@@ -25,10 +25,8 @@ from __future__ import annotations
 
 import pendulum
 
-from airflow.decorators import task
-from airflow.models.dag import DAG
 from airflow.providers.standard.operators.empty import EmptyOperator
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.sdk import DAG, TriggerRule, task
 
 with DAG(
     dag_id="example_nested_branch_dag",

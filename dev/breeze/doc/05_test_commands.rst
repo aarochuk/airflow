@@ -68,7 +68,7 @@ To run the whole test class:
 You can re-run the tests interactively, add extra parameters to pytest  and modify the files before
 re-running the test to iterate over the tests. You can also add more flags when starting the
 ``breeze shell`` command when you run integration tests or system tests. Read more details about it
-in the `testing doc </contributing-docs/testing.rst>`_ where all the test types and information on how to run them are explained.
+in the `testing doc </contributing-docs/09_testing.rst>`_ where all the test types and information on how to run them are explained.
 
 This applies to all kind of tests - all our tests can be run using pytest.
 
@@ -108,6 +108,20 @@ For example this will run API and WWW tests in parallel:
 
     breeze testing core-tests --parallel-test-types "API WWW" --run-in-parallel
 
+When testing separate worktrees concurrently, give each invocation a different
+``--project-name``. This isolates its containers, networks, and database volumes.
+The option also applies to ``breeze testing providers-tests``.
+
+.. code-block:: bash
+
+    breeze testing core-tests --project-name breeze-history --backend postgres
+    breeze testing core-tests --project-name breeze-clearing --backend postgres
+
+If you use this mode you will have to clean up old projects manually:
+
+.. code-block:: bash
+    breeze down --project-name breeze-history
+    breeze down --project-name breeze-clearing
 Here is the detailed set of options for the ``breeze testing core-tests`` command.
 
 .. image:: ./images/output_testing_core-tests.svg
@@ -121,7 +135,7 @@ Using ``breeze testing providers-tests`` command
 The ``breeze testing providers-tests`` command is that you can run for all or specify sub-set of the tests
 for Providers.
 
-For example this will run all provider tests tests :
+For example this will run all provider tests :
 
 .. code-block:: bash
 
@@ -159,7 +173,7 @@ Here is the detailed set of options for the ``breeze testing providers-test`` co
 Using ``breeze testing task-sdk-tests`` command
 ...............................................
 
-The ``breeze testing task-sdk-tests`` command is  allows you to run tests for Task SDK without
+The ``breeze testing task-sdk-tests`` command allows you to run tests for Task SDK without
 initializing database. The Task SDK should not need database to be started so this acts as a
 good check to see if the Task SDK tests are working properly.
 
@@ -180,11 +194,11 @@ Here is the detailed set of options for the ``breeze testing task-sdk-tests`` co
 Using ``breeze testing airflow-ctl-tests`` command
 ...............................................
 
-The ``breeze testing airflow-ctl-tests`` command allows you to run tests for Airflow CTL without
-initializing database. Airflow CTL should not require a database to start, so this acts as a
-good check to see if the Airflow CTL tests are working properly.
+The ``breeze testing airflow-ctl-tests`` command allows you to run tests for airflowctl without
+initializing database. airflowctl should not require a database to start, so this acts as a
+good check to see if the airflowctl tests are working properly.
 
-Run all Airflow CTL tests:
+Run all airflowctl tests:
 
 .. code-block:: bash
 
@@ -196,6 +210,25 @@ Here is the detailed set of options for the ``breeze testing airflow-ctl-tests``
   :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_testing_airflow-ctl-tests.svg
   :width: 100%
   :alt: Breeze testing airflow-ctl-tests
+
+Running airflowctl integration tests
+..................................
+
+You can use Breeze to run the airflowctl integration tests. Those tests are run using Production image by default
+and the tests are running with the docker-compose we have for airflowctl tests.
+
+.. image:: ./images/output_testing_airflow-ctl-integration-tests.svg
+  :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_testing_airflow-ctl-integration-tests.svg
+  :width: 100%
+  :alt: Breeze testing airflow-ctl-integration-tests
+
+You can also iterate over those tests with pytest command but unlike regular unit tests, they need to be run in
+a local venv. You can build the prod image with breeze and that will be used by default if present to run the tests.
+
+You can override the ``DOCKER_IMAGE`` environment variable to point to the image to test using the
+``breeze testing airflow-ctl-integration-tests`` command.
+
+The airflowctl tests are in ``airflow-ctl-tests/`` folder in the main repo.
 
 Running integration core tests
 ...............................
@@ -241,13 +274,13 @@ Here is the detailed set of options for the ``breeze testing providers-integrati
 Running Python API client tests
 ...............................
 
-To run Python API client tests, you need to have airflow python client packaged in dist folder.
+To run Python API client tests, you need to have Airflow python client packaged in dist folder.
 To package the client, clone the airflow-python-client repository and run the following command:
 
 .. code-block:: bash
 
    breeze release-management prepare-python-client --distribution-format both
-          --version-suffix-for-pypi dev0 --python-client-repo ./airflow-client-python
+          --python-client-repo ./airflow-client-python
 
 .. code-block:: bash
 
@@ -317,6 +350,88 @@ through ``breeze testing docker-compose-tests`` command.
 
 The docker-compose tests are in ``docker-tests/`` folder in the main repo.
 
+Running task-sdk integration tests
+..................................
+
+You can use Breeze to run the task sdk integration tests. Those tests are run using Production image by default
+and the tests are running with the docker-compose we have for task-sdk tests.
+
+.. image:: ./images/output_testing_task-sdk-integration-tests.svg
+  :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_testing_task-sdk-integration-tests.svg
+  :width: 100%
+  :alt: Breeze testing task-sdk-integration-tests
+
+You can also iterate over those tests with pytest command but unlike regular unit tests, they need to be run in
+a local venv. You can build the prod image with breeze and that will be used by default if present to run the tests.
+
+You can override the ``DOCKER_IMAGE`` environment variable to point to the image to test using the
+``breeze testing task-sdk-integration-tests`` command.
+
+The task-sdk integration tests are in ``task-sdk-integration-tests/`` folder in the main repo.
+
+Running Airflow E2E tests
+.........................
+
+You can use Breeze to run the Airflow E2E tests. Those tests are run using Production image by default.
+
+.. image:: ./images/output_testing_airflow-e2e-tests.svg
+  :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_testing_airflow-e2e-tests.svg
+  :width: 100%
+  :alt: Breeze testing airflow-e2e-tests
+
+You can also iterate over those tests with pytest command but unlike regular unit tests, they need to be run in
+a local venv. You can build the prod image with breeze and that will be used by default if present to run the tests.
+
+You can override the ``DOCKER_IMAGE`` environment variable to point to the image to test using the
+``breeze testing airflow-e2e-tests`` command.
+
+The Airflow E2E tests are in ``airflow-e2e-tests/`` folder in the main repo. Each suite is a
+``--e2e-test-mode`` (``basic``, ``remote_log``, ``event_driven``, ``java_sdk``, ``go_sdk``,
+``openlineage``, ``yaml_dag``, ...); the mode selects a docker-compose overlay and the matching test package under
+``airflow-e2e-tests/tests/airflow_e2e_tests/<mode>_tests``. For example, the ``openlineage`` mode
+deploys a real Airflow and runs the OpenLineage provider's system-test DAGs against it, asserting the
+emitted lineage events match — run it with ``breeze testing airflow-e2e-tests --e2e-test-mode openlineage``.
+Pass ``--airflow-version`` (openlineage mode only) to run against an older released Airflow version
+with the current providers from main, instead of the default PROD image; CI runs this compat matrix
+on canary only. See ``airflow-e2e-tests/tests/airflow_e2e_tests/openlineage_tests/README.md``.
+
+Running Airflow UI E2E tests
+.............................
+
+You can use Breeze to run the Airflow UI End-to-End tests using Playwright. These tests validate
+critical user workflows in the Airflow web interface across multiple browsers (Chromium, Firefox, WebKit).
+
+.. code-block:: bash
+
+   breeze testing ui-e2e-tests
+
+For example, to run a specific test pattern in headed mode:
+
+.. code-block:: bash
+
+   breeze testing ui-e2e-tests --test-pattern "dag-trigger.spec.ts" --headed
+
+You can also run tests in different browsers:
+
+.. code-block:: bash
+
+   breeze testing ui-e2e-tests --browser firefox --headed
+
+Or run tests in Playwright's UI mode for debugging:
+
+.. code-block:: bash
+
+   breeze testing ui-e2e-tests --ui-mode
+
+.. image:: ./images/output_testing_ui-e2e-tests.svg
+  :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_testing_ui-e2e-tests.svg
+  :width: 100%
+  :alt: Breeze testing ui-e2e-tests
+
+The tests use Page Object Model pattern and are located in ``airflow-core/src/airflow/ui/tests/e2e/`` folder.
+The tests require a running Airflow instance (typically ``http://localhost:28080``) and will install
+Playwright browsers automatically if needed.
+
 Running Kubernetes tests
 ------------------------
 
@@ -327,10 +442,11 @@ automatically to run the tests.
 You can:
 
 * Setup environment for k8s tests with ``breeze k8s setup-env``
-* Build airflow k8S images with ``breeze k8s build-k8s-image``
-* Manage KinD Kubernetes cluster and upload image and deploy Airflow to KinD cluster via
+* Build Airflow k8S images with ``breeze k8s build-k8s-image``
+* Manage KinD Kubernetes cluster, upload Airflow image, deploy Airflow to the cluster and check its status with
   ``breeze k8s create-cluster``, ``breeze k8s configure-cluster``, ``breeze k8s deploy-airflow``, ``breeze k8s status``,
-  ``breeze k8s upload-k8s-image``, ``breeze k8s delete-cluster`` commands
+  ``breeze k8s upload-k8s-image``, ``breeze k8s delete-cluster`` and ``breeze k8s deploy-cluster`` commands
+* Hot-reload Dags and core sources (scheduler/triggerer/dag-processor) with ``breeze k8s dev`` (skaffold sync)
 * Run Kubernetes tests  specified with ``breeze k8s tests`` command
 * Run complete test run with ``breeze k8s run-complete-tests`` - performing the full cycle of creating
   cluster, uploading the image, deploying airflow, running tests and deleting the cluster
@@ -398,7 +514,7 @@ Building Airflow K8s images
 ...........................
 
 Before deploying Airflow Helm Chart, you need to make sure the appropriate Airflow image is build (it has
-embedded test dags, pod templates and webserver is configured to refresh immediately. This can
+embedded test dags, pod templates and api-server is configured to refresh immediately. This can
 be done via ``breeze k8s build-k8s-image`` command. It can also be done in parallel for all images via
 ``--run-in-parallel`` flag.
 
@@ -412,7 +528,7 @@ All parameters of the command are here:
 Uploading Airflow K8s images
 ............................
 
-The K8S airflow images need to be uploaded to the KinD cluster. This can be done via
+The K8S Airflow images need to be uploaded to the KinD cluster. This can be done via
 ``breeze k8s upload-k8s-image`` command. It can also be done in parallel for all images via
 ``--run-in-parallel`` flag.
 
@@ -437,12 +553,29 @@ All parameters of the command are here:
   :width: 100%
   :alt: Breeze k8s configure-cluster
 
+Prepare Kind Cluster with Airflow image build
+.............................................
+
+In order to not execute every KinD cluster-related command and building Airflow image separately, use
+``breeze k8s deploy-cluster`` command for running:
+1. Local environment setup for KinD cluster and Airflow deployment
+2. KinD cluster creation and configuration
+3. Airflow UI asset compilation
+4. Airflow image build and upload
+
+All parameters of the command are here:
+
+.. image:: ./images/output_k8s_deploy-cluster.svg
+  :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_k8s_deploy-cluster.svg
+  :width: 100%
+  :alt: Breeze k8s deploy-cluster
+
 Deploying Airflow to the Cluster
 ................................
 
 Airflow can be deployed to the Cluster with ``breeze k8s deploy-airflow``. This step will automatically
 (unless disabled by switches) will rebuild the image to be deployed. It also uses the latest version
-of the Airflow Helm Chart to deploy it. You can also choose to upgrade existing airflow deployment
+of the Airflow Helm Chart to deploy it. You can also choose to upgrade existing Airflow deployment
 and pass extra arguments to ``helm install`` or ``helm upgrade`` commands that are used to
 deploy airflow. By passing ``--run-in-parallel`` the deployment can be run
 for all clusters in parallel.
@@ -454,10 +587,53 @@ All parameters of the command are here:
   :width: 100%
   :alt: Breeze k8s deploy-airflow
 
+Setting up the lang-SDK coordinator system test
+...............................................
+
+``breeze k8s setup-lang-sdk-test`` provisions a cluster for the lang-SDK coordinator
+system tests: it builds the Go, Java and TypeScript example bundles (mixed-language and
+native), deploys an in-cluster localstack S3, uploads the artifacts and the Dag files to
+their buckets, builds and loads the shared runtime image (prod + JRE + Node), and installs
+the Helm release configured for the ``golang``, ``java``, ``java-native`` and ``typescript``
+queues. After it completes, run the tests with ``breeze k8s tests``.
+
+All parameters of the command are here:
+
+.. image:: ./images/output_k8s_setup-lang-sdk-test.svg
+  :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_k8s_setup-lang-sdk-test.svg
+  :width: 100%
+  :alt: Breeze k8s setup-lang-sdk-test
+
+Hot-reloading Dags and core sources
+...................................
+
+After deploying Airflow you can run ``breeze k8s dev`` to sync local ``dags/`` and
+``airflow-core/src/airflow`` changes into running pods without rebuilding images. Scheduler,
+triggerer, and dag-processor run in dev hot-reload mode; the API server and webserver UI are not
+hot-reloaded by default.
+
+.. code-block:: bash
+
+    breeze k8s dev
+
+If skaffold cannot find the pods (for example if the release was deployed outside skaffold), rerun with
+``--deploy`` so it upgrades the Helm release and manages the resources:
+
+.. code-block:: bash
+
+    breeze k8s dev --deploy
+
+All parameters of the command are here:
+
+.. image:: ./images/output_k8s_dev.svg
+  :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_k8s_dev.svg
+  :width: 100%
+  :alt: Breeze k8s dev
+
 Checking status of the K8S cluster
 ..................................
 
-You can delete kubernetes cluster and airflow deployed in the current cluster
+You can delete kubernetes cluster and Airflow deployed in the current cluster
 via ``breeze k8s status`` command. It can be also checked for all clusters created so far by passing
 ``--all`` flag.
 
@@ -513,11 +689,58 @@ output during test execution.
 
     breeze k8s tests -- test_kubernetes_executor.py -s
 
+Smoke-testing a kustomize overlay
+.................................
+
+You can run ``breeze k8s smoke-test-overlay <name>`` to apply one of the
+overlays in ``chart/kustomize-overlays/`` to the current KinD cluster,
+wait for every resource declared in that overlay's ``STATUS.yaml``
+``verify:`` block, and run the optional per-overlay pytest module under
+``chart/tests/overlay_tests/``. An overlay's ``STATUS`` may only advance to
+``tested`` once this command exits 0.
+
+The runner is overlay-agnostic. For every overlay it:
+
+* renders the overlay and substitutes ``RELEASE-NAME`` / ``NAMESPACE``,
+* **auto-preloads every ``image:`` referenced by the rendered manifest**
+  into the kind node via ``docker pull`` (with retry on Docker Hub
+  rate limits) + ``kind load docker-image``, so the test does not flake
+  on registry availability,
+* applies the overlay,
+* polls each ``verify:`` resource for its declared success state while
+  **failing fast on terminal pod waiting reasons**
+  (``ImagePullBackOff``, ``ErrImagePull``, ``CrashLoopBackOff``,
+  ``CreateContainerConfigError``, …) rather than waiting out the full
+  ``timeout_seconds``,
+* runs the optional per-overlay pytest module,
+* deletes the overlay (skip with ``--skip-cleanup``).
+
+See ``chart/kustomize-overlays/CONTRIBUTING.rst`` for the full
+lifecycle and how an overlay's ``STATUS`` advances from ``not-tested``
+to ``tested``.
+
+.. code-block:: bash
+
+    breeze k8s deploy-cluster --rebuild-base-image
+    breeze k8s deploy-airflow
+    breeze k8s smoke-test-overlay kerberos
+
+.. note::
+
+   ``--rebuild-base-image`` flag is only required during the first run of the command.
+
+All parameters of the command are here:
+
+.. image:: ./images/output_k8s_smoke-test-overlay.svg
+  :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_k8s_smoke-test-overlay.svg
+  :width: 100%
+  :alt: Breeze k8s smoke-test-overlay
+
 Running k8s complete tests
 ..........................
 
 You can run ``breeze k8s run-complete-tests`` command to combine all previous steps in one command. That
-command will create cluster, deploy airflow and run tests and finally delete cluster. It is used in CI
+command will create cluster, deploy Airflow and run tests and finally delete cluster. It is used in CI
 to run the whole chains in parallel.
 
 Run all tests:
@@ -570,18 +793,18 @@ as executor you use, similar to:
 
 .. code-block:: bash
 
-    (kind-airflow-python-3.9-v1.24.0:KubernetesExecutor)>
+    (kind-airflow-python-3.11-v1.24.0:KubernetesExecutor)>
 
 
 The shell automatically activates the virtual environment that has all appropriate dependencies
 installed and you can interactively run all k8s tests with pytest command (of course the cluster need to
-be created and airflow deployed to it before running the tests):
+be created and Airflow deployed to it before running the tests):
 
 .. code-block:: bash
 
-    (kind-airflow-python-3.9-v1.24.0:KubernetesExecutor)> pytest test_kubernetes_executor.py
+    (kind-airflow-python-3.11-v1.24.0:KubernetesExecutor)> pytest test_kubernetes_executor.py
     ================================================= test session starts =================================================
-    platform linux -- Python 3.10.6, pytest-6.2.5, py-1.11.0, pluggy-1.0.0 -- /home/jarek/code/airflow/kubernetes-tests/.venv/bin/python
+    platform linux -- Python 3.11.16, pytest-6.2.5, py-1.11.0, pluggy-1.0.0 -- /home/jarek/code/airflow/kubernetes-tests/.venv/bin/python
     cachedir: .pytest_cache
     rootdir: /home/jarek/code/airflow, configfile: pytest.ini
     plugins: anyio-3.6.1
@@ -591,14 +814,14 @@ be created and airflow deployed to it before running the tests):
     test_kubernetes_executor.py::TestKubernetesExecutor::test_integration_run_dag_with_scheduler_failure PASSED [100%]
 
     ================================================== warnings summary ===================================================
-    kubernetes-tests/.venv/lib/python3.10/site-packages/_pytest/config/__init__.py:1233
-      /home/jarek/code/airflow/kubernetes-tests/.venv/lib/python3.10/site-packages/_pytest/config/__init__.py:1233: PytestConfigWarning: Unknown config option: asyncio_mode
+    kubernetes-tests/.venv/lib/python3.11/site-packages/_pytest/config/__init__.py:1233
+      /home/jarek/code/airflow/kubernetes-tests/.venv/lib/python3.11/site-packages/_pytest/config/__init__.py:1233: PytestConfigWarning: Unknown config option: asyncio_mode
 
         self._warn_or_fail_if_strict(f"Unknown config option: {key}\n")
 
     -- Docs: https://docs.pytest.org/en/stable/warnings.html
     ============================================ 2 passed, 1 warning in 38.62s ============================================
-    (kind-airflow-python-3.9-v1.24.0:KubernetesExecutor)>
+    (kind-airflow-python-3.11-v1.24.0:KubernetesExecutor)>
 
 
 All parameters of the command are here:

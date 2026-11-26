@@ -26,30 +26,12 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-apache-impala",
         "name": "Apache Impala",
         "description": "`Apache Impala <https://impala.apache.org/>`__.\n",
-        "state": "ready",
-        "source-date-epoch": 1743477776,
-        "versions": [
-            "1.6.1",
-            "1.6.0",
-            "1.5.2",
-            "1.5.1",
-            "1.5.0",
-            "1.4.2",
-            "1.4.1",
-            "1.4.0",
-            "1.3.0",
-            "1.2.1",
-            "1.2.0",
-            "1.1.3",
-            "1.1.2",
-            "1.1.1",
-            "1.1.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Apache Impala",
                 "external-doc-url": "https://impala.apache.org",
+                "logo": "/docs/integration-logos/Apache-Impala.png",
+                "how-to-guide": ["/docs/apache-airflow-providers-apache-impala/operators.rst"],
                 "tags": ["apache"],
             }
         ],
@@ -62,14 +44,8 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.apache.impala.hooks.impala.ImpalaHook",
+                "hook-name": "Impala",
                 "connection-type": "impala",
             }
         ],
-        "dependencies": [
-            "impyla>=0.18.0,<1.0",
-            "apache-airflow-providers-common-sql>=1.20.0",
-            "apache-airflow>=2.9.0",
-        ],
-        "optional-dependencies": {"kerberos": ["kerberos>=1.3.0"]},
-        "devel-dependencies": ["kerberos>=1.3.0"],
     }

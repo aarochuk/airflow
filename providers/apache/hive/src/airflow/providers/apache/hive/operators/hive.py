@@ -23,21 +23,16 @@ from collections.abc import Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from airflow.configuration import conf
-from airflow.models import BaseOperator
 from airflow.providers.apache.hive.hooks.hive import HiveCliHook
-from airflow.providers.common.compat.version_compat import AIRFLOW_V_3_0_PLUS
-
-if AIRFLOW_V_3_0_PLUS:
-    from airflow.sdk.execution_time.context import AIRFLOW_VAR_NAME_FORMAT_MAPPING, context_to_airflow_vars
-else:
-    from airflow.utils.operator_helpers import (  # type: ignore[no-redef, attr-defined]
-        AIRFLOW_VAR_NAME_FORMAT_MAPPING,
-        context_to_airflow_vars,
-    )
+from airflow.providers.common.compat.sdk import (
+    AIRFLOW_VAR_NAME_FORMAT_MAPPING,
+    BaseOperator,
+    conf,
+    context_to_airflow_vars,
+)
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class HiveOperator(BaseOperator):
@@ -66,6 +61,8 @@ class HiveOperator(BaseOperator):
         This can make monitoring easier.
     :param hive_cli_params: parameters passed to hive CLO
     :param auth: optional authentication option passed for the Hive connection
+    :param jdbc_params: Additional JDBC parameters to append to the Beeline URL.
+        Parameter values must be strings. Empty strings are ignored; semicolons are rejected.
     :param proxy_user: Run HQL code as this user.
     """
 
@@ -100,6 +97,7 @@ class HiveOperator(BaseOperator):
         mapred_job_name: str | None = None,
         hive_cli_params: str = "",
         auth: str | None = None,
+        jdbc_params: dict[str, str] | None = None,
         proxy_user: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -115,6 +113,7 @@ class HiveOperator(BaseOperator):
         self.mapred_job_name = mapred_job_name
         self.hive_cli_params = hive_cli_params
         self.auth = auth
+        self.jdbc_params = jdbc_params or {}
         self.proxy_user = proxy_user
         job_name_template = conf.get_mandatory_value(
             "hive",
@@ -133,6 +132,7 @@ class HiveOperator(BaseOperator):
             mapred_job_name=self.mapred_job_name,
             hive_cli_params=self.hive_cli_params,
             auth=self.auth,
+            jdbc_params=self.jdbc_params,
             proxy_user=self.proxy_user,
         )
 
@@ -148,9 +148,15 @@ class HiveOperator(BaseOperator):
         # set the mapred_job_name if it's not set with dag, task, execution time info
         if not self.mapred_job_name:
             ti = context["ti"]
-            logical_date = context["logical_date"]
+            logical_date = context.get("logical_date", None)
             if logical_date is None:
-                raise RuntimeError("logical_date is None")
+                raise RuntimeError(
+                    "logical_date is not available. Please make sure the task is not used in an asset-triggered Dag. "
+                    "HiveOperator was designed to work with timetable scheduled Dags, "
+                    "and an asset-triggered Dag run does not have a logical_date. "
+                    "If you need to use HiveOperator in an asset-triggered Dag,"
+                    "please open an issue on the Airflow project."
+                )
             hostname = ti.hostname or ""
             self.hook.mapred_job_name = self.mapred_job_name_template.format(
                 dag_id=ti.dag_id,

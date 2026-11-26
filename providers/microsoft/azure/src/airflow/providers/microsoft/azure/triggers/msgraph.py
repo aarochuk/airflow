@@ -20,9 +20,10 @@ from __future__ import annotations
 import json
 import locale
 from base64 import b64encode
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import suppress
 from datetime import datetime
+from functools import cached_property
 from json import JSONDecodeError
 from typing import (
     TYPE_CHECKING,
@@ -32,17 +33,18 @@ from uuid import UUID
 
 import pendulum
 
+from airflow.providers.common.compat.module_loading import import_string
 from airflow.providers.microsoft.azure.hooks.msgraph import KiotaRequestAdapterHook
 from airflow.triggers.base import BaseTrigger, TriggerEvent
-from airflow.utils.module_loading import import_string
 
 if TYPE_CHECKING:
     from io import BytesIO
 
+    import jinja2
     from kiota_abstractions.request_adapter import RequestAdapter
-    from kiota_abstractions.request_information import QueryParams
-    from kiota_http.httpx_request_adapter import ResponseType
     from msgraph_core import APIVersion
+
+    from airflow.sdk import Context
 
 
 class ResponseSerializer:
@@ -96,27 +98,23 @@ class MSGraphTrigger(BaseTrigger):
         or you can pass a string as `v1.0` or `beta`.
     :param serializer: Class which handles response serialization (default is ResponseSerializer).
         Bytes will be base64 encoded into a string, so it can be stored as an XCom.
+    :param pagination_link: Whether `url` was taken from a pagination link of a previous response
+        (default is False). When True, its host is verified against the configured Microsoft Graph
+        endpoint before the request is made.
+    :param rendered: Whether the templated fields already hold their rendered values (default is False).
+        A task which starts from the triggerer gets every one of its triggers rendered by the triggerer,
+        also the ones a worker deferred with values it rendered itself or took from a response, such as
+        a pagination link. When True, the triggerer leaves the fields as they are.
     """
-
-    template_fields: Sequence[str] = (
-        "url",
-        "response_type",
-        "path_parameters",
-        "url_template",
-        "query_parameters",
-        "headers",
-        "data",
-        "conn_id",
-    )
 
     def __init__(
         self,
         url: str,
-        response_type: ResponseType | None = None,
+        response_type: str | None = None,
         path_parameters: dict[str, Any] | None = None,
         url_template: str | None = None,
         method: str = "GET",
-        query_parameters: dict[str, QueryParams] | None = None,
+        query_parameters: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         data: dict[str, Any] | str | BytesIO | None = None,
         conn_id: str = KiotaRequestAdapterHook.default_conn_name,
@@ -125,15 +123,15 @@ class MSGraphTrigger(BaseTrigger):
         scopes: str | list[str] | None = None,
         api_version: APIVersion | str | None = None,
         serializer: type[ResponseSerializer] = ResponseSerializer,
+        pagination_link: bool = False,
+        rendered: bool = False,
     ):
         super().__init__()
-        self.hook = KiotaRequestAdapterHook(
-            conn_id=conn_id,
-            timeout=timeout,
-            proxies=proxies,
-            scopes=scopes,
-            api_version=api_version,
-        )
+        self.conn_id = conn_id
+        self.timeout = timeout
+        self.proxies = proxies
+        self.scopes = scopes
+        self.api_version = api_version
         self.url = url
         self.response_type = response_type
         self.path_parameters = path_parameters
@@ -143,6 +141,8 @@ class MSGraphTrigger(BaseTrigger):
         self.headers = headers
         self.data = data
         self.serializer: ResponseSerializer = self.resolve_type(serializer, default=ResponseSerializer)()
+        self.pagination_link = pagination_link
+        self.rendered = rendered
 
     @classmethod
     def resolve_type(cls, value: str | type, default) -> type:
@@ -160,7 +160,7 @@ class MSGraphTrigger(BaseTrigger):
                 "conn_id": self.conn_id,
                 "timeout": self.timeout,
                 "proxies": self.proxies,
-                "scopes": self.hook.scopes,
+                "scopes": self.scopes,
                 "api_version": self.api_version,
                 "serializer": f"{self.serializer.__class__.__module__}.{self.serializer.__class__.__name__}",
                 "url": self.url,
@@ -171,31 +171,40 @@ class MSGraphTrigger(BaseTrigger):
                 "headers": self.headers,
                 "data": self.data,
                 "response_type": self.response_type,
+                "pagination_link": self.pagination_link,
+                "rendered": self.rendered,
             },
         )
 
+    def render_template_fields(self, context: Context, jinja_env: jinja2.Environment | None = None) -> None:
+        if not self.rendered:
+            super().render_template_fields(context=context, jinja_env=jinja_env)
+
     def get_conn(self) -> RequestAdapter:
+        """
+        Initiate a new RequestAdapter connection.
+
+        .. warning::
+           This method is deprecated.
+        """
         return self.hook.get_conn()
 
-    @property
-    def conn_id(self) -> str:
-        return self.hook.conn_id
-
-    @property
-    def timeout(self) -> float | None:
-        return self.hook.timeout
-
-    @property
-    def proxies(self) -> dict | None:
-        return self.hook.proxies
-
-    @property
-    def api_version(self) -> APIVersion | str:
-        return self.hook.api_version
+    @cached_property
+    def hook(self) -> KiotaRequestAdapterHook:
+        return KiotaRequestAdapterHook(
+            conn_id=self.conn_id,
+            timeout=self.timeout,
+            proxies=self.proxies,
+            scopes=self.scopes,
+            api_version=self.api_version,
+        )
 
     async def run(self) -> AsyncIterator[TriggerEvent]:
         """Make a series of asynchronous HTTP calls via a KiotaRequestAdapterHook."""
         try:
+            if self.pagination_link:
+                await self.hook.assert_allowed_host(self.url)
+
             response = await self.hook.run(
                 url=self.url,
                 response_type=self.response_type,

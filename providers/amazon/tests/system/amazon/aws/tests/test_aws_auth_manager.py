@@ -16,13 +16,14 @@
 # under the License.
 from __future__ import annotations
 
+from functools import cache
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import boto3
 import pytest
 
-from airflow.providers.amazon.version_compat import AIRFLOW_V_3_0_PLUS
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 
 if not AIRFLOW_V_3_0_PLUS:
     pytest.skip("AWS auth manager is only compatible with Airflow >= 3.0.0", allow_module_level=True)
@@ -62,8 +63,7 @@ permit (
 );
 """
 
-env_id_cache: str | None = None
-policy_store_id_cache: str | None = None
+TEST_REQUEST_ID = "ONELOGIN_authn_request_id"
 
 
 def create_avp_policy_store(env_id):
@@ -99,12 +99,9 @@ def create_avp_policy_store(env_id):
     return policy_store_id
 
 
-@pytest.fixture
+@cache
 def env_id():
-    global env_id_cache
-    if not env_id_cache:
-        env_id_cache = set_env_id()
-    return env_id_cache
+    return set_env_id("test_aws_auth_manager")
 
 
 @pytest.fixture
@@ -113,11 +110,9 @@ def region_name():
 
 
 @pytest.fixture
-def avp_policy_store_id(env_id):
-    global policy_store_id_cache
-    if not policy_store_id_cache:
-        policy_store_id_cache = create_avp_policy_store(env_id)
-    return policy_store_id_cache
+@cache
+def avp_policy_store_id():
+    return create_avp_policy_store(env_id())
 
 
 @pytest.fixture
@@ -128,45 +123,59 @@ def base_app(region_name, avp_policy_store_id):
                 "core",
                 "auth_manager",
             ): "airflow.providers.amazon.aws.auth_manager.aws_auth_manager.AwsAuthManager",
+            ("aws_auth_manager", "conn_id"): "aws_default",
             ("aws_auth_manager", "region_name"): region_name,
             ("aws_auth_manager", "saml_metadata_url"): SAML_METADATA_URL,
             ("aws_auth_manager", "avp_policy_store_id"): avp_policy_store_id,
+            ("api", "ssl_cert"): "",
         }
     ):
         with (
             patch.object(OneLogin_Saml2_IdPMetadataParser, "parse_remote") as mock_parse_remote,
             patch(
-                "airflow.providers.amazon.aws.auth_manager.router.login._init_saml_auth"
+                "airflow.providers.amazon.aws.auth_manager.routes.login._init_saml_auth"
             ) as mock_init_saml_auth,
         ):
             mock_parse_remote.return_value = SAML_METADATA_PARSED
             yield mock_init_saml_auth
 
 
-@pytest.fixture
-def client_no_permissions(base_app):
+def _saml_auth_mock(nameid: str, attributes: dict) -> Mock:
     auth = Mock()
     auth.is_authenticated.return_value = True
-    auth.get_nameid.return_value = "user_no_permissions"
-    auth.get_attributes.return_value = {
-        "id": ["user_no_permissions"],
-        "groups": [],
-        "email": ["email"],
-    }
-    base_app.return_value = auth
+    auth.get_nameid.return_value = nameid
+    auth.get_attributes.return_value = attributes
+    auth.login.return_value = "https://idp.example.com/sso"
+    auth.get_last_request_id.return_value = TEST_REQUEST_ID
+    return auth
+
+
+def _complete_login(client: TestClient, saml_auth: Mock, login_path: str):
+    """Make the whole login round trip and return the callback response."""
+    client.get(AUTH_MANAGER_FASTAPI_APP_PREFIX + login_path, follow_redirects=False)
+    relay_state = saml_auth.login.call_args[0][0]
+    return client.post(
+        AUTH_MANAGER_FASTAPI_APP_PREFIX + "/login_callback",
+        follow_redirects=False,
+        data={"RelayState": relay_state},
+    )
+
+
+@pytest.fixture
+def client_no_permissions(base_app):
+    base_app.return_value = _saml_auth_mock(
+        "user_no_permissions",
+        {"id": ["user_no_permissions"], "groups": [], "email": ["email"]},
+    )
     return TestClient(create_app())
 
 
 @pytest.fixture
 def client_admin_permissions(base_app):
-    auth = Mock()
-    auth.is_authenticated.return_value = True
-    auth.get_nameid.return_value = "user_admin_permissions"
-    auth.get_attributes.return_value = {
-        "id": ["user_admin_permissions"],
-        "groups": ["Admin"],
-    }
-    base_app.return_value = auth
+    base_app.return_value = _saml_auth_mock(
+        "user_admin_permissions",
+        {"id": ["user_admin_permissions"], "groups": ["Admin"]},
+    )
     return TestClient(create_app())
 
 
@@ -191,18 +200,21 @@ class TestAwsAuthManager:
             for page in pages
             for store in page["policyStores"]
             if "description" in store
-            and f"Created by system test TestAwsAuthManager: {env_id_cache}" in store["description"]
+            and f"Created by system test TestAwsAuthManager: {env_id()}" in store["description"]
         ]
 
         for policy_store_id in policy_store_ids:
             client.delete_policy_store(policyStoreId=policy_store_id)
 
-    def test_login_admin(self, client_admin_permissions):
-        response = client_admin_permissions.post(
-            AUTH_MANAGER_FASTAPI_APP_PREFIX + "/login_callback", follow_redirects=False
-        )
+    def test_login_admin_redirect(self, base_app, client_admin_permissions):
+        response = _complete_login(client_admin_permissions, base_app.return_value, "/login")
         token = response.cookies.get(COOKIE_NAME_JWT_TOKEN)
         assert response.status_code == 303
         assert "location" in response.headers
-        assert response.headers["location"] == "http://localhost:28080/"
+        assert response.headers["location"] == "/"
         assert token is not None
+
+    def test_login_admin_token(self, base_app, client_admin_permissions):
+        response = _complete_login(client_admin_permissions, base_app.return_value, "/login/token")
+        assert response.status_code == 200
+        assert response.json()["access_token"]

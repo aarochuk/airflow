@@ -16,19 +16,28 @@
 # under the License.
 from __future__ import annotations
 
+import asyncio
 import datetime
+import inspect
 import os
-from typing import TYPE_CHECKING
+import re
+import sys
+from typing import TYPE_CHECKING, NamedTuple
+from unittest import mock
 
 import pytest
 import time_machine
+from fastapi import FastAPI
+from fastapi.routing import Mount
 from fastapi.testclient import TestClient
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 
 from airflow.api_fastapi.app import create_app
 from airflow.api_fastapi.auth.managers.simple.user import SimpleAuthManagerUser
+from airflow.dag_processing.bundles.manager import DagBundlesManager
 from airflow.models import Connection
-from airflow.models.dag_version import DagVersion
-from airflow.models.serialized_dag import SerializedDagModel
+from airflow.providers.git.bundles.git import GitDagBundle
 from airflow.providers.standard.operators.empty import EmptyOperator
 
 from tests_common.test_utils.config import conf_vars
@@ -53,8 +62,104 @@ def get_api_path(request):
     return API_PATHS.get(subdirectory_name, "/")
 
 
+@pytest.fixture(scope="session")
+def _shared_api_app():
+    """
+    Build the FastAPI app once per test session.
+
+    ``create_app()`` rebuilds two full FastAPI apps (core + execution), registers every route and
+    builds the OpenAPI schema -- ~0.5s. The default ``test_client`` always uses the same config
+    (SimpleAuthManager), so the app structure is identical across tests; only per-test DB state and
+    request data differ. Building it once and reusing it removes that per-test rebuild cost.
+    """
+    with conf_vars(
+        {
+            (
+                "core",
+                "auth_manager",
+            ): "airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager",
+        }
+    ):
+        return create_app()
+
+
+def _mounted_fastapi_apps(app: FastAPI) -> list[FastAPI]:
+    """Return ``app`` and every FastAPI app mounted under it, recursively (``/execution``, ``/auth``, ...)."""
+    apps = [app]
+    for route in app.routes:
+        if isinstance(route, Mount) and isinstance(route.app, FastAPI):
+            apps.extend(_mounted_fastapi_apps(route.app))
+    return apps
+
+
 @pytest.fixture
-def test_client(request):
+def _isolated_shared_app(_shared_api_app):
+    """
+    Yield the session-shared app with its mutable state snapshotted and restored around each test.
+
+    The app is built once per session, so a test that rebinds something on ``app.state`` (the auth
+    endpoint tests swap ``auth_manager`` for a mock) or installs a ``dependency_overrides`` entry
+    (extra-links/tasks/logs install a ``dag_bag_from_app`` override) would leak into later tests.
+    Snapshotting ``state`` and ``dependency_overrides`` on the root app and every mounted sub-app on
+    entry and restoring them on exit keeps the reset resilient to future mutations without having to
+    enumerate them.
+
+    ``app.state.dag_bag`` is the exception: tests mutate the DagBag object *in place* (its cache of
+    deserialized Dags fills as requests resolve them), which a state snapshot can't undo, so its
+    cache is cleared explicitly. A leaked warm entry would otherwise let a later test skip a
+    serialized-Dag DB read and break query-count assertions (e.g. the grid ``ti_summaries`` stream
+    tests) depending on execution order.
+    """
+    apps = _mounted_fastapi_apps(_shared_api_app)
+    # ``app.state._state`` is Starlette's backing dict for ``State`` -- the only way to enumerate it.
+    saved = [(app, dict(app.state._state), dict(app.dependency_overrides)) for app in apps]
+    _shared_api_app.state.dag_bag.clear_cache()
+    try:
+        yield _shared_api_app
+    finally:
+        for app, state, overrides in saved:
+            app.state._state.clear()
+            app.state._state.update(state)
+            app.dependency_overrides.clear()
+            app.dependency_overrides.update(overrides)
+
+
+def _authed_test_client(app: FastAPI, request):
+    auth_manager: SimpleAuthManager = app.state.auth_manager
+    # set time_very_before to 2014-01-01 00:00:00 and time_very_after to tomorrow
+    # to make the JWT token always valid for all test cases with time_machine
+    time_very_before = datetime.datetime(2014, 1, 1, 0, 0, 0)
+    time_after = datetime.datetime.now() + datetime.timedelta(days=1)
+    with time_machine.travel(time_very_before, tick=False):
+        token = auth_manager._get_token_signer(
+            expiration_time_in_seconds=(time_after - time_very_before).total_seconds()
+        ).generate(
+            auth_manager.serialize_user(
+                SimpleAuthManagerUser(username="test", role="admin", teams=["team1"])
+            ),
+        )
+    with mock.patch("airflow.models.revoked_token.RevokedToken.is_revoked", return_value=False):
+        with TestClient(
+            app,
+            headers={"Authorization": f"Bearer {token}"},
+            base_url=f"{BASE_URL}{get_api_path(request)}",
+        ) as test_client:
+            yield test_client
+
+
+@pytest.fixture
+def test_client(request, _isolated_shared_app):
+    yield from _authed_test_client(_isolated_shared_app, request)
+
+
+@pytest.fixture
+def fresh_test_client(request):
+    """
+    Like ``test_client`` but backed by a freshly built app instead of the session-shared one.
+
+    For the rare tests that patch app construction (e.g. counting ``DBDagBag`` instantiation) and
+    so need the app built *after* their patch is applied.
+    """
     with conf_vars(
         {
             (
@@ -64,45 +169,92 @@ def test_client(request):
         }
     ):
         app = create_app()
-        auth_manager: SimpleAuthManager = app.state.auth_manager
-        # set time_very_before to 2014-01-01 00:00:00 and time_very_after to tomorrow
-        # to make the JWT token always valid for all test cases with time_machine
-        time_very_before = datetime.datetime(2014, 1, 1, 0, 0, 0)
-        time_after = datetime.datetime.now() + datetime.timedelta(days=1)
-        with time_machine.travel(time_very_before, tick=False):
-            token = auth_manager._get_token_signer(
-                expiration_time_in_seconds=(time_after - time_very_before).total_seconds()
-            ).generate(
-                auth_manager.serialize_user(SimpleAuthManagerUser(username="test", role="admin")),
-            )
-        yield TestClient(
-            app, headers={"Authorization": f"Bearer {token}"}, base_url=f"{BASE_URL}{get_api_path(request)}"
-        )
+    yield from _authed_test_client(app, request)
 
 
 @pytest.fixture
-def unauthenticated_test_client(request):
-    return TestClient(create_app(), base_url=f"{BASE_URL}{get_api_path(request)}")
+def unauthenticated_test_client(request, _isolated_shared_app):
+    with TestClient(_isolated_shared_app, base_url=f"{BASE_URL}{get_api_path(request)}") as test_client:
+        yield test_client
 
 
 @pytest.fixture
-def unauthorized_test_client(request):
-    with conf_vars(
-        {
-            (
-                "core",
-                "auth_manager",
-            ): "airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager",
-        }
-    ):
-        app = create_app()
-        auth_manager: SimpleAuthManager = app.state.auth_manager
-        token = auth_manager._get_token_signer().generate(
-            auth_manager.serialize_user(SimpleAuthManagerUser(username="dummy", role=None))
-        )
-        yield TestClient(
-            app, headers={"Authorization": f"Bearer {token}"}, base_url=f"{BASE_URL}{get_api_path(request)}"
-        )
+def unauthorized_headers(_isolated_shared_app):
+    auth_manager: SimpleAuthManager = _isolated_shared_app.state.auth_manager
+    token = auth_manager._get_token_signer().generate(
+        auth_manager.serialize_user(SimpleAuthManagerUser(username="dummy", role=None))
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def unauthorized_test_client(request, _isolated_shared_app, unauthorized_headers):
+    with mock.patch("airflow.models.revoked_token.RevokedToken.is_revoked", return_value=False):
+        with TestClient(
+            _isolated_shared_app,
+            headers=unauthorized_headers,
+            base_url=f"{BASE_URL}{get_api_path(request)}",
+        ) as test_client:
+            yield test_client
+
+
+@pytest.fixture
+def deny_dag_edit_access():
+    """Let the test client's user do everything with a Dag but edit the Dag itself (``PUT``)."""
+    with mock.patch(
+        "airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager.is_authorized_dag",
+        autospec=True,
+        side_effect=lambda _self, *, method, user, access_entity=None, details=None: (
+            not (method == "PUT" and access_entity is None)
+        ),
+    ) as mock_is_authorized_dag:
+        yield mock_is_authorized_dag
+
+
+class EventLoopQuery(NamedTuple):
+    """A sync SQL statement run on the event loop, and the ``async def`` that issued it."""
+
+    statement: str
+    site: str
+
+
+def _get_coroutine_site() -> str:
+    """Return ``<path>:<line> <function>`` of the innermost ``async def`` on the call stack."""
+    frame = sys._getframe(1)
+    while frame is not None:
+        if frame.f_code.co_flags & (inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR):
+            path = re.sub(r"^.*(?:airflow-core/src|site-packages)/", "", frame.f_code.co_filename)
+            return f"{path}:{frame.f_lineno} {frame.f_code.co_name}"
+        frame = frame.f_back
+    return "?"
+
+
+@pytest.fixture
+def event_loop_queries():
+    """
+    Collect the sync SQL statements executed on the event loop thread.
+
+    FastAPI serializes responses on the event loop, so a statement collected here blocks the whole
+    API server while it waits for a database connection. ``AsyncSession`` statements are skipped:
+    they run on the loop thread too, but through the async driver, which yields instead of blocking.
+    """
+    queries: list[EventLoopQuery] = []
+
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        if conn.dialect.is_async:
+            return
+        # Only the event loop thread has a running loop; threadpool workers raise here.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        queries.append(EventLoopQuery(statement, _get_coroutine_site()))
+
+    event.listen(Engine, "before_cursor_execute", before_cursor_execute)
+    try:
+        yield queries
+    finally:
+        event.remove(Engine, "before_cursor_execute", before_cursor_execute)
 
 
 @pytest.fixture
@@ -118,31 +270,42 @@ def client(request):
 
 @pytest.fixture
 def configure_git_connection_for_dag_bundle(session):
+    clear_db_connections(False)
     # Git connection is required for the bundles to have a url.
     connection = Connection(
         conn_id="git_default",
         conn_type="git",
         description="default git connection",
-        host="fakeprotocol://test_host.github.com",
+        host="http://test_host.github.com",
         port=8081,
         login="",
     )
     session.add(connection)
-    with conf_vars(
-        {
-            (
-                "dag_processor",
-                "dag_bundle_config_list",
-            ): '[{ "name": "dag_maker", "classpath": "airflow.providers.git.bundles.git.GitDagBundle", "kwargs": {"subdir": "dags", "tracking_ref": "main", "refresh_interval": 0}}, { "name": "another_bundle_name", "classpath": "airflow.providers.git.bundles.git.GitDagBundle", "kwargs": {"subdir": "dags", "tracking_ref": "main", "refresh_interval": 0}}]'
-        }
+    with (
+        conf_vars(
+            {
+                (
+                    "dag_processor",
+                    "dag_bundle_config_list",
+                ): '[{ "name": "dag_maker", "classpath": "airflow.providers.git.bundles.git.GitDagBundle", "kwargs": {"subdir": "dags", "tracking_ref": "main", "refresh_interval": 0}}, { "name": "another_bundle_name", "classpath": "airflow.providers.git.bundles.git.GitDagBundle", "kwargs": {"subdir": "dags", "tracking_ref": "main", "refresh_interval": 0}}]'
+            }
+        ),
+        mock.patch("airflow.providers.git.bundles.git.GitHook") as mock_git_hook,
+        mock.patch.object(GitDagBundle, "get_current_version") as mock_get_current_version,
     ):
+        mock_get_current_version.return_value = "some_commit_hash"
+        mock_git_hook.return_value.repo_url = connection.host
+        DagBundlesManager().sync_bundles_to_db()
         yield
-
+    # in case no flush or commit was executed after the "session.add" above, we need to flush the session
+    # manually here to make sure that the added connection will be deleted by query(Connection).delete()
+    # in the`clear_db_connections` function below
+    session.flush()
     clear_db_connections(False)
 
 
 @pytest.fixture
-def make_dag_with_multiple_versions(dag_maker, configure_git_connection_for_dag_bundle):
+def make_dag_with_multiple_versions(dag_maker, configure_git_connection_for_dag_bundle, session):
     """
     Create DAG with multiple versions
 
@@ -152,23 +315,33 @@ def make_dag_with_multiple_versions(dag_maker, configure_git_connection_for_dag_
     """
     dag_id = "dag_with_multiple_versions"
     for version_number in range(1, 4):
-        with dag_maker(dag_id) as dag:
+        with dag_maker(dag_id, session=session, bundle_version=f"some_commit_hash{version_number}"):
             for task_number in range(version_number):
                 EmptyOperator(task_id=f"task{task_number + 1}")
-        SerializedDagModel.write_dag(
-            dag, bundle_name="dag_maker", bundle_version=f"some_commit_hash{version_number}"
-        )
         dag_maker.create_dagrun(
             run_id=f"run{version_number}",
-            logical_date=datetime.datetime(2020, 1, version_number, tzinfo=datetime.timezone.utc),
-            dag_version=DagVersion.get_version(dag_id=dag_id, version_number=version_number),
+            logical_date=datetime.datetime(2020, 1, version_number, tzinfo=datetime.UTC),
+            session=session,
         )
-        dag.sync_to_db()
+        session.commit()
 
 
 @pytest.fixture(scope="module")
 def dagbag():
-    from airflow.models import DagBag
+    from airflow.models.dagbag import DBDagBag
 
-    parse_and_sync_to_db(os.devnull, include_examples=True)
-    return DagBag(read_dags_from_db=True)
+    with conf_vars({("core", "load_examples"): "True"}):
+        parse_and_sync_to_db(os.devnull)
+    return DBDagBag()
+
+
+@pytest.fixture
+def get_execution_app():
+    def _get_execution_app(test_client):
+        test_app = test_client.app
+        for route in test_app.router.routes:
+            if route.path == "/execution":
+                return route.app
+        raise RuntimeError("Execution app not found at /execution")
+
+    return _get_execution_app

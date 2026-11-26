@@ -16,54 +16,67 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Flex, HStack, Table, Heading } from "@chakra-ui/react";
+import type { ReactNode } from "react";
+
+import { Box, Flex, Heading, HStack, Table } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 import { useParams, useSearchParams } from "react-router-dom";
 
-import {
-  useAssetServiceGetAssetEvents,
-  useTaskInstanceServiceGetMappedTaskInstance,
-  useTaskInstanceServiceGetTaskInstanceTryDetails,
-} from "openapi/queries";
-import { AssetEvents } from "src/components/Assets/AssetEvents";
+import { useTaskInstanceServiceGetTaskInstanceTryDetails } from "openapi/queries";
+
+import { ClipboardRoot, ClipboardIconButton } from "src/system-components";
+
 import { DagVersionDetails } from "src/components/DagVersionDetails";
+import RenderedJsonField from "src/components/RenderedJsonField";
 import { StateBadge } from "src/components/StateBadge";
 import { TaskTrySelect } from "src/components/TaskTrySelect";
+import { TeamName } from "src/components/TeamName";
 import Time from "src/components/Time";
-import { ClipboardRoot, ClipboardIconButton } from "src/components/ui";
-import { getDuration, useAutoRefresh, isStatePending } from "src/utils";
+
+import { SearchParamsKeys } from "src/constants/searchParams";
+import { useShowTeam } from "src/hooks/useShowTeam";
+import { useTaskInstanceCoordinates } from "src/hooks/useTaskInstanceCoordinates";
+import { useTaskInstanceView } from "src/hooks/useTaskInstanceView";
+import { isStatePending, useAutoRefresh, useDurationFormat } from "src/utils";
 
 import { BlockingDeps } from "./BlockingDeps";
 import { ExtraLinks } from "./ExtraLinks";
 import { TriggererInfo } from "./TriggererInfo";
+import { stateReasonDisplay } from "./stateReason";
 
 export const Details = () => {
+  const { t: translate } = useTranslation();
+  const { renderDuration } = useDurationFormat();
   const { dagId = "", mapIndex = "-1", runId = "", taskId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
+  const coordinates = useTaskInstanceCoordinates();
+  const {
+    historical,
+    historicalTaskInstance,
+    liveTaskInstance: taskInstance,
+    taskInstance: selectedTaskInstance,
+  } = useTaskInstanceView();
 
-  const tryNumberParam = searchParams.get("try_number");
+  const tryNumberParam = searchParams.get(SearchParamsKeys.TRY_NUMBER);
 
-  const { data: taskInstance } = useTaskInstanceServiceGetMappedTaskInstance({
-    dagId,
-    dagRunId: runId,
-    mapIndex: parseInt(mapIndex, 10),
-    taskId,
-  });
+  const showTeam = useShowTeam(taskInstance?.team_name);
 
   const onSelectTryNumber = (newTryNumber: number) => {
-    if (newTryNumber === taskInstance?.try_number) {
-      searchParams.delete("try_number");
+    if (!historical && newTryNumber === taskInstance?.try_number) {
+      searchParams.delete(SearchParamsKeys.TRY_NUMBER);
     } else {
-      searchParams.set("try_number", newTryNumber.toString());
+      searchParams.set(SearchParamsKeys.TRY_NUMBER, newTryNumber.toString());
     }
     setSearchParams(searchParams);
   };
 
-  const tryNumber = tryNumberParam === null ? taskInstance?.try_number : parseInt(tryNumberParam, 10);
+  const tryNumber = tryNumberParam === null ? selectedTaskInstance?.try_number : parseInt(tryNumberParam, 10);
 
   const refetchInterval = useAutoRefresh({ dagId });
 
-  const { data: tryInstance } = useTaskInstanceServiceGetTaskInstanceTryDetails(
+  const { data: liveTry } = useTaskInstanceServiceGetTaskInstanceTryDetails(
     {
+      ...coordinates,
       dagId,
       dagRunId: runId,
       mapIndex: parseInt(mapIndex, 10),
@@ -72,62 +85,100 @@ export const Details = () => {
     },
     undefined,
     {
-      refetchInterval: (query) => (isStatePending(query.state.data?.state) ? refetchInterval : false),
+      enabled: !historical,
+      refetchInterval: (query) => isStatePending(query.state.data?.state) && refetchInterval,
     },
   );
+  const tryInstance = historical ? historicalTaskInstance : liveTry;
 
-  const { data: assetEventsData, isLoading: isLoadingAssetEvents } = useAssetServiceGetAssetEvents(
-    {
-      sourceDagId: dagId,
-      sourceMapIndex: parseInt(mapIndex, 10),
-      sourceRunId: runId,
-      sourceTaskId: taskId,
-    },
-    undefined,
-    {
-      refetchInterval: () => (isStatePending(taskInstance?.state) ? refetchInterval : false),
-    },
-  );
+  const renderValue = (value: unknown): ReactNode => {
+    if (value === null || value === undefined || value === "") {
+      return translate("common:none", { defaultValue: "None" });
+    }
+
+    if (typeof value === "object") {
+      return <RenderedJsonField content={value} />;
+    }
+
+    if (typeof value === "string") {
+      return value;
+    }
+
+    return typeof value === "number" || typeof value === "boolean" || typeof value === "bigint"
+      ? value.toString()
+      : translate("common:none", { defaultValue: "None" });
+  };
+
+  // Keyed off the selected try's own state, so an earlier failed try keeps its reason while the
+  // current one is running again.
+  const tryStateReason =
+    tryInstance?.state_reason !== null &&
+    tryInstance?.state_reason !== undefined &&
+    stateReasonDisplay(tryInstance.state) !== undefined
+      ? tryInstance.state_reason
+      : undefined;
+
+  // omit kwargs from trigger
+  const triggerWithoutKwargs = taskInstance?.trigger
+    ? (({ kwargs, ...rest }) => rest)(taskInstance.trigger)
+    : undefined;
+
+  const rawTaskInstanceDetails: Array<{ label: string; value: unknown }> = [
+    { label: translate("taskInstance.id"), value: tryInstance?.id },
+    { label: translate("tryNumber"), value: tryInstance?.try_number },
+    { label: translate("taskInstance.maxTries"), value: tryInstance?.max_tries },
+    { label: translate("dagId"), value: tryInstance?.dag_id },
+    ...(historical
+      ? []
+      : [
+          { label: translate("taskInstance.trigger"), value: triggerWithoutKwargs },
+          { label: translate("taskInstance.triggerer.job"), value: taskInstance?.triggerer_job },
+        ]),
+  ];
 
   return (
     <Box p={2}>
-      {assetEventsData !== undefined && assetEventsData.asset_events.length > 0 ? (
-        <AssetEvents data={assetEventsData} isLoading={isLoadingAssetEvents} title="Created Asset Event" />
-      ) : undefined}
-      {taskInstance === undefined || tryNumber === undefined || taskInstance.try_number <= 1 ? (
+      {selectedTaskInstance === undefined || tryNumber === undefined ? (
         <div />
       ) : (
         <TaskTrySelect
           onSelectTryNumber={onSelectTryNumber}
           selectedTryNumber={tryNumber}
-          taskInstance={taskInstance}
+          taskInstance={selectedTaskInstance}
         />
       )}
-      <ExtraLinks />
+      {historical ? undefined : (
+        <ExtraLinks refetchInterval={isStatePending(tryInstance?.state) && refetchInterval} />
+      )}
       {taskInstance === undefined ||
-      // eslint-disable-next-line unicorn/no-null
       ![null, "queued", "scheduled"].includes(taskInstance.state) ? undefined : (
-        <BlockingDeps taskInstance={taskInstance} />
+        <BlockingDeps
+          refetchInterval={isStatePending(tryInstance?.state) && refetchInterval}
+          taskInstance={taskInstance}
+        />
       )}
       {taskInstance !== undefined && (taskInstance.trigger ?? taskInstance.triggerer_job) ? (
         <TriggererInfo taskInstance={taskInstance} />
       ) : undefined}
-      <Heading py={2} size="sm">
-        Task Instance Info
-      </Heading>
       <Table.Root striped>
         <Table.Body>
           <Table.Row>
-            <Table.Cell>State</Table.Cell>
+            <Table.Cell>{translate("state")}</Table.Cell>
             <Table.Cell>
               <Flex gap={1}>
                 <StateBadge state={tryInstance?.state} />
-                {tryInstance?.state ?? "no status"}
+                {tryInstance?.state ?? translate("states.no_status")}
               </Flex>
             </Table.Cell>
           </Table.Row>
+          {tryStateReason === undefined ? undefined : (
+            <Table.Row>
+              <Table.Cell>{translate("taskInstance.stateReason")}</Table.Cell>
+              <Table.Cell>{tryStateReason}</Table.Cell>
+            </Table.Row>
+          )}
           <Table.Row>
-            <Table.Cell>Task ID</Table.Cell>
+            <Table.Cell>{translate("taskId")}</Table.Cell>
             <Table.Cell>
               <HStack>
                 {tryInstance?.task_id}
@@ -138,7 +189,7 @@ export const Details = () => {
             </Table.Cell>
           </Table.Row>
           <Table.Row>
-            <Table.Cell>Run ID</Table.Cell>
+            <Table.Cell>{translate("runId")}</Table.Cell>
             <Table.Cell>
               <HStack>
                 {tryInstance?.dag_run_id}
@@ -149,41 +200,74 @@ export const Details = () => {
             </Table.Cell>
           </Table.Row>
           <Table.Row>
-            <Table.Cell>Map Index</Table.Cell>
+            <Table.Cell>{translate("mapIndex")}</Table.Cell>
             <Table.Cell>{tryInstance?.map_index}</Table.Cell>
           </Table.Row>
+          {showTeam ? (
+            <Table.Row>
+              <Table.Cell>{translate("dagDetails.team")}</Table.Cell>
+              <Table.Cell>
+                <TeamName teamName={taskInstance?.team_name} />
+              </Table.Cell>
+            </Table.Row>
+          ) : undefined}
+          {selectedTaskInstance?.loop_iteration === null ||
+          selectedTaskInstance?.loop_iteration === undefined ? undefined : (
+            <Table.Row>
+              <Table.Cell>
+                {translate("taskInstance.iteration")} ({selectedTaskInstance.loop_iteration.loop_id})
+              </Table.Cell>
+              <Table.Cell>{selectedTaskInstance.loop_iteration.iteration}</Table.Cell>
+            </Table.Row>
+          )}
           <Table.Row>
-            <Table.Cell>Operator</Table.Cell>
-            <Table.Cell>{tryInstance?.operator}</Table.Cell>
+            <Table.Cell>{translate("task.operator")}</Table.Cell>
+            <Table.Cell>{tryInstance?.operator_name}</Table.Cell>
           </Table.Row>
           <Table.Row>
-            <Table.Cell>Duration</Table.Cell>
+            <Table.Cell>{translate("duration")}</Table.Cell>
+            <Table.Cell>{renderDuration(tryInstance?.duration)}</Table.Cell>
+          </Table.Row>
+          <Table.Row>
+            <Table.Cell>{translate("taskInstance.scheduledWhen")}</Table.Cell>
             <Table.Cell>
-              {Boolean(tryInstance?.start_date) // eslint-disable-next-line unicorn/no-null
-                ? `${getDuration(tryInstance?.start_date ?? null, tryInstance?.end_date ?? null)}s`
-                : ""}
+              <Time datetime={tryInstance?.scheduled_when} />
             </Table.Cell>
           </Table.Row>
           <Table.Row>
-            <Table.Cell>Started</Table.Cell>
+            <Table.Cell>{translate("taskInstance.queuedWhen")}</Table.Cell>
+            <Table.Cell>
+              <Time datetime={tryInstance?.queued_when} />
+            </Table.Cell>
+          </Table.Row>
+          <Table.Row>
+            <Table.Cell>{translate("startDate")}</Table.Cell>
             <Table.Cell>
               <Time datetime={tryInstance?.start_date} />
             </Table.Cell>
           </Table.Row>
           <Table.Row>
-            <Table.Cell>Ended</Table.Cell>
+            <Table.Cell>{translate("endDate")}</Table.Cell>
             <Table.Cell>
               <Time datetime={tryInstance?.end_date} />
             </Table.Cell>
           </Table.Row>
+          {Boolean(tryInstance?.retry_at) ? (
+            <Table.Row>
+              <Table.Cell>{translate("taskInstance.retryAt")}</Table.Cell>
+              <Table.Cell>
+                <Time datetime={tryInstance?.retry_at} />
+              </Table.Cell>
+            </Table.Row>
+          ) : undefined}
           <Table.Row>
-            <Table.Cell>Dag Version</Table.Cell>
+            <Table.Cell>{translate("taskInstance.dagVersion")}</Table.Cell>
             <Table.Cell>
               <DagVersionDetails dagVersion={taskInstance?.dag_version} />
             </Table.Cell>
           </Table.Row>
           <Table.Row>
-            <Table.Cell>Process ID (PID)</Table.Cell>
+            <Table.Cell>{translate("taskInstance.pid")}</Table.Cell>
             <Table.Cell>
               <HStack>
                 {tryInstance?.pid}
@@ -194,7 +278,7 @@ export const Details = () => {
             </Table.Cell>
           </Table.Row>
           <Table.Row>
-            <Table.Cell>Hostname</Table.Cell>
+            <Table.Cell>{translate("taskInstance.hostname")}</Table.Cell>
             <Table.Cell>
               <HStack>
                 {tryInstance?.hostname}
@@ -205,39 +289,52 @@ export const Details = () => {
             </Table.Cell>
           </Table.Row>
           <Table.Row>
-            <Table.Cell>Pool</Table.Cell>
-            <Table.Cell>{tryInstance?.pool}</Table.Cell>
-          </Table.Row>
-          <Table.Row>
-            <Table.Cell>Pool Slots</Table.Cell>
-            <Table.Cell>{tryInstance?.pool_slots}</Table.Cell>
-          </Table.Row>
-          <Table.Row>
-            <Table.Cell>Executor</Table.Cell>
-            <Table.Cell>{tryInstance?.executor}</Table.Cell>
-          </Table.Row>
-          <Table.Row>
-            <Table.Cell>Executor Config</Table.Cell>
-            <Table.Cell>{tryInstance?.executor_config}</Table.Cell>
-          </Table.Row>
-          <Table.Row>
-            <Table.Cell>Unix Name</Table.Cell>
+            <Table.Cell>{translate("taskInstance.unixname")}</Table.Cell>
             <Table.Cell>{tryInstance?.unixname}</Table.Cell>
           </Table.Row>
           <Table.Row>
-            <Table.Cell>Max Tries</Table.Cell>
-            <Table.Cell>{tryInstance?.max_tries}</Table.Cell>
+            <Table.Cell>{translate("taskInstance.pool")}</Table.Cell>
+            <Table.Cell>{tryInstance?.pool}</Table.Cell>
           </Table.Row>
           <Table.Row>
-            <Table.Cell>Queue</Table.Cell>
+            <Table.Cell>{translate("taskInstance.queue")}</Table.Cell>
             <Table.Cell>{tryInstance?.queue}</Table.Cell>
           </Table.Row>
           <Table.Row>
-            <Table.Cell>Priority Weight</Table.Cell>
+            <Table.Cell>{translate("taskInstance.priorityWeight")}</Table.Cell>
             <Table.Cell>{tryInstance?.priority_weight}</Table.Cell>
+          </Table.Row>
+          <Table.Row>
+            <Table.Cell>{translate("taskInstance.executor")}</Table.Cell>
+            <Table.Cell>{tryInstance?.executor_config}</Table.Cell>
           </Table.Row>
         </Table.Body>
       </Table.Root>
+      <Box mt={6}>
+        <Heading as="h3" mb={3} size="sm">
+          {translate("taskInstance.additionalAttributes")}
+        </Heading>
+
+        <Table.Root striped>
+          <Table.Body>
+            {rawTaskInstanceDetails.map(({ label, value }) => {
+              const isObject = typeof value === "object" && value !== null;
+
+              return (
+                <Table.Row key={label}>
+                  <Table.Cell>{label}</Table.Cell>
+                  <Table.Cell
+                    fontFamily={isObject ? undefined : "mono"}
+                    whiteSpace={isObject ? undefined : "pre-wrap"}
+                  >
+                    {renderValue(value)}
+                  </Table.Cell>
+                </Table.Row>
+              );
+            })}
+          </Table.Body>
+        </Table.Root>
+      </Box>
     </Box>
   );
 };

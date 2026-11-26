@@ -16,12 +16,10 @@
 # under the License.
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from airflow.exceptions import AirflowException
-from airflow.hooks.base import BaseHook
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import AirflowException, BaseHook, BaseOperator
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -44,6 +42,8 @@ class BaseSqlToSlackOperator(BaseOperator):
         and receive a response from Slack. Optional
     :param slack_retry_handlers: List of handlers to customize retry logic. Optional
     """
+
+    template_fields: Sequence[str] = ("sql_conn_id",)
 
     def __init__(
         self,
@@ -70,15 +70,13 @@ class BaseSqlToSlackOperator(BaseOperator):
         self.log.debug("Get connection for %s", self.sql_conn_id)
         conn = BaseHook.get_connection(self.sql_conn_id)
         hook = conn.get_hook(hook_params=self.sql_hook_params)
-        if not callable(getattr(hook, "get_pandas_df", None)):
-            raise AirflowException(
-                "This hook is not supported. The hook class must have get_pandas_df method."
-            )
+        if not callable(getattr(hook, "get_df", None)):
+            raise AirflowException("This hook is not supported. The hook class must have get_df method.")
         return hook
 
     def _get_query_results(self) -> pd.DataFrame:
         sql_hook = self._get_hook()
 
         self.log.info("Running SQL query: %s", self.sql)
-        df = sql_hook.get_pandas_df(self.sql, parameters=self.parameters)
+        df = sql_hook.get_df(self.sql, parameters=self.parameters)
         return df

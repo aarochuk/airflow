@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """
-Example Utils for Apache Beam operator example DAG's
+Example Utils for Apache Beam operator example Dag's
 """
 
 from __future__ import annotations
@@ -25,7 +25,11 @@ import os
 from datetime import datetime
 from urllib.parse import urlsplit
 
-from airflow.utils.trigger_rule import TriggerRule
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "example-project")
 GCS_INPUT = os.environ.get("APACHE_BEAM_PYTHON", "gs://INVALID BUCKET NAME/shakespeare/kinglear.txt")

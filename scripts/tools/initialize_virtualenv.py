@@ -45,17 +45,27 @@ def check_if_in_virtualenv() -> bool:
 def check_for_package_extras() -> str:
     """
     check if the user provided any extra packages to install.
-    defaults to package 'devel'.
+    defaults to package 'dev'.
     """
     if len(sys.argv) > 1:
         if len(sys.argv) > 2:
-            print('Provide extras as 1 argument like: "devel,google,snowflake"')
+            print('Provide extras as 1 argument like: "dev,google,snowflake"')
             sys.exit(1)
         return sys.argv[1]
-    return "devel"
+    return "dev"
 
 
-def uv_install_requirements() -> int:
+def get_dependency_groups(pyproject_toml_path: Path) -> list[str]:
+    """
+    Get the dependency groups from pyproject.toml
+    """
+    import tomllib
+
+    airflow_core_toml_dict = tomllib.loads(pyproject_toml_path.read_text())
+    return airflow_core_toml_dict["dependency-groups"].keys()
+
+
+def uv_install_requirements(airflow_pyproject_toml_file: Path) -> int:
     """
     install the requirements of the current python version.
     return 0 if success, anything else is an error.
@@ -74,13 +84,12 @@ IMPORTANT NOTE ABOUT EXTRAS !!!
 
 You can specify extras as single coma-separated parameter to install. For example
 
-* devel - to have all development dependencies required to test core.
-* devel-* - to selectively install tools that we use to run scripts, tests, static checks etc.
-* google,amazon,microsoft_azure - to install dependencies needed at runtime by specified providers
-* devel-all-dbs - to have all development dependencies required for all DB providers
-* devel-all - to have all development dependencies required for all providers
+* dev - to have all development dependencies required to test core.
+* docs - to install dependencies required for documentation building
+* google,amazon,microsoft.azure - to install dependencies needed at runtime by specified providers
+* all - to have all provider dependencies
 
-Note that "devel-all" installs all possible dependencies and we have > 600 of them,
+Note that "all" installs all possible dependencies and we have > 600 of them,
 which might not be possible to install cleanly on your host because of lack of
 system packages. It's easier to install extras one-by-one as needed.
 
@@ -88,12 +97,17 @@ system packages. It's easier to install extras one-by-one as needed.
 
 """
     )
-    extra_param = [x for extra in extras.split(",") for x in ("--extra", extra)]
+    dependency_groups = get_dependency_groups(airflow_pyproject_toml_file)
+    extra_param = [
+        flag
+        for extra in extras.split(",")
+        for flag in (["--group", extra] if extra in dependency_groups else ["--extra", extra])
+    ]
     uv_install_command = ["uv", "sync"] + extra_param
     quoted_command = " ".join([shlex.quote(parameter) for parameter in uv_install_command])
     print()
     print(f"Running command: \n   {quoted_command}\n")
-    e = subprocess.run(uv_install_command)
+    e = subprocess.run(uv_install_command, check=False)
     return e.returncode
 
 
@@ -116,7 +130,7 @@ def main():
 
     if not check_if_in_virtualenv():
         version = get_python_version()
-        e = subprocess.run(["uv", "venv", "--python", version])
+        e = subprocess.run(["uv", "venv", "--python", version], check=False)
         if e.returncode != 0:
             print(f"There was a problem with 'uv venv'. Error code: {e.returncode}")
 
@@ -140,7 +154,8 @@ def main():
 
     clean_up_airflow_home(airflow_home_dir)
 
-    return_code = uv_install_requirements()
+    airflow_pyproject_toml_file = airflow_sources / "pyproject.toml"
+    return_code = uv_install_requirements(airflow_pyproject_toml_file)
 
     if return_code != 0:
         print(
@@ -151,13 +166,13 @@ def main():
 
         os_type = sys.platform
         if os_type == "darwin":
-            print("brew install sqlite mysql postgresql openssl")
+            print("brew install sqlite mysql postgresql openssl pkg-config")
             print('export LDFLAGS="-L/usr/local/opt/openssl/lib"')
             print('export CPPFLAGS="-I/usr/local/opt/openssl/include"')
         else:
             print(
                 "sudo apt install build-essential python3-dev libsqlite3-dev openssl "
-                "sqlite default-libmysqlclient-dev libmysqlclient-dev postgresql"
+                "sqlite3 default-libmysqlclient-dev libmysqlclient-dev postgresql pkg-config"
             )
         sys.exit(4)
 
@@ -168,7 +183,7 @@ def main():
     env["AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_ENABLED"] = "False"
     env["AIRFLOW__CORE__DAGS_FOLDER"] = f"{airflow_sources}/empty"
     env["AIRFLOW__CORE__PLUGINS_FOLDER"] = f"{airflow_sources}/empty"
-    subprocess.run(["uv", "run", "airflow", "db", "reset", "--yes"], env=env)
+    subprocess.run(["uv", "run", "airflow", "db", "reset", "--yes"], check=False, env=env)
 
     print("\nResetting AIRFLOW sqlite unit test database...")
     env = os.environ.copy()
@@ -177,7 +192,7 @@ def main():
     env["AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_ENABLED"] = "False"
     env["AIRFLOW__CORE__DAGS_FOLDER"] = f"{airflow_sources}/empty"
     env["AIRFLOW__CORE__PLUGINS_FOLDER"] = f"{airflow_sources}/empty"
-    subprocess.run(["uv", "run", "airflow", "db", "reset", "--yes"], env=env)
+    subprocess.run(["uv", "run", "airflow", "db", "reset", "--yes"], check=False, env=env)
 
     print("\nInitialization of environment complete! Go ahead and develop Airflow!")
 

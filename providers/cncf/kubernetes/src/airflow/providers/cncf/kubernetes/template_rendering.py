@@ -22,19 +22,37 @@ from typing import TYPE_CHECKING
 from jinja2 import TemplateAssertionError, UndefinedError
 from kubernetes.client.api_client import ApiClient
 
-from airflow.exceptions import AirflowException
 from airflow.providers.cncf.kubernetes.kube_config import KubeConfig
 from airflow.providers.cncf.kubernetes.kubernetes_helper_functions import create_unique_id
-from airflow.providers.cncf.kubernetes.pod_generator import PodGenerator
+from airflow.providers.cncf.kubernetes.pod_generator import PodGenerator, generate_pod_command_args
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.utils.session import NEW_SESSION, provide_session
 
 if TYPE_CHECKING:
     from airflow.models.taskinstance import TaskInstance
 
 
+def _get_executor_conf(dag_id: str):
+    """Build a team-aware ExecutorConf for the given dag_id, if multi-team is available."""
+    try:
+        from airflow.executors.base_executor import ExecutorConf
+        from airflow.models.dag import DagModel
+        from airflow.providers.common.compat.sdk import conf
+
+        if not conf.getboolean("core", "multi_team", fallback=False):
+            return None
+        team_name = DagModel.get_team_name(dag_id)
+        if team_name:
+            return ExecutorConf(team_name=team_name)
+    except (ImportError, AttributeError):
+        pass
+    return None
+
+
 def render_k8s_pod_yaml(task_instance: TaskInstance) -> dict | None:
     """Render k8s pod yaml."""
-    kube_config = KubeConfig()
+    executor_conf = _get_executor_conf(task_instance.dag_id)
+    kube_config = KubeConfig(executor_conf=executor_conf)
     if task_instance.executor_config and task_instance.executor_config.get("pod_template_file"):
         # If a specific pod_template_file was passed to the executor, we make
         # sure to render the k8s pod spec using this one, and not the default one.
@@ -43,6 +61,10 @@ def render_k8s_pod_yaml(task_instance: TaskInstance) -> dict | None:
         # If no such pod_template_file override was passed, we can simply render
         # The pod spec using the default template.
         pod_template_file = kube_config.pod_template_file
+
+    # Generate command args using shared utility function
+    command_args = generate_pod_command_args(task_instance)
+
     pod = PodGenerator.construct_pod(
         dag_id=task_instance.dag_id,
         run_id=task_instance.run_id,
@@ -52,7 +74,7 @@ def render_k8s_pod_yaml(task_instance: TaskInstance) -> dict | None:
         pod_id=create_unique_id(task_instance.dag_id, task_instance.task_id),
         try_number=task_instance.try_number,
         kube_image=kube_config.kube_image,
-        args=task_instance.command_as_list(),
+        args=command_args,
         pod_override_object=PodGenerator.from_obj(task_instance.executor_config),
         scheduler_job_id="0",
         namespace=kube_config.executor_namespace,
@@ -63,8 +85,9 @@ def render_k8s_pod_yaml(task_instance: TaskInstance) -> dict | None:
     return sanitized_pod
 
 
+# Note: AIRFLOW_V_3_0_PLUS - this is only needed for Airflow 2.x, can be removed if the support is dropped
 @provide_session
-def get_rendered_k8s_spec(task_instance: TaskInstance, session=NEW_SESSION) -> dict | None:
+def get_rendered_k8s_spec(task_instance: TaskInstance, *, session=NEW_SESSION) -> dict | None:
     """Fetch rendered template fields from DB."""
     from airflow.models.renderedtifields import RenderedTaskInstanceFields
 

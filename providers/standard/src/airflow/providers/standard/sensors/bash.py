@@ -17,21 +17,15 @@
 # under the License.
 from __future__ import annotations
 
-import os
 from collections.abc import Sequence
 from subprocess import PIPE, STDOUT, Popen
 from tempfile import NamedTemporaryFile, TemporaryDirectory, gettempdir
 from typing import TYPE_CHECKING
 
-from airflow.exceptions import AirflowFailException
-from airflow.sensors.base import BaseSensorOperator
+from airflow.providers.common.compat.sdk import AirflowFailException, BaseSensorOperator
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class BashSensor(BaseSensorOperator):
@@ -93,7 +87,7 @@ class BashSensor(BaseSensorOperator):
                 close_fds=True,
                 cwd=tmp_dir,
                 env=self.env,
-                preexec_fn=os.setsid,
+                start_new_session=True,
             ) as resp:
                 if resp.stdout:
                     self.log.info("Output:")
@@ -107,14 +101,12 @@ class BashSensor(BaseSensorOperator):
                     return True
 
                 # we have a retry exit code, sensor retries if return code matches, otherwise error
-                elif self.retry_exit_code is not None:
+                if self.retry_exit_code is not None:
                     if resp.returncode == self.retry_exit_code:
                         self.log.info("Return code matches retry code, will retry later")
                         return False
-                    else:
-                        raise AirflowFailException(f"Command exited with return code {resp.returncode}")
+                    raise AirflowFailException(f"Command exited with return code {resp.returncode}")
 
                 # backwards compatibility: sensor retries no matter the error code
-                else:
-                    self.log.info("Non-zero return code and no retry code set, will retry later")
-                    return False
+                self.log.info("Non-zero return code and no retry code set, will retry later")
+                return False

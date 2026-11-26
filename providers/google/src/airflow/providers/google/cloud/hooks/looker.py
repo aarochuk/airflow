@@ -28,8 +28,7 @@ from looker_sdk.rtl import api_settings, auth_session, requests_transport, seria
 from looker_sdk.sdk.api40 import methods as methods40
 from packaging.version import parse as parse_version
 
-from airflow.exceptions import AirflowException
-from airflow.hooks.base import BaseHook
+from airflow.providers.common.compat.sdk import AirflowException, BaseHook
 from airflow.version import version
 
 if TYPE_CHECKING:
@@ -38,6 +37,11 @@ if TYPE_CHECKING:
 
 class LookerHook(BaseHook):
     """Hook for Looker APIs."""
+
+    conn_name_attr = "looker_conn_id"
+    default_conn_name = "looker_default"
+    conn_type = "gcp_looker"
+    hook_name = "Google Looker"
 
     def __init__(
         self,

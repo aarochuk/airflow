@@ -18,15 +18,16 @@ from __future__ import annotations
 
 import os
 import tempfile
+import warnings
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
+from airflow.providers.google.version_compat import BaseOperator
 from airflow.providers.salesforce.hooks.salesforce import SalesforceHook
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class SalesforceToGcsOperator(BaseOperator):
@@ -52,12 +53,18 @@ class SalesforceToGcsOperator(BaseOperator):
         to the resulting data that marks when the data was fetched from Salesforce. Default: False
     :param gzip: Option to compress local file or file data for upload
     :param gcp_conn_id: the name of the connection that has the parameters we need to connect to GCS.
+    :param unwrap_single: If True, unwrap a single-element result list into a plain string value
+        for backward compatibility. If False, always return a list of GCS URIs.
+        If not explicitly provided, defaults to True and emits a FutureWarning that
+        the default will change to False in a future release.
     """
 
     template_fields: Sequence[str] = (
         "query",
         "bucket_name",
         "object_name",
+        "salesforce_conn_id",
+        "gcp_conn_id",
     )
     template_ext: Sequence[str] = (".sql",)
     template_fields_renderers = {"sql": "sql"}
@@ -76,6 +83,7 @@ class SalesforceToGcsOperator(BaseOperator):
         record_time_added: bool = False,
         gzip: bool = False,
         gcp_conn_id: str = "google_cloud_default",
+        unwrap_single: bool | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -90,8 +98,18 @@ class SalesforceToGcsOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.include_deleted = include_deleted
         self.query_params = query_params
+        if unwrap_single is None:
+            warnings.warn(
+                "Returning a list of Salesforce FileShare filenames from SalesforceToGcsOperator is deprecated and "
+                "will change to list[str] of GCS URIs in a future release. Set unwrap_single=True to opt in.",
+                FutureWarning,
+                stacklevel=2,
+            )
+            self.unwrap_single = True
+        else:
+            self.unwrap_single = unwrap_single
 
-    def execute(self, context: Context):
+    def execute(self, context: Context) -> str | list[str]:
         salesforce = SalesforceHook(salesforce_conn_id=self.salesforce_conn_id)
         response = salesforce.make_query(
             query=self.query, include_deleted=self.include_deleted, query_params=self.query_params
@@ -117,4 +135,7 @@ class SalesforceToGcsOperator(BaseOperator):
 
             gcs_uri = f"gs://{self.bucket_name}/{self.object_name}"
             self.log.info("%s uploaded to GCS", gcs_uri)
-            return gcs_uri
+
+            if self.unwrap_single:
+                return gcs_uri
+            return [gcs_uri]

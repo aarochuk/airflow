@@ -19,16 +19,20 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, overload
+from urllib.parse import quote_plus, urlencode
 
 import trino
 from trino.exceptions import DatabaseError
 from trino.transaction import IsolationLevel
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import (
+    AirflowException,
+    AirflowOptionalProviderFeatureException,
+    conf,
+)
 from airflow.providers.common.sql.hooks.sql import DbApiHook
 from airflow.providers.trino.version_compat import AIRFLOW_V_3_0_PLUS
 from airflow.utils.helpers import exactly_one
@@ -77,7 +81,7 @@ def _boolify(value):
     if isinstance(value, str):
         if value.lower() == "false":
             return False
-        elif value.lower() == "true":
+        if value.lower() == "true":
             return True
     return value
 
@@ -140,14 +144,25 @@ class TrinoHook(DbApiHook):
 
     def get_conn(self) -> Connection:
         """Return a connection object."""
-        db = self.get_connection(self.trino_conn_id)  # type: ignore[attr-defined]
+        db = self.get_connection(self.get_conn_id())
         extra = db.extra_dejson
-        auth = None
+        auth: trino.auth.Authentication | None = None
         user = db.login
-        if db.password and extra.get("auth") in ("kerberos", "certs"):
-            raise AirflowException(f"The {extra.get('auth')!r} authorization type doesn't support password.")
-        elif db.password:
-            auth = trino.auth.BasicAuthentication(db.login, db.password)  # type: ignore[attr-defined]
+        auth_methods = []
+        if db.password:
+            auth_methods.append("password")
+        if extra.get("auth") == "jwt":
+            auth_methods.append("jwt")
+        if extra.get("auth") == "certs":
+            auth_methods.append("certs")
+        if extra.get("auth") == "kerberos":
+            auth_methods.append("kerberos")
+        if len(auth_methods) > 1:
+            raise AirflowException(
+                f"Multiple authentication methods specified: {', '.join(auth_methods)}. Only one is allowed."
+            )
+        if db.password and db.login:
+            auth = trino.auth.BasicAuthentication(db.login, db.password)
         elif extra.get("auth") == "jwt":
             if not exactly_one(jwt_file := "jwt__file" in extra, jwt_token := "jwt__token" in extra):
                 msg = (
@@ -159,18 +174,18 @@ class TrinoHook(DbApiHook):
                 else:
                     msg += "none of them provided."
                 raise ValueError(msg)
-            elif jwt_file:
+            if jwt_file:
                 token = Path(extra["jwt__file"]).read_text()
             else:
                 token = extra["jwt__token"]
             auth = trino.auth.JWTAuthentication(token=token)
         elif extra.get("auth") == "certs":
             auth = trino.auth.CertificateAuthentication(
-                extra.get("certs__client_cert_path"),
-                extra.get("certs__client_key_path"),
+                extra["certs__client_cert_path"],
+                extra["certs__client_key_path"],
             )
         elif extra.get("auth") == "kerberos":
-            auth = trino.auth.KerberosAuthentication(  # type: ignore[attr-defined]
+            auth = trino.auth.KerberosAuthentication(
                 config=extra.get("kerberos__config", os.environ.get("KRB5_CONFIG")),
                 service_name=extra.get("kerberos__service_name"),
                 mutual_authentication=_boolify(extra.get("kerberos__mutual_authentication", False)),
@@ -199,19 +214,20 @@ class TrinoHook(DbApiHook):
             catalog=extra.get("catalog", "hive"),
             schema=db.schema,
             auth=auth,
-            # type: ignore[func-returns-value]
             isolation_level=self.get_isolation_level(),
             verify=_boolify(extra.get("verify", True)),
             session_properties=extra.get("session_properties") or None,
             client_tags=extra.get("client_tags") or None,
             timezone=extra.get("timezone") or None,
+            extra_credential=extra.get("extra_credential") or None,
+            roles=extra.get("roles") or None,
         )
 
         return trino_conn
 
     def get_isolation_level(self) -> Any:
         """Return an isolation level."""
-        db = self.get_connection(self.trino_conn_id)  # type: ignore[attr-defined]
+        db = self.get_connection(self.get_conn_id())
         isolation_level = db.extra_dejson.get("isolation_level", "AUTOCOMMIT").upper()
         return getattr(IsolationLevel, isolation_level, IsolationLevel.AUTOCOMMIT)
 
@@ -237,8 +253,13 @@ class TrinoHook(DbApiHook):
         except DatabaseError as e:
             raise TrinoException(e)
 
-    def get_pandas_df(self, sql: str = "", parameters: Iterable | Mapping[str, Any] | None = None, **kwargs):  # type: ignore[override]
-        import pandas as pd
+    def _get_pandas_df(self, sql: str = "", parameters=None, **kwargs):
+        try:
+            import pandas as pd
+        except ImportError:
+            raise AirflowOptionalProviderFeatureException(
+                "Pandas is not installed. Please install it with `pip install pandas`."
+            )
 
         cursor = self.get_cursor()
         try:
@@ -252,6 +273,76 @@ class TrinoHook(DbApiHook):
             df.rename(columns={n: c[0] for n, c in zip(df.columns, column_descriptions)}, inplace=True)
         else:
             df = pd.DataFrame(**kwargs)
+        return df
+
+    @overload
+    def run(
+        self,
+        sql: str | Iterable[str],
+        autocommit: bool = ...,
+        parameters: Iterable | Mapping[str, Any] | None = ...,
+        handler: None = ...,
+        split_statements: bool = ...,
+        return_last: bool = ...,
+    ) -> None: ...
+
+    @overload
+    def run(
+        self,
+        sql: str | Iterable[str],
+        autocommit: bool = ...,
+        parameters: Iterable | Mapping[str, Any] | None = ...,
+        handler: Callable[[Any], T] = ...,
+        split_statements: bool = ...,
+        return_last: bool = ...,
+    ) -> tuple | list[tuple] | list[list[tuple] | tuple] | None: ...
+
+    def run(
+        self,
+        sql: str | Iterable[str],
+        autocommit: bool = False,
+        parameters: Iterable | Mapping[str, Any] | None = None,
+        handler: Callable[[Any], T] | None = None,
+        split_statements: bool = True,
+        return_last: bool = True,
+    ) -> tuple | list[tuple] | list[list[tuple] | tuple] | None:
+        """
+        Override common run to set split_statements=True by default.
+
+        :param sql: SQL statement or list of statements to execute.
+        :param autocommit: Set autocommit mode before query execution.
+        :param parameters: Parameters to render the SQL query with.
+        :param handler: Optional callable to process each statement result.
+        :param split_statements: Split single SQL string into statements if True.
+        :param return_last: Return only last statement result if True.
+        :return: Query result or list of results.
+        """
+        return super().run(sql, autocommit, parameters, handler, split_statements, return_last)
+
+    def _get_polars_df(self, sql: str = "", parameters=None, **kwargs):
+        try:
+            import polars as pl
+        except ImportError:
+            raise AirflowOptionalProviderFeatureException(
+                "Polars is not installed. Please install it with `pip install polars`."
+            )
+
+        cursor = self.get_cursor()
+        try:
+            cursor.execute(self.strip_sql_string(sql), parameters)
+            data = cursor.fetchall()
+        except DatabaseError as e:
+            raise TrinoException(e)
+        column_descriptions = cursor.description
+        if data:
+            df = pl.DataFrame(
+                data,
+                schema=[c[0] for c in column_descriptions],
+                orient="row",
+                **kwargs,
+            )
+        else:
+            df = pl.DataFrame(**kwargs)
         return df
 
     def insert_rows(
@@ -319,6 +410,41 @@ class TrinoHook(DbApiHook):
         """Return Trino dialect."""
         return "trino"
 
-    def get_openlineage_default_schema(self):
-        """Return Trino default schema."""
-        return trino.constants.DEFAULT_SCHEMA
+    def get_openlineage_default_schema(self) -> str | None:
+        """Return the connection schema, which ``get_conn`` uses as the Trino session schema."""
+        return self.connection.schema or None
+
+    def get_uri(self) -> str:
+        """Return the Trino URI for the connection."""
+        conn = self.connection
+        uri = "trino://"
+
+        auth_part = ""
+        if conn.login:
+            auth_part = quote_plus(conn.login)
+            if conn.password:
+                auth_part = f"{auth_part}:{quote_plus(conn.password)}"
+            auth_part = f"{auth_part}@"
+
+        host_part = conn.host or "localhost"
+        if conn.port:
+            host_part = f"{host_part}:{conn.port}"
+
+        schema_part = ""
+        if conn.schema:
+            schema_part = f"/{quote_plus(conn.schema)}"
+            extra_schema = conn.extra_dejson.get("schema")
+            if extra_schema:
+                schema_part = f"{schema_part}/{quote_plus(extra_schema)}"
+
+        uri = f"{uri}{auth_part}{host_part}{schema_part}"
+
+        extra = conn.extra_dejson.copy()
+        if "schema" in extra:
+            extra.pop("schema")
+
+        query_params = {k: str(v) for k, v in extra.items() if v is not None}
+        if query_params:
+            uri = f"{uri}?{urlencode(query_params)}"
+
+        return uri

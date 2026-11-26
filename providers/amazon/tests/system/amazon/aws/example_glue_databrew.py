@@ -19,9 +19,6 @@ from __future__ import annotations
 import boto3
 import pendulum
 
-from airflow.decorators import task
-from airflow.models.baseoperator import chain
-from airflow.models.dag import DAG
 from airflow.providers.amazon.aws.operators.glue_databrew import (
     GlueDataBrewStartJobOperator,
 )
@@ -30,9 +27,24 @@ from airflow.providers.amazon.aws.operators.s3 import (
     S3CreateObjectOperator,
     S3DeleteBucketOperator,
 )
-from airflow.utils.trigger_rule import TriggerRule
 
-from system.amazon.aws.utils import SystemTestContextBuilder
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import DAG, chain, task
+else:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
+    from airflow.models.baseoperator import chain  # type: ignore[attr-defined,no-redef]
+    from airflow.models.dag import DAG  # type: ignore[attr-defined,no-redef,assignment]
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
+
+from system.amazon.aws.utils import SystemTestContextBuilder, print_and_delete_log_group_task
 
 DAG_ID = "example_glue_databrew"
 
@@ -153,6 +165,8 @@ with DAG(DAG_ID, schedule="@once", start_date=pendulum.datetime(2023, 1, 1, tz="
         delete_dataset(dataset_name),
         delete_bucket,
         delete_output_bucket,
+        # DataBrew names the log group after the job and does not delete it with the job.
+        print_and_delete_log_group_task(f"/aws-glue-databrew/jobs-{job_name}"),
     )
 
     from tests_common.test_utils.watcher import watcher
@@ -161,8 +175,7 @@ with DAG(DAG_ID, schedule="@once", start_date=pendulum.datetime(2023, 1, 1, tz="
     # when "tearDown" task with trigger rule is part of the DAG
     list(dag.tasks) >> watcher()
 
-
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

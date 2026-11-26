@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-common-messaging``
 
-Release: ``1.0.0``
+Release: ``2.2.0``
 
 
 ``Common Messaging Provider``
@@ -36,16 +36,16 @@ This is a provider package for ``common.messaging`` provider. All classes for th
 are in ``airflow.providers.common.messaging`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-common-messaging/1.0.0/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-common-messaging/2.2.0/>`_.
 
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation (see ``Requirements`` below
+You can install this package on top of an existing Airflow installation (see ``Requirements`` below
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-common-messaging``
 
-The package supports the following python versions: 3.9,3.10,3.11,3.12
+The package supports the following python versions: 3.11,3.12,3.13,3.14
 
 Requirements
 ------------
@@ -53,27 +53,18 @@ Requirements
 ==================  ==================
 PIP package         Version required
 ==================  ==================
-``apache-airflow``  ``>=3.0.0.dev0``
+``apache-airflow``  ``>=3.0.1``
 ==================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional dependencies
+----------------------
 
-Those are dependencies that might be needed in order to use all the features of the package.
-You need to install the specified providers in order to use them.
-
-You can install such cross-provider dependencies when installing from PyPI. For example:
-
-.. code-block:: bash
-
-    pip install apache-airflow-providers-common-messaging[amazon]
-
-
-====================================================================================================  ==========
-Dependent package                                                                                     Extra
-====================================================================================================  ==========
-`apache-airflow-providers-amazon <https://airflow.apache.org/docs/apache-airflow-providers-amazon>`_  ``amazon``
-====================================================================================================  ==========
+================  ================================================
+Extra             Dependencies
+================  ================================================
+``amazon``        ``apache-airflow-providers-amazon>=9.7.0``
+``apache.kafka``  ``apache-airflow-providers-apache-kafka>=1.9.0``
+================  ================================================
 
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-common-messaging/1.0.0/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-common-messaging/2.2.0/changelog.html>`_.

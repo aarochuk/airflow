@@ -27,9 +27,8 @@ import os
 import pendulum
 
 from airflow.configuration import conf
-from airflow.decorators import task
 from airflow.example_dags.libs.helper import print_stuff
-from airflow.models.dag import DAG
+from airflow.sdk import DAG, task
 
 log = logging.getLogger(__name__)
 
@@ -40,16 +39,13 @@ except ImportError:
         "The example_kubernetes_executor example DAG requires the kubernetes provider."
         " Please install it with: pip install apache-airflow[cncf.kubernetes]"
     )
-    k8s = None
-
-
-if k8s:
+else:
     with DAG(
         dag_id="example_kubernetes_executor",
         schedule=None,
         start_date=pendulum.datetime(2021, 1, 1, tz="UTC"),
         catchup=False,
-        tags=["example3"],
+        tags=["example", "example3"],
     ) as dag:
         # You can use annotations on your kubernetes pods!
         start_task_executor_config = {

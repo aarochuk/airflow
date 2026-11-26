@@ -26,6 +26,400 @@
 Changelog
 ---------
 
+6.2.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add configurable request timeout for the Airbyte API (#71092)``
+
+Misc
+~~~~
+
+* ``Drop support for Python 3.10 (#74157)``
+
+Doc-only
+~~~~~~~~
+
+* ``Update provider READMEs for the Python 3.11 baseline (#74158)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] Upgrade important CI environment (#73629)``
+
+6.1.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Template every connection id accepted by provider operators (#73286)``
+
+Misc
+~~~~
+
+* ``Sync connection UI metadata in provider.yaml with hook definitions (#72087)``
+
+Doc-only
+~~~~~~~~
+
+* ``Note why the Airbyte hook stays on httpx rather than httpx2 (#72111)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert "[main] Upgrade important CI environment (#73308)" (#73621)``
+   * ``[main] Upgrade important CI environment (#73308)``
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+
+6.0.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix AirbyteJobSensor marking a cancelled job as success in deferrable mode (#69786)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+6.0.0
+.....
+
+.. note::
+  This release upgrades the provider's ``airbyte-api`` dependency to the ``1.x`` series and switches
+  the underlying HTTP client from ``requests`` to ``httpx``.
+
+  No changes are required for typical Dag authors: the ``AirbyteHook``, ``AirbyteTriggerSyncOperator``,
+  and ``AirbyteJobSensor`` public interfaces are unchanged, and the Airbyte connection configuration
+  (including the ``proxies`` extra) keeps the same format.
+
+  Action is required only if your environment relies on the provider's transitive dependencies:
+
+  * ``airbyte-api`` is now ``>=1.0.0,<2.0`` (previously ``>=0.52.0,<1.0.0``). The ``1.x`` SDK is built
+    on Pydantic models, so any code importing ``airbyte_api`` directly must pass request objects as
+    keyword arguments (e.g. ``GetJobRequest(job_id=...)``) and handle its stricter response validation.
+  * ``requests`` is no longer installed by this provider. If your code relied on it being pulled in
+    transitively, declare ``requests`` as an explicit dependency of your own project.
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+* ``Migrate Airbyte provider to 'airbyte-api' library 1.0 and 'httpx' (#68882)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+5.5.2
+.....
+
+Misc
+~~~~
+
+* ``Cap airbyte-api < 1.0.0 due to breaking changes (#69081)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+5.5.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix deferrable execution timeout handling for Airbyte jobs. (#67816)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+5.5.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Implement execution_timeout semantics for AirbyteTriggerSyncOperator in deferrable mode (#64051)``
+
+Bug Fixes
+~~~~~~~~~
+
+   * ``Fix deferrable execution_timeout handling in AirbyteTriggerSyncOperator (#67382)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+.. Review and move the new changes to one of the sections above:
+   * ``Prepare providers release 2026-05-19 (#67137)``
+
+5.4.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Make OAuth credentials optional for Airbyte OSS deployments (#64986)``
+
+Misc
+~~~~
+
+* ``Add tests for execute_complete success and error paths (#64119)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Fix stale system test documentation links (#65071)``
+
+5.4.1
+.....
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.4.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add submit_reset_connection func (#63578)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+* ``Fix typo in debug message for 'AirbyteTriggerSyncOperator' (#64084)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+   * ``Standardize connection docs labels across providers (#63455)``
+
+5.3.3
+.....
+
+Misc
+~~~~
+
+* ``Migrate-airbyte-connection-UI-metadata-to-YAML (#62426)``
+
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``Prepare documentation for next release of providers (2026-02-24) (#62495)``
+
+5.3.2
+.....
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+* ``Migrate airbyte provider to use airflow.sdk.configuration.conf (#59991)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.3.1
+.....
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.3.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Make Airbyte connection fields properly labeled in Airflow 3 (#58342)``
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+
+5.2.5
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to 19 files in providers (airbyte, alibaba, atlassian, papermill, presto, redis, singularity, sqlite, tableau, vertica, weaviate, elasticsearch, exasol) (#57986)``
+
+5.2.4
+.....
+
+Misc
+~~~~
+
+* ``Migrate airbyte provider to ''common.compat'' (#56996)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare release for Sep 2025 2nd wave of providers (#55688)``
+   * ``Prepare release for Sep 2025 1st wave of providers (#55203)``
+   * ``Fix Airflow 2 reference in README/index of providers (#55240)``
+   * ``Make term Dag consistent in providers docs (#55101)``
+   * ``Switch pre-commit to prek (#54258)``
+
+5.2.3
+.....
+
+Misc
+~~~~
+
+* ``Improve debug logging in Airbyte provider (#51503)``
+
+Doc-only
+~~~~~~~~
+
+* ``Improve connection docs (#53942)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.2.2
+.....
+
+Misc
+~~~~
+
+* ``Add Python 3.13 support for Airflow. (#46891)``
+* ``Remove type ignore across codebase after mypy upgrade (#53243)``
+* ``Remove upper-binding for "python-requires" (#52980)``
+* ``Temporarily switch to use >=,< pattern instead of '~=' (#52967)``
+* ``Move all BaseHook usages in providers to version_compat in airbyte (#52776)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.2.1
+.....
+
+Misc
+~~~~
+
+* ``Move 'BaseHook' implementation to task SDK (#51873)``
+* ``Provider Migration: Update airbyte provider for Airflow 3.0 compatibility (#52418)``
+* ``Replace 'models.BaseOperator' to Task SDK one for Alibaba & Airbyte (#52335)``
+* ``Drop support for Python 3.9 (#52072)``
+* ``Use BaseSensorOperator from task sdk in providers (#52296)``
+
+Doc-only
+~~~~~~~~
+
+* ``Clean some leftovers of Python 3.9 removal - All the rest (#52432)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Airbyte test fixes, make mock JobResponse response id as int (#52134)``
+   * ``Remove pytest.mark.db_test: airbyte and amazon providers where possible (#52017)``
+   * ``Introducing fixture to create 'Connections' without DB in provider tests (#51930)``
+
+5.2.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add option to create connections using proxies (#49729)``
+
+Misc
+~~~~
+
+* ``Bump some provider dependencies for faster resolution (#51727)``
+
+5.1.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.10+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``update airbyte changelog (#49934)``
+* ``Bump min Airflow version in providers to 2.10 (#49843)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Update description of provider.yaml dependencies (#50231)``
+   * ``Avoid committing history for providers (#49907)``
+
+5.0.2
+.....
+
+.. note::
+
+   In this version of the provider, the ``provider_info`` entrypoint returned json has been cleaned up to
+   not contain any extra values that have not been described in the
+   `Provider Info Schema <https://github.com/apache/airflow/blob/main/airflow-core/src/airflow/provider_info.schema.json>`_
+   This is generally backwards-compatible change, as those values appearing there (such as ``dependencies`` had
+   never been described in the schema nor documentation (and the schema allows for optional, unsolicited components).
+   If you depended on some values like ``dependencies`` there, the data exposed there is available in the metadata
+   of the package (for example ``dependencies`` are available in ``requires`` metadata field of the package) and
+   you should retrieve them from there instead.
+
+   Also the ``Provider Info Schema`` for Airflow 3.0 has been updated to reflect the latest functionality
+   that can be exposed by the provider. The schema is backwards-compatible, it only contains new possible
+   entries that can appear there, reflecting new functionality added in Airflow 2 and 3.
+
+Misc
+~~~~
+
+* ``remove superfluous else block (#49199)``
+* ``Remove unnecessary entries in get_provider_info and update the schema (#48849)``
+
+Doc-only
+~~~~~~~~
+
+* ``Fix some mistakes in AirbyteJobSensor docs. (#49196)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare docs for Apr 2nd wave of providers (#49051)``
+   * ``Remove fab from preinstalled providers (#48457)``
+   * ``Improve documentation building iteration (#48760)``
+   * ``Prepare docs for Apr 1st wave of providers (#48828)``
+   * ``Simplify tooling by switching completely to uv (#48223)``
+   * ``Prepare docs for Mar 2nd wave of providers (#48383)``
+   * ``Upgrade providers flit build requirements to 3.12.0 (#48362)``
+   * ``Move airflow sources to airflow-core package (#47798)``
+   * ``Remove links to x/twitter.com (#47801)``
+
 5.0.1
 .....
 
@@ -90,8 +484,6 @@ Misc
    * ``Update DAG example links in multiple providers documents (#44034)``
    * ``Prepare docs for Nov 1st wave of providers (#44011)``
    * ``Split providers out of the main "airflow/" tree into a UV workspace project (#42505)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Update path of example dags in docs (#45069)``
 
 4.0.0

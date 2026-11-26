@@ -1,4 +1,3 @@
-#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -26,8 +25,11 @@ import prestodb
 from prestodb.exceptions import DatabaseError
 from prestodb.transaction import IsolationLevel
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import (
+    AirflowException,
+    AirflowOptionalProviderFeatureException,
+    conf,
+)
 from airflow.providers.common.sql.hooks.sql import DbApiHook
 from airflow.providers.presto.version_compat import AIRFLOW_V_3_0_PLUS
 
@@ -40,6 +42,8 @@ else:
     )
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import URL
+
     from airflow.models import Connection
 
 T = TypeVar("T")
@@ -75,7 +79,7 @@ def _boolify(value):
     if isinstance(value, str):
         if value.lower() == "false":
             return False
-        elif value.lower() == "true":
+        if value.lower() == "true":
             return True
     return value
 
@@ -102,12 +106,12 @@ class PrestoHook(DbApiHook):
 
     def get_conn(self) -> Connection:
         """Return a connection object."""
-        db = self.get_connection(self.presto_conn_id)  # type: ignore[attr-defined]
+        db = self.get_connection(self.get_conn_id())
         extra = db.extra_dejson
         auth = None
         if db.password and extra.get("auth") == "kerberos":
             raise AirflowException("Kerberos authorization doesn't support password.")
-        elif db.password:
+        if db.password:
             auth = prestodb.auth.BasicAuthentication(db.login, db.password)
         elif extra.get("auth") == "kerberos":
             auth = prestodb.auth.KerberosAuthentication(
@@ -135,7 +139,7 @@ class PrestoHook(DbApiHook):
             catalog=db.extra_dejson.get("catalog", "hive"),
             schema=db.schema,
             auth=auth,
-            isolation_level=self.get_isolation_level(),  # type: ignore[func-returns-value]
+            isolation_level=self.get_isolation_level(),
         )
         if extra.get("verify") is not None:
             # Unfortunately verify parameter is available via public API.
@@ -145,9 +149,52 @@ class PrestoHook(DbApiHook):
 
         return presto_conn
 
+    @property
+    def sqlalchemy_url(self) -> URL:
+        """Return a `sqlalchemy.engine.URL` object constructed from the connection."""
+        try:
+            from sqlalchemy.engine import URL
+        except (ImportError, ModuleNotFoundError) as err:
+            raise AirflowOptionalProviderFeatureException(
+                "SQLAlchemy is not installed. Please install it with "
+                "`pip install 'apache-airflow-providers-presto[sqlalchemy]'`."
+            ) from err
+
+        conn = self.get_connection(self.get_conn_id())
+        extra = conn.extra_dejson or {}
+
+        required_attrs = ["host", "login", "port"]
+        for attr in required_attrs:
+            if getattr(conn, attr) is None:
+                raise ValueError(f"Presto connections error: '{attr}' is missing in the connection")
+        # adding only when **kwargs are given by user
+        query = {
+            k: v
+            for k, v in {
+                "schema": conn.schema,
+                "protocol": extra.get("protocol"),
+                "source": extra.get("source"),
+                "catalog": extra.get("catalog"),
+            }.items()
+            if v is not None
+        }
+        return URL.create(
+            drivername="presto",
+            username=conn.login,
+            password=conn.password or "",
+            host=str(conn.host),
+            port=conn.port,
+            database=extra.get("catalog"),
+            query=query,
+        )
+
+    def get_uri(self) -> str:
+        """Return a SQLAlchemy engine URL as a string."""
+        return self.sqlalchemy_url.render_as_string(hide_password=False)
+
     def get_isolation_level(self) -> Any:
         """Return an isolation level."""
-        db = self.get_connection(self.presto_conn_id)  # type: ignore[attr-defined]
+        db = self.get_connection(self.get_conn_id())
         isolation_level = db.extra_dejson.get("isolation_level", "AUTOCOMMIT").upper()
         return getattr(IsolationLevel, isolation_level, IsolationLevel.AUTOCOMMIT)
 
@@ -173,8 +220,13 @@ class PrestoHook(DbApiHook):
         except DatabaseError as e:
             raise PrestoException(e)
 
-    def get_pandas_df(self, sql: str = "", parameters=None, **kwargs):
-        import pandas as pd
+    def _get_pandas_df(self, sql: str = "", parameters=None, **kwargs):
+        try:
+            import pandas as pd
+        except ImportError:
+            raise AirflowOptionalProviderFeatureException(
+                "Pandas is not installed. Please install it with `pip install pandas`."
+            )
 
         cursor = self.get_cursor()
         try:
@@ -188,6 +240,32 @@ class PrestoHook(DbApiHook):
             df.rename(columns={n: c[0] for n, c in zip(df.columns, column_descriptions)}, inplace=True)
         else:
             df = pd.DataFrame(**kwargs)
+        return df
+
+    def _get_polars_df(self, sql: str = "", parameters=None, **kwargs):
+        try:
+            import polars as pl
+        except ImportError:
+            raise AirflowOptionalProviderFeatureException(
+                "Polars is not installed. Please install it with `pip install polars`."
+            )
+
+        cursor = self.get_cursor()
+        try:
+            cursor.execute(self.strip_sql_string(sql), parameters)
+            data = cursor.fetchall()
+        except DatabaseError as e:
+            raise PrestoException(e)
+        column_descriptions = cursor.description
+        if data:
+            df = pl.DataFrame(
+                data,
+                schema=[c[0] for c in column_descriptions],
+                orient="row",
+                **kwargs,
+            )
+        else:
+            df = pl.DataFrame(**kwargs)
         return df
 
     def insert_rows(

@@ -19,9 +19,11 @@ from __future__ import annotations
 from unittest import mock
 
 import pytest
+from google.api_core.exceptions import AlreadyExists
 from google.api_core.gapic_v1.method import DEFAULT
+from google.cloud.orchestration.airflow.service_v1.types import Environment
 
-from airflow.exceptions import TaskDeferred
+from airflow.providers.common.compat.sdk import TaskDeferred
 from airflow.providers.google.cloud.operators.cloud_composer import (
     CloudComposerCreateEnvironmentOperator,
     CloudComposerDeleteEnvironmentOperator,
@@ -29,7 +31,9 @@ from airflow.providers.google.cloud.operators.cloud_composer import (
     CloudComposerListEnvironmentsOperator,
     CloudComposerListImageVersionsOperator,
     CloudComposerRunAirflowCLICommandOperator,
+    CloudComposerTriggerDAGRunOperator,
     CloudComposerUpdateEnvironmentOperator,
+    ComposerEnvironmentNotRunningError,
 )
 from airflow.providers.google.cloud.triggers.cloud_composer import (
     CloudComposerAirflowCLICommandTrigger,
@@ -67,14 +71,25 @@ TEST_METADATA = [("key", "value")]
 TEST_PARENT = "test-parent"
 TEST_NAME = "test-name"
 
+TEST_COMPOSER_DAG_ID = "test-composer-dag-id"
+TEST_COMPOSER_DAG_CONF = {"test-key": "test-value"}
+
 COMPOSER_STRING = "airflow.providers.google.cloud.operators.cloud_composer.{}"
 COMPOSER_TRIGGERS_STRING = "airflow.providers.google.cloud.triggers.cloud_composer.{}"
+TEST_COMPOSER_AIRFLOW_VERSION = 1
 
 
 class TestCloudComposerCreateEnvironmentOperator:
+    @staticmethod
+    def _mock_environment(state: int) -> Environment:
+        return Environment(state=state)
+
     @mock.patch(COMPOSER_STRING.format("Environment.to_dict"))
     @mock.patch(COMPOSER_STRING.format("CloudComposerHook"))
     def test_execute(self, mock_hook, to_dict_mode) -> None:
+        environment = self._mock_environment(Environment.State.RUNNING)
+        mock_hook.return_value.get_environment.return_value = environment
+
         op = CloudComposerCreateEnvironmentOperator(
             task_id=TASK_ID,
             project_id=TEST_GCP_PROJECT,
@@ -95,6 +110,14 @@ class TestCloudComposerCreateEnvironmentOperator:
             project_id=TEST_GCP_PROJECT,
             region=TEST_GCP_REGION,
             environment=TEST_ENVIRONMENT,
+            retry=TEST_RETRY,
+            timeout=TEST_TIMEOUT,
+            metadata=TEST_METADATA,
+        )
+        mock_hook.return_value.get_environment.assert_called_once_with(
+            project_id=TEST_GCP_PROJECT,
+            region=TEST_GCP_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
             retry=TEST_RETRY,
             timeout=TEST_TIMEOUT,
             metadata=TEST_METADATA,
@@ -122,6 +145,158 @@ class TestCloudComposerCreateEnvironmentOperator:
 
         assert isinstance(exc.value.trigger, CloudComposerExecutionTrigger)
         assert exc.value.method_name == GOOGLE_DEFAULT_DEFERRABLE_METHOD_NAME
+
+    @mock.patch(COMPOSER_STRING.format("CloudComposerHook"))
+    def test_execute_raises_when_operation_finishes_in_error_state(self, mock_hook) -> None:
+        mock_hook.return_value.get_environment.return_value = self._mock_environment(Environment.State.ERROR)
+
+        op = CloudComposerCreateEnvironmentOperator(
+            task_id=TASK_ID,
+            project_id=TEST_GCP_PROJECT,
+            region=TEST_GCP_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            environment=TEST_ENVIRONMENT,
+            gcp_conn_id=TEST_GCP_CONN_ID,
+            retry=TEST_RETRY,
+            timeout=TEST_TIMEOUT,
+            metadata=TEST_METADATA,
+        )
+
+        with pytest.raises(ComposerEnvironmentNotRunningError, match="Current state: ERROR"):
+            op.execute(mock.MagicMock())
+
+    @mock.patch(COMPOSER_STRING.format("Environment.to_dict"))
+    @mock.patch(COMPOSER_STRING.format("CloudComposerHook"))
+    def test_execute_rechecks_environment_state_after_operation_completion(
+        self, mock_hook, to_dict_mode
+    ) -> None:
+        mock_hook.return_value.wait_for_operation.return_value = self._mock_environment(
+            Environment.State.STATE_UNSPECIFIED
+        )
+        mock_hook.return_value.get_environment.return_value = self._mock_environment(
+            Environment.State.RUNNING
+        )
+
+        op = CloudComposerCreateEnvironmentOperator(
+            task_id=TASK_ID,
+            project_id=TEST_GCP_PROJECT,
+            region=TEST_GCP_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            environment=TEST_ENVIRONMENT,
+            gcp_conn_id=TEST_GCP_CONN_ID,
+            retry=TEST_RETRY,
+            timeout=TEST_TIMEOUT,
+            metadata=TEST_METADATA,
+        )
+
+        op.execute(mock.MagicMock())
+
+        mock_hook.return_value.wait_for_operation.assert_called_once()
+        mock_hook.return_value.get_environment.assert_called_once_with(
+            project_id=TEST_GCP_PROJECT,
+            region=TEST_GCP_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            retry=TEST_RETRY,
+            timeout=TEST_TIMEOUT,
+            metadata=TEST_METADATA,
+        )
+
+    @mock.patch(COMPOSER_STRING.format("Environment.to_dict"))
+    @mock.patch(COMPOSER_STRING.format("CloudComposerHook"))
+    def test_execute_existing_running_environment_succeeds(self, mock_hook, to_dict_mode) -> None:
+        mock_hook.return_value.create_environment.side_effect = AlreadyExists("already exists")
+        mock_hook.return_value.get_environment.return_value = self._mock_environment(
+            Environment.State.RUNNING
+        )
+
+        op = CloudComposerCreateEnvironmentOperator(
+            task_id=TASK_ID,
+            project_id=TEST_GCP_PROJECT,
+            region=TEST_GCP_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            environment=TEST_ENVIRONMENT,
+            gcp_conn_id=TEST_GCP_CONN_ID,
+            retry=TEST_RETRY,
+            timeout=TEST_TIMEOUT,
+            metadata=TEST_METADATA,
+        )
+
+        op.execute(mock.MagicMock())
+
+        mock_hook.return_value.get_environment.assert_called_once_with(
+            project_id=TEST_GCP_PROJECT,
+            region=TEST_GCP_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            retry=TEST_RETRY,
+            timeout=TEST_TIMEOUT,
+            metadata=TEST_METADATA,
+        )
+
+    @mock.patch(COMPOSER_STRING.format("CloudComposerHook"))
+    def test_execute_existing_environment_in_error_state_fails(self, mock_hook) -> None:
+        mock_hook.return_value.create_environment.side_effect = AlreadyExists("already exists")
+        mock_hook.return_value.get_environment.return_value = self._mock_environment(Environment.State.ERROR)
+
+        op = CloudComposerCreateEnvironmentOperator(
+            task_id=TASK_ID,
+            project_id=TEST_GCP_PROJECT,
+            region=TEST_GCP_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            environment=TEST_ENVIRONMENT,
+            gcp_conn_id=TEST_GCP_CONN_ID,
+            retry=TEST_RETRY,
+            timeout=TEST_TIMEOUT,
+            metadata=TEST_METADATA,
+        )
+
+        with pytest.raises(ComposerEnvironmentNotRunningError, match="Current state: ERROR"):
+            op.execute(mock.MagicMock())
+
+    @mock.patch(COMPOSER_STRING.format("Environment.to_dict"))
+    @mock.patch(COMPOSER_STRING.format("CloudComposerHook"))
+    def test_execute_complete_returns_running_environment(self, mock_hook, to_dict_mode) -> None:
+        mock_hook.return_value.get_environment.return_value = self._mock_environment(
+            Environment.State.RUNNING
+        )
+
+        op = CloudComposerCreateEnvironmentOperator(
+            task_id=TASK_ID,
+            project_id=TEST_GCP_PROJECT,
+            region=TEST_GCP_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            environment=TEST_ENVIRONMENT,
+            gcp_conn_id=TEST_GCP_CONN_ID,
+            retry=TEST_RETRY,
+            timeout=TEST_TIMEOUT,
+            metadata=TEST_METADATA,
+            deferrable=True,
+        )
+
+        op.execute_complete(mock.MagicMock(), {"operation_done": True, "operation_name": "test-operation"})
+
+    @mock.patch(COMPOSER_STRING.format("CloudComposerHook"))
+    def test_execute_complete_raises_when_environment_not_running(self, mock_hook) -> None:
+        mock_hook.return_value.get_environment.return_value = self._mock_environment(
+            Environment.State.CREATING
+        )
+
+        op = CloudComposerCreateEnvironmentOperator(
+            task_id=TASK_ID,
+            project_id=TEST_GCP_PROJECT,
+            region=TEST_GCP_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            environment=TEST_ENVIRONMENT,
+            gcp_conn_id=TEST_GCP_CONN_ID,
+            retry=TEST_RETRY,
+            timeout=TEST_TIMEOUT,
+            metadata=TEST_METADATA,
+            deferrable=True,
+        )
+
+        with pytest.raises(ComposerEnvironmentNotRunningError, match="Current state: CREATING"):
+            op.execute_complete(
+                mock.MagicMock(), {"operation_done": True, "operation_name": "test-operation"}
+            )
 
 
 class TestCloudComposerDeleteEnvironmentOperator:
@@ -319,6 +494,12 @@ class TestCloudComposerRunAirflowCLICommandOperator:
     @mock.patch(COMPOSER_STRING.format("ExecuteAirflowCommandResponse.to_dict"))
     @mock.patch(COMPOSER_STRING.format("CloudComposerHook"))
     def test_execute(self, mock_hook, to_dict_mode) -> None:
+        mock_hook.return_value.wait_command_execution_result.return_value = {
+            "exit_info": {"exit_code": 0},
+            "output": [
+                {"content": "test"},
+            ],
+        }
         op = CloudComposerRunAirflowCLICommandOperator(
             task_id=TASK_ID,
             project_id=TEST_GCP_PROJECT,
@@ -369,3 +550,36 @@ class TestCloudComposerRunAirflowCLICommandOperator:
 
         assert isinstance(exc.value.trigger, CloudComposerAirflowCLICommandTrigger)
         assert exc.value.method_name == GOOGLE_DEFAULT_DEFERRABLE_METHOD_NAME
+
+
+class TestCloudComposerTriggerDAGRunOperator:
+    @mock.patch(COMPOSER_STRING.format("CloudComposerHook"))
+    def test_execute(self, mock_hook) -> None:
+        op = CloudComposerTriggerDAGRunOperator(
+            task_id=TASK_ID,
+            project_id=TEST_GCP_PROJECT,
+            region=TEST_GCP_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            composer_dag_id=TEST_COMPOSER_DAG_ID,
+            composer_dag_conf=TEST_COMPOSER_DAG_CONF,
+            gcp_conn_id=TEST_GCP_CONN_ID,
+            timeout=TEST_TIMEOUT,
+        )
+        op.execute(mock.MagicMock())
+        mock_hook.assert_called_once_with(
+            gcp_conn_id=TEST_GCP_CONN_ID,
+            impersonation_chain=TEST_IMPERSONATION_CHAIN,
+        )
+        mock_hook.return_value.get_environment.assert_called_once_with(
+            project_id=TEST_GCP_PROJECT,
+            region=TEST_GCP_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            timeout=TEST_TIMEOUT,
+        )
+        mock_hook.return_value.trigger_dag_run.assert_called_once_with(
+            composer_airflow_uri=mock_hook.return_value.get_environment.return_value.config.airflow_uri,
+            composer_dag_id=TEST_COMPOSER_DAG_ID,
+            composer_dag_conf=TEST_COMPOSER_DAG_CONF,
+            composer_airflow_version=TEST_COMPOSER_AIRFLOW_VERSION,
+            timeout=TEST_TIMEOUT,
+        )

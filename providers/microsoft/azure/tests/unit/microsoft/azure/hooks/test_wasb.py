@@ -19,15 +19,18 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import UTC, datetime
 from unittest import mock
+from unittest.mock import create_autospec
 
 import pytest
+from azure.core.credentials import AzureSasCredential
 from azure.core.exceptions import ResourceNotFoundError
-from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobServiceClient, ContainerClient
 from azure.storage.blob._models import BlobProperties
 
-from airflow.exceptions import AirflowException
 from airflow.models import Connection
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.microsoft.azure.hooks.wasb import WasbHook
 
 pytestmark = pytest.mark.db_test
@@ -43,6 +46,11 @@ CONN_STRING = (
 
 ACCESS_KEY_STRING = "AccountName=name;skdkskd"
 PROXIES = {"http": "http_proxy_uri", "https": "https_proxy_uri"}
+
+# https://learn.microsoft.com/en-us/rest/api/storageservices/create-service-sas
+# The hook wraps plain SAS tokens in AzureSasCredential for the SDK to sign requests.
+SAS_TOKEN = "sv=2021-08-06&ss=b&srt=sco&sp=r&sig=samplesignature"
+HTTPS_SAS_TOKEN = f"https://login.blob.core.windows.net/?{SAS_TOKEN}"
 
 
 @pytest.fixture
@@ -79,6 +87,7 @@ class TestWasbHook:
         self.public_read_conn_id = "pub_read_id"
         self.public_read_conn_id_without_host = "pub_read_id_without_host"
         self.managed_identity_conn_id = "managed_identity_conn_id"
+        self.account_key_conn_id = "account_key_conn_id"
         self.authority = "https://test_authority.com"
 
         self.proxies = PROXIES
@@ -136,27 +145,33 @@ class TestWasbHook:
                 extra={"proxies": self.proxies},
             ),
             Connection(
+                conn_id=self.account_key_conn_id,
+                conn_type=self.connection_type,
+                login="testaccount",
+                extra={"account_key": "test_account_key", "proxies": self.proxies},
+            ),
+            Connection(
                 conn_id="sas_conn_id",
                 conn_type=self.connection_type,
                 login=self.login,
-                extra={"sas_token": "token", "proxies": self.proxies},
+                extra={"sas_token": SAS_TOKEN, "proxies": self.proxies},
             ),
             Connection(
                 conn_id=self.extra__wasb__sas_conn_id,
                 conn_type=self.connection_type,
                 login=self.login,
-                extra={"extra__wasb__sas_token": "token", "proxies": self.proxies},
+                extra={"extra__wasb__sas_token": SAS_TOKEN, "proxies": self.proxies},
             ),
             Connection(
                 conn_id=self.http_sas_conn_id,
                 conn_type=self.connection_type,
-                extra={"sas_token": "https://login.blob.core.windows.net/token", "proxies": self.proxies},
+                extra={"sas_token": HTTPS_SAS_TOKEN, "proxies": self.proxies},
             ),
             Connection(
                 conn_id=self.extra__wasb__http_sas_conn_id,
                 conn_type=self.connection_type,
                 extra={
-                    "extra__wasb__sas_token": "https://login.blob.core.windows.net/token",
+                    "extra__wasb__sas_token": HTTPS_SAS_TOKEN,
                     "proxies": self.proxies,
                 },
             ),
@@ -192,6 +207,19 @@ class TestWasbHook:
             shared_access_key="token",
         )
 
+    def test_blob_service_client_setter_overrides_cache(self, monkeypatch):
+        hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
+        default_client = mock.MagicMock(name="default_client")
+        monkeypatch.setattr(hook, "get_conn", mock.MagicMock(return_value=default_client))
+        hook._blob_service_client = None
+        assert hook.blob_service_client is default_client
+        hook.get_conn.assert_called_once()
+        new_client = mock.MagicMock(name="new_client")
+        hook.blob_service_client = new_client
+        hook.get_conn.reset_mock()
+        assert hook.blob_service_client is new_client
+        hook.get_conn.assert_not_called()
+
     def test_managed_identity(self, mocked_default_azure_credential, mocked_blob_service_client):
         mocked_default_azure_credential.assert_not_called()
         mocked_default_azure_credential.return_value = "foo-bar"
@@ -221,6 +249,27 @@ class TestWasbHook:
             credential="spam-egg",
             tenant_id="token",
             proxies=self.proxies,
+        )
+
+    def test_variable_type_checking(self):
+        hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
+        ok_container = object.__new__(ContainerClient)
+        hook.check_for_variable_type("container", ok_container, ContainerClient)
+        wrong_container = object.__new__(BlobServiceClient)
+        with pytest.raises(TypeError) as ei:
+            hook.check_for_variable_type("container", wrong_container, ContainerClient)
+        msg = str(ei.value)
+        for s in ["container", "WasbHook", "ContainerClient", "BlobServiceClient"]:
+            assert s in msg
+
+    def test_account_key_connection(self, mocked_blob_service_client):
+        """Test that account_key from extra is used when no password is provided."""
+        WasbHook(wasb_conn_id=self.account_key_conn_id).get_conn()
+        mocked_blob_service_client.assert_called_once_with(
+            account_url="https://testaccount.blob.core.windows.net/",
+            credential="test_account_key",
+            proxies=self.proxies,
+            account_key="test_account_key",
         )
 
     @pytest.mark.parametrize(
@@ -262,8 +311,12 @@ class TestWasbHook:
         self, mocked_connection, mocked_blob_service_client
     ):
         WasbHook(wasb_conn_id="testconn").get_conn()
+        called_credential = mocked_blob_service_client.call_args[1]["credential"]
+        assert isinstance(called_credential, AzureSasCredential)
+        assert called_credential.signature == "SAStoken"
         mocked_blob_service_client.assert_called_once_with(
-            account_url="https://testaccountname.blob.core.windows.net/SAStoken",
+            account_url="https://testaccountname.blob.core.windows.net/",
+            credential=called_credential,
             sas_token="SAStoken",
         )
 
@@ -305,7 +358,7 @@ class TestWasbHook:
             )
 
     @pytest.mark.parametrize(
-        argnames="conn_id_str, extra_key",
+        argnames=("conn_id_str", "extra_key"),
         argvalues=[
             ("sas_conn_id", "sas_token"),
             ("extra__wasb__sas_conn_id", "extra__wasb__sas_token"),
@@ -319,10 +372,14 @@ class TestWasbHook:
         hook_conn = hook.get_connection(hook.conn_id)
         sas_token = hook_conn.extra_dejson[extra_key]
         assert isinstance(conn, BlobServiceClient)
-        assert conn.url.startswith("https://")
-        if hook_conn.login:
-            assert hook_conn.login in conn.url
-        assert conn.url.endswith(sas_token + "/")
+        if sas_token.startswith("https"):
+            # HTTPS SAS URL: the full URL is passed to BlobServiceClient as-is;
+            # credential handling is left to the SDK.
+            assert sas_token in conn.url
+        else:
+            # Plain SAS token: the hook wraps it in AzureSasCredential.
+            assert isinstance(conn.credential, AzureSasCredential)
+            assert conn.credential.signature == sas_token
 
     @pytest.mark.parametrize(
         argnames="conn_id_str",
@@ -331,6 +388,7 @@ class TestWasbHook:
             "azure_shared_key_test",
             "ad_conn_id",
             "managed_identity_conn_id",
+            "account_key_conn_id",
             "sas_conn_id",
             "extra__wasb__sas_conn_id",
             "http_sas_conn_id",
@@ -352,7 +410,7 @@ class TestWasbHook:
         assert conn.credential._authority == self.authority
 
     @pytest.mark.parametrize(
-        "provided_host, expected_host",
+        ("provided_host", "expected_host"),
         [
             (
                 "https://testaccountname.blob.core.windows.net",
@@ -400,7 +458,40 @@ class TestWasbHook:
         assert not hook.check_for_prefix("container", "prefix", timeout=3)
         get_blobs_list.assert_called_once_with(container_name="container", prefix="prefix", timeout=3)
 
+    def test_check_for_container(self, mocked_blob_service_client):
+        mock_container = create_autospec(ContainerClient, instance=True)
+        mock_container.exists.return_value = True
+        mocked_blob_service_client.return_value.get_container_client.return_value = mock_container
+        hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
+        assert hook.check_for_container("mycontainer") is True
+        mocked_blob_service_client.return_value.get_container_client.assert_called_once_with("mycontainer")
+        mock_container.exists.assert_called_once_with()
+
+    def test_check_for_container_not_found(self, mocked_blob_service_client):
+        mock_container = create_autospec(ContainerClient, instance=True)
+        mock_container.exists.return_value = False
+        mocked_blob_service_client.return_value.get_container_client.return_value = mock_container
+        hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
+        assert hook.check_for_container("missing-container") is False
+        mock_container.exists.assert_called_once_with()
+
+    def test_check_for_container_raises_type_error_for_invalid_client(self, mocked_blob_service_client):
+        mocked_blob_service_client.return_value.get_container_client.return_value = mock.MagicMock()
+        hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
+        with pytest.raises(TypeError, match="container for WasbHook must be ContainerClient"):
+            hook.check_for_container("mycontainer")
+
+    def test_check_for_container_propagates_unexpected_errors(self, mocked_blob_service_client):
+        mock_container = create_autospec(ContainerClient, instance=True)
+        mock_container.exists.side_effect = OSError("network down")
+        mocked_blob_service_client.return_value.get_container_client.return_value = mock_container
+        hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
+        with pytest.raises(OSError, match="network down"):
+            hook.check_for_container("mycontainer")
+
     def test_get_blobs_list(self, mocked_blob_service_client):
+        mock_container = create_autospec(ContainerClient, instance=True)
+        mocked_blob_service_client.return_value.get_container_client.return_value = mock_container
         hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
         hook.get_blobs_list(container_name="mycontainer", prefix="my", include=None, delimiter="/")
         mock_container_client = mocked_blob_service_client.return_value.get_container_client
@@ -410,6 +501,8 @@ class TestWasbHook:
         )
 
     def test_get_blobs_list_recursive(self, mocked_blob_service_client):
+        mock_container = create_autospec(ContainerClient, instance=True)
+        mocked_blob_service_client.return_value.get_container_client.return_value = mock_container
         hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
         hook.get_blobs_list_recursive(
             container_name="mycontainer", prefix="test", include=None, endswith="file_extension"
@@ -421,6 +514,8 @@ class TestWasbHook:
         )
 
     def test_get_blobs_list_recursive_endswith(self, mocked_blob_service_client):
+        mock_container = create_autospec(ContainerClient, instance=True)
+        mocked_blob_service_client.return_value.get_container_client.return_value = mock_container
         hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
         mocked_blob_service_client.return_value.get_container_client.return_value.list_blobs.return_value = [
             BlobProperties(name="test/abc.py"),
@@ -501,6 +596,134 @@ class TestWasbHook:
         hook.download(container_name="mycontainer", blob_name="myblob", offset=2, length=4)
         blob_client.assert_called_once_with(container="mycontainer", blob="myblob")
         blob_client.return_value.download_blob.assert_called_once_with(offset=2, length=4)
+
+    def test_sync_to_local_dir_behaviour(self, mocked_blob_service_client, tmp_path):
+        def get_logs_string(call_args_list):
+            return "".join([args[0][0] % args[0][1:] for args in call_args_list])
+
+        def make_blob(name, size=9, last_modified=None):
+            blob = mock.MagicMock(spec=BlobProperties)
+            blob.name = name
+            blob.size = size
+            blob.last_modified = last_modified or datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+            return blob
+
+        container_name = "test_container"
+        mock_container = create_autospec(ContainerClient, instance=True)
+        mocked_blob_service_client.return_value.get_container_client.return_value = mock_container
+
+        blobs = [
+            make_blob("dag_01.py"),
+            make_blob("dag_02.py"),
+            make_blob("subproject1/dag_a.py"),
+            make_blob("subproject1/dag_b.py"),
+        ]
+        mock_container.list_blobs.return_value = blobs
+
+        sync_local_dir = tmp_path / "wasb_sync_dir"
+        hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
+        hook.log.debug = mock.MagicMock()
+        hook.get_file = mock.MagicMock()
+
+        hook.sync_to_local_dir(
+            container_name=container_name, local_dir=sync_local_dir, prefix="", delete_stale=True
+        )
+        logs_string = get_logs_string(hook.log.debug.call_args_list)
+        assert f"Downloading data from wasb://{container_name}/ to {sync_local_dir}" in logs_string
+        assert f"Local file {sync_local_dir}/dag_01.py does not exist." in logs_string
+        assert f"Downloaded dag_01.py to {sync_local_dir.as_posix()}/dag_01.py" in logs_string
+        assert f"Local file {sync_local_dir}/subproject1/dag_a.py does not exist." in logs_string
+        assert (
+            f"Downloaded subproject1/dag_a.py to {sync_local_dir.as_posix()}/subproject1/dag_a.py"
+            in logs_string
+        )
+        assert hook.get_file.call_count == 4
+
+        for blob in blobs:
+            p = sync_local_dir / blob.name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("test data")
+            os.utime(p, (blob.last_modified.timestamp(), blob.last_modified.timestamp()))
+
+        hook.log.debug = mock.MagicMock()
+        hook.get_file.reset_mock()
+        new_blob = make_blob("dag_03.py")
+        mock_container.list_blobs.return_value = blobs + [new_blob]
+        hook.sync_to_local_dir(
+            container_name=container_name, local_dir=sync_local_dir, prefix="", delete_stale=True
+        )
+        logs_string = get_logs_string(hook.log.debug.call_args_list)
+        assert (
+            f"Local file {(sync_local_dir / 'subproject1' / 'dag_b.py').as_posix()} is up-to-date "
+            "with blob subproject1/dag_b.py. Skipping download."
+        ) in logs_string
+        assert f"Local file {sync_local_dir}/dag_03.py does not exist." in logs_string
+        assert f"Downloaded dag_03.py to {sync_local_dir.as_posix()}/dag_03.py" in logs_string
+        hook.get_file.assert_called_once()
+        (sync_local_dir / "dag_03.py").write_text("test data")
+        os.utime(
+            sync_local_dir / "dag_03.py",
+            (new_blob.last_modified.timestamp(), new_blob.last_modified.timestamp()),
+        )
+
+        local_file_that_should_be_deleted = sync_local_dir / "file_that_should_be_deleted.py"
+        local_file_that_should_be_deleted.write_text("test dag")
+        local_folder_should_be_deleted = sync_local_dir / "local_folder_should_be_deleted"
+        local_folder_should_be_deleted.mkdir(exist_ok=True)
+        hook.log.debug = mock.MagicMock()
+        hook.get_file.reset_mock()
+        hook.sync_to_local_dir(
+            container_name=container_name, local_dir=sync_local_dir, prefix="", delete_stale=True
+        )
+        logs_string = get_logs_string(hook.log.debug.call_args_list)
+        assert f"Deleting stale local file: {local_file_that_should_be_deleted.as_posix()}" in logs_string
+        assert f"Deleting stale empty directory: {local_folder_should_be_deleted.as_posix()}" in logs_string
+        assert not hook.get_file.called
+
+        hook.log.debug = mock.MagicMock()
+        hook.get_file.reset_mock()
+        updated_blob = make_blob("dag_03.py", size=15)
+        mock_container.list_blobs.return_value = blobs + [updated_blob]
+        hook.sync_to_local_dir(
+            container_name=container_name, local_dir=sync_local_dir, prefix="", delete_stale=True
+        )
+        logs_string = get_logs_string(hook.log.debug.call_args_list)
+        assert "Blob size (15) and local file size (9) differ." in logs_string
+        assert f"Downloaded dag_03.py to {sync_local_dir.as_posix()}/dag_03.py" in logs_string
+        hook.get_file.assert_called_once()
+
+    @pytest.mark.parametrize("prefix", ["project1/dags", "project1/dags/"])
+    def test_sync_to_local_dir_with_prefix(self, mocked_blob_service_client, tmp_path, prefix):
+        mock_container = create_autospec(ContainerClient, instance=True)
+        mocked_blob_service_client.return_value.get_container_client.return_value = mock_container
+        blob = mock.MagicMock(spec=BlobProperties)
+        blob.name = "project1/dags/dag_a.py"
+        mock_container.list_blobs.return_value = [blob]
+        hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
+        hook.get_file = mock.MagicMock()
+
+        hook.sync_to_local_dir(container_name="test_container", local_dir=tmp_path, prefix=prefix)
+
+        mock_container.list_blobs.assert_called_once_with(name_starts_with="project1/dags/")
+        hook.get_file.assert_called_once_with(
+            file_path=str(tmp_path / "dag_a.py"), container_name="test_container", blob_name=blob.name
+        )
+
+    def test_sync_to_local_dir_rejects_blob_path_traversal(self, mocked_blob_service_client, tmp_path):
+        mock_container = create_autospec(ContainerClient, instance=True)
+        mocked_blob_service_client.return_value.get_container_client.return_value = mock_container
+        blob = mock.MagicMock(spec=BlobProperties)
+        blob.name = "dags/../../outside.py"
+        mock_container.list_blobs.return_value = [blob]
+        hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
+        hook.get_file = mock.MagicMock()
+
+        with pytest.raises(ValueError, match="resolves outside local directory"):
+            hook.sync_to_local_dir(
+                container_name="test_container", local_dir=tmp_path / "bundle", prefix="dags"
+            )
+        assert not (tmp_path / "outside.py").exists()
+        hook.get_file.assert_not_called()
 
     def test_get_container_client(self, mocked_blob_service_client):
         hook = WasbHook(wasb_conn_id=self.azure_shared_key_test)
@@ -659,6 +882,7 @@ class TestWasbHook:
             "azure_shared_key_test",
             "ad_conn_id",
             "managed_identity_conn_id",
+            "account_key_conn_id",
             "sas_conn_id",
             "extra__wasb__sas_conn_id",
             "http_sas_conn_id",

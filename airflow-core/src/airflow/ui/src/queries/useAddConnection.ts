@@ -16,16 +16,21 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
+
 import { useConnectionServiceGetConnectionsKey, useConnectionServicePostConnection } from "openapi/queries";
-import { toaster } from "src/components/ui";
+
+import { toaster } from "src/system-components";
+
 import type { ConnectionBody } from "src/pages/Connections/Connections";
 
 export const useAddConnection = ({ onSuccessConfirm }: { onSuccessConfirm: () => void }) => {
   const queryClient = useQueryClient();
   const [error, setError] = useState<unknown>(undefined);
+  const { t: translate } = useTranslation(["common", "admin"]);
 
   const onSuccess = async () => {
     await queryClient.invalidateQueries({
@@ -33,10 +38,17 @@ export const useAddConnection = ({ onSuccessConfirm }: { onSuccessConfirm: () =>
     });
 
     toaster.create({
-      description: "Connection has been added successfully",
-      title: "Connection Add Request Submitted",
+      description: translate("toaster.create.success.description", {
+        resourceName: translate("admin:connections.connection_one"),
+      }),
+      title: translate("toaster.create.success.title", {
+        action: translate("toaster.create"),
+        resourceName: translate("admin:connections.connection_one"),
+      }),
       type: "success",
     });
+
+    setError(undefined);
     onSuccessConfirm();
   };
 
@@ -57,6 +69,7 @@ export const useAddConnection = ({ onSuccessConfirm }: { onSuccessConfirm: () =>
     const port = requestBody.port === "" ? undefined : Number(requestBody.port);
     const schema = requestBody.schema === "" ? undefined : requestBody.schema;
     const extra = requestBody.extra === "{}" ? undefined : requestBody.extra;
+    const teamName = requestBody.team_name === "" ? undefined : requestBody.team_name;
 
     mutate({
       requestBody: {
@@ -69,6 +82,7 @@ export const useAddConnection = ({ onSuccessConfirm }: { onSuccessConfirm: () =>
         password,
         port,
         schema,
+        team_name: teamName,
       },
     });
   };

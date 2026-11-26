@@ -17,15 +17,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable, Sequence
 
-from airflow.decorators.base import DecoratedOperator, task_decorator_factory
+from airflow.providers.common.compat.sdk import DecoratedOperator, TaskDecorator, task_decorator_factory
 from airflow.providers.snowflake.operators.snowpark import SnowparkOperator
 from airflow.providers.snowflake.utils.snowpark import inject_session_into_op_kwargs
-
-if TYPE_CHECKING:
-    from airflow.decorators.base import TaskDecorator
 
 
 class _SnowparkDecoratedOperator(DecoratedOperator, SnowparkOperator):
@@ -59,6 +55,8 @@ class _SnowparkDecoratedOperator(DecoratedOperator, SnowparkOperator):
     :param multiple_outputs: If set to True, the decorated function's return value will be unrolled to
         multiple XCom values. Dict will unroll to XCom values with its keys as XCom keys. Defaults to False.
     """
+
+    template_fields: Sequence[str] = (*DecoratedOperator.template_fields, "snowflake_conn_id")
 
     custom_operator_name = "@task.snowpark"
 

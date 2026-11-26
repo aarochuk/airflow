@@ -16,7 +16,7 @@
 # under the License.
 
 """
-Example DAG to demonstrate annotating an asset event with extra information.
+Example Dag to demonstrate annotating an asset event with extra information.
 
 Also see examples in ``example_inlet_event_extra.py``.
 """
@@ -25,20 +25,17 @@ from __future__ import annotations
 
 import datetime
 
-from airflow.decorators import task
-from airflow.models.dag import DAG
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.sdk.definitions.asset import Asset
-from airflow.sdk.definitions.asset.metadata import Metadata
+from airflow.sdk import DAG, Asset, Metadata, task
 
 asset = Asset(uri="s3://output/1.txt", name="test-asset")
 
 with DAG(
     dag_id="asset_with_extra_by_yield",
     catchup=False,
-    start_date=datetime.datetime.min,
+    start_date=datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC),
     schedule="@daily",
-    tags=["produces"],
+    tags=["example", "produces"],
 ):
 
     @task(outlets=[asset])
@@ -50,9 +47,9 @@ with DAG(
 with DAG(
     dag_id="asset_with_extra_by_context",
     catchup=False,
-    start_date=datetime.datetime.min,
+    start_date=datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC),
     schedule="@daily",
-    tags=["produces"],
+    tags=["example", "produces"],
 ):
 
     @task(outlets=[asset])
@@ -64,9 +61,9 @@ with DAG(
 with DAG(
     dag_id="asset_with_extra_from_classic_operator",
     catchup=False,
-    start_date=datetime.datetime.min,
+    start_date=datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC),
     schedule="@daily",
-    tags=["produces"],
+    tags=["example", "produces"],
 ):
 
     def _asset_with_extra_from_classic_operator_post_execute(context, result):

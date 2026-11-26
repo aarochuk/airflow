@@ -17,9 +17,10 @@
  * under the License.
  */
 import { HStack, Badge, Text, Skeleton } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 import { Link, type To } from "react-router-dom";
 
-import { pluralize } from "src/utils";
+import { formatNumber } from "src/utils";
 
 import { TrendCountChart, type ChartEvent } from "./TrendCountChart";
 
@@ -44,20 +45,27 @@ export const TrendCountButton = ({
   route,
   startDate,
 }: Props) => {
-  if (count === 0 && !isLoading) {
-    return undefined;
-  }
+  const { i18n } = useTranslation();
 
   return isLoading ? (
     <Skeleton borderRadius={4} height="45px" width="350px" />
   ) : (
     <Link to={route}>
-      <HStack borderRadius={4} borderWidth={1} p={3} width="350px">
-        <Badge borderRadius="50%" colorPalette={colorPalette} variant="solid">
-          {count}
+      <HStack
+        _hover={{ bg: "bg.subtle" }}
+        borderColor="border.emphasized"
+        borderRadius={4}
+        borderWidth={1}
+        data-testid="trend-count-button"
+        p={3}
+        transition="background-color 0.2s"
+        width="350px"
+      >
+        <Badge borderRadius="md" colorPalette={colorPalette} variant="solid">
+          {formatNumber(count, i18n.language)}
         </Badge>
         <Text fontSize="sm" fontWeight="bold">
-          {pluralize(label, count, undefined, true)}
+          {label}
         </Text>
         <TrendCountChart endDate={endDate} events={events} startDate={startDate} />
       </HStack>

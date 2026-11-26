@@ -20,15 +20,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.opsgenie.hooks.opsgenie import OpsgenieAlertHook
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class OpsgenieCreateAlertOperator(BaseOperator):
@@ -66,7 +62,15 @@ class OpsgenieCreateAlertOperator(BaseOperator):
     :param note: Additional note that will be added while creating the alert. (templated)
     """
 
-    template_fields: Sequence[str] = ("message", "alias", "description", "entity", "priority", "note")
+    template_fields: Sequence[str] = (
+        "message",
+        "alias",
+        "description",
+        "entity",
+        "priority",
+        "note",
+        "opsgenie_conn_id",
+    )
 
     def __init__(
         self,
@@ -166,6 +170,8 @@ class OpsgenieCloseAlertOperator(BaseOperator):
     :param close_alert_kwargs: additional params to pass
     """
 
+    template_fields: Sequence[str] = ("opsgenie_conn_id",)
+
     def __init__(
         self,
         *,
@@ -243,7 +249,10 @@ class OpsgenieDeleteAlertOperator(BaseOperator):
     :param source: Display name of the request source
     """
 
-    template_fields: Sequence[str] = ("identifier",)
+    template_fields: Sequence[str] = (
+        "identifier",
+        "opsgenie_conn_id",
+    )
 
     def __init__(
         self,

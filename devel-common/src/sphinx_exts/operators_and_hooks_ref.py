@@ -27,13 +27,12 @@ import jinja2
 import rich_click as click
 import yaml
 from docutils import nodes
-
-# No stub exists for docutils.parsers.rst.directives. See https://github.com/python/typeshed/issues/5755.
-from docutils.parsers.rst import Directive, directives  # type: ignore[attr-defined]
+from docutils.parsers.rst import Directive, directives
 from docutils.statemachine import StringList
-from provider_yaml_utils import get_all_provider_yaml_paths, load_package_data
 from sphinx.util import nested_parse_with_titles
 from sphinx.util.docutils import switch_source_input
+
+from sphinx_exts.provider_yaml_utils import get_all_provider_yaml_paths, load_package_data
 
 if TYPE_CHECKING:
     from docutils.nodes import Element
@@ -108,6 +107,7 @@ def _prepare_operators_data(tags: set[str] | None):
     all_operators_by_integration = _prepare_resource_index(package_data, "operators")
     all_hooks_by_integration = _prepare_resource_index(package_data, "hooks")
     all_sensors_by_integration = _prepare_resource_index(package_data, "sensors")
+    all_triggers_by_integration = _prepare_resource_index(package_data, "triggers")
     results = []
 
     for integration in to_display_integration:
@@ -117,6 +117,7 @@ def _prepare_operators_data(tags: set[str] | None):
         operators = all_operators_by_integration.get(integration["integration-name"])
         sensors = all_sensors_by_integration.get(integration["integration-name"])
         hooks = all_hooks_by_integration.get(integration["integration-name"])
+        triggers = all_triggers_by_integration.get(integration["integration-name"])
 
         if "how-to-guide" in item["integration"]:
             item["integration"]["how-to-guide"] = [_docs_path(d) for d in item["integration"]["how-to-guide"]]
@@ -126,7 +127,9 @@ def _prepare_operators_data(tags: set[str] | None):
             item["sensors"] = sensors
         if hooks:
             item["hooks"] = hooks
-        if operators or sensors or hooks:
+        if triggers:
+            item["triggers"] = triggers
+        if operators or sensors or hooks or triggers:
             results.append(item)
 
     return sorted(results, key=lambda d: d["integration"]["integration-name"].lower())
@@ -226,10 +229,9 @@ def _get_decorator_details(decorator):
     def get_full_name(node):
         if isinstance(node, ast.Attribute):
             return f"{get_full_name(node.value)}.{node.attr}"
-        elif isinstance(node, ast.Name):
+        if isinstance(node, ast.Name):
             return node.id
-        else:
-            return ast.dump(node)
+        return ast.dump(node)
 
     def eval_node(node):
         try:
@@ -242,12 +244,11 @@ def _get_decorator_details(decorator):
         args = [eval_node(arg) for arg in decorator.args]
         kwargs = {kw.arg: eval_node(kw.value) for kw in decorator.keywords if kw.arg != "category"}
         return name, args, kwargs
-    elif isinstance(decorator, ast.Name):
+    if isinstance(decorator, ast.Name):
         return decorator.id, [], {}
-    elif isinstance(decorator, ast.Attribute):
+    if isinstance(decorator, ast.Attribute):
         return decorator.attr, [], {}
-    else:
-        return decorator, [], {}
+    return decorator, [], {}
 
 
 def _iter_module_for_deprecations(ast_node, file_path, class_name=None) -> list[dict[str, Any]]:
@@ -304,8 +305,8 @@ def _render_deprecations_content(*, header_separator: str):
     for provider_yaml_path in get_all_provider_yaml_paths():
         provider_parent_path = Path(provider_yaml_path).parent
         provider_info: dict[str, Any] = {"name": "", "deprecations": []}
-        for root, _, file_names in os.walk(provider_parent_path):
-            file_names = [f for f in file_names if f.endswith(".py") and f != "__init__.py"]
+        for root, _, file_names_raw in os.walk(provider_parent_path):
+            file_names = [f for f in file_names_raw if f.endswith(".py") and f != "__init__.py"]
             for file_name in file_names:
                 file_path = f"{os.path.relpath(root)}/{file_name}"
                 with open(file_path) as file:
@@ -406,6 +407,19 @@ class LoggingDirective(BaseJinjaReferenceDirective):
         )
 
 
+class EmailBackendsDirective(BaseJinjaReferenceDirective):
+    """Generate list of email backends"""
+
+    def render_content(
+        self, *, tags: set[str] | None, header_separator: str = DEFAULT_HEADER_SEPARATOR
+    ) -> str:
+        return _common_render_list_content(
+            header_separator=header_separator,
+            resource_type="email-backends",
+            template="email-backends.rst.jinja2",
+        )
+
+
 class AuthConfigurations(BaseJinjaReferenceDirective):
     """Generate list of configurations"""
 
@@ -483,6 +497,17 @@ class ExecutorsDirective(BaseJinjaReferenceDirective):
         )
 
 
+class QueuesDirective(BaseJinjaReferenceDirective):
+    """Generate list of queues"""
+
+    def render_content(
+        self, *, tags: set[str] | None, header_separator: str = DEFAULT_HEADER_SEPARATOR
+    ) -> str:
+        return _common_render_list_content(
+            header_separator=header_separator, resource_type="queues", template="queues.rst.jinja2"
+        )
+
+
 class DeferrableOperatorDirective(BaseJinjaReferenceDirective):
     """Generate list of deferrable operators"""
 
@@ -512,20 +537,53 @@ class AssetSchemeDirective(BaseJinjaReferenceDirective):
         )
 
 
+class AuthManagersDirective(BaseJinjaReferenceDirective):
+    """Generate list of auth managers"""
+
+    def render_content(
+        self, *, tags: set[str] | None, header_separator: str = DEFAULT_HEADER_SEPARATOR
+    ) -> str:
+        return _common_render_list_content(
+            header_separator=header_separator,
+            resource_type="auth-managers",
+            template="auth-managers.rst.jinja2",
+        )
+
+
+class CliCommandsDirective(BaseJinjaReferenceDirective):
+    """Generate list of CLI commands"""
+
+    def render_content(
+        self, *, tags: set[str] | None, header_separator: str = DEFAULT_HEADER_SEPARATOR
+    ) -> str:
+        tabular_data = [
+            (provider["name"], provider["package-name"])
+            for provider in load_package_data()
+            if provider.get("cli") is not None
+        ]
+        return _render_template(
+            "configuration.rst.jinja2", items=tabular_data, header_separator=header_separator
+        )
+
+
 def setup(app):
     """Setup plugin"""
     app.add_directive("operators-hooks-ref", OperatorsHooksReferenceDirective)
     app.add_directive("transfers-ref", TransfersReferenceDirective)
     app.add_directive("airflow-logging", LoggingDirective)
+    app.add_directive("airflow-email-backends", EmailBackendsDirective)
     app.add_directive("airflow-configurations", AuthConfigurations)
     app.add_directive("airflow-secrets-backends", SecretsBackendDirective)
     app.add_directive("airflow-connections", ConnectionsDirective)
     app.add_directive("airflow-extra-links", ExtraLinksDirective)
     app.add_directive("airflow-notifications", NotificationsDirective)
     app.add_directive("airflow-executors", ExecutorsDirective)
+    app.add_directive("airflow-queues", QueuesDirective)
     app.add_directive("airflow-deferrable-operators", DeferrableOperatorDirective)
     app.add_directive("airflow-deprecations", DeprecationsDirective)
     app.add_directive("airflow-dataset-schemes", AssetSchemeDirective)
+    app.add_directive("airflow-auth-managers", AuthManagersDirective)
+    app.add_directive("airflow-cli-commands", CliCommandsDirective)
 
     return {"parallel_read_safe": True, "parallel_write_safe": True}
 
@@ -582,6 +640,19 @@ def secret_backends(header_separator: str):
             header_separator=header_separator,
             resource_type="secrets-backends",
             template="secret_backend.rst.jinja2",
+        )
+    )
+
+
+@cli.command()
+@option_header_separator
+def email_backends(header_separator: str):
+    """Renders Email Backends content"""
+    print(
+        _common_render_list_content(
+            header_separator=header_separator,
+            resource_type="email-backends",
+            template="email-backends.rst.jinja2",
         )
     )
 

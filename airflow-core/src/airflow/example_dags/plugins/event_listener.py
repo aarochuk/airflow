@@ -20,21 +20,24 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from airflow.listeners import hookimpl
+from airflow.models.taskinstance import TaskInstance
+from airflow.utils.state import TaskInstanceState
 
 if TYPE_CHECKING:
     from airflow.models.dagrun import DagRun
     from airflow.sdk.execution_time.task_runner import RuntimeTaskInstance
-    from airflow.utils.state import TaskInstanceState
 
 
 # [START howto_listen_ti_running_task]
 @hookimpl
-def on_task_instance_running(previous_state: TaskInstanceState, task_instance: RuntimeTaskInstance):
+def on_task_instance_running(
+    previous_state: TaskInstanceState | None, task_instance: RuntimeTaskInstance | TaskInstance
+):
     """
-    This method is called when task state changes to RUNNING.
-    Through callback, parameters like previous_task_state, task_instance object can be accessed.
-    This will give more information about current task_instance that is running its dag_run,
-    task and dag information.
+    Called when task state changes to RUNNING.
+
+    previous_task_state and task_instance object can be used to retrieve more information about current
+    task_instance that is running, its dag_run, task and dag information.
     """
     print("Task instance is in running state")
     print(" Previous state of the Task instance:", previous_state)
@@ -61,15 +64,26 @@ def on_task_instance_running(previous_state: TaskInstanceState, task_instance: R
 
 # [START howto_listen_ti_success_task]
 @hookimpl
-def on_task_instance_success(previous_state: TaskInstanceState, task_instance: RuntimeTaskInstance):
+def on_task_instance_success(
+    previous_state: TaskInstanceState | None, task_instance: RuntimeTaskInstance | TaskInstance
+):
     """
-    This method is called when task state changes to SUCCESS.
-    Through callback, parameters like previous_task_state, task_instance object can be accessed.
-    This will give more information about current task_instance that has succeeded its
-    dag_run, task and dag information.
+    Called when task state changes to SUCCESS.
+
+    previous_task_state and task_instance object can be used to retrieve more information about current
+    task_instance that has succeeded, its dag_run, task and dag information.
+
+    A RuntimeTaskInstance is provided in most cases, except when the task's state change is triggered
+    through the API. In that case, the TaskInstance available on the API server will be provided instead.
     """
     print("Task instance in success state")
     print(" Previous state of the Task instance:", previous_state)
+
+    if isinstance(task_instance, TaskInstance):
+        print("Task instance's state was changed through the API.")
+
+        print(f"Task operator:{task_instance.operator}")
+        return
 
     context = task_instance.get_template_context()
     operator = context["task"]
@@ -83,15 +97,36 @@ def on_task_instance_success(previous_state: TaskInstanceState, task_instance: R
 # [START howto_listen_ti_failure_task]
 @hookimpl
 def on_task_instance_failed(
-    previous_state: TaskInstanceState, task_instance: RuntimeTaskInstance, error: None | str | BaseException
+    previous_state: TaskInstanceState | None,
+    task_instance: RuntimeTaskInstance | TaskInstance,
+    error: None | str | BaseException,
 ):
     """
-    This method is called when task state changes to FAILED.
-    Through callback, parameters like previous_task_state, task_instance object can be accessed.
-    This will give more information about current task_instance that has failed its dag_run,
-    task and dag information.
+    Called when a task instance attempt fails, including an attempt that will be retried.
+
+    previous_task_state, task_instance object and error can be used to retrieve more information about current
+    task_instance that has failed, its dag_run, task and dag information.
+
+    ``task_instance.state`` is ``UP_FOR_RETRY`` when the attempt will be retried and ``FAILED`` when it
+    will not.
+
+    A RuntimeTaskInstance is provided in most cases, except when the task's state change is triggered
+    through the API. In that case, the TaskInstance available on the API server will be provided instead.
     """
     print("Task instance in failure state")
+
+    if task_instance.state == TaskInstanceState.UP_FOR_RETRY:
+        print("This attempt failed and the task instance will be retried.")
+    else:
+        print("The task instance failed and will not be retried.")
+
+    if isinstance(task_instance, TaskInstance):
+        print("Task instance's state was changed through the API.")
+
+        print(f"Task operator:{task_instance.operator}")
+        if error:
+            print(f"Failure caused by {error}")
+        return
 
     context = task_instance.get_template_context()
     task = context["task"]
@@ -106,6 +141,44 @@ def on_task_instance_failed(
 
 
 # [END howto_listen_ti_failure_task]
+
+
+# [START howto_listen_ti_skipped_task]
+@hookimpl
+def on_task_instance_skipped(
+    previous_state: TaskInstanceState | None, task_instance: RuntimeTaskInstance | TaskInstance
+):
+    """
+    Called when a task instance skips itself during execution.
+
+    This hook is called only when a task has started execution and then
+    intentionally skips itself (e.g., by raising AirflowSkipException).
+
+    Note: This function will NOT cover tasks that were skipped by scheduler, before execution began, such as:
+        - Skips due to trigger rules (e.g., upstream failures)
+        - Skips from operators like BranchPythonOperator, ShortCircuitOperator, or similar mechanisms
+        - Any other situation in which the scheduler decides not to schedule a task for execution
+
+    For comprehensive tracking of skipped tasks, use DAG-level listeners
+    (on_dag_run_success/on_dag_run_failed) which may have access to all task states.
+    """
+    print("Task instance was skipped")
+
+    if isinstance(task_instance, TaskInstance):
+        print("Task instance's state was changed through the API.")
+        return
+
+    context = task_instance.get_template_context()
+    task = context["task"]
+
+    if TYPE_CHECKING:
+        assert task
+
+    print("Task start")
+    print(f"Task:{task}")
+
+
+# [END howto_listen_ti_skipped_task]
 
 
 # [START howto_listen_dagrun_success_task]

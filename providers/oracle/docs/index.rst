@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -56,7 +55,7 @@
     :maxdepth: 1
     :caption: Resources
 
-    Example DAGs <https://github.com/apache/airflow/tree/providers-oracle/|version|/airflow/providers/oracle/example_dags>
+    Example Dags <_api/airflow/providers/oracle/example_dags/index>
     PyPI Repository <https://pypi.org/project/apache-airflow-providers-oracle/>
     Installing from sources <installing-providers-from-sources>
 
@@ -74,10 +73,10 @@
 apache-airflow-providers-oracle package
 ------------------------------------------------------
 
-`Oracle <https://www.oracle.com/en/database/>`__
+`Oracle <https://www.oracle.com/database/technologies/>`__
 
 
-Release: 4.0.2
+Release: 4.7.1
 
 Provider package
 ----------------
@@ -88,25 +87,26 @@ All classes for this package are included in the ``airflow.providers.oracle`` py
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-oracle``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-=======================================  ==================
-PIP package                              Version required
-=======================================  ==================
-``apache-airflow``                       ``>=2.9.0``
-``apache-airflow-providers-common-sql``  ``>=1.20.0``
-``oracledb``                             ``>=2.0.0``
-=======================================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.8.0``
+``apache-airflow-providers-common-sql``     ``>=1.32.0``
+``oracledb``                                ``>=2.3.0``
+==========================================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified provider distributions in order to use them.
@@ -115,14 +115,32 @@ You can install such cross-provider dependencies when installing from PyPI. For 
 
 .. code-block:: bash
 
-    pip install apache-airflow-providers-oracle[common.sql]
+    pip install apache-airflow-providers-oracle[openlineage]
 
 
-============================================================================================================  ==============
-Dependent package                                                                                             Extra
-============================================================================================================  ==============
-`apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_  ``common.sql``
-============================================================================================================  ==============
+==============================================================================================================  ===============
+Dependent package                                                                                               Extra
+==============================================================================================================  ===============
+`apache-airflow-providers-openlineage <https://airflow.apache.org/docs/apache-airflow-providers-openlineage>`_  ``openlineage``
+==============================================================================================================  ===============
+
+Optional dependencies
+---------------------
+
+These extras install optional third-party libraries that enable additional features of the provider.
+Install them when installing from PyPI. For example:
+
+.. code-block:: bash
+
+    pip install apache-airflow-providers-oracle[numpy]
+
+
+===============  ==================================================================================================================================================================================================
+Extra            Dependencies
+===============  ==================================================================================================================================================================================================
+``numpy``        ``numpy>=1.23.2; python_version=='3.11'``, ``numpy>=1.26.0; python_version=='3.12'``, ``numpy>=2.1.0; python_version>='3.13' and python_version<'3.14'``, ``numpy>=2.4.3; python_version>='3.14'``
+``openlineage``  ``apache-airflow-providers-openlineage``
+===============  ==================================================================================================================================================================================================
 
 Downloading official packages
 -----------------------------
@@ -130,5 +148,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-oracle 4.0.2 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_oracle-4.0.2.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_oracle-4.0.2.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_oracle-4.0.2.tar.gz.sha512>`__)
-* `The apache-airflow-providers-oracle 4.0.2 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_oracle-4.0.2-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_oracle-4.0.2-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_oracle-4.0.2-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-oracle 4.7.1 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_oracle-4.7.1.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_oracle-4.7.1.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_oracle-4.7.1.tar.gz.sha512>`__)
+* `The apache-airflow-providers-oracle 4.7.1 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_oracle-4.7.1-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_oracle-4.7.1-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_oracle-4.7.1-py3-none-any.whl.sha512>`__)

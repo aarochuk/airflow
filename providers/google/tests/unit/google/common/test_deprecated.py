@@ -16,6 +16,8 @@
 # under the License.
 from __future__ import annotations
 
+import contextlib
+import locale
 from datetime import date
 from unittest import mock
 
@@ -25,6 +27,20 @@ from airflow.providers.google.common.deprecated import AirflowDeprecationAdapter
 
 ADAPTER_PATH = "airflow.providers.google.common.deprecated"
 ADAPTER_CLASS_PATH = f"{ADAPTER_PATH}.AirflowDeprecationAdapter"
+
+
+@contextlib.contextmanager
+def _time_locale(name: str):
+    """Temporarily set LC_TIME, skipping the test if the locale is unavailable."""
+    saved = locale.setlocale(locale.LC_TIME)
+    try:
+        locale.setlocale(locale.LC_TIME, name)
+    except locale.Error:
+        pytest.skip(f"locale {name!r} is not available on this system")
+    try:
+        yield
+    finally:
+        locale.setlocale(locale.LC_TIME, saved)
 
 
 class TestAirflowDeprecationAdapter:
@@ -45,25 +61,22 @@ class TestAirflowDeprecationAdapter:
         assert adapter.planned_removal_date == mock_date
         assert adapter.planned_removal_release == mock_release
 
-    @mock.patch(f"{ADAPTER_PATH}.datetime")
-    def test_validate_date(self, mock_datetime):
-        value = "August 22, 2024"
-        expected_date = date(2024, 8, 22)
-        mock_datetime.strptime.return_value.date.return_value = expected_date
+    @pytest.mark.parametrize(
+        ("value", "expected_date"),
+        [
+            ("August 22, 2024", date(2024, 8, 22)),
+            ("June 30, 2026", date(2026, 6, 30)),
+            ("January 1, 2020", date(2020, 1, 1)),
+            # Month names are matched case-insensitively, as the previous `%B` parsing did.
+            ("august 22, 2024", date(2024, 8, 22)),
+            ("AUGUST 22, 2024", date(2024, 8, 22)),
+        ],
+    )
+    def test_validate_date(self, value, expected_date):
+        assert AirflowDeprecationAdapter._validate_date(value) == expected_date
 
-        actual_date = AirflowDeprecationAdapter._validate_date(value)
-
-        assert actual_date == expected_date
-        mock_datetime.strptime.assert_called_once_with(value, "%B %d, %Y")
-
-    @mock.patch(f"{ADAPTER_PATH}.datetime")
-    def test_validate_date_none(self, mock_datetime):
-        value = None
-
-        actual_date = AirflowDeprecationAdapter._validate_date(value)
-
-        assert actual_date is None
-        assert not mock_datetime.strptime.called
+    def test_validate_date_none(self):
+        assert AirflowDeprecationAdapter._validate_date(None) is None
 
     @pytest.mark.parametrize(
         "invalid_date",
@@ -81,6 +94,17 @@ class TestAirflowDeprecationAdapter:
         )
         with pytest.raises(ValueError, match=expected_error_message):
             AirflowDeprecationAdapter(planned_removal_date=invalid_date)
+
+    @pytest.mark.parametrize("locale_name", ["de_DE.UTF-8", "fr_FR.UTF-8"])
+    def test_validate_date_is_locale_independent(self, locale_name):
+        with _time_locale(locale_name):
+            assert AirflowDeprecationAdapter._validate_date("June 30, 2026") == date(2026, 6, 30)
+
+    @pytest.mark.parametrize("locale_name", ["de_DE.UTF-8", "fr_FR.UTF-8"])
+    def test_sunset_message_uses_english_month_regardless_of_locale(self, locale_name):
+        with _time_locale(locale_name):
+            adapter = AirflowDeprecationAdapter(planned_removal_date="June 30, 2026")
+            assert adapter.sunset_message() == "after June 30, 2026"
 
     @pytest.mark.parametrize(
         "release_string",
@@ -134,7 +158,7 @@ class TestAirflowDeprecationAdapter:
             )
 
     @pytest.mark.parametrize(
-        "entity, expected_type",
+        ("entity", "expected_type"),
         [
             (AirflowDeprecationAdapter, "class"),
             (AirflowDeprecationAdapter.get_deprecated_msg, "function (or method)"),
@@ -144,7 +168,7 @@ class TestAirflowDeprecationAdapter:
         assert AirflowDeprecationAdapter.entity_type(entity) == expected_type
 
     @pytest.mark.parametrize(
-        "module_path, qualified_name, _str, expected_path",
+        ("module_path", "qualified_name", "_str", "expected_path"),
         [
             ("test-module", "test-qualified-name", "test-str", "test-module.test-qualified-name"),
             ("test-module", "", "test-str", "test-module"),
@@ -161,7 +185,7 @@ class TestAirflowDeprecationAdapter:
         assert AirflowDeprecationAdapter.entity_path(mock_entity) == expected_path
 
     @pytest.mark.parametrize(
-        "planned_removal_date, planned_removal_release, expected_message",
+        ("planned_removal_date", "planned_removal_release", "expected_message"),
         [
             ("August 22, 2024", None, "after August 22, 2024"),
             (None, "apache-airflow==1.2.3", "since version apache-airflow==1.2.3"),
@@ -181,7 +205,7 @@ class TestAirflowDeprecationAdapter:
         assert adapter.sunset_message() == expected_message
 
     @pytest.mark.parametrize(
-        "use_instead, expected_message",
+        ("use_instead", "expected_message"),
         [
             (None, "There is no replacement."),
             ("replacement", "Please use `replacement` instead."),
@@ -193,7 +217,7 @@ class TestAirflowDeprecationAdapter:
         assert adapter.replacement_message() == expected_message
 
     @pytest.mark.parametrize(
-        "reason, instructions",
+        ("reason", "instructions"),
         [
             ("Test reason", "Test instructions"),
             ("Test reason", None),

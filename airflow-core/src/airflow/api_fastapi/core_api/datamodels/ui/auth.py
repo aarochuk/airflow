@@ -17,18 +17,48 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
+from pydantic import Field
+
+from airflow.api_fastapi.common.types import ExtraMenuItem, MenuItem
 from airflow.api_fastapi.core_api.base import BaseModel
-
-
-class MenuItem(BaseModel):
-    """Menu Item for responses."""
-
-    text: str
-    href: str
 
 
 class MenuItemCollectionResponse(BaseModel):
     """Menu Item Collection serializer for responses."""
 
-    menu_items: list[MenuItem]
-    total_entries: int
+    authorized_menu_items: list[MenuItem]
+    extra_menu_items: list[ExtraMenuItem]
+
+
+class AuthenticatedMeResponse(BaseModel):
+    """Authenticated user information serializer for responses."""
+
+    id: str
+    username: str
+    teams: list[str] | None = Field(
+        default=None,
+        description="Teams the user has access to. Null when the environment does not run in multi-team mode.",
+    )
+
+
+class TokenType(str, Enum):
+    """Type of token to generate."""
+
+    API = "api"
+    CLI = "cli"
+
+
+class GenerateTokenBody(BaseModel):
+    """Request body for generating a token."""
+
+    token_type: TokenType = TokenType.API
+
+
+class GenerateTokenResponse(BaseModel):
+    """Response for a generated token."""
+
+    access_token: str
+    token_type: TokenType
+    expires_in_seconds: int

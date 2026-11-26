@@ -1,0 +1,176 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+from __future__ import annotations
+
+from typing import Annotated, Any, Literal
+
+from pydantic import Field, RootModel, model_validator
+
+from airflow.api_fastapi.core_api.base import BaseModel, StrictBaseModel
+from airflow.providers.keycloak.auth_manager.services.token import (
+    create_client_credentials_token,
+    create_jwt_federated_token,
+    create_token_for,
+    create_token_from_authorization_code,
+    create_token_from_device_code,
+    refresh_cli_token,
+)
+
+
+def default_to_password_grant(data: Any) -> Any:
+    """Add the default ``password`` grant_type, leaving a malformed body to the union."""
+    if isinstance(data, dict) and "grant_type" not in data:
+        return {**data, "grant_type": "password"}
+    return data
+
+
+class TokenResponse(BaseModel):
+    """Token serializer for responses."""
+
+    access_token: str
+
+
+class TokenPasswordBody(StrictBaseModel):
+    """Password grant token serializer for post bodies."""
+
+    grant_type: Literal["password"] = "password"
+    username: str = Field()
+    password: str = Field()
+
+    def create_token(self, expiration_time_in_seconds: int) -> str:
+        """Create token using password grant."""
+        return create_token_for(
+            self.username, self.password, expiration_time_in_seconds=expiration_time_in_seconds
+        )
+
+
+class TokenClientCredentialsBody(StrictBaseModel):
+    """Client credentials grant token serializer for post bodies."""
+
+    grant_type: Literal["client_credentials"]
+    client_id: str = Field()
+    client_secret: str = Field()
+
+    def create_token(self, expiration_time_in_seconds: int) -> str:
+        """Create token using client credentials grant."""
+        return create_client_credentials_token(
+            self.client_id, self.client_secret, expiration_time_in_seconds=expiration_time_in_seconds
+        )
+
+
+class TokenJwtFederatedBody(StrictBaseModel):
+    """
+    JWT-bearer grant token serializer for post bodies.
+
+    Accepts a Keycloak access token obtained via any Keycloak-native authentication
+    method (e.g. a client federated to an external OIDC identity provider) instead of
+    Airflow re-authenticating to Keycloak itself.
+    """
+
+    grant_type: Literal["urn:ietf:params:oauth:grant-type:jwt-bearer"]
+    assertion: str = Field()
+
+    def create_token(self, expiration_time_in_seconds: int) -> str:
+        """Create token by validating a pre-obtained Keycloak assertion."""
+        return create_jwt_federated_token(
+            self.assertion, expiration_time_in_seconds=expiration_time_in_seconds
+        )
+
+
+class TokenRefreshBody(StrictBaseModel):
+    """Refresh grant serializer for post bodies; ``token`` is the current CLI token."""
+
+    grant_type: Literal["refresh_token"]
+    token: str = Field()
+
+    def create_token(self, expiration_time_in_seconds: int) -> str:
+        """Create token from a CLI token that is still valid, expiring no later than it."""
+        return refresh_cli_token(self.token, expiration_time_in_seconds=expiration_time_in_seconds)
+
+
+class TokenAuthorizationCodeBody(StrictBaseModel):
+    """Authorization code grant serializer for post bodies, used by the browser login of CLI clients."""
+
+    grant_type: Literal["authorization_code"]
+    code: str = Field()
+    # RFC 7636 section 4.1 length bounds.
+    code_verifier: str = Field(min_length=43, max_length=128)
+    redirect_uri: str = Field()
+
+    def create_token(self, expiration_time_in_seconds: int) -> str:
+        """Create token from an authorization code and its PKCE verifier."""
+        return create_token_from_authorization_code(
+            self.code,
+            self.code_verifier,
+            self.redirect_uri,
+            expiration_time_in_seconds=expiration_time_in_seconds,
+        )
+
+
+class TokenDeviceCodeBody(StrictBaseModel):
+    """Device code grant serializer for post bodies, used by the device code login of CLI clients."""
+
+    grant_type: Literal["urn:ietf:params:oauth:grant-type:device_code"]
+    device_code: str = Field()
+
+    def create_token(self, expiration_time_in_seconds: int) -> str:
+        """Create token from a device code that the user approved."""
+        return create_token_from_device_code(
+            self.device_code, expiration_time_in_seconds=expiration_time_in_seconds
+        )
+
+
+class DeviceAuthorizationResponse(BaseModel):
+    """Device authorization response (RFC 8628 section 3.2) for the device code login of CLI clients."""
+
+    device_code: str
+    user_code: str
+    verification_uri: str
+    verification_uri_complete: str | None = None
+    expires_in: int
+    interval: int = 5
+
+
+TokenUnion = Annotated[
+    TokenPasswordBody | TokenClientCredentialsBody | TokenJwtFederatedBody,
+    Field(discriminator="grant_type"),
+]
+
+
+class TokenBody(RootModel[TokenUnion]):
+    """Token request body."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_grant_type(cls, data: Any) -> Any:
+        return default_to_password_grant(data)
+
+
+TokenCliUnion = Annotated[
+    TokenPasswordBody | TokenRefreshBody | TokenAuthorizationCodeBody | TokenDeviceCodeBody,
+    Field(discriminator="grant_type"),
+]
+
+
+class TokenCliBody(RootModel[TokenCliUnion]):
+    """Token request body for command-line clients."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_grant_type(cls, data: Any) -> Any:
+        return default_to_password_grant(data)

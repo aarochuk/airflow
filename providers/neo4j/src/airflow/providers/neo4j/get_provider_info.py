@@ -26,40 +26,15 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-neo4j",
         "name": "Neo4j",
         "description": "`Neo4j <https://neo4j.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477853,
-        "versions": [
-            "3.8.2",
-            "3.8.1",
-            "3.8.0",
-            "3.7.0",
-            "3.6.1",
-            "3.6.0",
-            "3.5.0",
-            "3.4.0",
-            "3.3.3",
-            "3.3.2",
-            "3.3.1",
-            "3.3.0",
-            "3.2.1",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.1.3",
-            "2.1.2",
-            "2.1.1",
-            "2.1.0",
-            "2.0.2",
-            "2.0.1",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Neo4j",
                 "external-doc-url": "https://neo4j.com/",
-                "how-to-guide": ["/docs/apache-airflow-providers-neo4j/operators/neo4j.rst"],
+                "logo": "/docs/integration-logos/Neo4j.svg",
+                "how-to-guide": [
+                    "/docs/apache-airflow-providers-neo4j/operators/neo4j.rst",
+                    "/docs/apache-airflow-providers-neo4j/sensors/neo4j.rst",
+                ],
                 "tags": ["software"],
             }
         ],
@@ -67,9 +42,14 @@ def get_provider_info():
             {"integration-name": "Neo4j", "python-modules": ["airflow.providers.neo4j.operators.neo4j"]}
         ],
         "hooks": [{"integration-name": "Neo4j", "python-modules": ["airflow.providers.neo4j.hooks.neo4j"]}],
-        "connection-types": [
-            {"hook-class-name": "airflow.providers.neo4j.hooks.neo4j.Neo4jHook", "connection-type": "neo4j"}
+        "sensors": [
+            {"integration-name": "Neo4j", "python-modules": ["airflow.providers.neo4j.sensors.neo4j"]}
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "neo4j>=4.2.1"],
-        "devel-dependencies": [],
+        "connection-types": [
+            {
+                "hook-class-name": "airflow.providers.neo4j.hooks.neo4j.Neo4jHook",
+                "hook-name": "Neo4j",
+                "connection-type": "neo4j",
+            }
+        ],
     }

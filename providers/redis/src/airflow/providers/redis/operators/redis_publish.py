@@ -20,15 +20,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.redis.hooks.redis import RedisHook
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class RedisPublishOperator(BaseOperator):
@@ -37,10 +33,10 @@ class RedisPublishOperator(BaseOperator):
 
     :param channel: redis channel to which the message is published (templated)
     :param message: the message to publish (templated)
-    :param redis_conn_id: redis connection to use
+    :param redis_conn_id: redis connection to use (templated)
     """
 
-    template_fields: Sequence[str] = ("channel", "message")
+    template_fields: Sequence[str] = ("channel", "message", "redis_conn_id")
 
     def __init__(self, *, channel: str, message: str, redis_conn_id: str = "redis_default", **kwargs) -> None:
         super().__init__(**kwargs)

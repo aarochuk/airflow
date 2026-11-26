@@ -17,10 +17,12 @@
 # under the License.
 from __future__ import annotations
 
+import json
 from unittest import mock
 from unittest.mock import AsyncMock
 
 import pytest
+from aiohttp import ClientSession, ClientTimeout
 from google.api_core.gapic_v1.method import DEFAULT
 from google.cloud.orchestration.airflow.service_v1 import EnvironmentsAsyncClient
 
@@ -55,6 +57,10 @@ TEST_TIMEOUT = None
 TEST_METADATA = [("key", "value")]
 TEST_PARENT = "test-parent"
 TEST_NAME = "test-name"
+
+TEST_COMPOSER_AIRFLOW_URI = "test-composer-airflow-uri"
+TEST_COMPOSER_DAG_ID = "test-composer-dag-id"
+TEST_COMPOSER_DAG_CONF = {"test-key": "test-value"}
 
 BASE_STRING = "airflow.providers.google.common.hooks.base_google.{}"
 COMPOSER_STRING = "airflow.providers.google.cloud.hooks.cloud_composer.{}"
@@ -257,11 +263,110 @@ class TestCloudComposerHook:
             metadata=TEST_METADATA,
         )
 
+    @pytest.mark.parametrize("composer_airflow_version", [2, 3])
+    @mock.patch(COMPOSER_STRING.format("CloudComposerHook.make_composer_airflow_api_request"))
+    def test_trigger_dag_run(self, mock_composer_airflow_api_request, composer_airflow_version) -> None:
+        if composer_airflow_version == 3:
+            expected_path = f"/api/v2/dags/{TEST_COMPOSER_DAG_ID}/dagRuns"
+        else:
+            expected_path = f"/api/v1/dags/{TEST_COMPOSER_DAG_ID}/dagRuns"
+        self.hook.get_credentials = mock.MagicMock()
+        self.hook.trigger_dag_run(
+            composer_airflow_uri=TEST_COMPOSER_AIRFLOW_URI,
+            composer_dag_id=TEST_COMPOSER_DAG_ID,
+            composer_dag_conf=TEST_COMPOSER_DAG_CONF,
+            composer_airflow_version=composer_airflow_version,
+            timeout=TEST_TIMEOUT,
+        )
+        mock_composer_airflow_api_request.assert_called_once_with(
+            method="POST",
+            airflow_uri=TEST_COMPOSER_AIRFLOW_URI,
+            path=expected_path,
+            data=json.dumps(
+                {
+                    "conf": TEST_COMPOSER_DAG_CONF,
+                }
+            ),
+            timeout=TEST_TIMEOUT,
+        )
+
+    @pytest.mark.parametrize("composer_airflow_version", [2, 3])
+    @mock.patch(COMPOSER_STRING.format("CloudComposerHook.make_composer_airflow_api_request"))
+    def test_get_dag_runs(self, mock_composer_airflow_api_request, composer_airflow_version) -> None:
+        if composer_airflow_version == 3:
+            expected_path = f"/api/v2/dags/{TEST_COMPOSER_DAG_ID}/dagRuns"
+        else:
+            expected_path = f"/api/v1/dags/{TEST_COMPOSER_DAG_ID}/dagRuns"
+
+        self.hook.get_credentials = mock.MagicMock()
+        self.hook.get_dag_runs(
+            composer_airflow_uri=TEST_COMPOSER_AIRFLOW_URI,
+            composer_dag_id=TEST_COMPOSER_DAG_ID,
+            composer_airflow_version=composer_airflow_version,
+            timeout=TEST_TIMEOUT,
+        )
+
+        mock_composer_airflow_api_request.assert_called_once_with(
+            method="GET",
+            airflow_uri=TEST_COMPOSER_AIRFLOW_URI,
+            path=expected_path,
+            timeout=TEST_TIMEOUT,
+        )
+
+    @pytest.mark.parametrize("query_parameters", [None, {"test_key": "test_value"}])
+    @pytest.mark.parametrize("composer_airflow_version", [2, 3])
+    @mock.patch(COMPOSER_STRING.format("CloudComposerHook.make_composer_airflow_api_request"))
+    def test_get_task_instances(
+        self, mock_composer_airflow_api_request, query_parameters, composer_airflow_version
+    ) -> None:
+        query_string = "?test_key=test_value" if query_parameters else ""
+        if composer_airflow_version == 3:
+            expected_path = f"/api/v2/dags/{TEST_COMPOSER_DAG_ID}/dagRuns/~/taskInstances{query_string}"
+        else:
+            expected_path = f"/api/v1/dags/{TEST_COMPOSER_DAG_ID}/dagRuns/~/taskInstances{query_string}"
+        self.hook.get_credentials = mock.MagicMock()
+        self.hook.get_task_instances(
+            composer_airflow_uri=TEST_COMPOSER_AIRFLOW_URI,
+            composer_dag_id=TEST_COMPOSER_DAG_ID,
+            composer_airflow_version=composer_airflow_version,
+            query_parameters=query_parameters,
+            timeout=TEST_TIMEOUT,
+        )
+        mock_composer_airflow_api_request.assert_called_once_with(
+            method="GET",
+            airflow_uri=TEST_COMPOSER_AIRFLOW_URI,
+            path=expected_path,
+            timeout=TEST_TIMEOUT,
+        )
+
 
 class TestCloudComposerAsyncHook:
     def setup_method(self, method):
-        with mock.patch(BASE_STRING.format("GoogleBaseHook.__init__"), new=mock_init):
+        with mock.patch(BASE_STRING.format("GoogleBaseAsyncHook.__init__"), new=mock_init):
             self.hook = CloudComposerAsyncHook(gcp_conn_id="test")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("timeout", [30.0, None])
+    @mock.patch(COMPOSER_STRING.format("ClientSession"), spec=True)
+    async def test_make_composer_airflow_api_request_passes_client_timeout(
+        self, mock_client_session, timeout
+    ) -> None:
+        self.hook._credentials = mock.MagicMock(valid=True, token="test-token")
+        session = mock.MagicMock(spec=ClientSession)
+        mock_client_session.return_value.__aenter__.return_value = session
+        response = session.request.return_value.__aenter__.return_value
+        response.json = AsyncMock(return_value={"key": "value"})
+        response.status = 200
+
+        result = await self.hook.make_composer_airflow_api_request(
+            method="GET",
+            airflow_uri=TEST_COMPOSER_AIRFLOW_URI,
+            path="/api/v1/dags",
+            timeout=timeout,
+        )
+
+        assert result == ({"key": "value"}, 200)
+        assert session.request.call_args.kwargs["timeout"] == ClientTimeout(total=timeout)
 
     @pytest.mark.asyncio
     @mock.patch(COMPOSER_STRING.format("CloudComposerAsyncHook.get_environment_client"))
@@ -341,6 +446,31 @@ class TestCloudComposerAsyncHook:
 
     @pytest.mark.asyncio
     @mock.patch(COMPOSER_STRING.format("CloudComposerAsyncHook.get_environment_client"))
+    async def test_get_environment(self, mock_client) -> None:
+        mock_env_client = AsyncMock(EnvironmentsAsyncClient)
+        mock_client.return_value = mock_env_client
+        await self.hook.get_environment(
+            project_id=TEST_GCP_PROJECT,
+            region=TEST_GCP_REGION,
+            environment_id=TEST_ENVIRONMENT_ID,
+            retry=TEST_RETRY,
+            timeout=TEST_TIMEOUT,
+            metadata=TEST_METADATA,
+        )
+        mock_client.assert_called_once()
+        mock_client.return_value.get_environment.assert_called_once_with(
+            request={
+                "name": self.hook.get_environment_name(
+                    TEST_GCP_PROJECT, TEST_GCP_REGION, TEST_ENVIRONMENT_ID
+                ),
+            },
+            retry=TEST_RETRY,
+            timeout=TEST_TIMEOUT,
+            metadata=TEST_METADATA,
+        )
+
+    @pytest.mark.asyncio
+    @mock.patch(COMPOSER_STRING.format("CloudComposerAsyncHook.get_environment_client"))
     async def test_execute_airflow_command(self, mock_client) -> None:
         mock_env_client = AsyncMock(EnvironmentsAsyncClient)
         mock_client.return_value = mock_env_client
@@ -401,4 +531,66 @@ class TestCloudComposerAsyncHook:
             retry=TEST_RETRY,
             timeout=TEST_TIMEOUT,
             metadata=TEST_METADATA,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("composer_airflow_version", [2, 3])
+    @mock.patch(COMPOSER_STRING.format("CloudComposerAsyncHook.get_sync_hook"))
+    @mock.patch(COMPOSER_STRING.format("CloudComposerAsyncHook.make_composer_airflow_api_request"))
+    async def test_get_dag_runs(
+        self, mock_composer_airflow_api_request, mock_sync_hook, composer_airflow_version
+    ) -> None:
+        if composer_airflow_version == 3:
+            expected_path = f"/api/v2/dags/{TEST_COMPOSER_DAG_ID}/dagRuns"
+            mock_sync_hook.return_value.get_airflow_rest_api_version = mock.MagicMock(return_value="v2")
+        else:
+            expected_path = f"/api/v1/dags/{TEST_COMPOSER_DAG_ID}/dagRuns"
+            mock_sync_hook.return_value.get_airflow_rest_api_version = mock.MagicMock(return_value="v1")
+        mock_composer_airflow_api_request.return_value = ({}, 200)
+        await self.hook.get_dag_runs(
+            composer_airflow_uri=TEST_COMPOSER_AIRFLOW_URI,
+            composer_dag_id=TEST_COMPOSER_DAG_ID,
+            timeout=TEST_TIMEOUT,
+            composer_airflow_version=composer_airflow_version,
+        )
+        mock_composer_airflow_api_request.assert_called_once_with(
+            method="GET",
+            airflow_uri=TEST_COMPOSER_AIRFLOW_URI,
+            path=expected_path,
+            timeout=TEST_TIMEOUT,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("composer_airflow_version", [2, 3])
+    @pytest.mark.parametrize("query_parameters", [None, {"test_key": "test_value"}])
+    @mock.patch(COMPOSER_STRING.format("CloudComposerAsyncHook.get_sync_hook"))
+    @mock.patch(COMPOSER_STRING.format("CloudComposerAsyncHook.make_composer_airflow_api_request"))
+    async def test_get_task_instances(
+        self,
+        mock_composer_airflow_api_request,
+        mock_sync_hook,
+        query_parameters,
+        composer_airflow_version,
+    ) -> None:
+        query_string = "?test_key=test_value" if query_parameters else ""
+        if composer_airflow_version == 3:
+            expected_path = f"/api/v2/dags/{TEST_COMPOSER_DAG_ID}/dagRuns/~/taskInstances{query_string}"
+            mock_sync_hook.return_value.get_airflow_rest_api_version = mock.MagicMock(return_value="v2")
+        else:
+            expected_path = f"/api/v1/dags/{TEST_COMPOSER_DAG_ID}/dagRuns/~/taskInstances{query_string}"
+            mock_sync_hook.return_value.get_airflow_rest_api_version = mock.MagicMock(return_value="v1")
+
+        mock_composer_airflow_api_request.return_value = ({}, 200)
+        await self.hook.get_task_instances(
+            composer_airflow_uri=TEST_COMPOSER_AIRFLOW_URI,
+            composer_dag_id=TEST_COMPOSER_DAG_ID,
+            query_parameters=query_parameters,
+            composer_airflow_version=composer_airflow_version,
+            timeout=TEST_TIMEOUT,
+        )
+        mock_composer_airflow_api_request.assert_called_once_with(
+            method="GET",
+            airflow_uri=TEST_COMPOSER_AIRFLOW_URI,
+            path=expected_path,
+            timeout=TEST_TIMEOUT,
         )

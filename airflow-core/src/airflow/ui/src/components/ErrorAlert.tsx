@@ -16,13 +16,15 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { HStack } from "@chakra-ui/react";
+import { HStack, Text } from "@chakra-ui/react";
 import type { ApiError } from "openapi-gen/requests/core/ApiError";
 import type { HTTPExceptionResponse, HTTPValidationError } from "openapi-gen/requests/types.gen";
 
-import { Alert } from "./ui";
+import { Alert } from "src/system-components";
 
-type ExpandedApiError = {
+import { getApiErrorDetail } from "src/utils";
+
+export type ExpandedApiError = {
   body: HTTPExceptionResponse | HTTPValidationError | undefined;
 } & ApiError;
 
@@ -37,27 +39,17 @@ export const ErrorAlert = ({ error: err }: Props) => {
     return undefined;
   }
 
-  const details = error.body?.detail;
-  let detailMessage;
-
-  if (details !== undefined) {
-    if (typeof details === "string") {
-      detailMessage = details;
-    } else if (Array.isArray(details)) {
-      detailMessage = details.map(
-        (detail) => `
-          ${detail.loc.join(".")} ${detail.msg}`,
-      );
-    } else {
-      detailMessage = Object.keys(details).map((key) => `${key}: ${details[key] as string}`);
-    }
-  }
+  const detailMessage = getApiErrorDetail(error);
 
   return (
-    <Alert status="error">
+    <Alert data-testid="error-alert" status="error">
       <HStack align="start" flexDirection="column" gap={2} mt={-1}>
         {error.status} {error.message}
-        {detailMessage === error.message ? undefined : <span>{detailMessage}</span>}
+        {detailMessage === error.message ? undefined : (
+          <Text whiteSpace="preserve" wordBreak="break-all">
+            {detailMessage}
+          </Text>
+        )}
       </HStack>
     </Alert>
   );

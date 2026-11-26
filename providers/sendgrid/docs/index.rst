@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -32,6 +31,13 @@
 .. toctree::
     :hidden:
     :maxdepth: 1
+    :caption: Guides
+
+    Email backend <email-backend>
+
+.. toctree::
+    :hidden:
+    :maxdepth: 1
     :caption: References
 
     Python API <_api/airflow/providers/sendgrid/index>
@@ -61,7 +67,7 @@ apache-airflow-providers-sendgrid package
 `Sendgrid <https://sendgrid.com/>`__
 
 
-Release: 4.0.1
+Release: 4.2.6
 
 Provider package
 ----------------
@@ -72,18 +78,28 @@ All classes for this package are included in the ``airflow.providers.sendgrid`` 
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-sendgrid``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-==================  ==================
-PIP package         Version required
-==================  ==================
-``apache-airflow``  ``>=2.9.0``
-``sendgrid``        ``>=6.0.0``
-==================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.8.0``
+``sendgrid``                                ``>=6.12.5``
+==========================================  ==================
+
+Downloading official packages
+-----------------------------
+
+You can download officially released packages and verify their checksums and signatures from the
+`Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
+
+* `The apache-airflow-providers-sendgrid 4.2.6 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sendgrid-4.2.6.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sendgrid-4.2.6.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sendgrid-4.2.6.tar.gz.sha512>`__)
+* `The apache-airflow-providers-sendgrid 4.2.6 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sendgrid-4.2.6-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sendgrid-4.2.6-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sendgrid-4.2.6-py3-none-any.whl.sha512>`__)

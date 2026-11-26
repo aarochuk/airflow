@@ -23,6 +23,7 @@ import datetime
 import json
 import time
 import uuid
+from collections.abc import Sequence
 from decimal import Decimal
 from functools import cached_property
 from typing import TYPE_CHECKING
@@ -31,7 +32,7 @@ import pendulum
 from slugify import slugify
 
 from airflow.providers.google.cloud.transfers.sql_to_gcs import BaseSQLToGCSOperator
-from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.providers.postgres.hooks.postgres import USE_PSYCOPG3, PostgresHook
 
 if TYPE_CHECKING:
     from airflow.providers.openlineage.extractors import OperatorLineage
@@ -48,18 +49,22 @@ class _PostgresServerSideCursorDecorator:
 
     def __init__(self, cursor):
         self.cursor = cursor
+        # Iterating the cursor fetches ``itersize`` rows per round trip, unlike ``fetchone()``. Keep a
+        # single iterator because psycopg < 3.3 returns a new generator on each ``iter()`` call.
+        self._rows_iterator = iter(cursor)
         self.rows = []
         self.initialized = False
 
     def __iter__(self):
+        """Make the cursor iterable."""
         return self
 
     def __next__(self):
+        """Fetch next row from the cursor."""
         if self.rows:
             return self.rows.pop()
-        else:
-            self.initialized = True
-            return next(self.cursor)
+        self.initialized = True
+        return next(self._rows_iterator)
 
     @property
     def description(self):
@@ -85,6 +90,8 @@ class PostgresToGCSOperator(BaseSQLToGCSOperator):
         For detailed info, check https://www.psycopg.org/docs/usage.html#server-side-cursors
     :param cursor_itersize: How many records are fetched at a time in case of server-side cursor.
     """
+
+    template_fields: Sequence[str] = (*BaseSQLToGCSOperator.template_fields, "postgres_conn_id")
 
     ui_color = "#a0e08c"
 
@@ -142,13 +149,29 @@ class PostgresToGCSOperator(BaseSQLToGCSOperator):
         return PostgresHook(postgres_conn_id=self.postgres_conn_id)
 
     def query(self):
-        """Query Postgres and returns a cursor to the results."""
+        """Execute the query and return a cursor."""
         conn = self.db_hook.get_conn()
-        cursor = conn.cursor(name=self._unique_name())
-        cursor.execute(self.sql, self.parameters)
-        if self.use_server_side_cursor:
-            cursor.itersize = self.cursor_itersize
-            return _PostgresServerSideCursorDecorator(cursor)
+
+        if USE_PSYCOPG3:
+            from psycopg.types.json import register_default_adapters
+
+            # Register JSON handlers for this connection if not already done
+            register_default_adapters(conn)
+
+            if self.use_server_side_cursor:
+                cursor_name = f"airflow_{self.task_id.replace('-', '_')}_{uuid.uuid4().hex}"[:63]
+                cursor = conn.cursor(name=cursor_name)
+                cursor.itersize = self.cursor_itersize
+                cursor.execute(self.sql, self.parameters)
+                return _PostgresServerSideCursorDecorator(cursor)
+            cursor = conn.cursor()
+            cursor.execute(self.sql, self.parameters)
+        else:
+            cursor = conn.cursor(name=self._unique_name())
+            cursor.execute(self.sql, self.parameters)
+            if self.use_server_side_cursor:
+                cursor.itersize = self.cursor_itersize
+                return _PostgresServerSideCursorDecorator(cursor)
         return cursor
 
     def field_to_bigquery(self, field) -> dict[str, str]:
@@ -183,8 +206,14 @@ class PostgresToGCSOperator(BaseSQLToGCSOperator):
                 hours=formatted_time.tm_hour, minutes=formatted_time.tm_min, seconds=formatted_time.tm_sec
             )
             return str(time_delta)
-        if stringify_dict and isinstance(value, dict):
-            return json.dumps(value)
+        if stringify_dict:
+            if USE_PSYCOPG3:
+                from psycopg.types.json import Json
+
+                if isinstance(value, (dict, Json)):
+                    return json.dumps(value)
+            elif isinstance(value, dict):
+                return json.dumps(value)
         if isinstance(value, Decimal):
             return float(value)
         return value

@@ -22,9 +22,10 @@ Example Airflow DAG for Google BigQuery service testing tables.
 from __future__ import annotations
 
 import os
-import time
 from datetime import datetime
 from pathlib import Path
+
+from google.cloud.bigquery import SchemaField, Table
 
 from airflow.models.dag import DAG
 from airflow.providers.google.cloud.operators.bigquery import (
@@ -40,7 +41,12 @@ from airflow.providers.google.cloud.operators.bigquery import (
 )
 from airflow.providers.google.cloud.operators.gcs import GCSCreateBucketOperator, GCSDeleteBucketOperator
 from airflow.providers.google.cloud.transfers.local_to_gcs import LocalFilesystemToGCSOperator
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 from system.openlineage.operator import OpenLineageTestOperator
@@ -92,6 +98,21 @@ with DAG(
     )
     # [END howto_operator_bigquery_create_table]
 
+    # [START howto_operator_bigquery_create_table_from_table_object]
+    create_table_from_table_object = BigQueryCreateTableOperator(
+        task_id="create_table_from_table_object",
+        dataset_id=DATASET_NAME,
+        table_id="test_table_from_object",
+        table_resource=Table(
+            f"{PROJECT_ID}.{DATASET_NAME}.test_table_from_object",
+            schema=[
+                SchemaField("emp_name", "STRING", mode="REQUIRED"),
+                SchemaField("salary", "INTEGER", mode="NULLABLE"),
+            ],
+        ),
+    )
+    # [END howto_operator_bigquery_create_table_from_table_object]
+
     # [START howto_operator_bigquery_create_view]
     create_view = BigQueryCreateTableOperator(
         task_id="create_view",
@@ -141,13 +162,39 @@ with DAG(
     )
     # [END howto_operator_bigquery_update_table]
 
+    # [START howto_operator_bigquery_update_view]
+    update_view = BigQueryUpdateTableOperator(
+        task_id="update_view",
+        dataset_id=DATASET_NAME,
+        table_id="test_view",
+        fields=["friendlyName", "description"],
+        table_resource={
+            "friendlyName": "Updated View friendlyName",
+            "description": "Updated View description",
+        },
+    )
+    # [END howto_operator_bigquery_update_view]
+
+    # [START howto_operator_bigquery_update_materialized_view]
+    update_materialized_view = BigQueryUpdateTableOperator(
+        task_id="update_materialized_view",
+        dataset_id=DATASET_NAME,
+        table_id="test_materialized_view",
+        fields=["friendlyName", "description"],
+        table_resource={
+            "friendlyName": "Updated View friendlyName",
+            "description": "Updated View description",
+        },
+    )
+    # [END howto_operator_bigquery_update_materialized_view]
+
     # [START howto_operator_bigquery_upsert_table]
     upsert_table = BigQueryUpsertTableOperator(
         task_id="upsert_table",
         dataset_id=DATASET_NAME,
         table_resource={
             "tableReference": {"tableId": "test_table_id"},
-            "expirationTime": (int(time.time()) + 300) * 1000,
+            "expirationTime": "{{ (macros.datetime.now().timestamp() | int + 300) * 1000 }}",
         },
     )
     # [END howto_operator_bigquery_upsert_table]
@@ -228,13 +275,16 @@ with DAG(
         # TEST BODY
         >> update_dataset
         >> create_table
+        >> create_table_from_table_object
         >> create_view
         >> create_materialized_view
+        >> update_view
         >> [
             get_dataset_tables,
             delete_view,
         ]
         >> update_table
+        >> update_materialized_view
         >> upsert_table
         >> update_table_schema
         >> create_table_schema_json
@@ -255,5 +305,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

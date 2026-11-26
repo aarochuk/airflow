@@ -19,6 +19,9 @@
 Configure AWS IAM Identity Center
 =================================
 
+.. warning::
+  The AWS auth manager is alpha/experimental at the moment and may be subject to change without warning.
+
 In order to use the AWS auth manager, you first need to configure `AWS IAM Identity Center <https://aws.amazon.com/iam/identity-center/>`_.
 AWS IAM Identity Center is used by the AWS auth manager for authentication purposes (login and logout).
 Following configuration, the Airflow environment administrator can manage users and groups with Identity Center service.
@@ -27,7 +30,7 @@ Create resources
 ================
 
 The AWS auth manager needs two resources in AWS IAM Identity Center: an instance and an application.
-You can must create them manually.
+You must create them manually.
 
 Create the instance
 -------------------
@@ -63,11 +66,11 @@ Please follow the instructions below to create the AWS IAM Identity Center appli
 10. Under **Application metadata**, choose **Manually type your metadata values**. Then, provide the **Application ACS URL** and **Application SAML audience** as follows.
 
     .. important::
-      Replace ``<base_url>`` by the base URL of your Airflow UI. It should be defined in ``AIRFLOW__WEBSERVER__BASE_URL``
+      Replace ``<base_url>`` by the base URL of your Airflow UI. It should be defined in ``AIRFLOW__API__BASE_URL``
       (e.g. ``localhost:8080`` if Airflow is running locally).
 
-   * **Application ACS URL**: ``<base_url>/login_callback``
-   * **Application SAML audience**: ``<base_url>/login_metadata``
+   * **Application ACS URL**: ``<base_url>/auth/login_callback``
+   * **Application SAML audience**: ``aws-auth-manager-saml-client``
 
 11. Choose **Submit**. The application is now created.
 
@@ -101,9 +104,15 @@ Once the application is created, you need to configure the attribute mappings.
 Configure Airflow
 =================
 
-You need to set in Airflow configuration the IAM Identity Center SAML metadata file created previously.
+You need to set in Airflow configuration:
+
+* The ``<base_url>`` specified in AWS IAM Identity Center configuration previously
+* The IAM Identity Center SAML metadata file copied previously
 
 .. code-block:: ini
+
+    [api]
+    base_url = <base_url>
 
     [aws_auth_manager]
     saml_metadata_url = <saml_metadata_file_url>
@@ -112,4 +121,51 @@ or
 
 .. code-block:: bash
 
-   export AIRFLOW__AWS_AUTH_MANAGER__SAML_METADATA_URL='<saml_metadata_file_url>'
+    export AIRFLOW__API__BASE_URL='<base_url>'
+    export AIRFLOW__AWS_AUTH_MANAGER__SAML_METADATA_URL='<saml_metadata_file_url>'
+
+.. important::
+  Serve the Airflow UI over HTTPS. Identity Center sends the SAML response back to
+  ``<base_url>/auth/login_callback`` from another site, and the browser only sends the login state
+  cookie with that request when the cookie is ``SameSite=None``, which requires ``Secure``. Airflow
+  sets it that way only when the API server sees the request as HTTPS. If TLS ends at a load
+  balancer or reverse proxy in front of Airflow, run ``airflow api-server --proxy-headers`` and set
+  ``FORWARDED_ALLOW_IPS`` so the API server trusts ``X-Forwarded-Proto``, as described in
+  :doc:`apache-airflow:howto/run-behind-proxy`. Otherwise every login started from Airflow fails
+  with "No login in progress for this browser".
+
+.. _identity_center_idp_initiated_login:
+
+Logging in from the access portal (IdP-initiated SSO)
+=====================================================
+
+By default the AWS auth manager only accepts a SAML response that answers a login started from
+Airflow itself. When you open ``<base_url>/auth/login``, Airflow sends an AuthnRequest to Identity
+Center and remembers its id in a short-lived, signed, ``HttpOnly`` cookie; the response is accepted
+only if it echoes that id back in ``InResponseTo``.
+
+This binding matters because a SAML assertion is signed by the identity provider, which
+authenticates *the identity in the response* — it says nothing about *which browser asked for it*.
+Without the binding, an assertion issued for one login would be accepted by a browser that never
+started it, signing that browser in as the assertion's subject rather than as the person using it.
+
+The cost is that clicking the Airflow tile in the AWS IAM Identity Center access portal no longer
+works: that flow produces an assertion nobody asked for, and Airflow cannot tell it apart from a
+replayed one. If you need it, enable it explicitly:
+
+.. code-block:: ini
+
+    [aws_auth_manager]
+    allow_idp_initiated_login = True
+
+or
+
+.. code-block:: bash
+
+    export AIRFLOW__AWS_AUTH_MANAGER__ALLOW_IDP_INITIATED_LOGIN='True'
+
+With this enabled, Airflow still requires the assertion to be signed by the configured identity
+provider, and still refuses one that carries an ``InResponseTo`` value — an unsolicited assertion
+answers no request, so a response that names one is a solicited assertion being replayed. What it
+gives up is the guarantee that the browser receiving the response is the one that asked for it.
+Leave it disabled unless the access portal flow is required.

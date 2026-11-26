@@ -16,27 +16,138 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box } from "@chakra-ui/react";
-import type { PropsWithChildren } from "react";
-import { Outlet } from "react-router-dom";
+import { useEffect, type PropsWithChildren } from "react";
 
+import { Box, LocaleProvider } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
+import { Outlet, useNavigation } from "react-router-dom";
+
+import { usePluginServiceGetPlugins } from "openapi/queries";
+import type { ReactAppResponse } from "openapi/requests/types.gen";
+
+import { ProgressBar } from "src/system-components";
+
+import { ReactPlugin } from "src/pages/ReactPlugin";
+
+import { KeyboardShortcutsModal } from "src/components/KeyboardShortcuts";
+
+import { DagsListSearchProvider } from "src/context/dagsListSearch";
+import { GridSelectionProvider } from "src/context/gridSelection";
 import { useConfig } from "src/queries/useConfig";
+import { DocumentTitleProvider } from "src/utils";
 
 import { Nav } from "./Nav";
 
 export const BaseLayout = ({ children }: PropsWithChildren) => {
-  const instanceName = useConfig("instance_name");
+  const { i18n, t: translate } = useTranslation();
+  const navigation = useNavigation();
+  const { data: pluginData } = usePluginServiceGetPlugins();
+  const theme = useConfig("theme") as unknown as { icon?: string; icon_dark_mode?: string } | undefined;
 
-  if (typeof instanceName === "string") {
-    document.title = instanceName;
-  }
+  const baseReactPlugins =
+    pluginData?.plugins
+      .flatMap((plugin) => plugin.react_apps)
+      .filter((reactApp: ReactAppResponse) => reactApp.destination === "base") ?? [];
+
+  useEffect(() => {
+    const html = document.documentElement;
+
+    const updateHtml = (language: string) => {
+      if (language) {
+        html.setAttribute("dir", i18n.dir(language));
+        html.setAttribute("lang", language);
+      }
+    };
+
+    // On mount too: i18next's initial `languageChanged` fires before this listener attaches, so a
+    // page loaded directly in an RTL language would otherwise stay ltr until the next change.
+    updateHtml(i18n.resolvedLanguage ?? i18n.language);
+    i18n.on("languageChanged", updateHtml);
+
+    return () => {
+      i18n.off("languageChanged", updateHtml);
+    };
+  }, [i18n]);
+
+  useEffect(() => {
+    const link = document.querySelector<HTMLLinkElement>("link[rel='icon']");
+
+    if (!link) {
+      return undefined;
+    }
+
+    const defaultFavicon = link.href;
+    const darkIcon = theme?.icon_dark_mode;
+    const lightIcon = theme?.icon;
+    // favicon color theme should follow system color scheme, not the one set in Airflow UI.
+    // (tab colors in browsers are based on system color scheme, not the one set in the website)
+    const darkModeQuery = globalThis.matchMedia("(prefers-color-scheme: dark)");
+
+    const updateFavicon = () => {
+      const customIcon =
+        darkModeQuery.matches && typeof darkIcon === "string" && darkIcon.length > 0 ? darkIcon : lightIcon;
+
+      if (typeof customIcon === "string" && customIcon.length > 0) {
+        link.href = customIcon;
+
+        const img = new Image();
+
+        img.addEventListener("error", () => {
+          link.href = defaultFavicon;
+        });
+        img.src = customIcon;
+      } else {
+        link.href = defaultFavicon;
+      }
+    };
+
+    updateFavicon();
+    darkModeQuery.addEventListener("change", updateFavicon);
+
+    return () => {
+      darkModeQuery.removeEventListener("change", updateFavicon);
+      link.href = defaultFavicon;
+    };
+  }, [theme?.icon, theme?.icon_dark_mode]);
 
   return (
-    <>
-      <Nav />
-      <Box display="flex" flexDirection="column" h="100vh" ml={20} p={3}>
-        {children ?? <Outlet />}
-      </Box>
-    </>
+    <LocaleProvider locale={i18n.language || "en"}>
+      <DocumentTitleProvider>
+        <DagsListSearchProvider>
+          <Box display="flex" flexDirection="column" h="100vh">
+            <ProgressBar
+              aria-label={translate("loading")}
+              insetInlineEnd={0}
+              insetInlineStart={16}
+              pointerEvents="none"
+              position="fixed"
+              size="xs"
+              top={0}
+              visibility={navigation.state === "idle" ? "hidden" : "visible"}
+              zIndex="toast"
+            />
+            <KeyboardShortcutsModal />
+            <Nav />
+            <Box
+              _ltr={{ ml: 16 }}
+              _rtl={{ mr: 16 }}
+              data-testid="main-content"
+              display="flex"
+              flex={1}
+              flexDirection="column"
+              minH={0}
+              overflowY="auto"
+              p={3}
+              pb={0}
+            >
+              {baseReactPlugins.map((plugin) => (
+                <ReactPlugin key={plugin.name} reactApp={plugin} />
+              ))}
+              <GridSelectionProvider>{children ?? <Outlet />}</GridSelectionProvider>
+            </Box>
+          </Box>
+        </DagsListSearchProvider>
+      </DocumentTitleProvider>
+    </LocaleProvider>
   );
 };

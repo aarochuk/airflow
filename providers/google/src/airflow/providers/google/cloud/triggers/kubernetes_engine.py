@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import warnings
 from collections.abc import AsyncIterator, Sequence
 from functools import cached_property
@@ -26,10 +27,11 @@ from typing import TYPE_CHECKING, Any
 from google.cloud.container_v1.types import Operation
 from packaging.version import parse as parse_version
 
-from airflow.exceptions import AirflowException, AirflowProviderDeprecationWarning
+from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.providers.cncf.kubernetes.triggers.pod import KubernetesPodTrigger
 from airflow.providers.cncf.kubernetes.utils.pod_manager import OnFinishAction, PodManager
 from airflow.providers.cncf.kubernetes.utils.xcom_sidecar import PodDefaults
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks.kubernetes_engine import (
     GKEAsyncHook,
     GKEKubernetesAsyncHook,
@@ -56,6 +58,8 @@ class GKEStartPodTrigger(KubernetesPodTrigger):
     :param poll_interval: Polling period in seconds to check for the status.
     :param trigger_start_time: time in Datetime format when the trigger was started
     :param in_cluster: run kubernetes client with in_cluster configuration.
+    :param use_dns_endpoint: Use the DNS address as the endpoint. This needs to set to True for the Sovereign
+        Cloud from Google.
     :param get_logs: get the stdout of the container as logs of the tasks.
     :param startup_timeout: timeout in seconds to start up the pod.
     :param base_container_name: The name of the base container in the pod. This container's logs
@@ -82,6 +86,7 @@ class GKEStartPodTrigger(KubernetesPodTrigger):
         cluster_context: str | None = None,
         poll_interval: float = 2,
         in_cluster: bool | None = None,
+        use_dns_endpoint: bool = False,
         get_logs: bool = True,
         startup_timeout: int = 120,
         on_finish_action: str = "delete_pod",
@@ -106,6 +111,7 @@ class GKEStartPodTrigger(KubernetesPodTrigger):
         self.poll_interval = poll_interval
         self.cluster_context = cluster_context
         self.in_cluster = in_cluster
+        self.use_dns_endpoint = use_dns_endpoint
         self.get_logs = get_logs
         self.startup_timeout = startup_timeout
         self.gcp_conn_id = gcp_conn_id
@@ -113,7 +119,7 @@ class GKEStartPodTrigger(KubernetesPodTrigger):
 
         if should_delete_pod is not None:
             warnings.warn(
-                "`should_delete_pod` parameter is deprecated, please use `on_finish_action`",
+                "`should_delete_pod` parameter is deprecated, please use `on_finish_action`. Planned removal date: October 5, 2026.",
                 AirflowProviderDeprecationWarning,
                 stacklevel=2,
             )
@@ -139,24 +145,28 @@ class GKEStartPodTrigger(KubernetesPodTrigger):
                 "poll_interval": self.poll_interval,
                 "cluster_context": self.cluster_context,
                 "in_cluster": self.in_cluster,
+                "use_dns_endpoint": self.use_dns_endpoint,
                 "get_logs": self.get_logs,
                 "startup_timeout": self.startup_timeout,
+                "schedule_timeout": self.schedule_timeout,
                 "trigger_start_time": self.trigger_start_time,
                 "base_container_name": self.base_container_name,
-                "should_delete_pod": self.should_delete_pod,
+                "should_delete_pod": None,
                 "on_finish_action": self.on_finish_action.value,
                 "gcp_conn_id": self.gcp_conn_id,
                 "impersonation_chain": self.impersonation_chain,
                 "logging_interval": self.logging_interval,
                 "last_log_time": self.last_log_time,
+                "trigger_kwargs": self.trigger_kwargs,
             },
         )
 
     @cached_property
-    def hook(self) -> GKEKubernetesAsyncHook:  # type: ignore[override]
+    def hook(self) -> GKEKubernetesAsyncHook:
         return GKEKubernetesAsyncHook(
             cluster_url=self._cluster_url,
             ssl_ca_cert=self._ssl_ca_cert,
+            use_dns_endpoint=self.use_dns_endpoint,
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
             enable_tcp_keepalive=True,
@@ -171,6 +181,7 @@ class GKEOperationTrigger(BaseTrigger):
         operation_name: str,
         project_id: str | None,
         location: str,
+        use_dns_endpoint: bool = False,
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
         poll_interval: int = 10,
@@ -180,6 +191,7 @@ class GKEOperationTrigger(BaseTrigger):
         self.operation_name = operation_name
         self.project_id = project_id
         self.location = location
+        self.use_dns_endpoint = use_dns_endpoint
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
         self.poll_interval = poll_interval
@@ -197,10 +209,11 @@ class GKEOperationTrigger(BaseTrigger):
                 "gcp_conn_id": self.gcp_conn_id,
                 "impersonation_chain": self.impersonation_chain,
                 "poll_interval": self.poll_interval,
+                "use_dns_endpoint": self.use_dns_endpoint,
             },
         )
 
-    async def run(self) -> AsyncIterator[TriggerEvent]:  # type: ignore[override]
+    async def run(self) -> AsyncIterator[TriggerEvent]:
         """Get operation status and yields corresponding event."""
         hook = self._get_hook()
         try:
@@ -260,9 +273,11 @@ class GKEJobTrigger(BaseTrigger):
         ssl_ca_cert: str,
         job_name: str,
         job_namespace: str,
-        pod_name: str,
+        pod_names: list[str],
         pod_namespace: str,
         base_container_name: str,
+        pod_name: str | None = None,
+        use_dns_endpoint: bool = False,
         gcp_conn_id: str = "google_cloud_default",
         poll_interval: float = 2,
         impersonation_chain: str | Sequence[str] | None = None,
@@ -274,7 +289,14 @@ class GKEJobTrigger(BaseTrigger):
         self.ssl_ca_cert = ssl_ca_cert
         self.job_name = job_name
         self.job_namespace = job_namespace
-        self.pod_name = pod_name
+        self.use_dns_endpoint = use_dns_endpoint
+        if pod_name is not None:
+            self._pod_name = pod_name
+            self.pod_names = [
+                self.pod_name,
+            ]
+        else:
+            self.pod_names = pod_names
         self.pod_namespace = pod_namespace
         self.base_container_name = base_container_name
         self.gcp_conn_id = gcp_conn_id
@@ -282,6 +304,15 @@ class GKEJobTrigger(BaseTrigger):
         self.impersonation_chain = impersonation_chain
         self.get_logs = get_logs
         self.do_xcom_push = do_xcom_push
+
+    @property
+    def pod_name(self):
+        warnings.warn(
+            "`pod_name` parameter is deprecated, please use `pod_names`. Planned removal date: October 5, 2026.",
+            AirflowProviderDeprecationWarning,
+            stacklevel=2,
+        )
+        return self._pod_name
 
     def serialize(self) -> tuple[str, dict[str, Any]]:
         """Serialize KubernetesCreateJobTrigger arguments and classpath."""
@@ -292,8 +323,9 @@ class GKEJobTrigger(BaseTrigger):
                 "ssl_ca_cert": self.ssl_ca_cert,
                 "job_name": self.job_name,
                 "job_namespace": self.job_namespace,
-                "pod_name": self.pod_name,
+                "pod_names": self.pod_names,
                 "pod_namespace": self.pod_namespace,
+                "use_dns_endpoint": self.use_dns_endpoint,
                 "base_container_name": self.base_container_name,
                 "gcp_conn_id": self.gcp_conn_id,
                 "poll_interval": self.poll_interval,
@@ -303,10 +335,8 @@ class GKEJobTrigger(BaseTrigger):
             },
         )
 
-    async def run(self) -> AsyncIterator[TriggerEvent]:  # type: ignore[override]
+    async def run(self) -> AsyncIterator[TriggerEvent]:
         """Get current job status and yield a TriggerEvent."""
-        if self.get_logs or self.do_xcom_push:
-            pod = await self.hook.get_pod(name=self.pod_name, namespace=self.pod_namespace)
         if self.do_xcom_push:
             kubernetes_provider = ProvidersManager().providers["apache-airflow-providers-cncf-kubernetes"]
             kubernetes_provider_name = kubernetes_provider.data["package-name"]
@@ -318,22 +348,53 @@ class GKEJobTrigger(BaseTrigger):
                     f"package {kubernetes_provider_name}=={kubernetes_provider_version} which doesn't "
                     f"support this feature. Please upgrade it to version higher than or equal to {min_version}."
                 )
-            await self.hook.wait_until_container_complete(
-                name=self.pod_name,
-                namespace=self.pod_namespace,
-                container_name=self.base_container_name,
-                poll_interval=self.poll_interval,
-            )
-            self.log.info("Checking if xcom sidecar container is started.")
-            await self.hook.wait_until_container_started(
-                name=self.pod_name,
-                namespace=self.pod_namespace,
-                container_name=PodDefaults.SIDECAR_CONTAINER_NAME,
-                poll_interval=self.poll_interval,
-            )
-            self.log.info("Extracting result from xcom sidecar container.")
-            loop = asyncio.get_running_loop()
-            xcom_result = await loop.run_in_executor(None, self.pod_manager.extract_xcom, pod)
+            # Re-discover pods for this job to handle retry scenarios
+            # where the original pod failed and a new pod was created
+            label_selector = f"job-name={self.job_name}"
+            deadline = time.monotonic() + self.poll_interval * 10
+            succeeded_pods = []
+            current_pods = []
+            while time.monotonic() < deadline:
+                current_pods = await self.hook.list_pods(
+                    namespace=self.pod_namespace,
+                    label_selector=label_selector,
+                )
+                succeeded_pods = [p for p in current_pods if p.status and p.status.phase == "Succeeded"]
+                if succeeded_pods:
+                    break
+                self.log.info(
+                    "No succeeded pods found yet for job %s, retrying in %s seconds...",
+                    self.job_name,
+                    self.poll_interval,
+                )
+                await asyncio.sleep(self.poll_interval)
+            if not succeeded_pods:
+                self.log.warning(
+                    "No succeeded pods found for job %s after timeout, falling back to original pod list",
+                    self.job_name,
+                )
+                succeeded_pods = [p for p in current_pods if p.metadata.name in self.pod_names]
+
+            xcom_results = []
+            for pod in succeeded_pods:
+                pod_name = pod.metadata.name
+                await self.hook.wait_until_container_complete(
+                    name=pod_name,
+                    namespace=self.pod_namespace,
+                    container_name=self.base_container_name,
+                    poll_interval=self.poll_interval,
+                )
+                self.log.info("Checking if xcom sidecar container is started.")
+                await self.hook.wait_until_container_started(
+                    name=pod_name,
+                    namespace=self.pod_namespace,
+                    container_name=PodDefaults.SIDECAR_CONTAINER_NAME,
+                    poll_interval=self.poll_interval,
+                )
+                self.log.info("Extracting result from xcom sidecar container.")
+                loop = asyncio.get_running_loop()
+                xcom_result = await loop.run_in_executor(None, self.pod_manager.extract_xcom, pod)
+                xcom_results.append(xcom_result)
         job: V1Job = await self.hook.wait_until_job_complete(
             name=self.job_name, namespace=self.job_namespace, poll_interval=self.poll_interval
         )
@@ -345,12 +406,12 @@ class GKEJobTrigger(BaseTrigger):
             {
                 "name": job.metadata.name,
                 "namespace": job.metadata.namespace,
-                "pod_name": pod.metadata.name if self.get_logs else None,
-                "pod_namespace": pod.metadata.namespace if self.get_logs else None,
+                "pod_names": [pod_name for pod_name in self.pod_names] if self.get_logs else None,
+                "pod_namespace": self.pod_namespace if self.get_logs else None,
                 "status": status,
                 "message": message,
                 "job": job_dict,
-                "xcom_result": xcom_result if self.do_xcom_push else None,
+                "xcom_result": xcom_results if self.do_xcom_push else None,
             }
         )
 
@@ -359,6 +420,7 @@ class GKEJobTrigger(BaseTrigger):
         return GKEKubernetesAsyncHook(
             cluster_url=self.cluster_url,
             ssl_ca_cert=self.ssl_ca_cert,
+            use_dns_endpoint=self.use_dns_endpoint,
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
         )
@@ -368,6 +430,7 @@ class GKEJobTrigger(BaseTrigger):
         sync_hook = GKEKubernetesHook(
             gcp_conn_id=self.gcp_conn_id,
             cluster_url=self.cluster_url,
+            use_dns_endpoint=self.use_dns_endpoint,
             ssl_ca_cert=self.ssl_ca_cert,
             impersonation_chain=self.impersonation_chain,
         )

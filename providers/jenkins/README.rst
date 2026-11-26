@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-jenkins``
 
-Release: ``4.0.3``
+Release: ``4.2.7``
 
 
 `Jenkins <https://jenkins.io/>`__
@@ -36,26 +36,27 @@ This is a provider package for ``jenkins`` provider. All classes for this provid
 are in ``airflow.providers.jenkins`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-jenkins/4.0.3/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-jenkins/4.2.7/>`_.
 
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation (see ``Requirements`` below
+You can install this package on top of an existing Airflow installation (see ``Requirements`` below
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-jenkins``
 
-The package supports the following python versions: 3.9,3.10,3.11,3.12
+The package supports the following python versions: 3.11,3.12,3.13,3.14
 
 Requirements
 ------------
 
-==================  ==================
-PIP package         Version required
-==================  ==================
-``apache-airflow``  ``>=2.9.0``
-``python-jenkins``  ``>=1.0.0``
-==================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.10.1``
+``python-jenkins``                          ``>=1.8.2``
+==========================================  ==================
 
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-jenkins/4.0.3/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-jenkins/4.2.7/changelog.html>`_.

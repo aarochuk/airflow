@@ -19,31 +19,36 @@ from __future__ import annotations
 import contextlib
 import json
 import uuid
+from collections.abc import Callable
 from functools import cache
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlsplit
 
 import fsspec.utils
 
-from airflow.configuration import conf
-from airflow.io.path import ObjectStoragePath
+from airflow.providers.common.compat.sdk import conf
 from airflow.providers.common.io.version_compat import AIRFLOW_V_3_0_PLUS
 from airflow.utils.json import XComDecoder, XComEncoder
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
+    from airflow.sdk.bases.xcom import XComCoordinate
     from airflow.sdk.execution_time.comms import XComResult
 
 if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import ObjectStoragePath
     from airflow.sdk.bases.xcom import BaseXCom
 else:
+    from airflow.io.path import ObjectStoragePath  # type: ignore[no-redef]
     from airflow.models.xcom import BaseXCom  # type: ignore[no-redef]
 
 T = TypeVar("T")
 
 SECTION = "common.io"
+
+# S3 limits an object key to 1,024 bytes.
+_MAX_PATH_LENGTH = 1024
 
 
 def _get_compression_suffix(compression: str) -> str:
@@ -61,7 +66,14 @@ def _get_compression_suffix(compression: str) -> str:
 
 @cache
 def _get_base_path() -> ObjectStoragePath:
-    return ObjectStoragePath(conf.get_mandatory_value(SECTION, "xcom_objectstorage_path"))
+    path = conf.get_mandatory_value(SECTION, "xcom_objectstorage_path")
+    # Reads only resolve URLs, so a schemeless path would read back as the path string.
+    if not urlsplit(path).scheme:
+        raise ValueError(
+            f"[{SECTION}] xcom_objectstorage_path must be a URL with a scheme, such as "
+            f"s3://conn_id@bucket/path or file:///path/to/xcom; got {path!r}."
+        )
+    return ObjectStoragePath(path)
 
 
 @cache
@@ -101,11 +113,27 @@ class XComObjectStorageBackend(BaseXCom):
             raise TypeError(f"Not a valid url: {data}") from None
 
         if url.scheme:
-            if not Path.is_relative_to(ObjectStoragePath(data), p):
+            if not ObjectStoragePath(data).is_relative_to(p):
                 raise ValueError(f"Invalid key: {data}")
             return p / data.replace(str(p), "", 1).lstrip("/")
 
         raise ValueError(f"Not a valid url: {data}")
+
+    @classmethod
+    def store_value(cls, coordinate: XComCoordinate, key: str, value: Any) -> str:
+        def get_path(suffix: str) -> ObjectStoragePath:
+            base = _get_base_path()
+            return base.joinpath(
+                coordinate.build_path(
+                    "",
+                    key,
+                    suffix=f".json{suffix}",
+                    max_length=_MAX_PATH_LENGTH - len(str(base).encode()) - 1,
+                )
+            )
+
+        path = cls._write_large_value(value, get_path)
+        return BaseXCom.serialize_value(value if path is None else str(path))
 
     @staticmethod
     def serialize_value(  # type: ignore[override]
@@ -117,40 +145,46 @@ class XComObjectStorageBackend(BaseXCom):
         run_id: str | None = None,
         map_index: int | None = None,
     ) -> bytes | str:
-        # we will always serialize ourselves and not by BaseXCom as the deserialize method
-        # from BaseXCom accepts only XCom objects and not the value directly
-        s_val = json.dumps(value, cls=XComEncoder)
-        s_val_encoded = s_val.encode("utf-8")
+        def get_unused_path(suffix: str) -> ObjectStoragePath:
+            base_path = _get_base_path()
+            while True:  # Safeguard against collisions.
+                p = base_path.joinpath(
+                    dag_id or "NO_DAG_ID",
+                    run_id or "NO_RUN_ID",
+                    task_id or "NO_TASK_ID",
+                    f"{uuid.uuid4()}{suffix}",
+                )
+                if not p.exists():
+                    return p
+
+        if (path := XComObjectStorageBackend._write_large_value(value, get_unused_path)) is not None:
+            return BaseXCom.serialize_value(str(path))
+        if AIRFLOW_V_3_0_PLUS:
+            return BaseXCom.serialize_value(value)
+        # TODO: Remove this branch once we drop support for Airflow 2
+        # This is for Airflow 2.10 where the value is expected to be bytes
+        return json.dumps(value, cls=XComEncoder).encode("utf-8")
+
+    @staticmethod
+    def _write_large_value(
+        value: Any, get_path: Callable[[str], ObjectStoragePath]
+    ) -> ObjectStoragePath | None:
+        """Write ``value`` to object storage if it reaches the threshold, returning where it was written."""
+        s_val_encoded = json.dumps(value, cls=XComEncoder).encode("utf-8")
+        threshold = _get_threshold()
+        if threshold < 0 or len(s_val_encoded) < threshold:  # Either no threshold or value is small enough.
+            return None
 
         if compression := _get_compression():
             suffix = f".{_get_compression_suffix(compression)}"
         else:
             suffix = ""
-
-        threshold = _get_threshold()
-        if threshold < 0 or len(s_val_encoded) < threshold:  # Either no threshold or value is small enough.
-            if AIRFLOW_V_3_0_PLUS:
-                return s_val
-            else:
-                # TODO: Remove this branch once we drop support for Airflow 2
-                # This is for Airflow 2.10 where the value is expected to be bytes
-                return s_val_encoded
-
-        base_path = _get_base_path()
-        while True:  # Safeguard against collisions.
-            p = base_path.joinpath(
-                dag_id or "NO_DAG_ID",
-                run_id or "NO_RUN_ID",
-                task_id or "NO_TASK_ID",
-                f"{uuid.uuid4()}{suffix}",
-            )
-            if not p.exists():
-                break
+        p = get_path(suffix)
         p.parent.mkdir(parents=True, exist_ok=True)
 
         with p.open(mode="wb", compression=compression) as f:
             f.write(s_val_encoded)
-        return BaseXCom.serialize_value(str(p))
+        return p
 
     @staticmethod
     def deserialize_value(result) -> Any:
@@ -159,19 +193,26 @@ class XComObjectStorageBackend(BaseXCom):
 
         Compression is inferred from the file extension.
         """
-        data = BaseXCom.deserialize_value(result)
+        base_xcom_deser_result = BaseXCom.deserialize_value(result)
+        data = base_xcom_deser_result
+
+        if not AIRFLOW_V_3_0_PLUS:
+            with contextlib.suppress(TypeError, ValueError):
+                # When XComObjectStorageBackend is used, xcom value will be serialized using json.dumps
+                # likely, we need to deserialize it using json.loads
+                data = json.loads(base_xcom_deser_result, cls=XComDecoder)
         try:
-            path = XComObjectStorageBackend._get_full_path(data)
+            path = XComObjectStorageBackend._get_full_path(base_xcom_deser_result)
         except (TypeError, ValueError):  # Likely value stored directly in the database.
             return data
         try:
             with path.open(mode="rb", compression="infer") as f:
                 return json.load(f, cls=XComDecoder)
-        except (TypeError, ValueError):
+        except (FileNotFoundError, TypeError, ValueError):
             return data
 
     @staticmethod
-    def purge(xcom: XComResult, session: Session | None = None) -> None:  # type: ignore[override]
+    def purge(xcom: XComResult, session: Session | None = None) -> None:
         if not isinstance(xcom.value, str):
             return
         with contextlib.suppress(TypeError, ValueError):

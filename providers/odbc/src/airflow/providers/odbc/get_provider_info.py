@@ -26,57 +26,35 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-odbc",
         "name": "ODBC",
         "description": "`ODBC <https://github.com/mkleehammer/pyodbc/wiki>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477855,
-        "versions": [
-            "4.9.1",
-            "4.9.0",
-            "4.8.1",
-            "4.8.0",
-            "4.7.1",
-            "4.7.0",
-            "4.6.3",
-            "4.6.2",
-            "4.6.1",
-            "4.6.0",
-            "4.5.0",
-            "4.4.1",
-            "4.4.0",
-            "4.3.0",
-            "4.2.0",
-            "4.1.0",
-            "4.0.0",
-            "3.3.0",
-            "3.2.1",
-            "3.2.0",
-            "3.1.2",
-            "3.1.1",
-            "3.1.0",
-            "3.0.0",
-            "2.0.4",
-            "2.0.3",
-            "2.0.2",
-            "2.0.1",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "ODBC",
                 "external-doc-url": "https://github.com/mkleehammer/pyodbc/wiki",
+                "how-to-guide": ["/docs/apache-airflow-providers-odbc/operators.rst"],
                 "logo": "/docs/integration-logos/ODBC.png",
                 "tags": ["protocol"],
             }
         ],
         "hooks": [{"integration-name": "ODBC", "python-modules": ["airflow.providers.odbc.hooks.odbc"]}],
         "connection-types": [
-            {"hook-class-name": "airflow.providers.odbc.hooks.odbc.OdbcHook", "connection-type": "odbc"}
+            {
+                "hook-class-name": "airflow.providers.odbc.hooks.odbc.OdbcHook",
+                "hook-name": "ODBC",
+                "connection-type": "odbc",
+            }
         ],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-common-sql>=1.20.0",
-            "pyodbc>=5.0.0",
-        ],
-        "devel-dependencies": [],
+        "config": {
+            "providers.odbc": {
+                "description": "This section applies for the ODBC provider and connection type.",
+                "options": {
+                    "allow_driver_in_extra": {
+                        "description": "Whether to allow using ``driver`` set in the connection's ``extra`` field. If set to False,\n``driver`` will be ignored. If enabling this functionality, you should make sure that you\ntrust the users who can edit connections to not use it maliciously.\n",
+                        "version_added": "4.0.0",
+                        "type": "boolean",
+                        "example": None,
+                        "default": "False",
+                    }
+                },
+            }
+        },
     }

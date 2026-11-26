@@ -18,30 +18,32 @@
 from __future__ import annotations
 
 import logging
-import logging.config
 from importlib import reload
 from unittest import mock
 
 import pytest
+from sqlalchemy import delete
 
-from airflow.config_templates.airflow_local_settings import DEFAULT_LOGGING_CONFIG
 from airflow.executors import executor_loader
 from airflow.models.dagrun import DagRun
 from airflow.models.taskinstance import TaskInstance
+from airflow.providers.common.compat.sdk import timezone
 from airflow.utils.log.file_task_handler import (
     FileTaskHandler,
 )
 from airflow.utils.session import create_session
 from airflow.utils.state import TaskInstanceState
-from airflow.utils.timezone import datetime
 from airflow.utils.types import DagRunType
 
 from tests_common.test_utils.config import conf_vars
-from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+from tests_common.test_utils.file_task_handler import (
+    convert_list_to_stream,
+)
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V_3_2_2_PLUS
 
 pytestmark = pytest.mark.db_test
 
-DEFAULT_DATE = datetime(2016, 1, 1)
+DEFAULT_DATE = timezone.datetime(2016, 1, 1)
 TASK_LOGGER = "airflow.task"
 FILE_TASK_HANDLER = "task"
 
@@ -49,11 +51,10 @@ FILE_TASK_HANDLER = "task"
 class TestFileTaskLogHandler:
     def clean_up(self):
         with create_session() as session:
-            session.query(DagRun).delete()
-            session.query(TaskInstance).delete()
+            session.execute(delete(DagRun))
+            session.execute(delete(TaskInstance))
 
     def setup_method(self):
-        logging.config.dictConfig(DEFAULT_LOGGING_CONFIG)
         logging.root.disabled = False
         self.clean_up()
         # We use file task handler by default.
@@ -78,14 +79,29 @@ class TestFileTaskLogHandler:
             fth = FileTaskHandler("")
 
             fth._read_from_logs_server = mock.Mock()
-            fth._read_from_logs_server.return_value = ["this message"], ["this\nlog\ncontent"]
+
+            # compat with 2.x and 3.x
+            if AIRFLOW_V_3_0_PLUS:
+                fth._read_from_logs_server.return_value = (
+                    ["this message"],
+                    [convert_list_to_stream(["this", "log", "content"])],
+                )
+            else:
+                fth._read_from_logs_server.return_value = ["this message"], ["this\nlog\ncontent"]
+
             logs, metadata = fth._read(ti=ti, try_number=1)
             fth._read_from_logs_server.assert_called_once()
 
-        if AIRFLOW_V_3_0_PLUS:
+        if AIRFLOW_V_3_2_2_PLUS:
+            logs = list(logs)
+            assert logs[1].event == "this message"
+            assert [x.event for x in logs[-3:]] == ["this", "log", "content"]
             assert metadata == {"end_of_log": False, "log_pos": 3}
+        elif AIRFLOW_V_3_0_PLUS:
+            logs = list(logs)
             assert logs[0].sources == ["this message"]
             assert [x.event for x in logs[-3:]] == ["this", "log", "content"]
+            assert metadata == {"end_of_log": False, "log_pos": 3}
         else:
             assert "*** this message\n" in logs
             assert logs.endswith("this\nlog\ncontent")

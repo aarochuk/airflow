@@ -26,78 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-google",
         "name": "Google",
         "description": "Google services including:\n\n  - `Google Ads <https://ads.google.com/>`__\n  - `Google Cloud (GCP) <https://cloud.google.com/>`__\n  - `Google Firebase <https://firebase.google.com/>`__\n  - `Google LevelDB <https://github.com/google/leveldb/>`__\n  - `Google Marketing Platform <https://marketingplatform.google.com/>`__\n  - `Google Workspace <https://workspace.google.com/>`__ (formerly Google Suite)\n",
-        "state": "ready",
-        "source-date-epoch": 1743477827,
-        "versions": [
-            "14.1.0",
-            "14.0.0",
-            "12.0.0",
-            "11.0.0",
-            "10.26.0",
-            "10.25.0",
-            "10.24.0",
-            "10.23.0",
-            "10.22.0",
-            "10.21.1",
-            "10.21.0",
-            "10.20.0",
-            "10.19.0",
-            "10.18.0",
-            "10.17.0",
-            "10.16.0",
-            "10.15.0",
-            "10.14.0",
-            "10.13.1",
-            "10.13.0",
-            "10.12.0",
-            "10.11.1",
-            "10.11.0",
-            "10.10.1",
-            "10.10.0",
-            "10.9.0",
-            "10.8.0",
-            "10.7.0",
-            "10.6.0",
-            "10.5.0",
-            "10.4.0",
-            "10.3.0",
-            "10.2.0",
-            "10.1.1",
-            "10.1.0",
-            "10.0.0",
-            "9.0.0",
-            "8.12.0",
-            "8.11.0",
-            "8.10.0",
-            "8.9.0",
-            "8.8.0",
-            "8.7.0",
-            "8.6.0",
-            "8.5.0",
-            "8.4.0",
-            "8.3.0",
-            "8.2.0",
-            "8.1.0",
-            "8.0.0",
-            "7.0.0",
-            "6.8.0",
-            "6.7.0",
-            "6.6.0",
-            "6.5.0",
-            "6.4.0",
-            "6.3.0",
-            "6.2.0",
-            "6.1.0",
-            "6.0.0",
-            "5.1.0",
-            "5.0.0",
-            "4.0.0",
-            "3.0.0",
-            "2.2.0",
-            "2.1.0",
-            "2.0.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Google Analytics (GA4)",
@@ -116,13 +44,6 @@ def get_provider_info():
                 "tags": ["gmp"],
             },
             {
-                "integration-name": "Google AutoML",
-                "external-doc-url": "https://cloud.google.com/automl/",
-                "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/automl.rst"],
-                "logo": "/docs/integration-logos/Cloud-AutoML.png",
-                "tags": ["gcp"],
-            },
-            {
                 "integration-name": "Google BigQuery Data Transfer Service",
                 "external-doc-url": "https://cloud.google.com/bigquery/transfer/",
                 "logo": "/docs/integration-logos/BigQuery.png",
@@ -131,7 +52,10 @@ def get_provider_info():
             },
             {
                 "integration-name": "Google BigQuery",
-                "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/bigquery.rst"],
+                "how-to-guide": [
+                    "/docs/apache-airflow-providers-google/operators/cloud/bigquery.rst",
+                    "/docs/apache-airflow-providers-google/operators/cloud/bigquery_routines.rst",
+                ],
                 "external-doc-url": "https://cloud.google.com/bigquery/",
                 "logo": "/docs/integration-logos/BigQuery.png",
                 "tags": ["gcp"],
@@ -163,7 +87,7 @@ def get_provider_info():
                 "logo": "/docs/integration-logos/Google.png",
             },
             {
-                "integration-name": "Google Cloud Composer",
+                "integration-name": "Managed Service for Apache Airflow",
                 "external-doc-url": "https://cloud.google.com/composer",
                 "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/cloud_composer.rst"],
                 "tags": ["google"],
@@ -213,13 +137,6 @@ def get_provider_info():
                 "integration-name": "Google Cloud Key Management Service (KMS)",
                 "external-doc-url": "https://cloud.google.com/security-key-management/",
                 "logo": "/docs/integration-logos/Key-Management-Service.png",
-                "tags": ["gcp"],
-            },
-            {
-                "integration-name": "Google Cloud Life Sciences",
-                "external-doc-url": "https://cloud.google.com/life-sciences/",
-                "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/life_sciences.rst"],
-                "logo": "/docs/integration-logos/Google-Cloud-Life-Sciences.png",
                 "tags": ["gcp"],
             },
             {
@@ -282,10 +199,12 @@ def get_provider_info():
                 "tags": ["gcp"],
             },
             {
-                "integration-name": "Google Cloud Stackdriver",
-                "external-doc-url": "https://cloud.google.com/products/operations/",
-                "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/stackdriver.rst"],
-                "logo": "/docs/integration-logos/Google-Cloud-Stackdriver.png",
+                "integration-name": "Google Cloud Monitoring",
+                "external-doc-url": "https://cloud.google.com/monitoring/",
+                "how-to-guide": [
+                    "/docs/apache-airflow-providers-google/operators/cloud/cloud_monitoring.rst"
+                ],
+                "logo": "/docs/integration-logos/Cloud-Monitoring.png",
                 "tags": ["gcp"],
             },
             {
@@ -298,7 +217,10 @@ def get_provider_info():
             {
                 "integration-name": "Google Cloud Tasks",
                 "external-doc-url": "https://cloud.google.com/tasks/",
-                "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/tasks.rst"],
+                "how-to-guide": [
+                    "/docs/apache-airflow-providers-google/operators/cloud/tasks.rst",
+                    "/docs/apache-airflow-providers-google/sensors/google-cloud-tasks.rst",
+                ],
                 "logo": "/docs/integration-logos/Cloud-Tasks.png",
                 "tags": ["gcp"],
             },
@@ -346,19 +268,6 @@ def get_provider_info():
                 "tags": ["gcp"],
             },
             {
-                "integration-name": "Google Data Proc",
-                "external-doc-url": "https://cloud.google.com/dataproc/",
-                "logo": "/docs/integration-logos/Google-Data-Proc.png",
-                "tags": ["gcp"],
-            },
-            {
-                "integration-name": "Google Data Catalog",
-                "external-doc-url": "https://cloud.google.com/data-catalog/",
-                "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/datacatalog.rst"],
-                "logo": "/docs/integration-logos/Google-Data-Catalog.png",
-                "tags": ["gcp"],
-            },
-            {
                 "integration-name": "Google Dataflow",
                 "external-doc-url": "https://cloud.google.com/dataflow/",
                 "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/dataflow.rst"],
@@ -373,7 +282,7 @@ def get_provider_info():
                 "tags": ["gcp"],
             },
             {
-                "integration-name": "Google Dataplex",
+                "integration-name": "Google Knowledge Catalog",
                 "external-doc-url": "https://cloud.google.com/dataplex/",
                 "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/dataplex.rst"],
                 "tags": ["gcp"],
@@ -394,7 +303,7 @@ def get_provider_info():
                 "tags": ["gcp"],
             },
             {
-                "integration-name": "Google Dataproc",
+                "integration-name": "Google Managed Service for Apache Spark",
                 "external-doc-url": "https://cloud.google.com/dataproc/",
                 "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/dataproc.rst"],
                 "logo": "/docs/integration-logos/Cloud-Dataproc.png",
@@ -502,13 +411,6 @@ def get_provider_info():
                 "tags": ["gcp"],
             },
             {
-                "integration-name": "Google Machine Learning Engine",
-                "external-doc-url": "https://cloud.google.com/vertex-ai/",
-                "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/mlengine.rst"],
-                "logo": "/docs/integration-logos/AI-Platform.png",
-                "tags": ["gcp"],
-            },
-            {
                 "integration-name": "Google Cloud Natural Language",
                 "external-doc-url": "https://cloud.google.com/natural-language/",
                 "how-to-guide": [
@@ -536,11 +438,41 @@ def get_provider_info():
                 "tags": ["gcp"],
             },
             {
-                "integration-name": "Google Looker",
+                "integration-name": "Google Data Studio",
                 "external-doc-url": "https://cloud.google.com/looker",
                 "logo": "/docs/integration-logos/Cloud-Looker.png",
                 "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/looker.rst"],
                 "tags": ["gcp"],
+            },
+            {
+                "integration-name": "Google Cloud Logging Sink",
+                "external-doc-url": "https://cloud.google.com/logging",
+                "logo": "/docs/integration-logos/Cloud-Logging-Sink.png",
+                "how-to-guide": [
+                    "/docs/apache-airflow-providers-google/operators/cloud/cloud_logging_sink.rst"
+                ],
+                "tags": ["gcp"],
+            },
+            {
+                "integration-name": "Google Cloud Generative AI",
+                "external-doc-url": "https://cloud.google.com/generative-ai-studio",
+                "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/gen_ai.rst"],
+                "tags": ["gcp"],
+            },
+            {
+                "integration-name": "Google Ray",
+                "external-doc-url": "https://docs.cloud.google.com/vertex-ai/docs/open-source/ray-on-vertex-ai/overview",
+                "how-to-guide": ["/docs/apache-airflow-providers-google/operators/cloud/ray.rst"],
+                "tags": ["gcp"],
+            },
+            {
+                "integration-name": "Google Bid Manager API",
+                "external-doc-url": "https://developers.google.com/bid-manager",
+                "logo": "/docs/integration-logos/Google-Search-Ads360.png",
+                "how-to-guide": [
+                    "/docs/apache-airflow-providers-google/operators/marketing_platform/bid_manager.rst"
+                ],
+                "tags": ["gmp"],
             },
         ],
         "operators": [
@@ -555,10 +487,6 @@ def get_provider_info():
             {
                 "integration-name": "Google Cloud AlloyDB",
                 "python-modules": ["airflow.providers.google.cloud.operators.alloy_db"],
-            },
-            {
-                "integration-name": "Google AutoML",
-                "python-modules": ["airflow.providers.google.cloud.operators.automl"],
             },
             {
                 "integration-name": "Google BigQuery",
@@ -577,8 +505,11 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.operators.cloud_build"],
             },
             {
-                "integration-name": "Google Cloud Composer",
-                "python-modules": ["airflow.providers.google.cloud.operators.cloud_composer"],
+                "integration-name": "Managed Service for Apache Airflow",
+                "python-modules": [
+                    "airflow.providers.google.cloud.operators.cloud_composer",
+                    "airflow.providers.google.cloud.operators.managed_airflow",
+                ],
             },
             {
                 "integration-name": "Google Cloud Run",
@@ -601,10 +532,6 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.operators.compute"],
             },
             {
-                "integration-name": "Google Data Catalog",
-                "python-modules": ["airflow.providers.google.cloud.operators.datacatalog"],
-            },
-            {
                 "integration-name": "Google Dataflow",
                 "python-modules": ["airflow.providers.google.cloud.operators.dataflow"],
             },
@@ -613,8 +540,11 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.operators.datafusion"],
             },
             {
-                "integration-name": "Google Dataplex",
-                "python-modules": ["airflow.providers.google.cloud.operators.dataplex"],
+                "integration-name": "Google Knowledge Catalog",
+                "python-modules": [
+                    "airflow.providers.google.cloud.operators.dataplex",
+                    "airflow.providers.google.cloud.operators.knowledge_catalog",
+                ],
             },
             {
                 "integration-name": "Google Dataprep",
@@ -625,8 +555,11 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.operators.dataproc_metastore"],
             },
             {
-                "integration-name": "Google Dataproc",
-                "python-modules": ["airflow.providers.google.cloud.operators.dataproc"],
+                "integration-name": "Google Managed Service for Apache Spark",
+                "python-modules": [
+                    "airflow.providers.google.cloud.operators.dataproc",
+                    "airflow.providers.google.cloud.operators.managed_spark",
+                ],
             },
             {
                 "integration-name": "Google Datastore",
@@ -649,14 +582,6 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.operators.kubernetes_engine"],
             },
             {
-                "integration-name": "Google Cloud Life Sciences",
-                "python-modules": ["airflow.providers.google.cloud.operators.life_sciences"],
-            },
-            {
-                "integration-name": "Google Machine Learning Engine",
-                "python-modules": ["airflow.providers.google.cloud.operators.mlengine"],
-            },
-            {
                 "integration-name": "Google Cloud Natural Language",
                 "python-modules": ["airflow.providers.google.cloud.operators.natural_language"],
             },
@@ -673,8 +598,8 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.operators.speech_to_text"],
             },
             {
-                "integration-name": "Google Cloud Stackdriver",
-                "python-modules": ["airflow.providers.google.cloud.operators.stackdriver"],
+                "integration-name": "Google Cloud Monitoring",
+                "python-modules": ["airflow.providers.google.cloud.operators.cloud_monitoring"],
             },
             {
                 "integration-name": "Google Cloud Tasks",
@@ -742,15 +667,18 @@ def get_provider_info():
                     "airflow.providers.google.cloud.operators.vertex_ai.auto_ml",
                     "airflow.providers.google.cloud.operators.vertex_ai.batch_prediction_job",
                     "airflow.providers.google.cloud.operators.vertex_ai.endpoint_service",
+                    "airflow.providers.google.cloud.operators.vertex_ai.experiment_service",
                     "airflow.providers.google.cloud.operators.vertex_ai.hyperparameter_tuning_job",
                     "airflow.providers.google.cloud.operators.vertex_ai.model_service",
                     "airflow.providers.google.cloud.operators.vertex_ai.pipeline_job",
                     "airflow.providers.google.cloud.operators.vertex_ai.generative_model",
                     "airflow.providers.google.cloud.operators.vertex_ai.feature_store",
+                    "airflow.providers.google.cloud.operators.vertex_ai.ray",
+                    "airflow.providers.google.cloud.operators.vertex_ai.agent_engine",
                 ],
             },
             {
-                "integration-name": "Google Looker",
+                "integration-name": "Google Data Studio",
                 "python-modules": ["airflow.providers.google.cloud.operators.looker"],
             },
             {
@@ -764,6 +692,22 @@ def get_provider_info():
             {
                 "integration-name": "Google Cloud Managed Service for Apache Kafka",
                 "python-modules": ["airflow.providers.google.cloud.operators.managed_kafka"],
+            },
+            {
+                "integration-name": "Google Cloud Logging Sink",
+                "python-modules": ["airflow.providers.google.cloud.operators.cloud_logging_sink"],
+            },
+            {
+                "integration-name": "Google Cloud Generative AI",
+                "python-modules": ["airflow.providers.google.cloud.operators.gen_ai"],
+            },
+            {
+                "integration-name": "Google Ray",
+                "python-modules": ["airflow.providers.google.cloud.operators.ray"],
+            },
+            {
+                "integration-name": "Google Bid Manager API",
+                "python-modules": ["airflow.providers.google.marketing_platform.operators.bid_manager"],
             },
         ],
         "sensors": [
@@ -780,7 +724,11 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.sensors.bigtable"],
             },
             {
-                "integration-name": "Google Cloud Composer",
+                "integration-name": "Google Cloud SQL",
+                "python-modules": ["airflow.providers.google.cloud.sensors.cloud_sql"],
+            },
+            {
+                "integration-name": "Managed Service for Apache Airflow",
                 "python-modules": ["airflow.providers.google.cloud.sensors.cloud_composer"],
             },
             {
@@ -800,11 +748,11 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.sensors.dataprep"],
             },
             {
-                "integration-name": "Google Dataplex",
+                "integration-name": "Google Knowledge Catalog",
                 "python-modules": ["airflow.providers.google.cloud.sensors.dataplex"],
             },
             {
-                "integration-name": "Google Dataproc",
+                "integration-name": "Google Managed Service for Apache Spark",
                 "python-modules": ["airflow.providers.google.cloud.sensors.dataproc"],
             },
             {
@@ -840,7 +788,7 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.marketing_platform.sensors.display_video"],
             },
             {
-                "integration-name": "Google Looker",
+                "integration-name": "Google Data Studio",
                 "python-modules": ["airflow.providers.google.cloud.sensors.looker"],
             },
             {
@@ -850,6 +798,10 @@ def get_provider_info():
             {
                 "integration-name": "Google Cloud Tasks",
                 "python-modules": ["airflow.providers.google.cloud.sensors.tasks"],
+            },
+            {
+                "integration-name": "Google Bid Manager API",
+                "python-modules": ["airflow.providers.google.marketing_platform.sensors.bid_manager"],
             },
         ],
         "filesystems": ["airflow.providers.google.cloud.fs.gcs"],
@@ -886,10 +838,6 @@ def get_provider_info():
         "hooks": [
             {"integration-name": "Google Ads", "python-modules": ["airflow.providers.google.ads.hooks.ads"]},
             {
-                "integration-name": "Google AutoML",
-                "python-modules": ["airflow.providers.google.cloud.hooks.automl"],
-            },
-            {
                 "integration-name": "Google BigQuery",
                 "python-modules": ["airflow.providers.google.cloud.hooks.bigquery"],
             },
@@ -910,7 +858,7 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.hooks.cloud_build"],
             },
             {
-                "integration-name": "Google Cloud Composer",
+                "integration-name": "Managed Service for Apache Airflow",
                 "python-modules": ["airflow.providers.google.cloud.hooks.cloud_composer"],
             },
             {
@@ -937,10 +885,6 @@ def get_provider_info():
                 ],
             },
             {
-                "integration-name": "Google Data Catalog",
-                "python-modules": ["airflow.providers.google.cloud.hooks.datacatalog"],
-            },
-            {
                 "integration-name": "Google Dataflow",
                 "python-modules": ["airflow.providers.google.cloud.hooks.dataflow"],
             },
@@ -949,7 +893,7 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.hooks.datafusion"],
             },
             {
-                "integration-name": "Google Dataplex",
+                "integration-name": "Google Knowledge Catalog",
                 "python-modules": ["airflow.providers.google.cloud.hooks.dataplex"],
             },
             {
@@ -961,7 +905,7 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.hooks.dataproc_metastore"],
             },
             {
-                "integration-name": "Google Dataproc",
+                "integration-name": "Google Managed Service for Apache Spark",
                 "python-modules": ["airflow.providers.google.cloud.hooks.dataproc"],
             },
             {
@@ -993,14 +937,6 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.hooks.kubernetes_engine"],
             },
             {
-                "integration-name": "Google Cloud Life Sciences",
-                "python-modules": ["airflow.providers.google.cloud.hooks.life_sciences"],
-            },
-            {
-                "integration-name": "Google Machine Learning Engine",
-                "python-modules": ["airflow.providers.google.cloud.hooks.mlengine"],
-            },
-            {
                 "integration-name": "Google Cloud Natural Language",
                 "python-modules": ["airflow.providers.google.cloud.hooks.natural_language"],
             },
@@ -1025,8 +961,8 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.hooks.speech_to_text"],
             },
             {
-                "integration-name": "Google Cloud Stackdriver",
-                "python-modules": ["airflow.providers.google.cloud.hooks.stackdriver"],
+                "integration-name": "Google Cloud Monitoring",
+                "python-modules": ["airflow.providers.google.cloud.hooks.cloud_monitoring"],
             },
             {
                 "integration-name": "Google Cloud Tasks",
@@ -1107,16 +1043,19 @@ def get_provider_info():
                     "airflow.providers.google.cloud.hooks.vertex_ai.auto_ml",
                     "airflow.providers.google.cloud.hooks.vertex_ai.batch_prediction_job",
                     "airflow.providers.google.cloud.hooks.vertex_ai.endpoint_service",
+                    "airflow.providers.google.cloud.hooks.vertex_ai.experiment_service",
                     "airflow.providers.google.cloud.hooks.vertex_ai.hyperparameter_tuning_job",
                     "airflow.providers.google.cloud.hooks.vertex_ai.model_service",
                     "airflow.providers.google.cloud.hooks.vertex_ai.pipeline_job",
                     "airflow.providers.google.cloud.hooks.vertex_ai.generative_model",
                     "airflow.providers.google.cloud.hooks.vertex_ai.prediction_service",
                     "airflow.providers.google.cloud.hooks.vertex_ai.feature_store",
+                    "airflow.providers.google.cloud.hooks.vertex_ai.agent_engine",
+                    "airflow.providers.google.cloud.hooks.vertex_ai.ray",
                 ],
             },
             {
-                "integration-name": "Google Looker",
+                "integration-name": "Google Data Studio",
                 "python-modules": ["airflow.providers.google.cloud.hooks.looker"],
             },
             {
@@ -1131,6 +1070,28 @@ def get_provider_info():
                 "integration-name": "Google Cloud Managed Service for Apache Kafka",
                 "python-modules": ["airflow.providers.google.cloud.hooks.managed_kafka"],
             },
+            {
+                "integration-name": "Google Cloud Logging Sink",
+                "python-modules": ["airflow.providers.google.cloud.hooks.cloud_logging"],
+            },
+            {
+                "integration-name": "Google Cloud Generative AI",
+                "python-modules": ["airflow.providers.google.cloud.hooks.gen_ai"],
+            },
+            {
+                "integration-name": "Google Ray",
+                "python-modules": ["airflow.providers.google.cloud.hooks.ray"],
+            },
+            {
+                "integration-name": "Google Bid Manager API",
+                "python-modules": ["airflow.providers.google.marketing_platform.hooks.bid_manager"],
+            },
+        ],
+        "bundles": [
+            {
+                "integration-name": "Google Cloud Storage (GCS)",
+                "python-modules": ["airflow.providers.google.cloud.bundles.gcs"],
+            }
         ],
         "triggers": [
             {
@@ -1146,7 +1107,7 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.triggers.cloud_build"],
             },
             {
-                "integration-name": "Google Cloud Composer",
+                "integration-name": "Managed Service for Apache Airflow",
                 "python-modules": ["airflow.providers.google.cloud.triggers.cloud_composer"],
             },
             {
@@ -1170,11 +1131,11 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.google.cloud.triggers.datafusion"],
             },
             {
-                "integration-name": "Google Dataplex",
+                "integration-name": "Google Knowledge Catalog",
                 "python-modules": ["airflow.providers.google.cloud.triggers.dataplex"],
             },
             {
-                "integration-name": "Google Dataproc",
+                "integration-name": "Google Managed Service for Apache Spark",
                 "python-modules": ["airflow.providers.google.cloud.triggers.dataproc"],
             },
             {
@@ -1184,10 +1145,6 @@ def get_provider_info():
             {
                 "integration-name": "Google Kubernetes Engine",
                 "python-modules": ["airflow.providers.google.cloud.triggers.kubernetes_engine"],
-            },
-            {
-                "integration-name": "Google Machine Learning Engine",
-                "python-modules": ["airflow.providers.google.cloud.triggers.mlengine"],
             },
             {
                 "integration-name": "Google Cloud Pub/Sub",
@@ -1200,6 +1157,10 @@ def get_provider_info():
             {
                 "integration-name": "Google Vertex AI",
                 "python-modules": ["airflow.providers.google.cloud.triggers.vertex_ai"],
+            },
+            {
+                "integration-name": "Google Cloud Generative AI",
+                "python-modules": ["airflow.providers.google.cloud.triggers.gen_ai"],
             },
         ],
         "transfers": [
@@ -1242,6 +1203,12 @@ def get_provider_info():
                 "source-integration-name": "Apache Cassandra",
                 "target-integration-name": "Google Cloud Storage (GCS)",
                 "python-module": "airflow.providers.google.cloud.transfers.cassandra_to_gcs",
+            },
+            {
+                "source-integration-name": "MongoDB",
+                "target-integration-name": "Google Cloud Storage (GCS)",
+                "how-to-guide": "/docs/apache-airflow-providers-google/operators/transfer/mongo_to_gcs.rst",
+                "python-module": "airflow.providers.google.cloud.transfers.mongo_to_gcs",
             },
             {
                 "source-integration-name": "Google Calendar",
@@ -1408,35 +1375,219 @@ def get_provider_info():
                 "python-module": "airflow.providers.google.cloud.transfers.azure_blob_to_gcs",
                 "how-to-guide": "/docs/apache-airflow-providers-google/operators/transfer/azure_blob_to_gcs.rst",
             },
+            {
+                "source-integration-name": "Hypertext Transfer Protocol (HTTP)",
+                "target-integration-name": "Google Cloud Storage (GCS)",
+                "python-module": "airflow.providers.google.cloud.transfers.http_to_gcs",
+                "how-to-guide": "/docs/apache-airflow-providers-google/operators/transfer/http_to_gcs.rst",
+            },
         ],
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.google.common.hooks.base_google.GoogleBaseHook",
+                "hook-name": "Google Cloud",
                 "connection-type": "google_cloud_platform",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["host", "schema", "login", "password", "port", "extra"],
+                    "relabeling": {},
+                    "placeholders": {},
+                },
+                "conn-fields": {
+                    "project": {"label": "Project Id", "schema": {"type": ["string", "null"]}},
+                    "key_path": {"label": "Keyfile Path", "schema": {"type": ["string", "null"]}},
+                    "keyfile_dict": {
+                        "label": "Keyfile JSON",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    },
+                    "credential_config_file": {
+                        "label": "Credential Configuration File",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "scope": {"label": "Scopes (comma separated)", "schema": {"type": ["string", "null"]}},
+                    "key_secret_name": {
+                        "label": "Keyfile Secret Name (in GCP Secret Manager)",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "key_secret_project_id": {
+                        "label": "Keyfile Secret Project Id (in GCP Secret Manager)",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "num_retries": {
+                        "label": "Number of Retries",
+                        "schema": {"type": ["integer", "null"], "default": 5},
+                    },
+                    "impersonation_chain": {
+                        "label": "Impersonation Chain",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "idp_issuer_url": {
+                        "label": "IdP Token Issue URL (Client Credentials Grant Flow)",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "client_id": {
+                        "label": "Client ID (Client Credentials Grant Flow)",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "client_secret": {
+                        "label": "Client Secret (Client Credentials Grant Flow)",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    },
+                    "idp_extra_parameters": {
+                        "label": "IdP Extra Request Parameters",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "is_anonymous": {
+                        "label": "Anonymous credentials (ignores all other settings)",
+                        "schema": {"type": ["boolean", "null"], "default": False},
+                    },
+                    "quota_project_id": {"label": "Quota Project ID", "schema": {"type": ["string", "null"]}},
+                },
+            },
+            {
+                "hook-class-name": "airflow.providers.google.cloud.hooks.spanner.SpannerHook",
+                "connection-type": "gcpspanner",
             },
             {
                 "hook-class-name": "airflow.providers.google.cloud.hooks.dataprep.GoogleDataprepHook",
+                "hook-name": "Google Dataprep",
                 "connection-type": "dataprep",
             },
             {
                 "hook-class-name": "airflow.providers.google.cloud.hooks.cloud_sql.CloudSQLHook",
+                "hook-name": "Google Cloud SQL",
                 "connection-type": "gcpcloudsql",
             },
             {
                 "hook-class-name": "airflow.providers.google.cloud.hooks.cloud_sql.CloudSQLDatabaseHook",
+                "hook-name": "Google Cloud SQL Database",
                 "connection-type": "gcpcloudsqldb",
             },
             {
                 "hook-class-name": "airflow.providers.google.cloud.hooks.bigquery.BigQueryHook",
+                "hook-name": "Google Bigquery",
                 "connection-type": "gcpbigquery",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["host", "schema", "login", "password", "port", "extra"],
+                    "relabeling": {},
+                    "placeholders": {},
+                },
+                "conn-fields": {
+                    "project": {"label": "Project Id", "schema": {"type": ["string", "null"]}},
+                    "key_path": {"label": "Keyfile Path", "schema": {"type": ["string", "null"]}},
+                    "keyfile_dict": {
+                        "label": "Keyfile JSON",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    },
+                    "credential_config_file": {
+                        "label": "Credential Configuration File",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "scope": {"label": "Scopes (comma separated)", "schema": {"type": ["string", "null"]}},
+                    "key_secret_name": {
+                        "label": "Keyfile Secret Name (in GCP Secret Manager)",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "key_secret_project_id": {
+                        "label": "Keyfile Secret Project Id (in GCP Secret Manager)",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "num_retries": {
+                        "label": "Number of Retries",
+                        "schema": {"type": ["integer", "null"], "default": 5},
+                    },
+                    "impersonation_chain": {
+                        "label": "Impersonation Chain",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "idp_issuer_url": {
+                        "label": "IdP Token Issue URL (Client Credentials Grant Flow)",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "client_id": {
+                        "label": "Client ID (Client Credentials Grant Flow)",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "client_secret": {
+                        "label": "Client Secret (Client Credentials Grant Flow)",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    },
+                    "idp_extra_parameters": {
+                        "label": "IdP Extra Request Parameters",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "is_anonymous": {
+                        "label": "Anonymous credentials (ignores all other settings)",
+                        "schema": {"type": ["boolean", "null"], "default": False},
+                    },
+                    "quota_project_id": {"label": "Quota Project ID", "schema": {"type": ["string", "null"]}},
+                    "use_legacy_sql": {"label": "Use Legacy SQL", "schema": {"type": ["boolean", "null"]}},
+                    "location": {"label": "Location", "schema": {"type": ["string", "null"]}},
+                    "priority": {
+                        "label": "Priority",
+                        "schema": {"type": ["string", "null"], "default": "INTERACTIVE"},
+                    },
+                    "api_resource_configs": {
+                        "label": "API Resource Configs",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "labels": {"label": "Labels", "schema": {"type": ["string", "null"]}},
+                },
             },
             {
                 "hook-class-name": "airflow.providers.google.cloud.hooks.compute_ssh.ComputeEngineSSHHook",
+                "hook-name": "Google Cloud SSH",
                 "connection-type": "gcpssh",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["host", "schema", "login", "password", "port", "extra"],
+                    "relabeling": {},
+                    "placeholders": {},
+                },
             },
             {
                 "hook-class-name": "airflow.providers.google.leveldb.hooks.leveldb.LevelDBHook",
+                "hook-name": "LevelDB",
                 "connection-type": "leveldb",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["login", "password", "schema", "port"],
+                    "relabeling": {},
+                },
+                "conn-fields": {
+                    "create_if_missing": {
+                        "label": "Create a database if it does not exist",
+                        "schema": {"type": ["boolean", "null"], "default": False},
+                    },
+                    "error_if_exists": {
+                        "label": "Raise an exception if the database already exists",
+                        "schema": {"type": ["boolean", "null"], "default": False},
+                    },
+                },
+            },
+            {
+                "hook-class-name": "airflow.providers.google.ads.hooks.ads.GoogleAdsHook",
+                "hook-name": "Google Ads",
+                "connection-type": "google_ads",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["host", "login", "schema", "port"],
+                    "relabeling": {},
+                    "placeholders": {"password": "Leave blank (optional)"},
+                },
+                "conn-fields": {
+                    "developer_token": {"label": "Developer token", "schema": {"type": ["string", "null"]}},
+                    "client_id": {"label": "OAuth2 Client ID", "schema": {"type": ["string", "null"]}},
+                    "client_secret": {
+                        "label": "OAuth2 Client Secret",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    },
+                    "refresh_token": {
+                        "label": "OAuth2 Refresh Token",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    },
+                },
+            },
+            {
+                "hook-class-name": "airflow.providers.google.cloud.hooks.looker.LookerHook",
+                "hook-name": "Google Data Studio",
+                "connection-type": "gcp_looker",
             },
         ],
         "extra-links": [
@@ -1468,11 +1619,10 @@ def get_provider_info():
             "airflow.providers.google.cloud.links.compute.ComputeInstanceDetailsLink",
             "airflow.providers.google.cloud.links.compute.ComputeInstanceTemplateDetailsLink",
             "airflow.providers.google.cloud.links.compute.ComputeInstanceGroupManagerDetailsLink",
+            "airflow.providers.google.cloud.links.cloud_run.CloudRunJobLoggingLink",
+            "airflow.providers.google.cloud.links.cloud_run.CloudRunJobExecutionDetailsLink",
             "airflow.providers.google.cloud.links.cloud_tasks.CloudTasksQueueLink",
             "airflow.providers.google.cloud.links.cloud_tasks.CloudTasksLink",
-            "airflow.providers.google.cloud.links.datacatalog.DataCatalogEntryGroupLink",
-            "airflow.providers.google.cloud.links.datacatalog.DataCatalogEntryLink",
-            "airflow.providers.google.cloud.links.datacatalog.DataCatalogTagTemplateLink",
             "airflow.providers.google.cloud.links.dataproc.DataprocLink",
             "airflow.providers.google.cloud.links.dataproc.DataprocListLink",
             "airflow.providers.google.cloud.links.dataproc.DataprocClusterLink",
@@ -1499,6 +1649,9 @@ def get_provider_info():
             "airflow.providers.google.cloud.links.vertex_ai.VertexAIEndpointListLink",
             "airflow.providers.google.cloud.links.vertex_ai.VertexAIPipelineJobLink",
             "airflow.providers.google.cloud.links.vertex_ai.VertexAIPipelineJobListLink",
+            "airflow.providers.google.cloud.links.vertex_ai.VertexAIRayClusterLink",
+            "airflow.providers.google.cloud.links.vertex_ai.VertexAIRayClusterListLink",
+            "airflow.providers.google.cloud.links.vertex_ai.VertexAICustomJobLink",
             "airflow.providers.google.cloud.links.workflows.WorkflowsWorkflowDetailsLink",
             "airflow.providers.google.cloud.links.workflows.WorkflowsListOfWorkflowsLink",
             "airflow.providers.google.cloud.links.workflows.WorkflowsExecutionLink",
@@ -1513,8 +1666,8 @@ def get_provider_info():
             "airflow.providers.google.cloud.links.bigtable.BigtableTablesLink",
             "airflow.providers.google.cloud.links.spanner.SpannerDatabaseLink",
             "airflow.providers.google.cloud.links.spanner.SpannerInstanceLink",
-            "airflow.providers.google.cloud.links.stackdriver.StackdriverNotificationsLink",
-            "airflow.providers.google.cloud.links.stackdriver.StackdriverPoliciesLink",
+            "airflow.providers.google.cloud.links.cloud_monitoring.CloudMonitoringNotificationsLink",
+            "airflow.providers.google.cloud.links.cloud_monitoring.CloudMonitoringPoliciesLink",
             "airflow.providers.google.cloud.links.kubernetes_engine.KubernetesEngineClusterLink",
             "airflow.providers.google.cloud.links.kubernetes_engine.KubernetesEnginePodLink",
             "airflow.providers.google.cloud.links.kubernetes_engine.KubernetesEngineJobLink",
@@ -1529,12 +1682,6 @@ def get_provider_info():
             "airflow.providers.google.cloud.links.cloud_build.CloudBuildListLink",
             "airflow.providers.google.cloud.links.cloud_build.CloudBuildTriggersListLink",
             "airflow.providers.google.cloud.links.cloud_build.CloudBuildTriggerDetailsLink",
-            "airflow.providers.google.cloud.links.automl.AutoMLDatasetLink",
-            "airflow.providers.google.cloud.links.automl.AutoMLDatasetListLink",
-            "airflow.providers.google.cloud.links.automl.AutoMLModelLink",
-            "airflow.providers.google.cloud.links.automl.AutoMLModelTrainLink",
-            "airflow.providers.google.cloud.links.automl.AutoMLModelPredictLink",
-            "airflow.providers.google.cloud.links.life_sciences.LifeSciencesLink",
             "airflow.providers.google.cloud.links.cloud_functions.CloudFunctionsDetailsLink",
             "airflow.providers.google.cloud.links.cloud_functions.CloudFunctionsListLink",
             "airflow.providers.google.cloud.links.cloud_storage_transfer.CloudStorageTransferListLink",
@@ -1551,11 +1698,6 @@ def get_provider_info():
             "airflow.providers.google.cloud.links.data_loss_prevention.CloudDLPInfoTypesListLink",
             "airflow.providers.google.cloud.links.data_loss_prevention.CloudDLPInfoTypeDetailsLink",
             "airflow.providers.google.cloud.links.data_loss_prevention.CloudDLPPossibleInfoTypesListLink",
-            "airflow.providers.google.cloud.links.mlengine.MLEngineModelLink",
-            "airflow.providers.google.cloud.links.mlengine.MLEngineModelsListLink",
-            "airflow.providers.google.cloud.links.mlengine.MLEngineJobDetailsLink",
-            "airflow.providers.google.cloud.links.mlengine.MLEngineJobSListLink",
-            "airflow.providers.google.cloud.links.mlengine.MLEngineModelVersionDetailsLink",
             "airflow.providers.google.common.links.storage.StorageLink",
             "airflow.providers.google.common.links.storage.FileDetailsLink",
             "airflow.providers.google.marketing_platform.links.analytics_admin.GoogleAnalyticsPropertyLink",
@@ -1575,6 +1717,7 @@ def get_provider_info():
             "airflow.providers.google.cloud.links.managed_kafka.ApacheKafkaClusterListLink",
             "airflow.providers.google.cloud.links.managed_kafka.ApacheKafkaTopicLink",
             "airflow.providers.google.cloud.links.managed_kafka.ApacheKafkaConsumerGroupLink",
+            "airflow.providers.google.cloud.links.ray.RayJobLink",
         ],
         "secrets-backends": [
             "airflow.providers.google.cloud.secrets.secret_manager.CloudSecretManagerBackend"
@@ -1582,99 +1725,19 @@ def get_provider_info():
         "auth-backends": ["airflow.providers.google.common.auth_backend.google_openid"],
         "logging": [
             "airflow.providers.google.cloud.log.gcs_task_handler.GCSTaskHandler",
-            "airflow.providers.google.cloud.log.stackdriver_task_handler.StackdriverTaskHandler",
+            "airflow.providers.google.cloud.log.cloud_logging_task_handler.CloudLoggingTaskHandler",
         ],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-common-compat>=1.4.0",
-            "apache-airflow-providers-common-sql>=1.20.0",
-            "asgiref>=3.5.2",
-            "dill>=0.2.3",
-            "gcloud-aio-auth>=5.2.0",
-            "gcloud-aio-bigquery>=6.1.2",
-            "gcloud-aio-storage>=9.0.0",
-            "gcsfs>=2023.10.0",
-            "google-ads>=26.0.0",
-            "google-analytics-admin>=0.9.0",
-            "google-api-core>=2.11.0,!=2.16.0,!=2.18.0",
-            "google-api-python-client>=2.0.2",
-            "google-auth>=2.29.0",
-            "google-auth-httplib2>=0.0.1",
-            "google-cloud-aiplatform[evaluation]>=1.73.0",
-            "google-cloud-alloydb>=0.4.0",
-            "google-cloud-automl>=2.12.0",
-            "google-cloud-bigquery>=3.4.0,!=3.21.*,!=3.22.0,!=3.23.*",
-            "google-cloud-bigquery-datatransfer>=3.13.0",
-            "google-cloud-bigtable>=2.17.0",
-            "google-cloud-build>=3.31.0",
-            "google-cloud-compute>=1.10.0",
-            "google-cloud-container>=2.52.0",
-            "google-cloud-datacatalog>=3.23.0",
-            "google-cloud-dataflow-client>=0.8.6",
-            "google-cloud-dataform>=0.5.0",
-            "google-cloud-dataplex>=2.6.0",
-            "google-cloud-dataproc>=5.12.0",
-            "google-cloud-dataproc-metastore>=1.12.0",
-            "google-cloud-dlp>=3.12.0",
-            "google-cloud-kms>=2.15.0",
-            "google-cloud-language>=2.9.0",
-            "google-cloud-logging>=3.5.0",
-            "google-cloud-managedkafka>=0.1.6",
-            "google-cloud-memcache>=1.7.0",
-            "google-cloud-monitoring>=2.18.0",
-            "google-cloud-orchestration-airflow>=1.10.0",
-            "google-cloud-os-login>=2.9.1",
-            "google-cloud-pubsub>=2.21.3",
-            "google-cloud-redis>=2.12.0",
-            "google-cloud-secret-manager>=2.16.0",
-            "google-cloud-spanner>=3.11.1,!=3.49.0",
-            "google-cloud-speech>=2.18.0",
-            "google-cloud-storage>=2.7.0",
-            "google-cloud-storage-transfer>=1.4.1",
-            "google-cloud-tasks>=2.13.0",
-            "google-cloud-texttospeech>=2.14.1",
-            "google-cloud-translate>=3.16.0",
-            "google-cloud-videointelligence>=2.11.0",
-            "google-cloud-vision>=3.4.0",
-            "google-cloud-workflows>=1.10.0",
-            "google-cloud-run>=0.10.0",
-            "google-cloud-batch>=0.13.0",
-            "grpcio-gcp>=0.2.2",
-            "httpx>=0.25.0",
-            "looker-sdk>=22.4.0,!=24.18.0",
-            "pandas-gbq>=0.7.0",
-            "pandas>=2.1.2,<2.2",
-            "proto-plus>=1.19.6",
-            "pyarrow>=14.0.1",
-            "python-slugify>=7.0.0",
-            "PyOpenSSL>=23.0.0",
-            "sqlalchemy-bigquery>=1.2.1",
-            "sqlalchemy-spanner>=1.6.2",
-            "tenacity>=8.1.0",
-            "immutabledict>=4.2.0",
-            "types-protobuf!=5.29.1.20250402",
+        "remote-logging": [
+            {
+                "classpath": "airflow.providers.google.cloud.log.gcs_task_handler.GCSRemoteLogIO",
+                "scheme": "gs",
+            },
+            {
+                "classpath": "airflow.providers.google.cloud.log.cloud_logging_task_handler.CloudLoggingRemoteLogIO",
+                "scheme": "stackdriver",
+            },
         ],
-        "optional-dependencies": {
-            "apache.beam": [
-                'apache-beam[gcp]>=2.53.0; python_version < "3.12"',
-                'apache-beam[gcp]>=2.57.0; python_version >= "3.12"',
-            ],
-            "cncf.kubernetes": ["apache-airflow-providers-cncf-kubernetes>=10.1.0"],
-            "leveldb": ["plyvel>=1.5.1"],
-            "oracle": ["apache-airflow-providers-oracle>=3.1.0"],
-            "facebook": ["apache-airflow-providers-facebook>=2.2.0"],
-            "amazon": ["apache-airflow-providers-amazon>=2.6.0"],
-            "apache.cassandra": ["apache-airflow-providers-apache-cassandra"],
-            "microsoft.azure": ["apache-airflow-providers-microsoft-azure"],
-            "microsoft.mssql": ["apache-airflow-providers-microsoft-mssql"],
-            "mysql": ["apache-airflow-providers-mysql"],
-            "openlineage": ["apache-airflow-providers-openlineage"],
-            "postgres": ["apache-airflow-providers-postgres"],
-            "presto": ["apache-airflow-providers-presto"],
-            "salesforce": ["apache-airflow-providers-salesforce"],
-            "sftp": ["apache-airflow-providers-sftp"],
-            "ssh": ["apache-airflow-providers-ssh"],
-            "trino": ["apache-airflow-providers-trino"],
-        },
-        "devel-dependencies": [],
+        "queues": [
+            "airflow.providers.google.event_scheduling.events.pubsub.PubSubMessageQueueEventTriggerContainer"
+        ],
     }

@@ -20,14 +20,16 @@
 # IF YOU WANT TO MODIFY THIS FILE EXCEPT DEPENDENCIES, YOU SHOULD MODIFY THE TEMPLATE
 # `pyproject_TEMPLATE.toml.jinja2` IN the `dev/breeze/src/airflow_breeze/templates` DIRECTORY
 [build-system]
-requires = ["flit_core==3.12.0"]
+requires = ["flit_core==4.2.0"]
 build-backend = "flit_core.buildapi"
 
 [project]
 name = "apache-airflow-providers-amazon"
-version = "9.5.0"
+version = "9.41.0"
 description = "Provider package apache-airflow-providers-amazon for Apache Airflow"
 readme = "README.rst"
+license = "Apache-2.0"
+license-files = ['LICENSE', 'NOTICE']
 authors = [
     {name="Apache Software Foundation", email="dev@airflow.apache.org"},
 ]
@@ -43,68 +45,71 @@ classifiers = [
     "Intended Audience :: System Administrators",
     "Framework :: Apache Airflow",
     "Framework :: Apache Airflow :: Provider",
-    "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: System :: Monitoring",
 ]
-requires-python = "~=3.9"
+requires-python = ">=3.11"
 
 # The dependencies should be modified in place in the generated file.
 # Any change in the dependencies is preserved when the file is regenerated
-# Make sure to run ``breeze static-checks --type update-providers-dependencies --all-files``
+# Make sure to run ``prek update-providers-dependencies --all-files``
 # After you modify the dependencies, and rebuild your Breeze CI image with ``breeze ci-image build``
 dependencies = [
-    "apache-airflow>=2.9.0",
-    "apache-airflow-providers-common-compat>=1.6.0",
-    "apache-airflow-providers-common-sql>=1.20.0",
+    "apache-airflow>=2.11.0",
+    "apache-airflow-providers-common-compat>=1.23.0",
+    "apache-airflow-providers-common-sql>=1.32.0",
     "apache-airflow-providers-http",
-    # We should update minimum version of boto3 and here regularly to avoid `pip` backtracking with the number
-    # of candidates to consider. Make sure to configure boto3 version here as well as in all the tools below
-    # in the `devel-dependencies` section to be the same minimum version.
-    "boto3>=1.37.0",
-    "botocore>=1.34.90",
+    # The boto3/botocore floors are raised automatically by `breeze ci upgrade` to limit `pip` backtracking
+    # (see [tool.airflow.dependency-floors] in the root pyproject.toml). The mypy-boto3-* stubs in
+    # `devel-dependencies` below are not covered by that automation and are raised by hand.
+    "boto3>=1.43.6",
+    "botocore>=1.43.6",
     "inflection>=0.5.1",
     # Allow a wider range of watchtower versions for flexibility among users
-    "watchtower>=3.0.0,!=3.3.0,<4",
+    "watchtower>=3.3.1,<4",
     "jsonpath_ng>=1.5.3",
-    "redshift_connector>=2.0.918",
-    "asgiref>=2.3.0",
-    "PyAthena>=3.0.10",
+    "redshift_connector>=2.1.3",
+    "redshift_connector>=2.1.13; python_version >= '3.14'",
+    "asgiref>=2.3.0; python_version < '3.14'",
+    "asgiref>=3.11.1; python_version >= '3.14'",
+    "PyAthena>=3.10.0",
     "jmespath>=0.7.0",
-    "python3-saml>=1.16.0",
-    # python3-saml is dependent on xmlsec and seems they do not pin it, pinning here would be needed
-    # We can remove it after https://github.com/xmlsec/python-xmlsec/issues/344 is fixed
-    "xmlsec!=1.3.15,>=1.3.14",
-    "sagemaker-studio>=1.0.9",
+    # Do not change sagemaker-studio versions without approval from AWS.
+    # Capping sagemaker-studio under 1.1.0 temporarily until the NotebookOperator params are released to newer versions
+    "sagemaker-studio>=1.0.25,<1.1.0",
+    "marshmallow>=3",
 ]
 
 # The optional dependencies should be modified in place in the generated file
 # Any change in the dependencies is preserved when the file is regenerated
 [project.optional-dependencies]
-"pandas" = [
-    # In pandas 2.2 minimal version of the sqlalchemy is 2.0
-    # https://pandas.pydata.org/docs/whatsnew/v2.2.0.html#increased-minimum-versions-for-dependencies
-    # However Airflow not fully supports it yet: https://github.com/apache/airflow/issues/28723
-    # In addition FAB also limit sqlalchemy to < 2.0
-    "pandas>=2.1.2,<2.2",
-]
-# There is conflict between boto3 and aiobotocore dependency botocore.
-# TODO: We can remove it once boto3 and aiobotocore both have compatible botocore version or
-# boto3 have native async support and we move away from aio aiobotocore
+# TODO: Remove aiobotocore when boto3 has native async support (and we transition to it)
 "aiobotocore" = [
-    "aiobotocore[boto3]>=2.13.0",
+    "aiobotocore>=3.0.0",
 ]
 "cncf.kubernetes" = [
-    "apache-airflow-providers-cncf-kubernetes>=7.2.0",
+    "apache-airflow-providers-cncf-kubernetes>=11.0.0",
+]
+"datafusion" = [
+    "datafusion>=50.0.0,<52.0.0",
+    "apache-airflow-providers-common-sql>=1.33.0",
 ]
 "s3fs" = [
     "s3fs>=2023.10.0",
 ]
+"msk" = [
+    "aws-msk-iam-sasl-signer-python>=1.0.1",
+]
 "python3-saml" = [
-    "python3-saml>=1.16.0",
+    # Python 3 saml is not compatible with Python 3.13 yet, so we pin it to < 3.13
+    "python3-saml>=1.16.0; python_version < '3.13'",
+    # python3-saml is dependent on xmlsec and seems they do not pin it, pinning here would be needed
+    # We can remove it after https://github.com/xmlsec/python-xmlsec/issues/344 is fixed
+    "xmlsec>=1.3.14; python_version < '3.13'",
+    "lxml>=6.0.0; python_version < '3.13'",
 ]
 "apache.hive" = [
     "apache-airflow-providers-apache-hive"
@@ -113,7 +118,7 @@ dependencies = [
     "apache-airflow-providers-exasol"
 ]
 "fab" = [
-    "apache-airflow-providers-fab"
+    "apache-airflow-providers-fab>=2.2.0"
 ]
 "ftp" = [
     "apache-airflow-providers-ftp"
@@ -130,8 +135,18 @@ dependencies = [
 "mongo" = [
     "apache-airflow-providers-mongo"
 ]
+"pandas" = [
+    'pandas>=2.1.2; python_version <"3.13"',
+    'pandas>=2.2.3; python_version >="3.13" and python_version <"3.14"',
+    'pandas>=2.3.3; python_version >="3.14"',
+]
+"parquet" = [
+    "pyarrow>=16.1.0; python_version < '3.13'",
+    "pyarrow>=18.0.0; python_version >= '3.13' and python_version < '3.14'",
+    "pyarrow>=22.0.0; python_version >= '3.14'",
+]
 "openlineage" = [
-    "apache-airflow-providers-openlineage"
+    "apache-airflow-providers-openlineage>=2.3.0"
 ]
 "salesforce" = [
     "apache-airflow-providers-salesforce"
@@ -142,6 +157,22 @@ dependencies = [
 "standard" = [
     "apache-airflow-providers-standard"
 ]
+"common.ai" = [
+    "apache-airflow-providers-common-ai>=0.11.0",
+]
+"common.messaging" = [
+    "apache-airflow-providers-common-messaging>=2.0.0"
+]
+# DuckDB support is opt-in: the duckdb wheel is around 20MB and irrelevant to most users of this
+# provider, so it must never become a hard dependency here.
+"duckdb" = [
+    "apache-airflow-providers-duckdb>=0.1.0",
+    # AwsDuckDBHook creates its S3 secret with REFRESH 'auto', which needs DuckDB 1.2.2.
+    "duckdb>=1.2.2",
+]
+"sqlalchemy" = [
+    "sqlalchemy>=1.4.54,!=2.1.0",
+]
 
 [dependency-groups]
 dev = [
@@ -150,8 +181,11 @@ dev = [
     "apache-airflow-devel-common",
     "apache-airflow-providers-apache-hive",
     "apache-airflow-providers-cncf-kubernetes",
+    "apache-airflow-providers-common-ai",
     "apache-airflow-providers-common-compat",
+    "apache-airflow-providers-common-messaging",
     "apache-airflow-providers-common-sql",
+    "apache-airflow-providers-duckdb",
     "apache-airflow-providers-exasol",
     "apache-airflow-providers-ftp",
     "apache-airflow-providers-google",
@@ -163,10 +197,10 @@ dev = [
     "apache-airflow-providers-salesforce",
     "apache-airflow-providers-ssh",
     # Additional devel dependencies (do not remove this line and add extra development dependencies)
-    "aiobotocore>=2.13.0",
+    "apache-airflow-providers-amazon[aiobotocore]",
     "apache-airflow-providers-postgres",
     "aws_xray_sdk>=2.12.0",
-    "moto[cloudformation,glue]>=5.1.2",
+    "moto[cloudformation,glue]>=5.2.2",
     "mypy-boto3-appflow>=1.37.0",
     "mypy-boto3-rds>=1.34.90",
     "mypy-boto3-redshift-data>=1.34.0",
@@ -176,6 +210,27 @@ dev = [
     "openapi-spec-validator>=0.7.1",
     "opensearch-py>=2.2.0",
     "responses>=0.25.0",
+    "apache-airflow-providers-common-sql[pandas,polars]",
+    "apache-airflow-providers-amazon[sqlalchemy]",
+    "apache-airflow-providers-amazon[parquet]",
+    "apache-airflow-providers-duckdb",
+    "apache-airflow-providers-amazon[datafusion]"
+]
+
+# To build docs:
+#
+#    uv run --group docs build-docs
+#
+# To enable auto-refreshing build with server:
+#
+#    uv run --group docs build-docs --autobuild
+#
+# To see more options:
+#
+#    uv run --group docs build-docs --help
+#
+docs = [
+    "apache-airflow-devel-common[docs]"
 ]
 
 [tool.uv.sources]
@@ -185,12 +240,11 @@ apache-airflow = {workspace = true}
 apache-airflow-devel-common = {workspace = true}
 apache-airflow-task-sdk = {workspace = true}
 apache-airflow-providers-common-sql = {workspace = true}
-apache-airflow-providers-fab = {workspace = true}
 apache-airflow-providers-standard = {workspace = true}
 
 [project.urls]
-"Documentation" = "https://airflow.apache.org/docs/apache-airflow-providers-amazon/9.5.0"
-"Changelog" = "https://airflow.apache.org/docs/apache-airflow-providers-amazon/9.5.0/changelog.html"
+"Documentation" = "https://airflow.apache.org/docs/apache-airflow-providers-amazon/9.41.0"
+"Changelog" = "https://airflow.apache.org/docs/apache-airflow-providers-amazon/9.41.0/changelog.html"
 "Bug Tracker" = "https://github.com/apache/airflow/issues"
 "Source Code" = "https://github.com/apache/airflow"
 "Slack Chat" = "https://s.apache.org/airflow-slack"
@@ -202,3 +256,14 @@ provider_info = "airflow.providers.amazon.get_provider_info:get_provider_info"
 
 [tool.flit.module]
 name = "airflow.providers.amazon"
+
+# Explicit sdist contents so the build does not rely on VCS information
+# (flit 4.0 makes --no-use-vcs the default — see https://github.com/pypa/flit/pull/782).
+[tool.flit.sdist]
+include = [
+    "docs/",
+    "provider.yaml",
+    "src/airflow/__init__.py",
+    "src/airflow/providers/__init__.py",
+    "tests/",
+]

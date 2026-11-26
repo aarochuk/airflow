@@ -20,10 +20,12 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import ydb
-from sqlalchemy.engine import URL
 from ydb_dbapi import Connection as DbApiConnection
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import (
+    AirflowException,
+    AirflowOptionalProviderFeatureException,
+)
 from airflow.providers.common.sql.hooks.sql import DbApiHook
 from airflow.providers.ydb.utils.credentials import get_credentials_from_connection
 from airflow.providers.ydb.utils.defaults import CONN_NAME_ATTR, CONN_TYPE, DEFAULT_CONN_NAME
@@ -31,9 +33,13 @@ from airflow.providers.ydb.utils.defaults import CONN_NAME_ATTR, CONN_TYPE, DEFA
 DEFAULT_YDB_GRPCS_PORT: int = 2135
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import URL
     from ydb_dbapi import Cursor as DbApiCursor
 
-    from airflow.models.connection import Connection
+    try:
+        from airflow.sdk import Connection
+    except ImportError:
+        from airflow.models.connection import Connection  # type: ignore[assignment]
 
 
 class YDBCursor:
@@ -228,6 +234,14 @@ class YDBHook(DbApiHook):
 
     @property
     def sqlalchemy_url(self) -> URL:
+        try:
+            from sqlalchemy.engine import URL
+        except (ImportError, ModuleNotFoundError) as err:
+            raise AirflowOptionalProviderFeatureException(
+                "The 'sqlalchemy' library is required to use this feature. "
+                "Please install it with: pip install 'apache-airflow-providers-ydb[sqlalchemy]'"
+            ) from err
+
         conn: Connection = self.get_connection(self.get_conn_id())
         return URL.create(
             drivername="ydb",

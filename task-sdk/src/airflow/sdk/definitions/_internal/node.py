@@ -17,24 +17,21 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from abc import ABCMeta, abstractmethod
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-import methodtools
-
+from airflow.sdk._shared.dagnode.node import GenericDAGNode
 from airflow.sdk.definitions._internal.mixins import DependencyMixin
 
 if TYPE_CHECKING:
-    from airflow.sdk.definitions._internal.types import Logger
-    from airflow.sdk.definitions.abstractoperator import Operator
+    from airflow.sdk.api.datamodels._generated import DagAttributeTypes
     from airflow.sdk.definitions.dag import DAG
     from airflow.sdk.definitions.edges import EdgeModifier
-    from airflow.sdk.definitions.taskgroup import TaskGroup
-    from airflow.serialization.enums import DagAttributeTypes
+    from airflow.sdk.definitions.taskgroup import TaskGroup  # noqa: F401
+    from airflow.sdk.types import Operator  # noqa: F401
 
 
 KEY_REGEX = re.compile(r"^[\w.-]+$")
@@ -67,55 +64,15 @@ def validate_group_key(k: str, max_length: int = 200):
         )
 
 
-class DAGNode(DependencyMixin, metaclass=ABCMeta):
+class DAGNode(GenericDAGNode["DAG", "Operator", "TaskGroup"], DependencyMixin, metaclass=ABCMeta):  # type: ignore[type-var]
     """
     A base class for a node in the graph of a workflow.
 
     A node may be an Operator or a Task Group, either mapped or unmapped.
     """
 
-    dag: DAG | None
-    task_group: TaskGroup | None
-    """The task_group that contains this node"""
     start_date: datetime | None
     end_date: datetime | None
-    upstream_task_ids: set[str]
-    downstream_task_ids: set[str]
-
-    def __init__(self):
-        self.upstream_task_ids = set()
-        self.downstream_task_ids = set()
-        super().__init__()
-
-    @property
-    @abstractmethod
-    def node_id(self) -> str:
-        raise NotImplementedError()
-
-    @property
-    def label(self) -> str | None:
-        tg = self.task_group
-        if tg and tg.node_id and tg.prefix_group_id:
-            # "task_group_id.task_id" -> "task_id"
-            return self.node_id[len(tg.node_id) + 1 :]
-        return self.node_id
-
-    def has_dag(self) -> bool:
-        return self.dag is not None
-
-    @property
-    def dag_id(self) -> str:
-        """Returns dag id if it has one or an adhoc/meaningless ID."""
-        if self.dag:
-            return self.dag.dag_id
-        return "_in_memory_dag_"
-
-    @methodtools.lru_cache()  # type: ignore[misc]
-    @property
-    def log(self) -> Logger:
-        typ = type(self)
-        name = f"{typ.__module__}.{typ.__qualname__}"
-        return logging.getLogger(name)
 
     @property
     @abstractmethod
@@ -135,6 +92,7 @@ class DAGNode(DependencyMixin, metaclass=ABCMeta):
     ) -> None:
         """Set relatives for the task or task list."""
         from airflow.sdk.bases.operator import BaseOperator
+        from airflow.sdk.definitions._internal.loop import get_edge_source
         from airflow.sdk.definitions.mappedoperator import MappedOperator
 
         if not isinstance(task_or_task_list, Sequence):
@@ -151,38 +109,40 @@ class DAGNode(DependencyMixin, metaclass=ABCMeta):
                     )
                 task_list.append(task)
 
-        # relationships can only be set if the tasks share a single DAG. Tasks
-        # without a DAG are assigned to that DAG.
+        # relationships can only be set if the tasks share a single Dag. Tasks
+        # without a Dag are assigned to that Dag.
         dags: set[DAG] = {task.dag for task in [*self.roots, *task_list] if task.has_dag() and task.dag}
 
         if len(dags) > 1:
-            raise RuntimeError(f"Tried to set relationships between tasks in more than one DAG: {dags}")
-        elif len(dags) == 1:
+            raise RuntimeError(f"Tried to set relationships between tasks in more than one Dag: {dags}")
+        if len(dags) == 1:
             dag = dags.pop()
         else:
             raise ValueError(
-                "Tried to create relationships between tasks that don't have DAGs yet. "
-                f"Set the DAG for at least one task and try again: {[self, *task_list]}"
+                "Tried to create relationships between tasks that don't have Dags yet. "
+                f"Set the Dag for at least one task and try again: {[self, *task_list]}"
             )
 
         if not self.has_dag():
-            # If this task does not yet have a dag, add it to the same dag as the other task.
+            # If this task does not yet have a Dag, add it to the same Dag as the other task.
             self.dag = dag
 
         for task in task_list:
             if dag and not task.has_dag():
-                # If the other task does not yet have a dag, add it to the same dag as this task and
+                # If the other task does not yet have a Dag, add it to the same Dag as this task and
                 dag.add_task(task)  # type: ignore[arg-type]
             if upstream:
-                task.downstream_task_ids.add(self.node_id)
-                self.upstream_task_ids.add(task.node_id)
+                source = get_edge_source(task, self)
+                source.downstream_task_ids.add(self.node_id)
+                self.upstream_task_ids.add(source.node_id)
                 if edge_modifier:
-                    edge_modifier.add_edge_info(dag, task.node_id, self.node_id)
+                    edge_modifier.add_edge_info(dag, source.node_id, self.node_id)
             else:
-                self.downstream_task_ids.add(task.node_id)
-                task.upstream_task_ids.add(self.node_id)
+                source = get_edge_source(self, task)
+                source.downstream_task_ids.add(task.node_id)
+                task.upstream_task_ids.add(source.node_id)
                 if edge_modifier:
-                    edge_modifier.add_edge_info(dag, self.node_id, task.node_id)
+                    edge_modifier.add_edge_info(dag, source.node_id, task.node_id)
 
     def set_downstream(
         self,
@@ -199,34 +159,6 @@ class DAGNode(DependencyMixin, metaclass=ABCMeta):
     ) -> None:
         """Set a node (or nodes) to be directly upstream from the current node."""
         self._set_relatives(task_or_task_list, upstream=True, edge_modifier=edge_modifier)
-
-    @property
-    def downstream_list(self) -> Iterable[Operator]:
-        """List of nodes directly downstream."""
-        if not self.dag:
-            raise RuntimeError(f"Operator {self} has not been assigned to a DAG yet")
-        return [self.dag.get_task(tid) for tid in self.downstream_task_ids]
-
-    @property
-    def upstream_list(self) -> Iterable[Operator]:
-        """List of nodes directly upstream."""
-        if not self.dag:
-            raise RuntimeError(f"Operator {self} has not been assigned to a DAG yet")
-        return [self.dag.get_task(tid) for tid in self.upstream_task_ids]
-
-    def get_direct_relative_ids(self, upstream: bool = False) -> set[str]:
-        """Get set of the direct relative ids to the current task, upstream or downstream."""
-        if upstream:
-            return self.upstream_task_ids
-        else:
-            return self.downstream_task_ids
-
-    def get_direct_relatives(self, upstream: bool = False) -> Iterable[Operator]:
-        """Get list of the direct relatives to the current task, upstream or downstream."""
-        if upstream:
-            return self.upstream_list
-        else:
-            return self.downstream_list
 
     def serialize_for_task_group(self) -> tuple[DagAttributeTypes, Any]:
         """Serialize a task group's content; used by TaskGroupSerialization."""

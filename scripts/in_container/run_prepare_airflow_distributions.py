@@ -37,7 +37,7 @@ AIRFLOW_CORE_ROOT_PATH = AIRFLOW_ROOT_PATH / "airflow-core"
 AIRFLOW_CORE_SOURCES_PATH = AIRFLOW_CORE_ROOT_PATH / "src"
 AIRFLOW_INIT_FILE = AIRFLOW_CORE_SOURCES_PATH / "airflow" / "__init__.py"
 WWW_DIRECTORY = AIRFLOW_CORE_SOURCES_PATH / "airflow" / "www"
-VERSION_SUFFIX = os.environ.get("VERSION_SUFFIX_FOR_PYPI", "")
+VERSION_SUFFIX = os.environ.get("VERSION_SUFFIX", "")
 DISTRIBUTION_FORMAT = os.environ.get("DISTRIBUTION_FORMAT", "wheel")
 
 
@@ -86,16 +86,16 @@ def apply_distribution_format_to_hatch_command(build_command: list[str], distrib
 
 def build_airflow_packages(distribution_format: str):
     reproducible_date = yaml.safe_load(REPRODUCIBLE_BUILD_YAML_PATH.read_text())["source-date-epoch"]
-    envcopy = os.environ.copy()
-    envcopy["SOURCE_DATE_EPOCH"] = str(reproducible_date)
+    hatch_env = {"SOURCE_DATE_EPOCH": str(reproducible_date), "PATH": os.environ["PATH"]}
     airflow_core_build_command = [sys.executable, "-m", "hatch", "build", "-t", "custom"]
     apply_distribution_format_to_hatch_command(airflow_core_build_command, distribution_format)
     console.print(f"[bright_blue]Building apache-airflow-core distributions: {distribution_format}\n")
     build_process = subprocess.run(
         airflow_core_build_command,
+        check=False,
         capture_output=False,
         cwd=AIRFLOW_CORE_ROOT_PATH,
-        env=envcopy,
+        env=hatch_env,
     )
     if build_process.returncode != 0:
         console.print("[red]Error building Airflow packages")
@@ -105,9 +105,10 @@ def build_airflow_packages(distribution_format: str):
     console.print(f"[bright_blue]Building apache-airflow distributions: {distribution_format}\n")
     build_process = subprocess.run(
         airflow_build_command,
+        check=False,
         capture_output=False,
         cwd=AIRFLOW_ROOT_PATH,
-        env=envcopy,
+        env=hatch_env,
     )
     if build_process.returncode != 0:
         console.print("[red]Error building Airflow packages")
@@ -130,8 +131,6 @@ def build_airflow_packages(distribution_format: str):
                             tmpdir,
                             "--no-deps",
                             "--no-cache",
-                            "--no-binary",
-                            ":all:",
                             sdist_distribution_file.as_posix(),
                         ],
                         check=False,

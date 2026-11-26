@@ -17,23 +17,32 @@
 # under the License.
 from __future__ import annotations
 
-import argparse
+import asyncio
+import logging
+import threading
+import warnings
+from contextlib import suppress
 from functools import cached_property
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin
+from weakref import WeakValueDictionary
 
-import packaging.version
-from connexion import FlaskApi
+from cachetools import TTLCache
 from fastapi import FastAPI
-from flask import Blueprint, g
+from fastapi.middleware.wsgi import WSGIMiddleware
+from flask import current_app, g, has_app_context
+from flask_appbuilder.const import AUTH_DB, AUTH_LDAP
 from sqlalchemy import select
-from sqlalchemy.orm import Session, joinedload
-from starlette.middleware.wsgi import WSGIMiddleware
+from sqlalchemy.exc import SQLAlchemyError
 
-from airflow import __version__ as airflow_version
 from airflow.api_fastapi.app import AUTH_MANAGER_FASTAPI_APP_PREFIX
 from airflow.api_fastapi.auth.managers.base_auth_manager import BaseAuthManager
+
+try:
+    from airflow.api_fastapi.auth.managers.base_auth_manager import ExtendedResourceMethod
+except ImportError:
+    from airflow.api_fastapi.auth.managers.base_auth_manager import ResourceMethod as ExtendedResourceMethod
+
 from airflow.api_fastapi.auth.managers.models.resource_details import (
     AccessView,
     BackfillDetails,
@@ -45,63 +54,60 @@ from airflow.api_fastapi.auth.managers.models.resource_details import (
     VariableDetails,
 )
 from airflow.api_fastapi.common.types import ExtraMenuItem, MenuItem
-from airflow.cli.cli_config import (
-    DefaultHelpParser,
-    GroupCommand,
+from airflow.exceptions import AirflowConfigException, AirflowProviderDeprecationWarning
+from airflow.models import Connection, DagModel, Pool, Variable
+from airflow.models.asset import AssetModel
+from airflow.providers.common.compat.sdk import AirflowException, conf
+from airflow.providers.common.compat.security.access_view import (
+    AUDIT_LOGS_ALL_ACCESS_VIEW,
+    IMPORT_ERRORS_ALL_ACCESS_VIEW,
+    REPARSE_ALL_ACCESS_VIEW,
 )
-from airflow.configuration import conf
-from airflow.exceptions import AirflowConfigException, AirflowException
-from airflow.models import DagModel
-from airflow.providers.fab.auth_manager.cli_commands.definition import (
-    DB_COMMANDS,
-    ROLES_COMMANDS,
-    SYNC_PERM_COMMAND,
-    USERS_COMMANDS,
-)
-from airflow.providers.fab.auth_manager.models import Permission, Role, User
+from airflow.providers.fab.auth_manager.models import Role, User
 from airflow.providers.fab.auth_manager.models.anonymous_user import AnonymousUser
+from airflow.providers.fab.version_compat import AIRFLOW_V_3_1_PLUS
 from airflow.providers.fab.www.app import create_app
-from airflow.providers.fab.www.constants import SWAGGER_BUNDLE, SWAGGER_ENABLED
-from airflow.providers.fab.www.extensions.init_views import (
-    _CustomErrorRequestBodyValidator,
-    _LazyResolver,
-)
 from airflow.providers.fab.www.security import permissions
 from airflow.providers.fab.www.security.permissions import (
+    ACTION_CAN_READ,
     RESOURCE_AUDIT_LOG,
+    RESOURCE_AUDIT_LOG_ALL,
+    RESOURCE_BACKFILL,
     RESOURCE_CLUSTER_ACTIVITY,
     RESOURCE_CONFIG,
     RESOURCE_CONNECTION,
     RESOURCE_DAG,
+    RESOURCE_DAG_BUNDLE,
     RESOURCE_DAG_CODE,
     RESOURCE_DAG_DEPENDENCIES,
+    RESOURCE_DAG_PREFIX,
     RESOURCE_DAG_RUN,
     RESOURCE_DAG_VERSION,
     RESOURCE_DAG_WARNING,
     RESOURCE_DOCS,
     RESOURCE_IMPORT_ERROR,
+    RESOURCE_IMPORT_ERROR_ALL,
     RESOURCE_JOB,
     RESOURCE_PLUGIN,
     RESOURCE_POOL,
     RESOURCE_PROVIDER,
-    RESOURCE_SLA_MISS,
+    RESOURCE_REPARSE_ALL,
     RESOURCE_TASK_INSTANCE,
     RESOURCE_TASK_LOG,
-    RESOURCE_TASK_RESCHEDULE,
     RESOURCE_TRIGGER,
     RESOURCE_VARIABLE,
     RESOURCE_WEBSITE,
     RESOURCE_XCOM,
 )
-from airflow.providers.fab.www.utils import (
-    get_fab_action_from_method_map,
-    get_method_from_fab_action_map,
-)
-from airflow.security.permissions import RESOURCE_BACKFILL
-from airflow.utils.session import NEW_SESSION, create_session, provide_session
-from airflow.utils.yaml import safe_load
+from airflow.providers.fab.www.security_appless import ApplessAirflowSecurityManager
+from airflow.providers.fab.www.utils import get_fab_action_from_method_map
+from airflow.utils.session import NEW_SESSION, create_session, create_session_async, provide_session
 
 if TYPE_CHECKING:
+    from flask import Flask
+    from sqlalchemy.orm import Session
+    from starlette.middleware import _MiddlewareFactory
+
     from airflow.api_fastapi.auth.managers.base_auth_manager import ResourceMethod
     from airflow.cli.cli_config import (
         CLICommand,
@@ -115,11 +121,14 @@ if TYPE_CHECKING:
         RESOURCE_ASSET,
         RESOURCE_ASSET_ALIAS,
     )
+    from airflow.serialization.serialized_objects import LazyDeserializedDAG
 else:
     from airflow.providers.common.compat.security.permissions import (
         RESOURCE_ASSET,
         RESOURCE_ASSET_ALIAS,
     )
+
+log = logging.getLogger(__name__)
 
 
 _MAP_DAG_ACCESS_ENTITY_TO_FAB_RESOURCE_TYPE: dict[DagAccessEntity, tuple[str, ...]] = {
@@ -127,7 +136,6 @@ _MAP_DAG_ACCESS_ENTITY_TO_FAB_RESOURCE_TYPE: dict[DagAccessEntity, tuple[str, ..
     DagAccessEntity.CODE: (RESOURCE_DAG_CODE,),
     DagAccessEntity.DEPENDENCIES: (RESOURCE_DAG_DEPENDENCIES,),
     DagAccessEntity.RUN: (RESOURCE_DAG_RUN,),
-    DagAccessEntity.SLA_MISS: (RESOURCE_SLA_MISS,),
     # RESOURCE_TASK_INSTANCE has been originally misused. RESOURCE_TASK_INSTANCE referred to task definition
     # AND task instances without making the difference
     # To be backward compatible, we translate DagAccessEntity.TASK_INSTANCE to RESOURCE_TASK_INSTANCE AND
@@ -136,7 +144,6 @@ _MAP_DAG_ACCESS_ENTITY_TO_FAB_RESOURCE_TYPE: dict[DagAccessEntity, tuple[str, ..
     DagAccessEntity.TASK: (RESOURCE_TASK_INSTANCE,),
     DagAccessEntity.TASK_INSTANCE: (RESOURCE_DAG_RUN, RESOURCE_TASK_INSTANCE),
     DagAccessEntity.TASK_LOGS: (RESOURCE_TASK_LOG,),
-    DagAccessEntity.TASK_RESCHEDULE: (RESOURCE_TASK_RESCHEDULE,),
     DagAccessEntity.VERSION: (RESOURCE_DAG_VERSION,),
     DagAccessEntity.WARNING: (RESOURCE_DAG_WARNING,),
     DagAccessEntity.XCOM: (RESOURCE_XCOM,),
@@ -153,9 +160,20 @@ _MAP_ACCESS_VIEW_TO_FAB_RESOURCE_TYPE = {
     AccessView.WEBSITE: RESOURCE_WEBSITE,
 }
 
+# ``AccessView.IMPORT_ERRORS_ALL`` and ``AccessView.AUDIT_LOGS_ALL`` only exist on
+# Airflow >= 3.4.0, and ``AccessView.REPARSE_ALL`` in a later version; the compat shim yields ``None``
+# on older Airflow versions so this provider still imports there.
+if IMPORT_ERRORS_ALL_ACCESS_VIEW is not None:
+    _MAP_ACCESS_VIEW_TO_FAB_RESOURCE_TYPE[IMPORT_ERRORS_ALL_ACCESS_VIEW] = RESOURCE_IMPORT_ERROR_ALL
+if AUDIT_LOGS_ALL_ACCESS_VIEW is not None:
+    _MAP_ACCESS_VIEW_TO_FAB_RESOURCE_TYPE[AUDIT_LOGS_ALL_ACCESS_VIEW] = RESOURCE_AUDIT_LOG_ALL
+if REPARSE_ALL_ACCESS_VIEW is not None:
+    _MAP_ACCESS_VIEW_TO_FAB_RESOURCE_TYPE[REPARSE_ALL_ACCESS_VIEW] = RESOURCE_REPARSE_ALL
+
 _MAP_MENU_ITEM_TO_FAB_RESOURCE_TYPE = {
     MenuItem.ASSETS: RESOURCE_ASSET,
-    MenuItem.ASSET_EVENTS: RESOURCE_ASSET,
+    MenuItem.AUDIT_LOG: RESOURCE_AUDIT_LOG,
+    MenuItem.CONFIG: RESOURCE_CONFIG,
     MenuItem.CONNECTIONS: RESOURCE_CONNECTION,
     MenuItem.DAGS: RESOURCE_DAG,
     MenuItem.DOCS: RESOURCE_DOCS,
@@ -166,6 +184,29 @@ _MAP_MENU_ITEM_TO_FAB_RESOURCE_TYPE = {
     MenuItem.XCOMS: RESOURCE_XCOM,
 }
 
+CACHE_TTL = conf.getint("fab", "cache_ttl", fallback=30)
+TOKEN_GENERATION_CLAIM = "token_generation"
+
+
+if AIRFLOW_V_3_1_PLUS:
+    from airflow.providers.fab.www.security.permissions import RESOURCE_HITL_DETAIL
+
+    _MAP_MENU_ITEM_TO_FAB_RESOURCE_TYPE[MenuItem.REQUIRED_ACTIONS] = RESOURCE_HITL_DETAIL
+    _MAP_DAG_ACCESS_ENTITY_TO_FAB_RESOURCE_TYPE[DagAccessEntity.HITL_DETAIL] = (RESOURCE_HITL_DETAIL,)
+
+if hasattr(MenuItem, "DEADLINES"):
+    _MAP_MENU_ITEM_TO_FAB_RESOURCE_TYPE[MenuItem.DEADLINES] = RESOURCE_DAG_RUN
+
+# The Dag bundles menu item first ships in Airflow 3.4.0 and its view in 3.4.1, newer than this
+# provider's minimum Airflow. Unmapped, the view is denied to every role. Airflow 3.4.0 shows the
+# bundles to anyone who can read a Dag in them, so there the menu entry stays on Dag access.
+DAG_BUNDLES_ACCESS_VIEW: AccessView | None = getattr(AccessView, "DAG_BUNDLES", None)
+if DAG_BUNDLES_ACCESS_VIEW is not None:
+    _MAP_ACCESS_VIEW_TO_FAB_RESOURCE_TYPE[DAG_BUNDLES_ACCESS_VIEW] = RESOURCE_DAG_BUNDLE
+    _MAP_MENU_ITEM_TO_FAB_RESOURCE_TYPE[MenuItem.DAG_BUNDLES] = RESOURCE_DAG_BUNDLE
+elif hasattr(MenuItem, "DAG_BUNDLES"):
+    _MAP_MENU_ITEM_TO_FAB_RESOURCE_TYPE[MenuItem.DAG_BUNDLES] = RESOURCE_DAG
+
 
 class FabAuthManager(BaseAuthManager[User]):
     """
@@ -174,45 +215,57 @@ class FabAuthManager(BaseAuthManager[User]):
     This auth manager is responsible for providing a backward compatible user management experience to users.
     """
 
+    cache: TTLCache = TTLCache(maxsize=1024, ttl=CACHE_TTL)
+    # ``TTLCache`` is not thread-safe: requests read it on the event loop, while user updates pop
+    # from it in threadpool and WSGI threads. Hold this lock for every access to ``cache``.
+    cache_lock = threading.Lock()
+    _user_fetch_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
     appbuilder: AirflowAppBuilder | None = None
+    flask_app: Flask | None = None
+    _flask_app_lock = threading.Lock()
+
+    @classmethod
+    def evict_cached_user(cls, user_id: int) -> None:
+        """
+        Drop a user from the cache so that their next request reloads them from the database.
+
+        Call it only after the change to the user is committed: a request served in between would
+        cache the row as it was before the change.
+        """
+        with cls.cache_lock:
+            cls.cache.pop(user_id, None)
 
     def init_flask_resources(self) -> None:
         self._sync_appbuilder_roles()
 
+    @staticmethod
+    def sync_dag_perms(dag: LazyDeserializedDAG, *, session: Session) -> None:
+        """Sync Dag-specific permissions without initializing the auth manager."""
+        log.debug("Syncing DAG permissions: %s to the DB", dag.dag_id)
+        security_manager = ApplessAirflowSecurityManager(session=session)
+        security_manager.sync_perm_for_dag(dag.dag_id, dag.access_control)
+
     @cached_property
     def apiserver_endpoint(self) -> str:
-        return conf.get("api", "base_url")
+        return conf.get("api", "base_url", fallback="/")
 
     @staticmethod
     def get_cli_commands() -> list[CLICommand]:
         """Vends CLI commands to be included in Airflow CLI."""
-        commands: list[CLICommand] = [
-            GroupCommand(
-                name="users",
-                help="Manage users",
-                subcommands=USERS_COMMANDS,
-            ),
-            GroupCommand(
-                name="roles",
-                help="Manage roles",
-                subcommands=ROLES_COMMANDS,
-            ),
-            SYNC_PERM_COMMAND,  # not in a command group
-        ]
-        # If Airflow version is 3.0.0 or higher, add the fab-db command group
-        if packaging.version.parse(
-            packaging.version.parse(airflow_version).base_version
-        ) >= packaging.version.parse("3.0.0"):
-            commands.append(GroupCommand(name="fab-db", help="Manage FAB", subcommands=DB_COMMANDS))
-        return commands
+        from airflow.providers.fab.cli.definition import get_fab_cli_commands
+
+        return get_fab_cli_commands()
 
     def get_fastapi_app(self) -> FastAPI | None:
         """Get the FastAPI app."""
-        from airflow.providers.fab.auth_manager.api_fastapi.routes.login import (
-            login_router,
+        from airflow.providers.fab.auth_manager.api_fastapi.routes.router import (
+            auth_router,
+            fab_router,
+            register_routes,
         )
 
         flask_app = create_app(enable_plugins=False)
+        self.flask_app = flask_app
 
         app = FastAPI(
             title="FAB auth manager API",
@@ -224,29 +277,36 @@ class FabAuthManager(BaseAuthManager[User]):
             ),
         )
 
-        # Add the login router to the FastAPI app
-        app.include_router(login_router)
+        register_routes()
+        app.include_router(auth_router)
+        app.include_router(fab_router)
+
+        # Session cleanup middleware to prevent PendingRollbackError.
+        # FAB's Flask views (e.g., /users/list/, /roles/list/) are mounted below via
+        # WSGIMiddleware. These views use settings.Session (SQLAlchemy scoped_session),
+        # but unlike a native Flask app where teardown_appcontext calls Session.remove(),
+        # the WSGI wrapper does not trigger Flask's teardown hooks.
+        # Without explicit cleanup, sessions remain in "idle in transaction" state.
+        # When the database connection times out (e.g., PostgreSQL's
+        # idle_in_transaction_session_timeout), subsequent requests reusing the
+        # invalidated session raise PendingRollbackError.
+        @app.middleware("http")
+        async def cleanup_session_middleware(request, call_next):
+            try:
+                response = await call_next(request)
+                return response
+            finally:
+                from airflow import settings
+
+                if settings.Session:
+                    try:
+                        settings.Session.remove()
+                    except Exception:
+                        log.warning("Failed to remove session during cleanup", exc_info=True)
 
         app.mount("/", WSGIMiddleware(flask_app))
 
         return app
-
-    def get_api_endpoints(self) -> None | Blueprint:
-        folder = Path(__file__).parents[0].resolve()  # this is airflow/auth/managers/fab/
-        with folder.joinpath("openapi", "v1.yaml").open() as f:
-            specification = safe_load(f)
-        return FlaskApi(
-            specification=specification,
-            resolver=_LazyResolver(),
-            base_path="/fab/v1",
-            options={
-                "swagger_ui": SWAGGER_ENABLED,
-                "swagger_path": SWAGGER_BUNDLE.__fspath__(),
-            },
-            strict_validation=True,
-            validate_responses=True,
-            validator_map={"body": _CustomErrorRequestBodyValidator},
-        ).blueprint
 
     def get_user(self) -> User:
         """
@@ -265,21 +325,207 @@ class FabAuthManager(BaseAuthManager[User]):
 
         return current_user
 
+    @property
+    def session(self):
+        return self.appbuilder.session
+
+    @staticmethod
+    def _validate_user(user: User | None, user_id: str) -> User:
+        if user is None:
+            raise ValueError(f"User with id {user_id} not found")
+        # A token stays syntactically valid until it expires, so the account it
+        # names has to be re-checked on every request rather than trusted from
+        # the signature alone. ``is_active`` reads the nullable ``active``
+        # column, and a null is treated as inactive here for the same reason it
+        # is on the password path in ``auth_user_db``.
+        if not user.is_active:
+            raise ValueError(f"User with id {user_id} is not active")
+        return user
+
+    @staticmethod
+    def _get_token_generation(token: dict[str, Any]) -> int:
+        # Tokens issued before the claim existed count as the initial generation.
+        token_generation = token.get(TOKEN_GENERATION_CLAIM, 0)
+        if type(token_generation) is not int:
+            raise ValueError(
+                f"Token of user with id {token['sub']} has an invalid {TOKEN_GENERATION_CLAIM} claim"
+            )
+        return token_generation
+
+    def _get_cached_user(self, user_id: int, token_generation: int) -> User | None:
+        """
+        Return the cached user, unless the token is newer than it.
+
+        A newer token was issued after a password change that the cached user predates, so the
+        cached user is dropped: it must not match tokens from before the change either.
+        """
+        with self.cache_lock:
+            user = self.cache.get(user_id)
+            if user is not None and user.token_generation < token_generation:
+                self.cache.pop(user_id, None)
+                return None
+        return user
+
     def deserialize_user(self, token: dict[str, Any]) -> User:
-        with create_session() as session:
-            return session.get(User, int(token["sub"]))
+        user_id = int(token["sub"])
+        token_generation = self._get_token_generation(token)
+        user = self._get_cached_user(user_id, token_generation)
+        if user is None:
+            user = self._load_active_user(user_id)
+            with self.cache_lock:
+                self.cache[user_id] = user
+        if token_generation != user.token_generation:
+            raise ValueError(f"Token of user with id {user_id} was issued before their last password change")
+        return user
+
+    def _load_active_user(self, user_id: int) -> User:
+        def _fetch_user() -> User:
+            with create_session() as session:
+                user = session.scalars(select(User).where(User.id == user_id)).one_or_none()
+                return self._validate_user(user, str(user_id))
+
+        try:
+            return _fetch_user()
+        except SQLAlchemyError:
+            # Discard the poisoned scoped session so the next request gets a
+            # fresh connection from the pool instead of a PendingRollbackError.
+            with suppress(Exception):
+                self.session.remove()
+            try:
+                return _fetch_user()
+            except SQLAlchemyError:
+                # If retry also fails, remove the scoped session again to keep
+                # future requests from reusing a broken transaction state.
+                with suppress(Exception):
+                    self.session.remove()
+                raise
+
+    async def deserialize_user_async(self, token: dict[str, Any]) -> User:
+        """Deserialize a user for FastAPI JWT authentication without blocking its event loop."""
+        # Preserve legacy synchronous overrides while the default FAB implementation uses async lookup below.
+        deserialize_user_owner = next(cls for cls in type(self).__mro__ if "deserialize_user" in cls.__dict__)
+        if deserialize_user_owner is not FabAuthManager:
+            return self.deserialize_user(token)
+
+        user_id = int(token["sub"])
+        token_generation = self._get_token_generation(token)
+        user = self._get_cached_user(user_id, token_generation)
+        if user is None:
+            lock = self._user_fetch_locks.setdefault(user_id, asyncio.Lock())
+            async with lock:
+                user = self._get_cached_user(user_id, token_generation)
+                if user is None:
+                    async with create_session_async() as session:
+                        user = (await session.scalars(select(User).where(User.id == user_id))).one_or_none()
+                        user = self._validate_user(user, token["sub"])
+                    with self.cache_lock:
+                        self.cache[user_id] = user
+        if token_generation != user.token_generation:
+            raise ValueError(f"Token of user with id {user_id} was issued before their last password change")
+        return user
 
     def serialize_user(self, user: User) -> dict[str, Any]:
-        return {"sub": str(user.id)}
+        return {"sub": str(user.id), TOKEN_GENERATION_CLAIM: user.token_generation}
 
     def is_logged_in(self) -> bool:
         """Return whether the user is logged in."""
         user = self.get_user()
-        return (
-            self.appbuilder
-            and self.appbuilder.get_app.config.get("AUTH_ROLE_PUBLIC", None)
-            or (not user.is_anonymous and user.is_active)
+        return bool(
+            (self.appbuilder and self._get_auth_role_public()) or (not user.is_anonymous and user.is_active)
         )
+
+    def _get_auth_role_public(self) -> str | None:
+        """
+        Return the role granted to anonymous users, or ``None`` if public access is disabled.
+
+        Reads ``[fab] auth_role_public`` from the Airflow config first, then falls back to
+        ``AUTH_ROLE_PUBLIC`` on the Flask app config, which covers the legacy entry in
+        ``webserver_config.py``.
+        """
+        role_public = conf.get("fab", "auth_role_public", fallback="") or None
+        if role_public:
+            return role_public
+        if self.appbuilder is None:
+            return None
+        # The API server runs FastAPI requests and startup without a Flask app context, where
+        # ``current_app`` raises, so read the Flask app it built in ``get_fastapi_app``.
+        if has_app_context():
+            return current_app.config.get("AUTH_ROLE_PUBLIC")
+        if self.flask_app is not None:
+            return self.flask_app.config.get("AUTH_ROLE_PUBLIC")
+        return None
+
+    async def build_public_user(self) -> AnonymousUser | None:
+        """
+        Build an :class:`AnonymousUser` pre-populated with the configured public role.
+
+        Returns ``None`` when neither ``[fab] auth_role_public`` nor the legacy
+        ``AUTH_ROLE_PUBLIC`` entry in ``webserver_config.py`` is set.
+
+        The role and its permissions are resolved via the database so the caller does not
+        need a Flask app/request context to use the returned user (see #60897).
+
+        :meta private:
+        """
+        public_role_name = self._get_auth_role_public()
+        if not public_role_name:
+            return None
+
+        user = AnonymousUser()
+        async with create_session_async() as session:
+            role = await session.scalar(select(Role).where(Role.name == public_role_name))
+        # ``AnonymousUser.roles``/``perms`` normally resolve lazily through Flask's
+        # ``current_app``. Writing ``_roles``/``_perms`` directly freezes a snapshot for
+        # the lifetime of a single FastAPI authorization check.
+        if role is None:
+            log.debug(
+                "The public role %r does not exist, so anonymous users get no permissions", public_role_name
+            )
+            user._roles = set()
+            user._perms = set()
+        else:
+            user._roles = {role}
+            user._perms = {(perm.action.name, perm.resource.name) for perm in role.permissions}
+        return user
+
+    def get_fastapi_middlewares(self) -> list[tuple[_MiddlewareFactory[Any], dict[str, Any]]]:
+        """Register the FAB public-access middleware when public access is configured."""
+        if not self._get_auth_role_public():
+            return []
+        from airflow.providers.fab.auth_manager.middleware import FabAuthRolePublicMiddleware
+
+        return [(FabAuthRolePublicMiddleware, {})]
+
+    def create_token(self, headers: dict[str, str], body: dict[str, Any]) -> User | None:
+        """
+        Create a new token from a payload.
+
+        By default, it uses basic authentication (username and password), checked against the
+        configured ``AUTH_TYPE``. Tokens are only issued for ``AUTH_DB`` and ``AUTH_LDAP``.
+        Override this method to use a different authentication method (e.g. oauth).
+
+        :param headers: request headers
+        :param body: request body
+        """
+        username = body.get("username")
+        password = body.get("password")
+        # Treat a password made only of NUL bytes as empty, as Flask-AppBuilder's login API does.
+        if (
+            not isinstance(username, str)
+            or not isinstance(password, str)
+            or not username
+            or not password.strip("\x00")
+        ):
+            raise ValueError("Username and password must be provided")
+
+        # Only check the password against the configured authentication type. Other types (OAuth,
+        # remote user, ...) do not authenticate with a username and password, so no token is issued.
+        auth_type = self.security_manager.auth_type
+        if auth_type == AUTH_LDAP:
+            return self.security_manager.auth_user_ldap(username, password, rotate_session_id=False)
+        if auth_type == AUTH_DB:
+            return self.security_manager.auth_user_db(username, password, rotate_session_id=False)
+        return None
 
     def is_authorized_configuration(
         self,
@@ -312,41 +558,52 @@ class FabAuthManager(BaseAuthManager[User]):
 
         There are multiple scenarios:
 
-        1. ``dag_access`` is not provided which means the user wants to access the DAG itself and not a sub
-        entity (e.g. DAG runs).
-        2. ``dag_access`` is provided which means the user wants to access a sub entity of the DAG
-        (e.g. DAG runs).
+        1. ``method`` is "GET" and no details are provided which means the user wants to list Dags (or sub entities of Dags).
+        2. ``access_entity`` is not provided which means the user wants to access the DAG itself and not a sub
+            entity (e.g. Task instances).
+        3. ``access_entity`` is provided which means the user wants to access a sub entity of the DAG
+            (e.g. DAG runs).
 
             a. If ``method`` is GET, then check the user has READ permissions on the DAG and the sub entity.
-            b. Else, check the user has EDIT permissions on the DAG and ``method`` on the sub entity. However,
-                if no specific DAG is targeted, just check the sub entity.
+            b. Else, check the user has EDIT permissions on the DAG and ``method`` on the sub entity.
 
         :param method: The method to authorize.
         :param user: The user performing the action.
         :param access_entity: The dag access entity.
         :param details: The dag details.
         """
-        if not access_entity:
-            # Scenario 1
-            return self._is_authorized_dag(method=method, details=details, user=user)
-        else:
-            # Scenario 2
+        if access_entity:
+            # If a sub-Dag entity is specified, check whether the user has access to it
             resource_types = self._get_fab_resource_types(access_entity)
-            dag_method: ResourceMethod = "GET" if method == "GET" else "PUT"
-
-            if (details and details.id) and not self._is_authorized_dag(
-                method=dag_method, details=details, user=user
-            ):
-                return False
-
-            return all(
-                (
-                    self._is_authorized(method=method, resource_type=resource_type, user=user)
-                    if resource_type != RESOURCE_DAG_RUN or not hasattr(permissions, "resource_name")
-                    else self._is_authorized_dag_run(method=method, details=details, user=user)
-                )
+            access_entity_authorized = all(
+                self._is_authorized(method=method, resource_type=resource_type, user=user)
                 for resource_type in resource_types
             )
+            if access_entity == DagAccessEntity.RUN and details and details.id:
+                # Check using the deprecated permission prefix "DAG Run" to check whether the user has access to dag runs
+                is_authorized_run = self._is_authorized(
+                    method=method,
+                    resource_type=permissions.resource_name(details.id, RESOURCE_DAG_RUN),
+                    user=user,
+                )
+                if not (is_authorized_run or access_entity_authorized):
+                    return False
+            elif not access_entity_authorized:
+                return False
+
+        if method == "GET" and (not details or not details.id):
+            # Scenario 1
+            return self._is_authorized_list_dags(user=user)
+        if not access_entity:
+            # Scenario 2
+            return self._is_authorized_dag(method=method, details=details, user=user)
+        # Scenario 3
+        dag_method: ResourceMethod = "GET" if method == "GET" else "PUT"
+        if (details and details.id) and not self._is_authorized_dag(
+            method=dag_method, details=details, user=user
+        ):
+            return False
+        return True
 
     def is_authorized_backfill(
         self,
@@ -355,6 +612,12 @@ class FabAuthManager(BaseAuthManager[User]):
         user: User,
         details: BackfillDetails | None = None,
     ) -> bool:
+        # Method can be removed once the min Airflow version is >= 3.2.0.
+        warnings.warn(
+            "Use ``is_authorized_dag`` on ``DagAccessEntity.RUN`` instead for a dag level access control.",
+            AirflowProviderDeprecationWarning,
+            stacklevel=2,
+        )
         return self._is_authorized(method=method, resource_type=RESOURCE_BACKFILL, user=user)
 
     def is_authorized_asset(
@@ -385,9 +648,12 @@ class FabAuthManager(BaseAuthManager[User]):
     ) -> bool:
         return self._is_authorized(method=method, resource_type=RESOURCE_VARIABLE, user=user)
 
-    def is_authorized_view(self, *, access_view: AccessView, user: User) -> bool:
+    def is_authorized_view(
+        self, *, access_view: AccessView, user: User, team_name: str | None = None
+    ) -> bool:
+        # ``team_name`` is ignored: FAB has no multi-team support.
         # "Docs" are only links in the menu, there is no page associated
-        method: ResourceMethod = "MENU" if access_view == AccessView.DOCS else "GET"
+        method: ExtendedResourceMethod = "MENU" if access_view == AccessView.DOCS else "GET"
         return self._is_authorized(
             method=method,
             resource_type=_MAP_ACCESS_VIEW_TO_FAB_RESOURCE_TYPE[access_view],
@@ -412,6 +678,46 @@ class FabAuthManager(BaseAuthManager[User]):
         ]
 
     @provide_session
+    def get_authorized_assets(
+        self,
+        *,
+        user: User,
+        method: ResourceMethod = "GET",
+        session: Session = NEW_SESSION,
+    ) -> set[int]:
+        """
+        Get the ids of the assets the user has access to.
+
+        Fab auth manager does not allow fine-grained access with assets. Thus, return all the asset ids.
+
+        :param user: the user
+        :param method: the method to filter on
+        :param session: the session
+        """
+        rows = session.execute(select(AssetModel.id)).scalars().all()
+        return set(rows)
+
+    @provide_session
+    def get_authorized_connections(
+        self,
+        *,
+        user: User,
+        method: ResourceMethod = "GET",
+        session: Session = NEW_SESSION,
+    ) -> set[str]:
+        """
+        Get connection ids (``conn_id``) the user has access to.
+
+        Fab auth manager does not allow fine-grained access with connections. Thus, return all the connection ids.
+
+        :param user: the user
+        :param method: the method to filter on
+        :param session: the session
+        """
+        rows = session.execute(select(Connection.conn_id)).scalars().all()
+        return set(rows)
+
+    @provide_session
     def get_authorized_dag_ids(
         self,
         *,
@@ -422,36 +728,52 @@ class FabAuthManager(BaseAuthManager[User]):
         if self._is_authorized(method=method, resource_type=RESOURCE_DAG, user=user):
             # If user is authorized to access all DAGs, return all DAGs
             return {dag.dag_id for dag in session.execute(select(DagModel.dag_id))}
-        if isinstance(user, AnonymousUser):
-            return set()
-        user_query = session.scalar(
-            select(User)
-            .options(
-                joinedload(User.roles)
-                .subqueryload(Role.permissions)
-                .options(joinedload(Permission.action), joinedload(Permission.resource))
-            )
-            .where(User.id == user.id)
-        )
-        roles = user_query.roles
-
-        map_fab_action_name_to_method_name = get_method_from_fab_action_map()
+        fab_action = get_fab_action_from_method_map().get(method)
         resources = set()
-        for role in roles:
-            for permission in role.permissions:
-                action = permission.action.name
-                if (
-                    action in map_fab_action_name_to_method_name
-                    and map_fab_action_name_to_method_name[action] == method
-                ):
-                    resource = permission.resource.name
-                    if resource == permissions.RESOURCE_DAG:
-                        return {dag.dag_id for dag in session.execute(select(DagModel.dag_id))}
-                    if resource.startswith(permissions.RESOURCE_DAG_PREFIX):
-                        resources.add(resource[len(permissions.RESOURCE_DAG_PREFIX) :])
-                    else:
-                        resources.add(resource)
+        for action, resource in self._get_user_permissions(user):
+            if action == fab_action and resource.startswith(RESOURCE_DAG_PREFIX):
+                resources.add(resource[len(RESOURCE_DAG_PREFIX) :])
         return set(session.scalars(select(DagModel.dag_id).where(DagModel.dag_id.in_(resources))))
+
+    @provide_session
+    def get_authorized_pools(
+        self,
+        *,
+        user: User,
+        method: ResourceMethod = "GET",
+        session: Session = NEW_SESSION,
+    ) -> set[str]:
+        """
+        Get pools the user has access to.
+
+        Fab auth manager does not allow fine-grained access with pools. Thus, return all the pool names.
+
+        :param user: the user
+        :param method: the method to filter on
+        :param session: the session
+        """
+        rows = session.execute(select(Pool.pool)).scalars().all()
+        return {r for r in rows if r is not None}
+
+    @provide_session
+    def get_authorized_variables(
+        self,
+        *,
+        user: User,
+        method: ResourceMethod = "GET",
+        session: Session = NEW_SESSION,
+    ) -> set[str]:
+        """
+        Get variable keys the user has access to.
+
+        Fab auth manager does not allow fine-grained access with variables. Thus, return all the variable keys.
+
+        :param user: the user
+        :param method: the method to filter on
+        :param session: the session
+        """
+        rows = session.execute(select(Variable.key)).scalars().all()
+        return set(rows)
 
     @cached_property
     def security_manager(self) -> FabAirflowSecurityManagerOverride:
@@ -463,7 +785,7 @@ class FabAuthManager(BaseAuthManager[User]):
         if not self.appbuilder:
             raise AirflowException("AppBuilder is not initialized.")
 
-        sm_from_config = self.appbuilder.get_app.config.get("SECURITY_MANAGER_CLASS")
+        sm_from_config = current_app.config.get("SECURITY_MANAGER_CLASS")
         if sm_from_config:
             if not issubclass(sm_from_config, FabAirflowSecurityManagerOverride):
                 raise AirflowConfigException(
@@ -475,11 +797,15 @@ class FabAuthManager(BaseAuthManager[User]):
 
     def get_url_login(self, **kwargs) -> str:
         """Return the login page url."""
-        return urljoin(self.apiserver_endpoint, f"{AUTH_MANAGER_FASTAPI_APP_PREFIX}/login/")
+        login_url = urljoin(self.apiserver_endpoint, f"{AUTH_MANAGER_FASTAPI_APP_PREFIX}/login/")
+        next_url = kwargs.get("next_url")
+        if next_url:
+            return f"{login_url}?{urlencode({'next': next_url})}"
+        return login_url
 
     def get_url_logout(self) -> str | None:
         """Return the logout page url."""
-        return urljoin(self.apiserver_endpoint, f"{AUTH_MANAGER_FASTAPI_APP_PREFIX}/logout/")
+        return urljoin(self.apiserver_endpoint, f"{AUTH_MANAGER_FASTAPI_APP_PREFIX}/logout")
 
     def register_views(self) -> None:
         self.security_manager.register_views()
@@ -523,12 +849,14 @@ class FabAuthManager(BaseAuthManager[User]):
 
     @staticmethod
     def get_db_manager() -> str | None:
+        # This method can be removed once the min Airflow version supported in FAB provider is >= 3.2
+        # https://github.com/apache/airflow/pull/62308 auto uses DB managers from installed providers
         return "airflow.providers.fab.auth_manager.models.db.FABDBManager"
 
     def _is_authorized(
         self,
         *,
-        method: ResourceMethod,
+        method: ExtendedResourceMethod,
         resource_type: str,
         user: User,
     ) -> bool:
@@ -537,7 +865,7 @@ class FabAuthManager(BaseAuthManager[User]):
 
         :param method: the method to perform
         :param resource_type: the type of resource the user attempts to perform the action on
-        :param user: the user to performing the action
+        :param user: the user performing the action
 
         :meta private:
         """
@@ -557,7 +885,7 @@ class FabAuthManager(BaseAuthManager[User]):
 
         :param method: the method to perform
         :param details: details about the DAG
-        :param user: the user to performing the action
+        :param user: the user performing the action
 
         :meta private:
         """
@@ -567,39 +895,30 @@ class FabAuthManager(BaseAuthManager[User]):
 
         if details and details.id:
             # Check whether the user has permissions to access a specific DAG
-            resource_dag_name = self._resource_name(details.id, RESOURCE_DAG)
+            resource_dag_name = permissions.resource_name(details.id, RESOURCE_DAG)
             return self._is_authorized(method=method, resource_type=resource_dag_name, user=user)
-
         return False
 
-    def _is_authorized_dag_run(
-        self,
-        method: ResourceMethod,
-        details: DagDetails | None,
-        user: User,
-    ) -> bool:
+    def _is_authorized_list_dags(self, *, user: User) -> bool:
         """
-        Return whether the user is authorized to perform a given action on a DAG Run.
+        Return whether the user is authorized to list Dags.
 
-        :param method: the method to perform
-        :param details: details about the DAG
-        :param user: the user to performing the action
+        :param user: the user performing the action
 
         :meta private:
         """
-        is_global_authorized = self._is_authorized(method=method, resource_type=RESOURCE_DAG_RUN, user=user)
+        is_global_authorized = self._is_authorized(method="GET", resource_type=RESOURCE_DAG, user=user)
         if is_global_authorized:
             return True
 
-        if details and details.id:
-            # Check whether the user has permissions to access a specific DAG Run permission on a DAG Level
-            resource_dag_name = self._resource_name(details.id, RESOURCE_DAG_RUN)
-            return self._is_authorized(method=method, resource_type=resource_dag_name, user=user)
-
+        user_permissions = self._get_user_permissions(user)
+        for action, resource in user_permissions:
+            if action == ACTION_CAN_READ and resource.startswith(RESOURCE_DAG_PREFIX):
+                return True
         return False
 
     @staticmethod
-    def _get_fab_action(method: ResourceMethod) -> str:
+    def _get_fab_action(method: ExtendedResourceMethod) -> str:
         """
         Convert the method to a FAB action.
 
@@ -625,19 +944,6 @@ class FabAuthManager(BaseAuthManager[User]):
             raise AirflowException(f"Unknown DAG access entity: {dag_access_entity}")
         return _MAP_DAG_ACCESS_ENTITY_TO_FAB_RESOURCE_TYPE[dag_access_entity]
 
-    def _resource_name(self, dag_id: str, resource_type: str) -> str:
-        """
-        Return the FAB resource name for a DAG id.
-
-        :param dag_id: the DAG id
-
-        :meta private:
-        """
-        root_dag_id = self._get_root_dag_id(dag_id)
-        if hasattr(permissions, "resource_name"):
-            return getattr(permissions, "resource_name")(root_dag_id, resource_type)
-        return getattr(permissions, "resource_name_for_dag")(root_dag_id)
-
     @staticmethod
     def _get_user_permissions(user: User):
         """
@@ -647,24 +953,10 @@ class FabAuthManager(BaseAuthManager[User]):
 
         :meta private:
         """
+        # If the user gets deleted while being logged in
+        if not user:
+            return []
         return getattr(user, "perms") or []
-
-    def _get_root_dag_id(self, dag_id: str) -> str:
-        """
-        Return the root DAG id in case of sub DAG, return the DAG id otherwise.
-
-        :param dag_id: the DAG id
-
-        :meta private:
-        """
-        if not self.appbuilder:
-            raise AirflowException("AppBuilder is not initialized.")
-
-        if "." in dag_id and hasattr(DagModel, "root_dag_id"):
-            return self.appbuilder.get_session.scalar(
-                select(DagModel.dag_id, DagModel.root_dag_id).where(DagModel.dag_id == dag_id).limit(1)
-            )
-        return dag_id
 
     def _sync_appbuilder_roles(self):
         """
@@ -678,14 +970,3 @@ class FabAuthManager(BaseAuthManager[User]):
         # delete the old ones.
         if conf.getboolean("fab", "UPDATE_FAB_PERMS"):
             self.security_manager.sync_roles()
-
-
-def get_parser() -> argparse.ArgumentParser:
-    """Generate documentation; used by Sphinx argparse."""
-    from airflow.cli.cli_parser import AirflowHelpFormatter, _add_command
-
-    parser = DefaultHelpParser(prog="airflow", formatter_class=AirflowHelpFormatter)
-    subparsers = parser.add_subparsers(dest="subcommand", metavar="GROUP_OR_COMMAND")
-    for group_command in FabAuthManager.get_cli_commands():
-        _add_command(subparsers, group_command)
-    return parser

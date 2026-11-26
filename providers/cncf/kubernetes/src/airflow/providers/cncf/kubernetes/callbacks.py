@@ -17,16 +17,18 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, TypeAlias
 
 import kubernetes.client as k8s
 import kubernetes_asyncio.client as async_k8s
 
 if TYPE_CHECKING:
-    from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
-    from airflow.utils.context import Context
+    from pendulum import DateTime
 
-client_type = Union[k8s.CoreV1Api, async_k8s.CoreV1Api]
+    from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
+    from airflow.sdk import Context
+
+client_type: TypeAlias = k8s.CoreV1Api | async_k8s.CoreV1Api
 
 
 class ExecutionMode(str, Enum):
@@ -151,7 +153,7 @@ class KubernetesPodOperatorCallback:
     @staticmethod
     def on_pod_cleanup(
         *,
-        pod: k8s.V1Pod,
+        pod: k8s.V1Pod | None,
         client: client_type,
         mode: str,
         operator: KubernetesPodOperator,
@@ -179,7 +181,12 @@ class KubernetesPodOperatorCallback:
         **kwargs,
     ) -> None:
         """
-        Invoke this callback when resuming the `KubernetesPodOperator` from deferred state.
+        Invoke this callback when the operator processes a trigger event.
+
+        This fires on every re-entry, including re-entries that defer again, and
+        including the synchronous short-circuit taken when the pod already reached
+        a terminal state before deferral. It does not fire when the pod was garbage
+        collected before re-entry, since there is no pod to pass.
 
         :param pod: the current state of the pod.
         :param event: the returned event from the Trigger.
@@ -189,12 +196,24 @@ class KubernetesPodOperatorCallback:
         pass
 
     @staticmethod
-    def progress_callback(*, line: str, client: client_type, mode: str, **kwargs) -> None:
+    def progress_callback(
+        *,
+        line: str,
+        client: client_type,
+        mode: str,
+        container_name: str,
+        timestamp: DateTime | None,
+        pod: k8s.V1Pod,
+        **kwargs,
+    ) -> None:
         """
         Invoke this callback to process pod container logs.
 
         :param line: the read line of log.
         :param client: the Kubernetes client that can be used in the callback.
         :param mode: the current execution mode, it's one of (`sync`, `async`).
+        :param container_name: the name of the container from which the log line was read.
+        :param timestamp: the timestamp of the log line.
+        :param pod: the pod from which the log line was read.
         """
         pass

@@ -21,15 +21,11 @@ from collections.abc import Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING
 
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 from airflow.providers.redis.hooks.redis import RedisHook
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class RedisPubSubSensor(BaseSensorOperator):
@@ -37,10 +33,10 @@ class RedisPubSubSensor(BaseSensorOperator):
     Redis sensor for reading a message from pub sub channels.
 
     :param channels: The channels to be subscribed to (templated)
-    :param redis_conn_id: the redis connection id
+    :param redis_conn_id: the redis connection id (templated)
     """
 
-    template_fields: Sequence[str] = ("channels",)
+    template_fields: Sequence[str] = ("channels", "redis_conn_id")
     ui_color = "#f0eee4"
 
     def __init__(self, *, channels: list[str] | str, redis_conn_id: str, **kwargs) -> None:

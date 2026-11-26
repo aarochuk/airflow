@@ -44,7 +44,12 @@ from airflow.providers.google.cloud.operators.vertex_ai.dataset import (
     ListDatasetsOperator,
     UpdateDatasetOperator,
 )
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT", "default")
@@ -84,16 +89,6 @@ TABULAR_DATASET = {
         },
         Value(),
     ),
-}
-TEXT_DATASET = {
-    "display_name": f"text-dataset-{ENV_ID}",
-    "metadata_schema_uri": schema.dataset.metadata.text,
-    "metadata": Value(string_value="text-dataset"),
-}
-VIDEO_DATASET = {
-    "display_name": f"video-dataset-{ENV_ID}",
-    "metadata_schema_uri": schema.dataset.metadata.video,
-    "metadata": Value(string_value="video-dataset"),
 }
 TEST_EXPORT_CONFIG = {"gcs_destination": {"output_uri_prefix": f"gs://{DATA_SAMPLE_GCS_BUCKET_NAME}/exports"}}
 TEST_IMPORT_CONFIG = [
@@ -136,18 +131,6 @@ with DAG(
         region=REGION,
         project_id=PROJECT_ID,
     )
-    create_text_dataset_job = CreateDatasetOperator(
-        task_id="text_dataset",
-        dataset=TEXT_DATASET,
-        region=REGION,
-        project_id=PROJECT_ID,
-    )
-    create_video_dataset_job = CreateDatasetOperator(
-        task_id="video_dataset",
-        dataset=VIDEO_DATASET,
-        region=REGION,
-        project_id=PROJECT_ID,
-    )
     create_time_series_dataset_job = CreateDatasetOperator(
         task_id="time_series_dataset",
         dataset=TIME_SERIES_DATASET,
@@ -155,15 +138,6 @@ with DAG(
         project_id=PROJECT_ID,
     )
     # [END how_to_cloud_vertex_ai_create_dataset_operator]
-
-    # [START how_to_cloud_vertex_ai_delete_dataset_operator]
-    delete_dataset_job = DeleteDatasetOperator(
-        task_id="delete_dataset",
-        dataset_id=create_text_dataset_job.output["dataset_id"],
-        region=REGION,
-        project_id=PROJECT_ID,
-    )
-    # [END how_to_cloud_vertex_ai_delete_dataset_operator]
 
     # [START how_to_cloud_vertex_ai_get_dataset_operator]
     get_dataset = GetDatasetOperator(
@@ -207,19 +181,21 @@ with DAG(
         task_id="update_dataset",
         project_id=PROJECT_ID,
         region=REGION,
-        dataset_id=create_video_dataset_job.output["dataset_id"],
+        dataset_id=create_time_series_dataset_job.output["dataset_id"],
         dataset=DATASET_TO_UPDATE,
         update_mask=TEST_UPDATE_MASK,
     )
     # [END how_to_cloud_vertex_ai_update_dataset_operator]
 
-    delete_time_series_dataset_job = DeleteDatasetOperator(
-        task_id="delete_time_series_dataset",
+    # [START how_to_cloud_vertex_ai_delete_dataset_operator]
+    delete_dataset_job = DeleteDatasetOperator(
+        task_id="delete_dataset",
         dataset_id=create_time_series_dataset_job.output["dataset_id"],
         region=REGION,
         project_id=PROJECT_ID,
         trigger_rule=TriggerRule.ALL_DONE,
     )
+    # [END how_to_cloud_vertex_ai_delete_dataset_operator]
 
     delete_tabular_dataset_job = DeleteDatasetOperator(
         task_id="delete_tabular_dataset",
@@ -237,14 +213,6 @@ with DAG(
         trigger_rule=TriggerRule.ALL_DONE,
     )
 
-    delete_video_dataset_job = DeleteDatasetOperator(
-        task_id="delete_video_dataset",
-        dataset_id=create_video_dataset_job.output["dataset_id"],
-        region=REGION,
-        project_id=PROJECT_ID,
-        trigger_rule=TriggerRule.ALL_DONE,
-    )
-
     delete_bucket = GCSDeleteBucketOperator(
         task_id="delete_bucket",
         bucket_name=DATA_SAMPLE_GCS_BUCKET_NAME,
@@ -256,11 +224,9 @@ with DAG(
         create_bucket
         # TEST BODY
         >> [
-            create_time_series_dataset_job >> delete_time_series_dataset_job,
-            create_text_dataset_job >> delete_dataset_job,
+            create_time_series_dataset_job >> update_dataset_job >> delete_dataset_job,
             create_tabular_dataset_job >> get_dataset >> delete_tabular_dataset_job,
             create_image_dataset_job >> import_data_job >> export_data_job >> delete_image_dataset_job,
-            create_video_dataset_job >> update_dataset_job >> delete_video_dataset_job,
             list_dataset_job,
         ]
         # TEST TEARDOWN
@@ -277,5 +243,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -58,7 +57,7 @@
     :maxdepth: 1
     :caption: Resources
 
-    Example DAGs <https://github.com/apache/airflow/tree/providers-elasticsearch/|version|/providers/elasticsearch/tests/system/elasticsearch>
+    Example Dags <https://github.com/apache/airflow/tree/providers-elasticsearch/|version|/providers/elasticsearch/tests/system/elasticsearch>
     PyPI Repository <https://pypi.org/project/apache-airflow-providers-elasticsearch/>
     Installing from sources <installing-providers-from-sources>
 
@@ -79,7 +78,7 @@ apache-airflow-providers-elasticsearch package
 `Elasticsearch <https://www.elastic.co/elasticsearch>`__
 
 
-Release: 6.2.1
+Release: 6.10.0
 
 Provider package
 ----------------
@@ -90,41 +89,40 @@ All classes for this package are included in the ``airflow.providers.elasticsear
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-elasticsearch``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-=======================================  ==================
-PIP package                              Version required
-=======================================  ==================
-``apache-airflow``                       ``>=2.9.0``
-``apache-airflow-providers-common-sql``  ``>=1.20.0``
-``elasticsearch``                        ``>=8.10,<9``
-=======================================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.12.0``
+``apache-airflow-providers-common-sql``     ``>=1.32.0``
+``elasticsearch``                           ``<10,>=8.10``
+==========================================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional dependencies
+---------------------
 
-Those are dependencies that might be needed in order to use all the features of the package.
-You need to install the specified provider distributions in order to use them.
-
-You can install such cross-provider dependencies when installing from PyPI. For example:
+These extras install optional third-party libraries that enable additional features of the provider.
+Install them when installing from PyPI. For example:
 
 .. code-block:: bash
 
-    pip install apache-airflow-providers-elasticsearch[common.sql]
+    pip install apache-airflow-providers-elasticsearch[polars]
 
 
-============================================================================================================  ==============
-Dependent package                                                                                             Extra
-============================================================================================================  ==============
-`apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_  ``common.sql``
-============================================================================================================  ==============
+==========  ==================
+Extra       Dependencies
+==========  ==================
+``polars``  ``polars>=1.26.0``
+==========  ==================
 
 Downloading official packages
 -----------------------------
@@ -132,5 +130,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-elasticsearch 6.2.1 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_elasticsearch-6.2.1.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_elasticsearch-6.2.1.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_elasticsearch-6.2.1.tar.gz.sha512>`__)
-* `The apache-airflow-providers-elasticsearch 6.2.1 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_elasticsearch-6.2.1-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_elasticsearch-6.2.1-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_elasticsearch-6.2.1-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-elasticsearch 6.10.0 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_elasticsearch-6.10.0.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_elasticsearch-6.10.0.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_elasticsearch-6.10.0.tar.gz.sha512>`__)
+* `The apache-airflow-providers-elasticsearch 6.10.0 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_elasticsearch-6.10.0-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_elasticsearch-6.10.0-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_elasticsearch-6.10.0-py3-none-any.whl.sha512>`__)

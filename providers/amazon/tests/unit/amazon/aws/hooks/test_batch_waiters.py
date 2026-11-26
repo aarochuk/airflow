@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import inspect
 import itertools
-import time
 from unittest import mock
 
 import boto3
@@ -28,9 +27,9 @@ from botocore.exceptions import ClientError, WaiterError
 from botocore.waiter import SingleWaiterConfig, WaiterModel
 from moto import mock_aws
 
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.hooks.batch_waiters import BatchWaitersHook
 from airflow.providers.amazon.aws.utils.task_log_fetcher import AwsTaskLogFetcher
+from airflow.providers.common.compat.sdk import AirflowException
 
 INTERMEDIATE_STATES = ("SUBMITTED", "PENDING", "RUNNABLE", "STARTING")
 RUNNING_STATE = "RUNNING"
@@ -45,7 +44,6 @@ def aws_region():
     return AWS_REGION
 
 
-@mock_aws
 @pytest.fixture
 def patch_hook(monkeypatch, aws_region):
     """Patch hook object by dummy boto3 Batch client."""
@@ -59,6 +57,7 @@ def test_batch_waiters(aws_region):
     assert isinstance(batch_waiters, BatchWaitersHook)
 
 
+@mock_aws
 class TestBatchWaiters:
     @pytest.fixture(autouse=True)
     def setup_tests(self, patch_hook):
@@ -106,9 +105,8 @@ class TestBatchWaiters:
         assert waiters == ["JobComplete", "JobExists", "JobRunning"]
 
         # test errors when requesting a waiter with the wrong name
-        with pytest.raises(ValueError) as ctx:
+        with pytest.raises(ValueError, match="Waiter does not exist: JobExist"):
             model.get_waiter("JobExist")
-        assert "Waiter does not exist: JobExist" in str(ctx.value)
 
         # test some default waiter properties
         waiter = model.get_waiter("JobExists")
@@ -153,9 +151,9 @@ class TestBatchWaiters:
         batch_log_fetcher = mock.Mock(spec=AwsTaskLogFetcher)
         mock_get_batch_log_fetcher = mock.Mock(return_value=batch_log_fetcher)
 
-        thread_start = mock.Mock(side_effect=lambda: time.sleep(2))
-        thread_stop = mock.Mock(side_effect=lambda: time.sleep(2))
-        thread_join = mock.Mock(side_effect=lambda: time.sleep(2))
+        thread_start = mock.Mock()
+        thread_stop = mock.Mock()
+        thread_join = mock.Mock()
 
         with (
             mock.patch.object(self.batch_waiters, "get_waiter") as mock_get_waiter,
@@ -215,6 +213,7 @@ class TestBatchWaiters:
             assert mock_waiter.wait.call_count == 1
 
 
+@mock_aws
 class TestBatchJobWaiters:
     """Test default waiters."""
 

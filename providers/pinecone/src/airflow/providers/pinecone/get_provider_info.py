@@ -26,25 +26,11 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-pinecone",
         "name": "Pinecone",
         "description": "`Pinecone <https://docs.pinecone.io/docs/overview>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477870,
-        "versions": [
-            "2.2.2",
-            "2.2.1",
-            "2.2.0",
-            "2.1.1",
-            "2.1.0",
-            "2.0.1",
-            "2.0.0",
-            "1.1.2",
-            "1.1.1",
-            "1.1.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Pinecone",
                 "external-doc-url": "https://docs.pinecone.io/docs/overview",
+                "logo": "/docs/integration-logos/Pinecone.png",
                 "how-to-guide": ["/docs/apache-airflow-providers-pinecone/operators/pinecone.rst"],
                 "tags": ["software"],
             }
@@ -55,7 +41,23 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.pinecone.hooks.pinecone.PineconeHook",
+                "hook-name": "Pinecone",
                 "connection-type": "pinecone",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["port", "schema"],
+                    "relabeling": {
+                        "login": "Pinecone Environment",
+                        "host": "Pinecone Host",
+                        "password": "Pinecone API key",
+                    },
+                },
+                "conn-fields": {
+                    "region": {"label": "Pinecone Region", "schema": {"type": ["string", "null"]}},
+                    "debug_curl": {
+                        "label": "PINECONE_DEBUG_CURL",
+                        "schema": {"type": ["boolean", "null"], "default": False},
+                    },
+                },
             }
         ],
         "operators": [
@@ -64,6 +66,4 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.pinecone.operators.pinecone"],
             }
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "pinecone>=3.1.0"],
-        "devel-dependencies": [],
     }

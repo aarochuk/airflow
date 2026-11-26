@@ -26,30 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-smtp",
         "name": "Simple Mail Transfer Protocol (SMTP)",
         "description": "`Simple Mail Transfer Protocol (SMTP) <https://tools.ietf.org/html/rfc5321>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477891,
-        "versions": [
-            "2.0.2",
-            "2.0.1",
-            "2.0.0",
-            "1.9.0",
-            "1.8.1",
-            "1.8.0",
-            "1.7.1",
-            "1.7.0",
-            "1.6.1",
-            "1.6.0",
-            "1.5.0",
-            "1.4.1",
-            "1.4.0",
-            "1.3.2",
-            "1.3.1",
-            "1.3.0",
-            "1.2.0",
-            "1.1.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Simple Mail Transfer Protocol (SMTP)",
@@ -71,9 +47,58 @@ def get_provider_info():
             }
         ],
         "connection-types": [
-            {"hook-class-name": "airflow.providers.smtp.hooks.smtp.SmtpHook", "connection-type": "smtp"}
+            {
+                "hook-class-name": "airflow.providers.smtp.hooks.smtp.SmtpHook",
+                "hook-name": "SMTP",
+                "connection-type": "smtp",
+                "conn-fields": {
+                    "from_email": {"label": "From email", "schema": {"type": ["string", "null"]}},
+                    "timeout": {
+                        "label": "Connection timeout",
+                        "schema": {"type": ["integer", "null"], "default": 30},
+                    },
+                    "retry_limit": {
+                        "label": "Number of Retries",
+                        "schema": {"type": ["integer", "null"], "default": 5},
+                    },
+                    "disable_tls": {
+                        "label": "Disable TLS",
+                        "schema": {"type": ["boolean", "null"], "default": False},
+                    },
+                    "disable_ssl": {
+                        "label": "Disable SSL",
+                        "schema": {"type": ["boolean", "null"], "default": False},
+                    },
+                    "subject_template": {
+                        "label": "Path to the subject template",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "html_content_template": {
+                        "label": "Path to the html content template",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "auth_type": {
+                        "label": "Auth Type",
+                        "schema": {
+                            "type": ["string", "null"],
+                            "default": "basic",
+                            "enum": ["basic", "oauth2"],
+                        },
+                        "description": "basic or oauth2",
+                    },
+                    "access_token": {"label": "Access Token", "schema": {"type": ["string", "null"]}},
+                    "client_id": {"label": "Client ID", "schema": {"type": ["string", "null"]}},
+                    "client_secret": {"label": "Client Secret", "schema": {"type": ["string", "null"]}},
+                    "tenant_id": {"label": "Tenant ID", "schema": {"type": ["string", "null"]}},
+                    "scope": {"label": "Scope", "schema": {"type": ["string", "null"]}},
+                },
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema", "extra"],
+                    "relabeling": {},
+                    "placeholders": {},
+                },
+            }
         ],
         "notifications": ["airflow.providers.smtp.notifications.smtp.SmtpNotifier"],
-        "dependencies": ["apache-airflow>=2.9.0", "apache-airflow-providers-common-compat>=1.6.0"],
-        "devel-dependencies": [],
+        "email-backends": ["airflow.providers.smtp.utils.emailer.send_email_smtp"],
     }

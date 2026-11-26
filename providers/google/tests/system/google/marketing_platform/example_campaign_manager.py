@@ -29,19 +29,18 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
-import uuid
 from datetime import datetime
-from typing import cast
+from typing import Any, cast
 
-from google.api_core.exceptions import NotFound
-
-from airflow.decorators import task
-from airflow.models import Connection
+try:
+    from airflow.sdk import task
+except ImportError:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
 from airflow.models.dag import DAG
 from airflow.models.xcom_arg import XComArg
-from airflow.providers.google.cloud.hooks.secret_manager import GoogleCloudSecretManagerHook
 from airflow.providers.google.cloud.operators.gcs import GCSCreateBucketOperator, GCSDeleteBucketOperator
+from airflow.providers.google.common.utils.get_secret import get_secret
 from airflow.providers.google.marketing_platform.operators.campaign_manager import (
     GoogleCampaignManagerBatchInsertConversionsOperator,
     GoogleCampaignManagerBatchUpdateConversionsOperator,
@@ -53,16 +52,23 @@ from airflow.providers.google.marketing_platform.operators.campaign_manager impo
 from airflow.providers.google.marketing_platform.sensors.campaign_manager import (
     GoogleCampaignManagerReportSensor,
 )
-from airflow.settings import Session
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
+from system.google.gcp_api_client_helpers import create_airflow_connection, delete_airflow_connection
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT") or DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 CM360_IMPERSONATION_CHAIN = os.environ.get("IMPERSONATION_CHAIN", None)
 
 DAG_ID = "campaign_manager"
+
+IS_COMPOSER = bool(os.environ.get("COMPOSER_ENVIRONMENT", ""))
 
 SECRET_ACCOUNT_ID = "cm360_account_id"
 SECRET_DCLID = "cm360_dclid"
@@ -114,7 +120,7 @@ CONVERSION = {
     "ordinal": "0",
     "quantity": 42,
     "value": 123.4,
-    "timestampMicros": int(time.time()) * 1000000,
+    "timestampMicros": "{{ (macros.datetime.now().timestamp() * 1000000) | int }}",
     "customVariables": [
         {
             "kind": "dfareporting#customFloodlightVariable",
@@ -138,13 +144,6 @@ CONVERSION_UPDATE = {
 log = logging.getLogger(__name__)
 
 
-def get_secret(secret_id: str) -> str:
-    hook = GoogleCloudSecretManagerHook()
-    if hook.secret_exists(secret_id=secret_id):
-        return hook.access_secret(secret_id=secret_id).payload.data.decode().strip()
-    raise NotFound("The secret '%s' not found", secret_id)
-
-
 with DAG(
     DAG_ID,
     schedule="@once",  # Override to match your needs,
@@ -155,10 +154,6 @@ with DAG(
 
     @task
     def create_connection(connection_id: str) -> None:
-        connection = Connection(
-            conn_id=connection_id,
-            conn_type="google_cloud_platform",
-        )
         extras = {
             "scope": "https://www.googleapis.com/auth/cloud-platform,"
             "https://www.googleapis.com/auth/ddmconversions,"
@@ -168,16 +163,12 @@ with DAG(
             extras["impersonation_chain"] = CM360_IMPERSONATION_CHAIN
 
         conn_extra_json = json.dumps(extras)
-        connection.set_extra(conn_extra_json)
-
-        session = Session()
-        log.info("Removing connection %s if it exists", connection_id)
-        query = session.query(Connection).filter(Connection.conn_id == connection_id)
-        query.delete()
-
-        session.add(connection)
-        session.commit()
-        log.info("Connection %s created", CONNECTION_ID)
+        connection: dict[str, Any] = {"conn_type": "google_cloud_platform", "extra": conn_extra_json}
+        create_airflow_connection(
+            connection_id=connection_id,
+            connection_conf=connection,
+            is_composer=IS_COMPOSER,
+        )
 
     @task
     def get_account_id():
@@ -238,7 +229,7 @@ with DAG(
     # [END howto_campaign_manager_wait_for_operation]
 
     # [START howto_campaign_manager_get_report_operator]
-    report_name = f"reports/report_{str(uuid.uuid1())}"
+    report_name = "reports/report_{{ macros.uuid.uuid1() }}"
     get_report = GoogleCampaignManagerDownloadReportOperator(
         task_id="get_report",
         profile_id=USER_PROFILE_ID,
@@ -291,11 +282,7 @@ with DAG(
 
     @task(task_id="delete_connection")
     def delete_connection(connection_id: str) -> None:
-        session = Session()
-        log.info("Removing connection %s", connection_id)
-        query = session.query(Connection).filter(Connection.conn_id == connection_id)
-        query.delete()
-        session.commit()
+        delete_airflow_connection(connection_id=connection_id, is_composer=IS_COMPOSER)
 
     (
         # TEST SETUP
@@ -336,5 +323,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

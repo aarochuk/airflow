@@ -35,7 +35,7 @@ import argcomplete
 # any possible import cycles with settings downstream.
 from airflow import configuration
 from airflow.cli import cli_parser
-from airflow.configuration import write_webserver_configuration_if_needed
+from airflow.cli.utils import redirect_stdout_log_handlers_to_stderr
 
 
 def main():
@@ -46,6 +46,11 @@ def main():
     parser = cli_parser.get_parser()
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
+    # Commands that accept ``-o`` produce structured output on stdout; route any
+    # console log handler currently writing to stdout to stderr so log lines do
+    # not corrupt that output (e.g. ``airflow ... -o json | jq``).
+    if hasattr(args, "output"):
+        redirect_stdout_log_handlers_to_stderr()
     if args.subcommand not in ["lazy_loaded", "version"]:
         # Here we ensure that the default configuration is written if needed before running any command
         # that might need it. This used to be done during configuration initialization but having it
@@ -53,8 +58,6 @@ def main():
         from airflow.configuration import write_default_airflow_configuration_if_needed
 
         conf = write_default_airflow_configuration_if_needed()
-        if args.subcommand in ["webserver", "internal-api", "worker"]:
-            write_webserver_configuration_if_needed(conf)
     args.func(args)
 
 

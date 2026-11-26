@@ -26,32 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-zendesk",
         "name": "Zendesk",
         "description": "`Zendesk <https://www.zendesk.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477914,
-        "versions": [
-            "4.9.1",
-            "4.9.0",
-            "4.8.0",
-            "4.7.1",
-            "4.7.0",
-            "4.6.0",
-            "4.5.0",
-            "4.4.0",
-            "4.3.2",
-            "4.3.1",
-            "4.3.0",
-            "4.2.0",
-            "4.1.0",
-            "4.0.0",
-            "3.0.3",
-            "3.0.2",
-            "3.0.1",
-            "3.0.0",
-            "2.0.1",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Zendesk",
@@ -66,9 +40,33 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.zendesk.hooks.zendesk.ZendeskHook",
+                "hook-name": "Zendesk",
                 "connection-type": "zendesk",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema", "port"],
+                    "relabeling": {
+                        "host": "Zendesk domain",
+                        "login": "Zendesk email",
+                        "password": "Password / API token",
+                    },
+                },
+                "conn-fields": {
+                    "use_token": {
+                        "label": "Use Token",
+                        "schema": {"type": ["boolean", "null"]},
+                        "description": "If enabled, the password field is treated as an API token.",
+                    },
+                    "token": {
+                        "label": "API Token",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                        "description": "Zendesk API token (alternative to password field).",
+                    },
+                    "oauth_token": {
+                        "label": "OAuth Token",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                        "description": "Zendesk OAuth token.",
+                    },
+                },
             }
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "zenpy>=2.0.40"],
-        "devel-dependencies": [],
     }

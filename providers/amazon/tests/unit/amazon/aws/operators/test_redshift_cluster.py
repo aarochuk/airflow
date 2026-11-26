@@ -21,8 +21,9 @@ from unittest.mock import Mock
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError, WaiterError
+from tenacity import wait_fixed
 
-from airflow.exceptions import AirflowException, TaskDeferred
 from airflow.providers.amazon.aws.hooks.redshift_cluster import RedshiftHook
 from airflow.providers.amazon.aws.operators.redshift_cluster import (
     RedshiftCreateClusterOperator,
@@ -33,12 +34,15 @@ from airflow.providers.amazon.aws.operators.redshift_cluster import (
     RedshiftResumeClusterOperator,
 )
 from airflow.providers.amazon.aws.triggers.redshift_cluster import (
+    RedshiftClusterSettledTrigger,
     RedshiftCreateClusterSnapshotTrigger,
     RedshiftDeleteClusterTrigger,
     RedshiftPauseClusterTrigger,
     RedshiftResumeClusterTrigger,
 )
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred
 
+from unit.amazon.aws.utils.test_deferral import expect_deferral_warning
 from unit.amazon.aws.utils.test_template_fields import validate_template_fields
 
 
@@ -47,13 +51,13 @@ class TestRedshiftCreateClusterOperator:
         redshift_operator = RedshiftCreateClusterOperator(
             task_id="task_test",
             cluster_identifier="test_cluster",
-            node_type="dc2.large",
+            node_type="ra3.large",
             master_username="adminuser",
             master_user_password="Test123$",
         )
         assert redshift_operator.task_id == "task_test"
         assert redshift_operator.cluster_identifier == "test_cluster"
-        assert redshift_operator.node_type == "dc2.large"
+        assert redshift_operator.node_type == "ra3.large"
         assert redshift_operator.master_username == "adminuser"
         assert redshift_operator.master_user_password == "Test123$"
 
@@ -62,7 +66,7 @@ class TestRedshiftCreateClusterOperator:
         redshift_operator = RedshiftCreateClusterOperator(
             task_id="task_test",
             cluster_identifier="test-cluster",
-            node_type="dc2.large",
+            node_type="ra3.large",
             master_username="adminuser",
             master_user_password="Test123$",
             cluster_type="single-node",
@@ -80,7 +84,7 @@ class TestRedshiftCreateClusterOperator:
         }
         mock_conn.create_cluster.assert_called_once_with(
             ClusterIdentifier="test-cluster",
-            NodeType="dc2.large",
+            NodeType="ra3.large",
             MasterUsername="adminuser",
             MasterUserPassword="Test123$",
             **params,
@@ -96,7 +100,7 @@ class TestRedshiftCreateClusterOperator:
         redshift_operator = RedshiftCreateClusterOperator(
             task_id="task_test",
             cluster_identifier="test-cluster",
-            node_type="dc2.large",
+            node_type="ra3.large",
             number_of_nodes=3,
             master_username="adminuser",
             master_user_password="Test123$",
@@ -115,7 +119,7 @@ class TestRedshiftCreateClusterOperator:
         }
         mock_conn.create_cluster.assert_called_once_with(
             ClusterIdentifier="test-cluster",
-            NodeType="dc2.large",
+            NodeType="ra3.large",
             MasterUsername="adminuser",
             MasterUserPassword="Test123$",
             **params,
@@ -124,32 +128,193 @@ class TestRedshiftCreateClusterOperator:
         # wait_for_completion is False so check waiter is not called
         mock_conn.get_waiter.assert_not_called()
 
+    @pytest.mark.parametrize("wait_for_completion", [True, False])
     @mock.patch.object(RedshiftHook, "conn")
-    def test_create_cluster_deferrable(self, mock_conn):
+    def test_create_cluster_deferrable(self, mock_conn, wait_for_completion):
         redshift_operator = RedshiftCreateClusterOperator(
             task_id="task_test",
             cluster_identifier="test-cluster",
-            node_type="dc2.large",
+            node_type="ra3.large",
             master_username="adminuser",
             master_user_password="Test123$",
             cluster_type="single-node",
+            wait_for_completion=wait_for_completion,
             deferrable=True,
         )
 
-        with pytest.raises(TaskDeferred):
+        with (
+            expect_deferral_warning(deferrable=True, wait_for_completion=wait_for_completion),
+            pytest.raises(TaskDeferred),
+        ):
             redshift_operator.execute(None)
+        mock_conn.get_waiter.assert_not_called()
 
     def test_template_fields(self):
         operator = RedshiftCreateClusterOperator(
             task_id="task_test",
             cluster_identifier="test-cluster",
-            node_type="dc2.large",
+            node_type="ra3.large",
             master_username="adminuser",
             master_user_password="Test123$",
             cluster_type="single-node",
             deferrable=True,
         )
         validate_template_fields(operator)
+
+    @mock.patch.object(RedshiftHook, "delete_cluster")
+    @mock.patch.object(RedshiftHook, "conn")
+    def test_create_cluster_cleanup_on_waiter_auth_failure(
+        self,
+        mock_conn,
+        mock_delete_cluster,
+    ):
+        # Simulate waiter failure (e.g. DescribeClusters denied).
+        waiter_error = WaiterError(
+            name="ClusterAvailable",
+            reason="AccessDenied for DescribeClusters",
+            last_response={},
+        )
+        mock_conn.get_waiter.return_value.wait.side_effect = waiter_error
+
+        operator = RedshiftCreateClusterOperator(
+            task_id="task_test",
+            cluster_identifier="test-cluster",
+            node_type="ra3.large",
+            master_username="adminuser",
+            master_user_password="Test123$",
+            cluster_type="single-node",
+            wait_for_completion=True,
+            delete_cluster_on_failure=True,
+            cleanup_timeout_seconds=300,
+        )
+
+        with pytest.raises(WaiterError):
+            operator.execute({})
+
+        # Cluster creation happened.
+        mock_conn.create_cluster.assert_called_once()
+
+        # Cleanup attempted at least once.
+        mock_delete_cluster.assert_called_with(
+            cluster_identifier="test-cluster",
+        )
+        assert mock_delete_cluster.call_count >= 1
+
+    @mock.patch.object(RedshiftHook, "delete_cluster")
+    @mock.patch.object(RedshiftHook, "conn")
+    def test_create_cluster_cleanup_failure_does_not_mask_original_error(
+        self,
+        mock_conn,
+        mock_delete_cluster,
+    ):
+        # Simulate waiter failure (e.g. DescribeClusters denied).
+        waiter_error = WaiterError(
+            name="ClusterAvailable",
+            reason="AccessDenied for DescribeClusters",
+            last_response={},
+        )
+
+        # Simulate deletion failure (e.g. DeleteCluster denied).
+        cleanup_error = ClientError(
+            error_response={
+                "Error": {
+                    "Code": "UnauthorizedOperation",
+                    "Message": "You are not authorized to perform this operation",
+                }
+            },
+            operation_name="DeleteCluster",
+        )
+
+        mock_conn.get_waiter.return_value.wait.side_effect = waiter_error
+        mock_delete_cluster.side_effect = cleanup_error
+
+        operator = RedshiftCreateClusterOperator(
+            task_id="task_test",
+            cluster_identifier="test-cluster",
+            node_type="ra3.large",
+            master_username="adminuser",
+            master_user_password="Test123$",
+            cluster_type="single-node",
+            wait_for_completion=True,
+            delete_cluster_on_failure=True,
+            cleanup_timeout_seconds=300,
+        )
+
+        with pytest.raises(WaiterError) as exc:
+            operator.execute({})
+
+        # Original exception must be preserved.
+        assert exc.value is waiter_error
+
+        # Cluster creation happened.
+        mock_conn.create_cluster.assert_called_once()
+
+        # Cleanup attempted despite failure.
+        mock_delete_cluster.assert_called_with(
+            cluster_identifier="test-cluster",
+        )
+
+        # Cleanup attempted despite failure.
+        mock_delete_cluster.assert_called_with(
+            cluster_identifier="test-cluster",
+        )
+        assert mock_delete_cluster.call_count >= 1
+
+    @mock.patch(
+        "airflow.providers.amazon.aws.operators.redshift_cluster.wait_fixed",
+    )
+    @mock.patch.object(RedshiftHook, "delete_cluster")
+    @mock.patch.object(RedshiftHook, "conn")
+    def test_create_cluster_cleanup_retries_on_active_operation(
+        self,
+        mock_conn,
+        mock_delete_cluster,
+        mock_wait_fixed,
+    ):
+
+        mock_wait_fixed.return_value = wait_fixed(0)
+        # Simulate waiter failure (e.g. DescribeClusters denied).
+        waiter_error = WaiterError(
+            name="ClusterAvailable",
+            reason="AccessDenied for DescribeClusters",
+            last_response={},
+        )
+        mock_conn.get_waiter.return_value.wait.side_effect = waiter_error
+
+        # First deletion attempt fails due to cluster still modifying.
+        active_operation_error = ClientError(
+            error_response={
+                "Error": {
+                    "Code": "InvalidClusterStateFault",
+                    "Message": "Cluster currently modifying",
+                }
+            },
+            operation_name="DeleteCluster",
+        )
+
+        # Second attempt succeeds.
+        mock_delete_cluster.side_effect = [
+            active_operation_error,
+            None,
+        ]
+
+        operator = RedshiftCreateClusterOperator(
+            task_id="task_test",
+            cluster_identifier="test-cluster",
+            node_type="ra3.large",
+            master_username="adminuser",
+            master_user_password="Test123$",
+            cluster_type="single-node",
+            wait_for_completion=True,
+            delete_cluster_on_failure=True,
+            cleanup_timeout_seconds=300,
+        )
+
+        with pytest.raises(WaiterError):
+            operator.execute({})
+
+        # Retry should occur.
+        assert mock_delete_cluster.call_count == 2
 
 
 class TestRedshiftCreateClusterSnapshotOperator:
@@ -211,18 +376,25 @@ class TestRedshiftCreateClusterSnapshotOperator:
             WaiterConfig={"Delay": 15, "MaxAttempts": 20},
         )
 
+    @pytest.mark.parametrize("wait_for_completion", [True, False])
     @mock.patch.object(RedshiftHook, "cluster_status")
     @mock.patch.object(RedshiftHook, "create_cluster_snapshot")
-    def test_create_cluster_snapshot_deferred(self, mock_create_cluster_snapshot, mock_cluster_status):
+    def test_create_cluster_snapshot_deferred(
+        self, mock_create_cluster_snapshot, mock_cluster_status, wait_for_completion
+    ):
         mock_cluster_status.return_value = "available"
         mock_create_cluster_snapshot.return_value = True
         create_snapshot = RedshiftCreateClusterSnapshotOperator(
             task_id="test_snapshot",
             cluster_identifier="test_cluster",
             snapshot_identifier="test_snapshot",
+            wait_for_completion=wait_for_completion,
             deferrable=True,
         )
-        with pytest.raises(TaskDeferred) as exc:
+        with (
+            expect_deferral_warning(deferrable=True, wait_for_completion=wait_for_completion),
+            pytest.raises(TaskDeferred) as exc,
+        ):
             create_snapshot.execute(None)
         assert isinstance(exc.value.trigger, RedshiftCreateClusterSnapshotTrigger), (
             "Trigger is not a RedshiftCreateClusterSnapshotTrigger"
@@ -624,18 +796,140 @@ class TestDeleteClusterOperator:
             cluster_identifier="test_cluster",
             aws_conn_id="aws_conn_test",
             wait_for_completion=False,
+            max_attempts=3,
         )
         with pytest.raises(returned_exception):
             redshift_operator.execute(None)
 
-        assert mock_delete_cluster.call_count == 10
+        assert mock_delete_cluster.call_count == 3
+
+    @pytest.mark.parametrize("wait_for_completion", [True, False])
+    @mock.patch("airflow.providers.amazon.aws.hooks.redshift_cluster.RedshiftHook.cluster_status")
+    @mock.patch("airflow.providers.amazon.aws.hooks.redshift_cluster.RedshiftHook.delete_cluster")
+    def test_delete_cluster_deferrable_mode(
+        self, mock_delete_cluster, mock_cluster_status, wait_for_completion
+    ):
+        """When the delete is accepted, deferrable mode waits for deletion to complete."""
+        mock_delete_cluster.return_value = True
+        mock_cluster_status.return_value = "deleting"
+        delete_cluster = RedshiftDeleteClusterOperator(
+            task_id="task_test",
+            cluster_identifier="test_cluster",
+            deferrable=True,
+            wait_for_completion=wait_for_completion,
+        )
+
+        with (
+            expect_deferral_warning(deferrable=True, wait_for_completion=wait_for_completion),
+            pytest.raises(TaskDeferred) as exc,
+        ):
+            delete_cluster.execute(context=None)
+
+        assert isinstance(exc.value.trigger, RedshiftDeleteClusterTrigger), (
+            "Trigger is not a RedshiftDeleteClusterTrigger"
+        )
+        # Delete is attempted exactly once (no synchronous busy-retry loop in deferrable mode).
+        mock_delete_cluster.assert_called_once()
 
     @mock.patch("airflow.providers.amazon.aws.hooks.redshift_cluster.RedshiftHook.cluster_status")
     @mock.patch("airflow.providers.amazon.aws.hooks.redshift_cluster.RedshiftHook.delete_cluster")
-    def test_delete_cluster_deferrable_mode(self, mock_delete_cluster, mock_cluster_status):
-        """Test delete cluster operator with defer when deferrable param is true"""
+    def test_delete_cluster_deferrable_mode_already_gone(self, mock_delete_cluster, mock_cluster_status):
+        """When the cluster is already gone after the delete, deferrable mode completes without deferring."""
         mock_delete_cluster.return_value = True
-        mock_cluster_status.return_value = "available"
+        mock_cluster_status.return_value = "cluster_not_found"
+        delete_cluster = RedshiftDeleteClusterOperator(
+            task_id="task_test",
+            cluster_identifier="test_cluster",
+            deferrable=True,
+            wait_for_completion=True,
+        )
+
+        # No TaskDeferred is raised; the operator returns normally.
+        delete_cluster.execute(context=None)
+        mock_delete_cluster.assert_called_once()
+
+    @pytest.mark.parametrize("wait_for_completion", [True, False])
+    @mock.patch.object(RedshiftHook, "conn")
+    @mock.patch("airflow.providers.amazon.aws.hooks.redshift_cluster.RedshiftHook.delete_cluster")
+    def test_delete_cluster_deferrable_mode_busy_defers_to_settle_trigger(
+        self, mock_delete_cluster, mock_conn, wait_for_completion
+    ):
+        """A busy cluster defers to the settle-wait trigger, without the deprecation warning."""
+        exception = boto3.client("redshift").exceptions.InvalidClusterStateFault({}, "test")
+        mock_conn.exceptions.InvalidClusterStateFault = type(exception)
+        mock_delete_cluster.side_effect = exception
+
+        delete_cluster = RedshiftDeleteClusterOperator(
+            task_id="task_test",
+            cluster_identifier="test_cluster",
+            deferrable=True,
+            wait_for_completion=wait_for_completion,
+        )
+
+        with pytest.raises(TaskDeferred) as exc:
+            delete_cluster.execute(context=None)
+
+        assert isinstance(exc.value.trigger, RedshiftClusterSettledTrigger), (
+            "Trigger is not a RedshiftClusterSettledTrigger"
+        )
+        assert exc.value.method_name == "_retry_delete_when_settled"
+        # Delete attempted once; the synchronous busy-retry loop never runs in deferrable mode.
+        mock_delete_cluster.assert_called_once()
+
+    @mock.patch("airflow.providers.amazon.aws.hooks.redshift_cluster.RedshiftHook.cluster_status")
+    @mock.patch("airflow.providers.amazon.aws.hooks.redshift_cluster.RedshiftHook.delete_cluster")
+    def test_retry_delete_when_settled_reissues_delete(self, mock_delete_cluster, mock_cluster_status):
+        """The settle-wait callback re-issues the delete and defers to the delete-complete trigger."""
+        mock_delete_cluster.return_value = True
+        mock_cluster_status.return_value = "deleting"
+        delete_cluster = RedshiftDeleteClusterOperator(
+            task_id="task_test",
+            cluster_identifier="test_cluster",
+            deferrable=True,
+            wait_for_completion=True,
+        )
+
+        with pytest.raises(TaskDeferred) as exc:
+            delete_cluster._retry_delete_when_settled(
+                context=None, event={"status": "success", "cluster_identifier": "test_cluster"}
+            )
+
+        assert isinstance(exc.value.trigger, RedshiftDeleteClusterTrigger)
+        mock_delete_cluster.assert_called_once()
+
+    @mock.patch("airflow.providers.amazon.aws.hooks.redshift_cluster.RedshiftHook.cluster_status")
+    @mock.patch("airflow.providers.amazon.aws.hooks.redshift_cluster.RedshiftHook.delete_cluster")
+    def test_retry_delete_when_settled_uses_cluster_id_from_event(
+        self, mock_delete_cluster, mock_cluster_status
+    ):
+        """The re-issued delete targets the identifier from the trigger event, not the operator field."""
+        mock_delete_cluster.return_value = True
+        mock_cluster_status.return_value = "cluster_not_found"
+        delete_cluster = RedshiftDeleteClusterOperator(
+            task_id="task_test",
+            cluster_identifier="rerendered_different_value",
+            deferrable=True,
+            wait_for_completion=True,
+        )
+
+        delete_cluster._retry_delete_when_settled(
+            context=None, event={"status": "success", "cluster_identifier": "original_cluster"}
+        )
+
+        mock_delete_cluster.assert_called_once_with(
+            cluster_identifier="original_cluster",
+            skip_final_cluster_snapshot=True,
+            final_cluster_snapshot_identifier=None,
+        )
+
+    @mock.patch.object(RedshiftHook, "conn")
+    @mock.patch("airflow.providers.amazon.aws.hooks.redshift_cluster.RedshiftHook.delete_cluster")
+    def test_retry_delete_when_settled_redefers_on_race(self, mock_delete_cluster, mock_conn):
+        """If the cluster re-enters a transitional state (race), the callback re-defers to settle-wait."""
+        exception = boto3.client("redshift").exceptions.InvalidClusterStateFault({}, "test")
+        mock_conn.exceptions.InvalidClusterStateFault = type(exception)
+        mock_delete_cluster.side_effect = exception
+
         delete_cluster = RedshiftDeleteClusterOperator(
             task_id="task_test",
             cluster_identifier="test_cluster",
@@ -644,32 +938,49 @@ class TestDeleteClusterOperator:
         )
 
         with pytest.raises(TaskDeferred) as exc:
-            delete_cluster.execute(context=None)
+            delete_cluster._retry_delete_when_settled(
+                context=None, event={"status": "success", "cluster_identifier": "test_cluster"}
+            )
 
-        assert isinstance(exc.value.trigger, RedshiftDeleteClusterTrigger), (
-            "Trigger is not a RedshiftDeleteClusterTrigger"
-        )
+        assert isinstance(exc.value.trigger, RedshiftClusterSettledTrigger)
+        assert exc.value.method_name == "_retry_delete_when_settled"
 
-    @mock.patch("airflow.providers.amazon.aws.operators.redshift_cluster.RedshiftDeleteClusterOperator.defer")
-    @mock.patch("airflow.providers.amazon.aws.hooks.redshift_cluster.RedshiftHook.cluster_status")
-    @mock.patch("airflow.providers.amazon.aws.hooks.redshift_cluster.RedshiftHook.delete_cluster")
-    def test_delete_cluster_deferrable_mode_in_paused_state(
-        self, mock_delete_cluster, mock_cluster_status, mock_defer
-    ):
-        """Test delete cluster operator with defer when deferrable param is true"""
-        mock_delete_cluster.return_value = True
-        mock_cluster_status.return_value = "creating"
+    def test_retry_delete_when_settled_error_event_raises(self):
+        """A non-success event from the settle-wait trigger raises AirflowException."""
         delete_cluster = RedshiftDeleteClusterOperator(
             task_id="task_test",
             cluster_identifier="test_cluster",
             deferrable=True,
             wait_for_completion=False,
         )
-
         with pytest.raises(AirflowException):
-            delete_cluster.execute(context=None)
+            delete_cluster._retry_delete_when_settled(
+                context=None, event={"status": "error", "message": "timed out"}
+            )
 
-        assert not mock_defer.called
+    @mock.patch.object(RedshiftHook, "delete_cluster")
+    @mock.patch.object(RedshiftHook, "conn")
+    @mock.patch("time.sleep", return_value=None)
+    def test_delete_cluster_sync_mode_still_uses_busy_retry_loop(
+        self, mock_sleep, mock_conn, mock_delete_cluster
+    ):
+        """Sync mode (deferrable=False) must keep the synchronous busy-retry loop unchanged."""
+        exception = boto3.client("redshift").exceptions.InvalidClusterStateFault({}, "test")
+        mock_conn.exceptions.InvalidClusterStateFault = type(exception)
+        mock_delete_cluster.side_effect = [exception, exception, True]
+
+        redshift_operator = RedshiftDeleteClusterOperator(
+            task_id="task_test",
+            cluster_identifier="test_cluster",
+            aws_conn_id="aws_conn_test",
+            deferrable=False,
+            wait_for_completion=False,
+        )
+        redshift_operator.execute(None)
+
+        # Three synchronous attempts, and time.sleep was used between the retries.
+        assert mock_delete_cluster.call_count == 3
+        assert mock_sleep.called
 
     def test_delete_cluster_execute_complete_success(self):
         """Asserts that logging occurs as expected"""

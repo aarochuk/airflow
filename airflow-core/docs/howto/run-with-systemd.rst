@@ -27,6 +27,12 @@ In the ``scripts/systemd`` directory, you can find unit files that
 have been tested on Redhat based systems. These files can be used as-is by copying them over to
 ``/usr/lib/systemd/system``.
 
+You can find the latest systemd unit files on GitHub:
+https://github.com/apache/airflow/tree/main/scripts/systemd
+
+Assumptions
+-----------
+
 The following **assumptions** have been made while creating these unit files:
 
 #. Airflow runs as the following ``user:group`` ``airflow:airflow``.
@@ -34,7 +40,54 @@ The following **assumptions** have been made while creating these unit files:
 
 If this is not the case, appropriate changes will need to be made.
 
+Environment Configuration
+-------------------------
+
 Please **note** that environment configuration is picked up from ``/etc/sysconfig/airflow``.
 
 An example file is supplied within ``scripts/systemd``.
 You can also define configuration at :envvar:`AIRFLOW_HOME` or :envvar:`AIRFLOW_CONFIG`.
+
+Using Virtual Environments
+--------------------------
+
+.. note::
+   If Airflow is installed inside a virtual environment (e.g. ``venv`` or ``conda``), you must update the ``ExecStart`` line in each systemd unit file to activate the virtualenv first.
+
+   Example:
+
+   .. code-block:: ini
+
+       ExecStart=/bin/bash -c 'source /home/airflow/airflow_venv/bin/activate && airflow scheduler'
+
+   Replace ``/home/airflow/airflow_venv/`` with the path to your virtual environment.
+
+New Airflow 3.0 Services
+------------------------
+
+Since Apache Airflow 3.0, additional components have been split out into separate services. The following new unit files are available:
+
+- ``airflow-dag-processor.service`` for Dag file parsing
+- ``airflow-triggerer.service`` for deferrable task triggering
+- ``airflow-api.service`` for the standalone REST API server
+
+Required services
+'''''''''''''''''
+
+At a minimum, you must run the ``scheduler``, the ``dag-processor`` and the ``api-server``:
+
+- ``airflow-scheduler.service``
+- ``airflow-dag-processor.service``
+- ``airflow-api.service``
+
+Without a running Dag processor, Dag files are not parsed.
+
+The ``airflow-triggerer.service`` is optional if you do not use deferrable tasks or
+event-driven :doc:`triggers <../authoring-and-scheduling/event-scheduling>`.
+
+For both ``dag_processor`` and ``triggerer``, the ``/api/v2/monitor/health`` endpoint returns
+``unhealthy`` for the status and ``down`` for the detailed status when no instance is alive.
+If there are no unfinished jobs for the component, its latest heartbeat and instances are ``null``.
+You can ignore the ``triggerer`` health status only when your deployment intentionally does not use a triggerer.
+
+See :ref:`Checking Airflow Health Status <check-health/http-endpoint>` for details on how each component reports its health.

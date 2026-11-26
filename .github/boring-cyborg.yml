@@ -21,11 +21,20 @@ labelPRBasedOnFilePath:
   provider:airbyte:
     - providers/airbyte/**
 
+  provider:akeyless:
+    - providers/akeyless/**
+
   provider:alibaba:
     - providers/alibaba/**
 
   provider:amazon:
     - providers/amazon/**
+
+  provider:anthropic:
+    - providers/anthropic/**
+
+  provider:apache-arrow:
+    - providers/apache/arrow/**
 
   provider:apache-beam:
     - providers/apache/beam/**
@@ -69,8 +78,14 @@ labelPRBasedOnFilePath:
   provider:apache-pinot:
     - providers/apache/pinot/**
 
+  provider:apache-polaris:
+    - providers/apache/polaris/**
+
   provider:apache-spark:
     - providers/apache/spark/**
+
+  provider:apache-tinkerpop:
+    - providers/apache/tinkerpop/**
 
   provider:apprise:
     - providers/apprise/**
@@ -87,6 +102,9 @@ labelPRBasedOnFilePath:
   provider:celery:
     - providers/celery/**
 
+  provider:clickhousedb:
+    - providers/clickhousedb/**
+
   provider:cloudant:
     - providers/cloudant/**
 
@@ -96,8 +114,14 @@ labelPRBasedOnFilePath:
   provider:cohere:
     - providers/cohere/**
 
+  provider:common-ai:
+    - providers/common/ai/**
+
   provider:common-compat:
     - providers/common/compat/**
+
+  provider:common-dataquality:
+    - providers/common/dataquality/**
 
   provider:common-io:
     - providers/common/io/**
@@ -108,14 +132,13 @@ labelPRBasedOnFilePath:
   provider:common-sql:
     - providers/common/sql/**
 
-  provider:standard:
-    - providers/standard/**
-
   provider:databricks:
     - providers/databricks/**
 
   provider:datadog:
     - providers/datadog/**
+  provider:ibm-db2:
+    - providers/ibm/db2/**
 
   provider:dbt-cloud:
     - providers/dbt/cloud/**
@@ -129,8 +152,11 @@ labelPRBasedOnFilePath:
   provider:docker:
     - providers/docker/**
 
+  provider:duckdb:
+    - providers/duckdb/**
+
   provider:edge:
-    - providers/edge/**
+    - providers/edge3/**
 
   provider:elasticsearch:
     - providers/elasticsearch/**
@@ -147,6 +173,9 @@ labelPRBasedOnFilePath:
   provider:ftp:
     - providers/ftp/**
 
+  provider:git:
+    - providers/git/**
+
   provider:github:
     - providers/github/**
 
@@ -162,17 +191,29 @@ labelPRBasedOnFilePath:
   provider:http:
     - providers/http/**
 
+  provider:huggingface:
+    - providers/huggingface/**
+
+  provider:ibm-mq:
+    - providers/ibm/mq/**
+
   provider:imap:
     - providers/imap/**
 
   provider:influxdb:
     - providers/influxdb/**
 
+  provider:informatica:
+    - providers/informatica/**
+
   provider:jdbc:
     - providers/jdbc/**
 
   provider:jenkins:
     - providers/jenkins/**
+
+  provider:keycloak:
+    - providers/keycloak/**
 
   provider:microsoft-azure:
     - providers/microsoft/azure/**
@@ -185,6 +226,9 @@ labelPRBasedOnFilePath:
 
   provider:microsoft-winrm:
     - providers/microsoft/winrm/**
+
+  provider:modal:
+    - providers/modal/**
 
   provider:mongo:
     - providers/mongo/**
@@ -213,7 +257,7 @@ labelPRBasedOnFilePath:
   provider:opsgenie:
     - providers/opsgenie/**
 
-  provider:Oracle:
+  provider:oracle:
     - providers/oracle/**
 
   provider:pagerduty:
@@ -273,6 +317,9 @@ labelPRBasedOnFilePath:
   provider:ssh:
     - providers/ssh/**
 
+  provider:standard:
+    - providers/standard/**
+
   provider:tableau:
     - providers/tableau/**
 
@@ -288,6 +335,9 @@ labelPRBasedOnFilePath:
   provider:vertica:
     - providers/vertica/**
 
+  provider:vespa:
+    - providers/vespa/**
+
   provider:weaviate:
     - providers/weaviate/**
 
@@ -302,7 +352,13 @@ labelPRBasedOnFilePath:
 
   area:API:
     - airflow-core/src/airflow/api/**/*
-    - airflow-core/src/airflow/api_fastapi/**/*
+    - airflow-core/src/airflow/api_fastapi/auth/**/*
+    - airflow-core/src/airflow/api_fastapi/common/**/*
+    - airflow-core/src/airflow/api_fastapi/core_api/**/*
+    - airflow-core/src/airflow/api_fastapi/logging/**/*
+    - airflow-core/src/airflow/api_fastapi/app.py
+    - airflow-core/src/airflow/api_fastapi/compat.py
+    - airflow-core/src/airflow/api_fastapi/main.py
     - clients/**/*
     - airflow-core/docs/stable-rest-api-ref.rst
     - airflow-core/tests/unit/api_fastapi/**/*
@@ -323,6 +379,33 @@ labelPRBasedOnFilePath:
     - .rat-excludes
     - .readthedocs.yml
 
+  # This should be copy of the "area:dev-tools" above minus contributing docs and some files that should
+  # only make sense in main - it should be updated when we switch maintenance branch.
+  # Scoped to PRs targeting `main` only — a PR opened directly against v3-4-test
+  # does not need a backport-to-v3-4-test label.
+  backport-to-v3-4-test:
+    paths:
+      - scripts/**/*
+      - dev/**/*
+      - .github/**/*
+      - Dockerfile.ci
+      - yamllint-config.yml
+      - .dockerignore
+      - .hadolint.yaml
+      - .pre-commit-config.yaml
+      - .rat-excludes
+    targetBranchFilter:
+      - ^main$
+
+  # Apply to PRs touching airflow-ctl code so the release manager notices when a
+  # fix should land on the airflow-ctl/v0-1-test maintenance branch.
+  # Scoped to PRs targeting `main` only.
+  backport-to-airflow-ctl/v0-1-test:
+    paths:
+      - airflow-ctl/**/*
+    targetBranchFilter:
+      - ^main$
+
   kind:documentation:
     - airflow-core/docs/**/*
     - chart/docs/**/*
@@ -330,6 +413,7 @@ labelPRBasedOnFilePath:
     - providers/**/docs/**/*
     - providers-summary-docs/**/*
     - docker-stack-docs/**/*
+    - airflow-ctl/docs/**/*
 
   area:helm-chart:
     - chart/**/*
@@ -338,6 +422,72 @@ labelPRBasedOnFilePath:
     - airflow-core/docs/ui.rst
     - airflow-core/src/airflow/ui/**/*
 
+  area:translations:
+    - airflow-core/src/airflow/ui/public/i18n/**/*
+
+  translation:default:
+    - airflow-core/src/airflow/ui/public/i18n/locales/en/*
+
+  translation:ar:
+    - airflow-core/src/airflow/ui/public/i18n/locales/ar/*
+
+  translation:ca:
+    - airflow-core/src/airflow/ui/public/i18n/locales/ca/*
+
+  translation:de:
+    - airflow-core/src/airflow/ui/public/i18n/locales/de/*
+
+  translation:el:
+    - airflow-core/src/airflow/ui/public/i18n/locales/el/*
+
+  translation:es:
+    - airflow-core/src/airflow/ui/public/i18n/locales/es/*
+
+  translation:fr:
+    - airflow-core/src/airflow/ui/public/i18n/locales/fr/*
+
+  translation:he:
+    - airflow-core/src/airflow/ui/public/i18n/locales/he/*
+
+  translation:hi:
+    - airflow-core/src/airflow/ui/public/i18n/locales/hi/*
+
+  translation:hu:
+    - airflow-core/src/airflow/ui/public/i18n/locales/hu/*
+
+  translation:it:
+    - airflow-core/src/airflow/ui/public/i18n/locales/it/*
+
+  translation:ja:
+    - airflow-core/src/airflow/ui/public/i18n/locales/ja/*
+
+  translation:ko:
+    - airflow-core/src/airflow/ui/public/i18n/locales/ko/*
+
+  translation:nl:
+    - airflow-core/src/airflow/ui/public/i18n/locales/nl/*
+
+  translation:pl:
+    - airflow-core/src/airflow/ui/public/i18n/locales/pl/*
+
+  translation:pt:
+    - airflow-core/src/airflow/ui/public/i18n/locales/pt/*
+
+  translation:ru:
+    - airflow-core/src/airflow/ui/public/i18n/locales/ru/*
+
+  translation:th:
+    - airflow-core/src/airflow/ui/public/i18n/locales/th/*
+
+  translation:tr:
+    - airflow-core/src/airflow/ui/public/i18n/locales/tr/*
+
+  translation:zh-CN:
+    - airflow-core/src/airflow/ui/public/i18n/locales/zh-CN/*
+
+  translation:zh-TW:
+    - airflow-core/src/airflow/ui/public/i18n/locales/zh-TW/*
+
   area:CLI:
     - airflow-core/src/airflow/cli/**/*.py
     - airflow-core/tests/unit/cli/**/*.py
@@ -345,15 +495,20 @@ labelPRBasedOnFilePath:
     - airflow-core/docs/howto/usage-cli.rst
 
   area:Lineage:
-    - airflow-core/src/airflow/lineage/**/*
-    - airflow-core/tests/unit/lineage/**/*
+    - task-sdk/src/airflow/sdk/lineage.py
+    - task-sdk/tests/task_sdk/test_lineage.py
     - airflow-core/docs/administration-and-deployment/lineage.rst
 
   area:Logging:
+    - airflow-core/src/airflow/config_templates/airflow_local_settings.py
+    - shared/logging/**/*
     - airflow-core/src/airflow/utils/log/**/*
     - airflow-core/docs/administration-and-deployment/logging-monitoring/logging-*.rst
     - airflow-core/tests/unit/utils/log/**/*
     - providers/**/log/*
+
+  area:ConfigTemplates:
+    - airflow-core/src/airflow/config_templates/*
 
   area:Plugins:
     - airflow-core/src/airflow/cli/commands/plugins_command.py
@@ -372,6 +527,12 @@ labelPRBasedOnFilePath:
     - airflow-core/src/airflow/jobs/dag_processor_job_runner.py
     - airflow-core/docs/administration-and-deployment/dagfile-processing.rst
     - airflow-core/tests/unit/dag_processing/**/*
+    # Serialization (merged into DAG-processing)
+    - airflow-core/src/airflow/serialization/**/*
+    - airflow-core/src/airflow/models/serialized_dag.py
+    - airflow-core/tests/unit/serialization/**/*
+    - airflow-core/tests/unit/models/test_serialized_dag.py
+    - airflow-core/docs/administration-and-deployment/dag-serialization.rst
 
   area:Executors-core:
     - airflow-core/src/airflow/executors/**/*
@@ -380,7 +541,6 @@ labelPRBasedOnFilePath:
 
   area:Secrets:
     - airflow-core/src/airflow/secrets/**/*
-    - airflow-core/tests/unit/secrets/**/*
     - providers/**/secrets/*
     - airflow-core/docs/security/secrets/**/*
 
@@ -393,13 +553,6 @@ labelPRBasedOnFilePath:
     - airflow-core/tests/unit/jobs/test_triggerer_job.py
     - airflow-core/tests/unit/models/test_trigger.py
     - providers/standard/tests/unit/standard/triggers/**/*
-
-  area:Serialization:
-    - airflow-core/src/airflow/serialization/**/*
-    - airflow-core/src/airflow/models/serialized_dag.py
-    - airflow-core/tests/unit/serialization/**/*
-    - airflow-core/tests/unit/models/test_serialized_dag.py
-    - airflow-core/docs/administration-and-deployment/dag-serialization.rst
 
   area:core-operators:
     - airflow-core/src/airflow/hooks/**/*
@@ -418,10 +571,42 @@ labelPRBasedOnFilePath:
     - airflow-core/tests/system/**/*
 
   area:task-sdk:
+    - airflow-core/src/airflow/api_fastapi/execution_api/**/*
     - task-sdk/**/*
+
+  area:go-sdk:
+    - go-sdk/**/*
+
+  area:java-sdk:
+    - java-sdk/**/*
+
+  area:ts-sdk:
+    - ts-sdk/**/*
+
+  area:coordinator:
+    - task-sdk/src/airflow/sdk/coordinators/**/*
+    - task-sdk/src/airflow/sdk/execution_time/coordinator.py
+    - task-sdk/tests/task_sdk/coordinators/**/*
+    - task-sdk/tests/task_sdk/execution_time/test_coordinator.py
+
+  "AIP-85: Dag Importer":
+    - task-sdk/src/airflow/sdk/importers/**/*
+    - task-sdk/tests/task_sdk/importers/**/*
 
   area:db-migrations:
     - airflow-core/src/airflow/migrations/versions/*
+
+  area:deadline-alerts:
+    - airflow-core/src/airflow/models/deadline.py
+    - airflow-core/src/airflow/models/deadline_alert.py
+    - airflow-core/src/airflow/serialization/definitions/deadline.py
+    - airflow-core/src/airflow/migrations/versions/*deadline*.py
+    - task-sdk/src/airflow/sdk/definitions/deadline.py
+    - airflow-core/tests/unit/models/test_deadline.py
+    - airflow-core/tests/unit/models/test_deadline_alert.py
+    - task-sdk/tests/task_sdk/definitions/test_deadline.py
+    - airflow-core/docs/howto/deadline-alerts.rst
+    - airflow-core/docs/howto/sla-to-deadlines.rst
 
   area:providers:
     - providers/**/*
@@ -432,8 +617,19 @@ labelPRBasedOnFilePath:
   area:docker-tests:
     - docker-tests/**/*
 
+  area:e2e-tests:
+    - airflow-e2e-tests/**/*
+
   area:kubernetes-tests:
     - kubernetes-tests/**/*
+
+  area:registry:
+    - registry/**/*
+    - dev/registry/**/*
+    - dev/breeze/src/airflow_breeze/commands/registry_commands*.py
+    - dev/breeze/src/airflow_breeze/utils/publish_registry_versions.py
+    - dev/breeze/tests/test_publish_registry_versions.py
+    - .github/workflows/registry-*
 
 # Various Flags to control behaviour of the "Labeler"
 labelerFlags:
@@ -447,18 +643,18 @@ labelerFlags:
 firstPRWelcomeComment: >
   Congratulations on your first Pull Request and welcome to the Apache Airflow community!
   If you have any issues or are unsure about any anything please check our
-  Contributors' Guide (https://github.com/apache/airflow/blob/main/contributing-docs/README.rst)
+  [Contributors' Guide](https://github.com/apache/airflow/blob/main/contributing-docs/README.rst)
 
   Here are some useful points:
 
-  - Pay attention to the quality of your code (ruff, mypy and type annotations). Our [pre-commits](
-  https://github.com/apache/airflow/blob/main/contributing-docs/08_static_code_checks.rst#prerequisites-for-pre-commit-hooks)
+  - Pay attention to the quality of your code (ruff, mypy and type annotations). Our [prek-hooks](
+  https://github.com/apache/airflow/blob/main/contributing-docs/08_static_code_checks.rst#prerequisites-for-prek-hooks)
   will help you with that.
 
   - In case of a new feature add useful documentation (in docstrings or in `docs/` directory).
   Adding a new operator? Check this short
   [guide](https://github.com/apache/airflow/blob/main/airflow-core/docs/howto/custom-operator.rst)
-  Consider adding an example DAG that shows how users should use it.
+  Consider adding an example Dag that shows how users should use it.
 
   - Consider using [Breeze environment](https://github.com/apache/airflow/blob/main/dev/breeze/doc/README.rst)
   for testing locally, it's a heavy docker but it ships with a working Airflow and a lot of integrations.

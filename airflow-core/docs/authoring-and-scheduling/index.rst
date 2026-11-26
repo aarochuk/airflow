@@ -18,8 +18,10 @@
 Authoring and Scheduling
 =========================
 
-Here you can find detailed documentation about advanced authoring and scheduling airflow dags.
+Here you can find detailed documentation about advanced authoring and scheduling Airflow Dags.
 It's recommended that you first review the pages in :doc:`core concepts </core-concepts/index>`
+
+.. _authoring-section:
 
 **Authoring**
 
@@ -29,9 +31,15 @@ It's recommended that you first review the pages in :doc:`core concepts </core-c
     deferring
     serializers
     connections
+    loops-and-mapped-tasks
     dynamic-task-mapping
+    loops
     assets
+    dag-result
+    Non-Python Task SDKs <language-sdks/index>
+    Writing Dags in YAML <yaml-dags>
 
+.. _scheduling-section:
 
 **Scheduling**
 
@@ -40,6 +48,6 @@ It's recommended that you first review the pages in :doc:`core concepts </core-c
 
     cron
     timezone
-    Data-ware scheduling with assets <datasets>
+    Asset-Aware Scheduling <asset-scheduling>
     timetable
-    Event-driven scheduling <event-scheduling>
+    Event-Driven Scheduling <event-scheduling>

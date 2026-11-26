@@ -21,21 +21,21 @@ import fcntl
 import logging
 import tempfile
 import threading
-import time
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 import time_machine
 
+from airflow._shared.timezones import timezone as tz
 from airflow.dag_processing.bundles.base import (
     BaseDagBundle,
     BundleUsageTrackingManager,
+    BundleVersion,
     BundleVersionLock,
     get_bundle_storage_root_path,
 )
-from airflow.utils import timezone as tz
 
 from tests_common.test_utils.config import conf_vars
 
@@ -51,7 +51,7 @@ def bundle_temp_dir(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "val, expected",
+    ("val", "expected"),
     [
         ("/blah", Path("/blah")),
         ("", Path(tempfile.gettempdir(), "airflow", "dag_bundles")),
@@ -71,6 +71,10 @@ class BasicBundle(BaseDagBundle):
 
     def path(self):
         pass
+
+
+def test_refresh_may_change_source_by_default():
+    assert BasicBundle.refresh_changes_source is True
 
 
 def test_dag_bundle_root_storage_path():
@@ -137,61 +141,73 @@ def test_lock_exception_handling():
         assert acquired
 
 
+LOCK_WAIT_TIMEOUT = 10
+
+
 class LockTestHelper:
     def __init__(self, num, **kwargs):
         super().__init__(**kwargs)
         self.num = num
-        self.stop = None
-        self.did_lock = None
-        self.locker: BundleVersionLock
-
-    def lock_the_file(self):
+        self.stop = threading.Event()
+        self.did_lock = threading.Event()
         self.locker = BundleVersionLock(
             bundle_name="abc",
             bundle_version="this",
         )
+
+    def lock_the_file(self):
         with self.locker:
-            self.did_lock = True
+            self.did_lock.set()
             idx = 0
-            while not self.stop:
+            while not self.stop.wait(0.2):
                 idx += 1
-                time.sleep(0.2)
                 log.info("sleeping: idx=%s num=%s", idx, self.num)
         log.info("exit")
+
+    def start(self):
+        thread = threading.Thread(target=self.lock_the_file)
+        thread.start()
+        return thread
+
+    def wait_until_locked(self):
+        assert self.did_lock.wait(LOCK_WAIT_TIMEOUT), f"helper {self.num} never acquired the lock"
 
 
 class TestBundleVersionLock:
     def test_that_shared_lock_doesnt_block_shared_lock(self):
         """Verify that two things can lock file at same time."""
         lth1 = LockTestHelper(1)
-        t1 = threading.Thread(target=lth1.lock_the_file)
         lth2 = LockTestHelper(2)
-        t2 = threading.Thread(target=lth2.lock_the_file)
-        t1.start()
-        time.sleep(0.1)
-        assert lth1.did_lock is True
-        t2.start()
-        time.sleep(0.1)
-        assert lth2.did_lock is True
-        lth1.stop = True
-        lth2.stop = True
-        t1.join()
-        t2.join()
+        t1 = lth1.start()
+        t2 = None
+        try:
+            lth1.wait_until_locked()
+            t2 = lth2.start()
+            lth2.wait_until_locked()
+        finally:
+            lth1.stop.set()
+            lth2.stop.set()
+            t1.join(LOCK_WAIT_TIMEOUT)
+            if t2:
+                t2.join(LOCK_WAIT_TIMEOUT)
+        assert not t1.is_alive()
+        assert not t2.is_alive()
 
     def test_that_shared_lock_blocks_ex_lock(self):
         """Test that exclusive lock is impossible when in bundle lock context."""
         lth1 = LockTestHelper(1)
-        t1 = threading.Thread(target=lth1.lock_the_file)
-        t1.start()
-        time.sleep(0.1)
-        assert lth1.did_lock is True
-        with open(lth1.locker.lock_file_path, "a") as f:
-            fcntl.flock(f, fcntl.LOCK_SH)
-            fcntl.flock(f, fcntl.LOCK_UN)
-            with pytest.raises(BlockingIOError):  # <-- this is the important part
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        lth1.stop = True
-        t1.join()
+        t1 = lth1.start()
+        try:
+            lth1.wait_until_locked()
+            with open(lth1.locker.lock_file_path, "a") as f:
+                fcntl.flock(f, fcntl.LOCK_SH)
+                fcntl.flock(f, fcntl.LOCK_UN)
+                with pytest.raises(BlockingIOError):  # <-- this is the important part
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            lth1.stop.set()
+            t1.join(LOCK_WAIT_TIMEOUT)
+        assert not t1.is_alive()
 
     def test_that_no_version_is_noop(self):
         with BundleVersionLock(
@@ -201,6 +217,32 @@ class TestBundleVersionLock:
             log.info("this is fine")
         assert b.lock_file_path is None
         assert b.lock_file is None
+
+    def test_log_exc_formats_message_correctly(self):
+        """Test that _log_exc correctly formats the log message with all parameters."""
+        from airflow.dag_processing.bundles.base import log as bundle_log
+
+        bundle_name = "test_bundle"
+        bundle_version = "v1.0.0"
+        lock = BundleVersionLock(
+            bundle_name=bundle_name,
+            bundle_version=bundle_version,
+        )
+
+        test_msg = "error when attempting to acquire lock"
+
+        with patch.object(bundle_log, "exception") as mock_exception:
+            lock._log_exc(test_msg)
+
+            assert mock_exception.mock_calls == [
+                call(
+                    "%s name=%s version=%s lock_file=%s",
+                    test_msg,
+                    bundle_name,
+                    bundle_version,
+                    lock.lock_file_path,
+                )
+            ]
 
 
 class FakeBundle(BaseDagBundle):
@@ -215,7 +257,7 @@ class FakeBundle(BaseDagBundle):
 
 class TestBundleUsageTrackingManager:
     @pytest.mark.parametrize(
-        "threshold_hours, min_versions, when_hours, expected_remaining",
+        ("threshold_hours", "min_versions", "when_hours", "expected_remaining"),
         [
             (3, 0, 3, 5),
             (3, 0, 6, 2),
@@ -263,8 +305,49 @@ class TestBundleUsageTrackingManager:
             assert len(bundle_folders) == 5
             num += 1
             with time_machine.travel(h0 + timedelta(hours=when_hours), tick=False):
-                BundleUsageTrackingManager()._remove_stale_bundle_versions_for_bundle(bundle_name=bundle_name)
+                BundleUsageTrackingManager().remove_stale_bundle_versions_for_bundle(bundle_name=bundle_name)
                 lock_files = list(bundle_tracking_dir.iterdir())
                 assert len(lock_files) == expected_remaining
                 bundle_folders = list(b.versions_dir.iterdir())
                 assert len(bundle_folders) == expected_remaining
+
+
+class TestBundleVersion:
+    def test_bundle_version_with_version_only(self):
+        bv = BundleVersion(version="abc123")
+        assert bv.version == "abc123"
+        assert bv.data is None
+
+    def test_bundle_version_with_data(self):
+        data = {"schema_version": 1, "files": {"dag.py": "v1"}}
+        bv = BundleVersion(version="sha256hex", data=data)
+        assert bv.version == "sha256hex"
+        assert bv.data == data
+
+    def test_bundle_version_is_frozen(self):
+        bv = BundleVersion(version="abc")
+        with pytest.raises(AttributeError):
+            bv.version = "xyz"
+
+    def test_bundle_version_equality(self):
+        bv1 = BundleVersion(version="abc", data={"key": "val"})
+        bv2 = BundleVersion(version="abc", data={"key": "val"})
+        assert bv1 == bv2
+
+    def test_bundle_version_inequality(self):
+        bv1 = BundleVersion(version="abc", data={"key": "val"})
+        bv2 = BundleVersion(version="abc", data={"key": "other"})
+        assert bv1 != bv2
+
+
+def test_version_data_stored_on_bundle():
+    """Test that version_data passed to a bundle constructor is stored on the instance."""
+    manifest = {"schema_version": 1, "files": {"dags/my_dag.py": "S3VersionId123"}}
+    bundle = BasicBundle(name="test", version="abc", version_data=manifest)
+    assert bundle.version_data == manifest
+
+
+def test_version_data_defaults_to_none():
+    """Test that version_data defaults to None when not provided."""
+    bundle = BasicBundle(name="test")
+    assert bundle.version_data is None

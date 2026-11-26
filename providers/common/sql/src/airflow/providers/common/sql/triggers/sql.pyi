@@ -17,7 +17,7 @@
 #
 # This is automatically generated stub for the `common.sql` provider
 #
-# This file is generated automatically by the `update-common-sql-api stubs` pre-commit
+# This file is generated automatically by the `update-common-sql-api stubs` prek hook
 # and the .pyi file represents part of the "public" API that the
 # `common.sql` provider exposes to other providers.
 #
@@ -27,19 +27,40 @@
 #
 # You can read more in the README_API.md file
 #
-"""
-Definition of the public interface for airflow.providers.common.sql.triggers.sql
-isort:skip_file
-"""
+"""Definition of the public interface for airflow.providers.common.sql.triggers.sql."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable, Mapping
 from typing import Any
 
+from airflow.providers.common.sql.hooks.sql import DbApiHook as DbApiHook
 from airflow.triggers.base import BaseTrigger as BaseTrigger, TriggerEvent as TriggerEvent
+
+NO_ROWS_MESSAGE: str
 
 class SQLExecuteQueryTrigger(BaseTrigger):
     def __init__(
-        self, sql: str | list[str], conn_id: str, hook_params: dict | None = None, **kwargs
+        self,
+        sql: str | list[str],
+        conn_id: str,
+        hook_params: dict | None = None,
+        parameters: Iterable | Mapping[str, Any] | None = None,
+        **kwargs,
+    ) -> None: ...
+    def serialize(self) -> tuple[str, dict[str, Any]]: ...
+    def get_hook(self) -> DbApiHook: ...
+    async def run(self) -> AsyncIterator[TriggerEvent]: ...  # type: ignore
+
+class SqlSensorTrigger(SQLExecuteQueryTrigger):
+    def __init__(
+        self,
+        *,
+        sql: str,
+        conn_id: str,
+        poke_interval: float,
+        parameters: Iterable | Mapping[str, Any] | None = None,
+        hook_params: dict | None = None,
+        fail_on_empty: bool = False,
+        **kwargs,
     ) -> None: ...
     def serialize(self) -> tuple[str, dict[str, Any]]: ...
     async def run(self) -> AsyncIterator[TriggerEvent]: ...  # type: ignore

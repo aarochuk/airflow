@@ -17,35 +17,30 @@
  * under the License.
  */
 import { ReactFlowProvider } from "@xyflow/react";
-import { FiCode } from "react-icons/fi";
+import { useTranslation } from "react-i18next";
+import { FiCode, FiDatabase, FiPhoneCall } from "react-icons/fi";
 import { MdDetails, MdOutlineEventNote, MdOutlineTask } from "react-icons/md";
 import { useParams } from "react-router-dom";
 
-import { useDagRunServiceGetDagRun, useDagServiceGetDagDetails } from "openapi/queries";
+import { useDagRunServiceGetDagRun, useDeadlinesServiceGetDeadlines } from "openapi/queries";
+
 import { DetailsLayout } from "src/layouts/Details/DetailsLayout";
-import { isStatePending, useAutoRefresh } from "src/utils";
+
+import { usePluginTabs } from "src/hooks/usePluginTabs";
+import { isStatePending, useAutoRefresh, useDocumentTitle } from "src/utils";
 
 import { Header } from "./Header";
 
-const tabs = [
-  { icon: <MdOutlineTask />, label: "Task Instances", value: "" },
-  { icon: <MdOutlineEventNote />, label: "Events", value: "events" },
-  { icon: <FiCode />, label: "Code", value: "code" },
-  { icon: <MdDetails />, label: "Details", value: "details" },
-];
-
 export const Run = () => {
+  const { t: translate } = useTranslation(["dag", "hitl"]);
   const { dagId = "", runId = "" } = useParams();
 
-  const refetchInterval = useAutoRefresh({ dagId });
+  useDocumentTitle(runId);
 
-  const {
-    data: dag,
-    error: dagError,
-    isLoading: isLoadinDag,
-  } = useDagServiceGetDagDetails({
-    dagId,
-  });
+  // Get external views with dag_run destination
+  const externalTabs = usePluginTabs("dag_run");
+
+  const refetchInterval = useAutoRefresh({ dagId });
 
   const {
     data: dagRun,
@@ -58,19 +53,36 @@ export const Run = () => {
     },
     undefined,
     {
-      refetchInterval: (query) => (isStatePending(query.state.data?.state) ? refetchInterval : false),
+      refetchInterval: (query) => isStatePending(query.state.data?.state) && refetchInterval,
     },
   );
 
+  // Like Required Actions, the Callbacks tab only shows when the run has callbacks (one per deadline).
+  const { data: deadlines } = useDeadlinesServiceGetDeadlines(
+    { dagId, dagRunId: runId, limit: 1 },
+    undefined,
+    {
+      refetchInterval: isStatePending(dagRun?.state) && refetchInterval,
+    },
+  );
+  const hasCallbacks = (deadlines?.total_entries ?? 0) > 0;
+
+  const tabs = [
+    { icon: <MdOutlineTask />, label: translate("tabs.taskInstances"), value: "" },
+    { icon: <FiDatabase />, label: translate("tabs.assetEvents"), value: "asset_events" },
+    ...(hasCallbacks
+      ? [{ icon: <FiPhoneCall />, label: translate("tabs.callbacks"), value: "callbacks" }]
+      : []),
+    { icon: <MdOutlineEventNote />, label: translate("tabs.auditLog"), value: "events" },
+    { icon: <FiCode />, label: translate("tabs.code"), value: "code" },
+    { icon: <MdDetails />, label: translate("tabs.details"), value: "details" },
+    ...externalTabs,
+  ];
+
   return (
     <ReactFlowProvider>
-      <DetailsLayout dag={dag} error={error ?? dagError} isLoading={isLoading || isLoadinDag} tabs={tabs}>
-        {dagRun === undefined ? undefined : (
-          <Header
-            dagRun={dagRun}
-            isRefreshing={Boolean(isStatePending(dagRun.state) && Boolean(refetchInterval))}
-          />
-        )}
+      <DetailsLayout error={error} isLoading={isLoading} tabs={tabs}>
+        {dagRun === undefined ? undefined : <Header dagRun={dagRun} />}
       </DetailsLayout>
     </ReactFlowProvider>
   );

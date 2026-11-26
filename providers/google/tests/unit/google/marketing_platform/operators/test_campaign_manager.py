@@ -22,8 +22,10 @@ from tempfile import NamedTemporaryFile
 from unittest import mock
 
 import pytest
+from sqlalchemy import delete
 
-from airflow.models import DAG, TaskInstance as TI
+from airflow.models import TaskInstance as TI
+from airflow.providers.common.compat.sdk import timezone
 from airflow.providers.google.marketing_platform.operators.campaign_manager import (
     GoogleCampaignManagerBatchInsertConversionsOperator,
     GoogleCampaignManagerBatchUpdateConversionsOperator,
@@ -32,10 +34,11 @@ from airflow.providers.google.marketing_platform.operators.campaign_manager impo
     GoogleCampaignManagerInsertReportOperator,
     GoogleCampaignManagerRunReportOperator,
 )
-from airflow.utils import timezone
 from airflow.utils.session import create_session
 
-API_VERSION = "v4"
+from tests_common.test_utils.taskinstance import run_task_instance
+
+API_VERSION = "v5"
 GCP_CONN_ID = "google_cloud_default"
 
 CONVERSION = {
@@ -74,7 +77,7 @@ class TestGoogleCampaignManagerDeleteReportOperator:
             api_version=API_VERSION,
             task_id="test_task",
         )
-        op.execute(context=None)
+        op.execute(context={})
         hook_mock.assert_called_once_with(
             gcp_conn_id=GCP_CONN_ID,
             api_version=API_VERSION,
@@ -84,16 +87,36 @@ class TestGoogleCampaignManagerDeleteReportOperator:
             profile_id=PROFILE_ID, report_id=REPORT_ID
         )
 
+    @pytest.mark.parametrize(
+        ("report_name", "report_id"),
+        [
+            pytest.param(None, None, id="both-missing"),
+            pytest.param(REPORT_NAME, REPORT_ID, id="both-provided"),
+        ],
+    )
+    def test_missing_or_conflicting_report_params_fail_at_construction(self, report_name, report_id):
+        # Provision checks on templated fields stay in `__init__` (rewritten with
+        # `is not None` polarity) so static authoring mistakes surface at Dag parse
+        # time — see https://github.com/apache/airflow/issues/70296.
+        with pytest.raises(ValueError, match="Please provide exactly one of `report_name` or `report_id`"):
+            GoogleCampaignManagerDeleteReportOperator(
+                profile_id=PROFILE_ID,
+                report_name=report_name,
+                report_id=report_id,
+                api_version=API_VERSION,
+                task_id="test_task",
+            )
+
 
 @pytest.mark.db_test
 class TestGoogleCampaignManagerDownloadReportOperator:
     def setup_method(self):
         with create_session() as session:
-            session.query(TI).delete()
+            session.execute(delete(TI))
 
     def teardown_method(self):
         with create_session() as session:
-            session.query(TI).delete()
+            session.execute(delete(TI))
 
     @mock.patch("airflow.providers.google.marketing_platform.operators.campaign_manager.http")
     @mock.patch("airflow.providers.google.marketing_platform.operators.campaign_manager.tempfile")
@@ -102,13 +125,8 @@ class TestGoogleCampaignManagerDownloadReportOperator:
     )
     @mock.patch("airflow.providers.google.marketing_platform.operators.campaign_manager.GCSHook")
     @mock.patch("airflow.providers.google.marketing_platform.operators.campaign_manager.BaseOperator")
-    @mock.patch(
-        "airflow.providers.google.marketing_platform.operators."
-        "campaign_manager.GoogleCampaignManagerDownloadReportOperator.xcom_push"
-    )
     def test_execute(
         self,
-        xcom_mock,
         mock_base_op,
         gcs_hook_mock,
         hook_mock,
@@ -120,6 +138,9 @@ class TestGoogleCampaignManagerDownloadReportOperator:
             True,
         )
         tempfile_mock.NamedTemporaryFile.return_value.__enter__.return_value.name = TEMP_FILE_NAME
+
+        mock_context = {"task_instance": mock.Mock()}
+
         op = GoogleCampaignManagerDownloadReportOperator(
             profile_id=PROFILE_ID,
             report_id=REPORT_ID,
@@ -129,7 +150,7 @@ class TestGoogleCampaignManagerDownloadReportOperator:
             api_version=API_VERSION,
             task_id="test_task",
         )
-        op.execute(context=None)
+        op.execute(context=mock_context)
         hook_mock.assert_called_once_with(
             gcp_conn_id=GCP_CONN_ID,
             api_version=API_VERSION,
@@ -149,11 +170,13 @@ class TestGoogleCampaignManagerDownloadReportOperator:
             filename=TEMP_FILE_NAME,
             mime_type="text/csv",
         )
-        xcom_mock.assert_called_once_with(None, key="report_name", value=REPORT_NAME + ".gz")
+        mock_context["task_instance"].xcom_push.assert_called_once_with(
+            key="report_name", value=REPORT_NAME + ".gz"
+        )
 
     @pytest.mark.parametrize(
         "test_bucket_name",
-        [BUCKET_NAME, f"gs://{BUCKET_NAME}", "XComArg", "{{ ti.xcom_pull(task_ids='f') }}"],
+        [BUCKET_NAME, f"gs://{BUCKET_NAME}", "XComArg", "{{ ti.xcom_pull(task_ids='taskflow_op') }}"],
     )
     @mock.patch("airflow.providers.google.marketing_platform.operators.campaign_manager.http")
     @mock.patch("airflow.providers.google.marketing_platform.operators.campaign_manager.tempfile")
@@ -168,6 +191,7 @@ class TestGoogleCampaignManagerDownloadReportOperator:
         tempfile_mock,
         http_mock,
         test_bucket_name,
+        dag_maker,
     ):
         http_mock.MediaIoBaseDownload.return_value.next_chunk.return_value = (
             None,
@@ -175,33 +199,29 @@ class TestGoogleCampaignManagerDownloadReportOperator:
         )
         tempfile_mock.NamedTemporaryFile.return_value.__enter__.return_value.name = TEMP_FILE_NAME
 
-        dag = DAG(
-            dag_id="test_set_bucket_name",
-            start_date=DEFAULT_DATE,
-            schedule=None,
-            catchup=False,
-        )
+        with dag_maker(dag_id="test_set_bucket_name", start_date=DEFAULT_DATE) as dag:
+            if BUCKET_NAME not in test_bucket_name:
 
-        if BUCKET_NAME not in test_bucket_name:
+                @dag.task(task_id="taskflow_op")
+                def f():
+                    return BUCKET_NAME
 
-            @dag.task
-            def f():
-                return BUCKET_NAME
+                taskflow_op = f()
 
-            taskflow_op = f()
-            taskflow_op.operator.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE)
+            GoogleCampaignManagerDownloadReportOperator(
+                profile_id=PROFILE_ID,
+                report_id=REPORT_ID,
+                file_id=FILE_ID,
+                bucket_name=test_bucket_name if test_bucket_name != "XComArg" else taskflow_op,
+                report_name=REPORT_NAME,
+                api_version=API_VERSION,
+                task_id="test_task",
+            )
 
-        op = GoogleCampaignManagerDownloadReportOperator(
-            profile_id=PROFILE_ID,
-            report_id=REPORT_ID,
-            file_id=FILE_ID,
-            bucket_name=test_bucket_name if test_bucket_name != "XComArg" else taskflow_op,
-            report_name=REPORT_NAME,
-            api_version=API_VERSION,
-            task_id="test_task",
-            dag=dag,
-        )
-        op.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE)
+        dr = dag_maker.create_dagrun()
+
+        for ti in dr.get_task_instances():
+            run_task_instance(ti, dag_maker.dag.get_task(ti.task_id))
 
         gcs_hook_mock.return_value.upload.assert_called_once_with(
             bucket_name=BUCKET_NAME,
@@ -217,12 +237,10 @@ class TestGoogleCampaignManagerInsertReportOperator:
         "airflow.providers.google.marketing_platform.operators.campaign_manager.GoogleCampaignManagerHook"
     )
     @mock.patch("airflow.providers.google.marketing_platform.operators.campaign_manager.BaseOperator")
-    @mock.patch(
-        "airflow.providers.google.marketing_platform.operators."
-        "campaign_manager.GoogleCampaignManagerInsertReportOperator.xcom_push"
-    )
-    def test_execute(self, xcom_mock, mock_base_op, hook_mock):
+    def test_execute(self, mock_base_op, hook_mock):
         report = {"report": "test"}
+
+        mock_context = {"task_instance": mock.Mock()}
 
         hook_mock.return_value.insert_report.return_value = {"id": REPORT_ID}
 
@@ -232,14 +250,14 @@ class TestGoogleCampaignManagerInsertReportOperator:
             api_version=API_VERSION,
             task_id="test_task",
         )
-        op.execute(context=None)
+        op.execute(context=mock_context)
         hook_mock.assert_called_once_with(
             gcp_conn_id=GCP_CONN_ID,
             api_version=API_VERSION,
             impersonation_chain=None,
         )
         hook_mock.return_value.insert_report.assert_called_once_with(profile_id=PROFILE_ID, report=report)
-        xcom_mock.assert_called_once_with(None, key="report_id", value=REPORT_ID)
+        mock_context["task_instance"].xcom_push.assert_called_once_with(key="report_id", value=REPORT_ID)
 
     def test_prepare_template(self):
         report = {"key": "value"}
@@ -263,12 +281,10 @@ class TestGoogleCampaignManagerRunReportOperator:
         "airflow.providers.google.marketing_platform.operators.campaign_manager.GoogleCampaignManagerHook"
     )
     @mock.patch("airflow.providers.google.marketing_platform.operators.campaign_manager.BaseOperator")
-    @mock.patch(
-        "airflow.providers.google.marketing_platform.operators."
-        "campaign_manager.GoogleCampaignManagerRunReportOperator.xcom_push"
-    )
-    def test_execute(self, xcom_mock, mock_base_op, hook_mock):
+    def test_execute(self, mock_base_op, hook_mock):
         synchronous = True
+
+        mock_context = {"task_instance": mock.Mock()}
 
         hook_mock.return_value.run_report.return_value = {"id": FILE_ID}
 
@@ -279,7 +295,7 @@ class TestGoogleCampaignManagerRunReportOperator:
             api_version=API_VERSION,
             task_id="test_task",
         )
-        op.execute(context=None)
+        op.execute(context=mock_context)
         hook_mock.assert_called_once_with(
             gcp_conn_id=GCP_CONN_ID,
             api_version=API_VERSION,
@@ -288,7 +304,7 @@ class TestGoogleCampaignManagerRunReportOperator:
         hook_mock.return_value.run_report.assert_called_once_with(
             profile_id=PROFILE_ID, report_id=REPORT_ID, synchronous=synchronous
         )
-        xcom_mock.assert_called_once_with(None, key="file_id", value=FILE_ID)
+        mock_context["task_instance"].xcom_push.assert_called_once_with(key="file_id", value=FILE_ID)
 
 
 class TestGoogleCampaignManagerBatchInsertConversionsOperator:

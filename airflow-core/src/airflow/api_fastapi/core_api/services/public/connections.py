@@ -17,10 +17,13 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import HTTPException, status
 from pydantic import ValidationError
 from sqlalchemy import select
 
+from airflow._shared.secrets_masker import merge
 from airflow.api_fastapi.core_api.datamodels.common import (
     BulkActionNotOnExistence,
     BulkActionOnExistence,
@@ -29,7 +32,10 @@ from airflow.api_fastapi.core_api.datamodels.common import (
     BulkDeleteAction,
     BulkUpdateAction,
 )
-from airflow.api_fastapi.core_api.datamodels.connections import ConnectionBody
+from airflow.api_fastapi.core_api.datamodels.connections import (
+    ConnectionBody,
+    restore_provider_sensitive_extra,
+)
 from airflow.api_fastapi.core_api.services.public.common import BulkService
 from airflow.models.connection import Connection
 
@@ -38,6 +44,7 @@ def update_orm_from_pydantic(
     orm_conn: Connection, pydantic_conn: ConnectionBody, update_mask: list[str] | None = None
 ) -> None:
     """Update ORM object from Pydantic object."""
+    stored_conn_type = orm_conn.conn_type
     # Not all fields match and some need setters, therefore copy partly manually via setters
     non_update_fields = {"connection_id", "conn_id"}
     setter_fields = {"password", "extra"}
@@ -56,11 +63,27 @@ def update_orm_from_pydantic(
     if (not update_mask and "password" in pydantic_conn.model_fields_set) or (
         update_mask and "password" in update_mask
     ):
-        orm_conn.set_password(pydantic_conn.password)
+        if pydantic_conn.password is None:
+            orm_conn.set_password(pydantic_conn.password)
+        else:
+            merged_password = merge(pydantic_conn.password, orm_conn.password, "password")
+            orm_conn.set_password(merged_password)
     if (not update_mask and "extra" in pydantic_conn.model_fields_set) or (
         update_mask and "extra" in update_mask
     ):
-        orm_conn.set_extra(pydantic_conn.extra)
+        if pydantic_conn.extra is None or orm_conn.extra is None:
+            orm_conn.set_extra(pydantic_conn.extra)
+            return
+        try:
+            old_extra = json.loads(orm_conn.extra)
+            merged_extra = merge(json.loads(pydantic_conn.extra), old_extra)
+            # A secret declared by one provider must not be handed to another type's hook.
+            if orm_conn.conn_type == stored_conn_type:
+                merged_extra = restore_provider_sensitive_extra(merged_extra, old_extra)
+            orm_conn.set_extra(json.dumps(merged_extra))
+        except json.JSONDecodeError:
+            # We can't merge fields in an unstructured `extra`
+            orm_conn.set_extra(pydantic_conn.extra)
 
 
 class BulkConnectionService(BulkService[ConnectionBody]):
@@ -97,7 +120,7 @@ class BulkConnectionService(BulkService[ConnectionBody]):
                     status_code=status.HTTP_409_CONFLICT,
                     detail=f"The connections with these connection_ids: {matched_connection_ids} already exist.",
                 )
-            elif action.action_on_existence == BulkActionOnExistence.SKIP:
+            if action.action_on_existence == BulkActionOnExistence.SKIP:
                 create_connection_ids = not_found_connection_ids
             else:
                 create_connection_ids = to_create_connection_ids
@@ -106,7 +129,12 @@ class BulkConnectionService(BulkService[ConnectionBody]):
                 if connection.connection_id in create_connection_ids:
                     if connection.connection_id in matched_connection_ids:
                         existed_connection = existed_connections_dict[connection.connection_id]
-                        for key, val in connection.model_dump(by_alias=True).items():
+                        # Only overwrite fields the request actually provided (see pools.py for the
+                        # full rationale). Plain ``model_dump()`` resets omitted fields to their
+                        # defaults on the existing connection — e.g. silently nulling ``team_name``
+                        # multi-team ownership. ``exclude_unset=True`` writes only the fields present
+                        # in the request body.
+                        for key, val in connection.model_dump(by_alias=True, exclude_unset=True).items():
                             setattr(existed_connection, key, val)
                     else:
                         self.session.add(Connection(**connection.model_dump(by_alias=True)))
@@ -120,8 +148,8 @@ class BulkConnectionService(BulkService[ConnectionBody]):
     ) -> None:
         """Bulk Update connections."""
         to_update_connection_ids = {connection.connection_id for connection in action.entities}
-        _, matched_connection_ids, not_found_connection_ids = self.categorize_connections(
-            to_update_connection_ids
+        existed_connections_dict, matched_connection_ids, not_found_connection_ids = (
+            self.categorize_connections(to_update_connection_ids)
         )
 
         try:
@@ -130,16 +158,14 @@ class BulkConnectionService(BulkService[ConnectionBody]):
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"The connections with these connection_ids: {not_found_connection_ids} were not found.",
                 )
-            elif action.action_on_non_existence == BulkActionNotOnExistence.SKIP:
+            if action.action_on_non_existence == BulkActionNotOnExistence.SKIP:
                 update_connection_ids = matched_connection_ids
             else:
                 update_connection_ids = to_update_connection_ids
 
             for connection in action.entities:
                 if connection.connection_id in update_connection_ids:
-                    old_connection: Connection = self.session.scalar(
-                        select(Connection).filter(Connection.conn_id == connection.connection_id).limit(1)
-                    )
+                    old_connection = existed_connections_dict.get(connection.connection_id)
                     if old_connection is None:
                         raise ValidationError(
                             f"The Connection with connection_id: `{connection.connection_id}` was not found"
@@ -160,8 +186,8 @@ class BulkConnectionService(BulkService[ConnectionBody]):
     ) -> None:
         """Bulk delete connections."""
         to_delete_connection_ids = set(action.entities)
-        _, matched_connection_ids, not_found_connection_ids = self.categorize_connections(
-            to_delete_connection_ids
+        existed_connections_dict, matched_connection_ids, not_found_connection_ids = (
+            self.categorize_connections(to_delete_connection_ids)
         )
 
         try:
@@ -170,15 +196,13 @@ class BulkConnectionService(BulkService[ConnectionBody]):
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"The connections with these connection_ids: {not_found_connection_ids} were not found.",
                 )
-            elif action.action_on_non_existence == BulkActionNotOnExistence.SKIP:
+            if action.action_on_non_existence == BulkActionNotOnExistence.SKIP:
                 delete_connection_ids = matched_connection_ids
             else:
                 delete_connection_ids = to_delete_connection_ids
 
             for connection_id in delete_connection_ids:
-                existing_connection = self.session.scalar(
-                    select(Connection).where(Connection.conn_id == connection_id).limit(1)
-                )
+                existing_connection = existed_connections_dict.get(connection_id)
                 if existing_connection:
                     self.session.delete(existing_connection)
                     results.success.append(connection_id)

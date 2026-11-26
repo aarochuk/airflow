@@ -38,7 +38,7 @@ class TestSlackWebhookOperator:
 
     @mock.patch("airflow.providers.slack.operators.slack_webhook.SlackWebhookHook")
     @pytest.mark.parametrize(
-        "slack_op_kwargs, hook_extra_kwargs",
+        ("slack_op_kwargs", "hook_extra_kwargs"),
         [
             pytest.param({}, DEFAULT_HOOKS_PARAMETERS, id="default-hook-parameters"),
             pytest.param(
@@ -69,11 +69,12 @@ class TestSlackWebhookOperator:
             "channel",
             "username",
             "proxy",
+            "slack_webhook_conn_id",
         )
         assert operator.template_fields == template_fields
 
     @pytest.mark.parametrize(
-        "message,blocks,attachments",
+        ("message", "blocks", "attachments"),
         [
             ("Test Text", ["Dummy Block"], ["Test Attachments"]),
             ("Test Text", ["Dummy Block"], None),
@@ -84,7 +85,7 @@ class TestSlackWebhookOperator:
         ],
     )
     @pytest.mark.parametrize(
-        "channel,username,icon_emoji,icon_url",
+        ("channel", "username", "icon_emoji", "icon_url"),
         [
             (None, None, None, None),
             ("legacy-channel", "legacy-username", "legacy-icon_emoji", "legacy-icon-url"),

@@ -33,9 +33,9 @@ from __future__ import annotations
 # serve to show the default.
 import logging
 import os
-from pathlib import Path
 from typing import Any
 
+import rich
 from packaging.version import parse as parse_version
 
 import airflow
@@ -46,11 +46,14 @@ from docs.utils.conf_constants import (
     AUTOAPI_OPTIONS,
     BASIC_AUTOAPI_IGNORE_PATTERNS,
     BASIC_SPHINX_EXTENSIONS,
-    REDOC_SCRIPT_URL,
     SMARTQUOTES_EXCLUDES,
     SPELLING_WORDLIST_PATH,
     SPHINX_DESIGN_STATIC_PATH,
+    SPHINX_SWAGGER_EXTENSION,
     SUPPRESS_WARNINGS,
+    SWAGGER_BUNDLE_URI,
+    SWAGGER_CSS_URI,
+    SWAGGER_PRESENT_URI,
     filter_autoapi_ignore_entries,
     get_autodoc_mock_imports,
     get_configs_and_deprecations,
@@ -60,7 +63,6 @@ from docs.utils.conf_constants import (
     get_html_theme_options,
     get_intersphinx_mapping,
     get_rst_epilogue,
-    get_rst_filepath_from_path,
 )
 from sphinx_exts.provider_yaml_utils import load_package_data
 
@@ -79,7 +81,6 @@ PROVIDER_PATH = (AIRFLOW_REPO_ROOT_PATH / "providers").joinpath(*PACKAGE_ID.spli
 BASE_PROVIDER_SRC_PATH = PROVIDER_PATH / "src" / "airflow"
 PACKAGE_VERSION = CURRENT_PROVIDER["versions"][0]
 SYSTEM_TESTS_DIR = PROVIDER_PATH / "tests" / "system"
-conf_py_path = f"/providers/{PACKAGE_ID.replace('.', '/')}/docs/"
 
 # Adds to environment variables for easy access from other plugins like airflow_intersphinx.
 os.environ["AIRFLOW_PACKAGE_NAME"] = PACKAGE_NAME
@@ -120,58 +121,49 @@ smartquotes_excludes = SMARTQUOTES_EXCLUDES
 # ones.
 extensions = BASIC_SPHINX_EXTENSIONS
 
-PROVIDER_PACKAGES_WITH_REDOC = ["apache-airflow-providers-fab"]
+PROVIDER_PACKAGES_WITH_API_REFERENCE = [
+    "apache-airflow-providers-edge3",
+    "apache-airflow-providers-fab",
+    "apache-airflow-providers-keycloak",
+]
 
-if PACKAGE_NAME in PROVIDER_PACKAGES_WITH_REDOC:
-    extensions.extend(
-        [
-            "autoapi.extension",
-            # First, generate redoc
-            "sphinxcontrib.redoc",
-            # Second, update redoc script
-            "sphinx_script_update",
-        ]
-    )
-    redoc_script_url = REDOC_SCRIPT_URL
-else:
-    extensions.extend(
-        [
-            "autoapi.extension",
-        ]
-    )
+if PACKAGE_NAME in PROVIDER_PACKAGES_WITH_API_REFERENCE:
+    extensions.append(SPHINX_SWAGGER_EXTENSION)
+
+    swagger_present_uri = SWAGGER_PRESENT_URI
+    swagger_bundle_uri = SWAGGER_BUNDLE_URI
+    swagger_css_uri = SWAGGER_CSS_URI
+    swagger_mirror_external_resources = True  # Ensure we embed external resources prevent tracking
+
+extensions.append("autoapi.extension")
 
 extensions.extend(
     [
         "extra_provider_files_with_substitutions",
         "providers_extensions",
+        "providers_commits",
         "sphinx_jinja",
+        "generate_erd",
     ]
 )
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
-empty_subpackages = ["apache", "atlassian", "common", "cncf", "dbt", "microsoft"]
+empty_subpackages = ["apache", "atlassian", "common", "cncf", "dbt", "ibm", "microsoft"]
 exclude_patterns = [
     "operators/_partials",
     "_api/airflow/index.rst",
     "_api/airflow/providers/index.rst",
-    "_api/airflow/providers/apache/index.rst",
-    "_api/airflow/providers/atlassian/index.rst",
-    "_api/airflow/providers/cncf/index.rst",
-    "_api/airflow/providers/common/index.rst",
-    "_api/airflow/providers/common/messaging/providers/base_provider/index.rst",
-    "_api/airflow/providers/common/messaging/providers/sqs/index.rst",
-    "_api/airflow/providers/dbt/index.rst",
-    "_api/airflow/providers/microsoft/index.rst",
     "_api/docs/conf",
+    *[f"_api/airflow/providers/{subpackage}/index.rst" for subpackage in empty_subpackages],
     *[f"_api/system/{subpackage}/index.rst" for subpackage in empty_subpackages],
     *[f"_api/tests/system/{subpackage}/index.rst" for subpackage in empty_subpackages],
 ]
 
-exclude_patterns.extend(
-    get_rst_filepath_from_path(f, AIRFLOW_REPO_ROOT_PATH)
-    for f in BASE_PROVIDER_SRC_PATH.rglob("example_dags")
-)
+# exclude_patterns.extend(
+#     get_rst_filepath_from_path(f, AIRFLOW_REPO_ROOT_PATH)
+#     for f in BASE_PROVIDER_SRC_PATH.rglob("example_dags")
+# )
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ["templates"]
@@ -220,6 +212,8 @@ html_show_copyright = False
 
 html_theme_options: dict[str, Any] = get_html_theme_options()
 
+
+conf_py_path = f"/providers/{PACKAGE_ID.replace('.', '/')}/docs/"
 # A dictionary of values to pass into the template engine's context for all pages.
 html_context = get_html_context(conf_py_path)
 
@@ -235,6 +229,11 @@ config_descriptions = retrieve_configuration_description(
 configs, deprecated_options = get_configs_and_deprecations(
     parse_version(PACKAGE_VERSION), config_descriptions
 )
+
+PROVIDERS_RELEASE_DATE_PATH = AIRFLOW_REPO_ROOT_PATH / "providers" / ".last_release_date.txt"
+
+PROVIDERS_RELEASE_DATE = PROVIDERS_RELEASE_DATE_PATH.read_text().strip()
+
 jinja_contexts = {
     "config_ctx": {
         "configs": configs,
@@ -247,6 +246,7 @@ jinja_contexts = {
         "package_name": PACKAGE_NAME,
         "package_name_underscores": PACKAGE_NAME.replace("-", "_"),
         "package_version": PACKAGE_VERSION,
+        "providers_release_date": PROVIDERS_RELEASE_DATE,
     },
 }
 
@@ -293,7 +293,12 @@ autoapi_dirs = [BASE_PROVIDER_SRC_PATH.as_posix()]
 autoapi_ignore = BASIC_AUTOAPI_IGNORE_PATTERNS
 
 autoapi_log = logging.getLogger("sphinx.autoapi.mappers.base")
-autoapi_log.addFilter(filter_autoapi_ignore_entries)
+# One process builds several packages in a row and re-imports this module each time, so guard
+# against stacking the same filter on the (process-wide) logger.
+if not any(
+    getattr(f, "__name__", None) == filter_autoapi_ignore_entries.__name__ for f in autoapi_log.filters
+):
+    autoapi_log.addFilter(filter_autoapi_ignore_entries)
 
 autoapi_python_use_implicit_namespaces = True
 
@@ -301,7 +306,6 @@ autoapi_ignore.extend(
     (
         "*/airflow/__init__.py",
         "*/airflow/providers/__init__.py",
-        "*/example_dags/*",
         "*/providers/__init__.py",
         "*/conf/*",
     )
@@ -315,16 +319,15 @@ for p in load_package_data(include_suspended=True):
         continue
     autoapi_ignore.extend((p["package-dir"] + "/*", p["system-tests-dir"] + "/*"))
 
-autoapi_keep_files = True
-
 if SYSTEM_TESTS_DIR and os.path.exists(SYSTEM_TESTS_DIR):
     test_dir = SYSTEM_TESTS_DIR.parent
     autoapi_dirs.append(test_dir.as_posix())
 
     autoapi_ignore.extend(f"{d}/*" for d in test_dir.glob("*") if d.is_dir() and d.name != "system")
-print("#### AUTOAPI_IGNORE:")
-print(autoapi_ignore)
-print("#### END OF AUTOAPI_IGNORE:")
+
+rich.print("[bright_blue]AUTOAPI_IGNORE:")
+rich.print(autoapi_ignore)
+rich.print()
 
 # Keep the AutoAPI generated files on the filesystem after the run.
 # Useful for debugging.
@@ -357,33 +360,3 @@ spelling_ignore_contributor_names = False
 spelling_ignore_importable_modules = True
 
 graphviz_output_format = "svg"
-
-if PACKAGE_NAME in PROVIDER_PACKAGES_WITH_REDOC:
-    from airflow.providers.fab.auth_manager.api_fastapi.openapi import (
-        __file__ as fab_auth_manager_fastapi_api_file,
-    )
-    from airflow.providers.fab.auth_manager.openapi import __file__ as fab_auth_manager_flask_api_file
-
-    fab_auth_manager_flask_api_path = Path(fab_auth_manager_flask_api_file).parent.joinpath("v1.yaml")
-    fab_auth_manager_fastapi_api_path = Path(fab_auth_manager_fastapi_api_file).parent.joinpath(
-        "v1-generated.yaml"
-    )
-    redoc = [
-        {
-            "name": "Fab auth manager API",
-            "page": "api-ref/fab-public-api-ref",
-            "spec": fab_auth_manager_flask_api_path.as_posix(),
-            "opts": {
-                "hide-hostname": True,
-            },
-        },
-        {
-            "name": "Fab auth manager token API",
-            "page": "api-ref/fab-token-api-ref",
-            "spec": fab_auth_manager_fastapi_api_path.as_posix(),
-            "opts": {
-                "hide-hostname": True,
-                "no-auto-auth": True,
-            },
-        },
-    ]

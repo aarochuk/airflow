@@ -17,20 +17,30 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import boto3
 import tenacity
 from tenacity import before_log, before_sleep_log
 
-from airflow.decorators import task, task_group
-from airflow.models.baseoperator import chain
-from airflow.models.dag import DAG
 from airflow.providers.amazon.aws.operators.s3 import S3CreateBucketOperator, S3DeleteBucketOperator
 from airflow.providers.amazon.aws.transfers.dynamodb_to_s3 import DynamoDBToS3Operator
-from airflow.providers.standard.operators.empty import EmptyOperator
-from airflow.utils.edgemodifier import Label
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.providers.common.compat.sdk import AirflowSkipException
+
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import DAG, chain, task, task_group
+else:
+    # Airflow 2.10 compat
+    from airflow.decorators import task, task_group  # type: ignore[attr-defined,no-redef]
+    from airflow.models.baseoperator import chain  # type: ignore[attr-defined,no-redef]
+    from airflow.models.dag import DAG  # type: ignore[attr-defined,no-redef,assignment]
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.amazon.aws.utils import ENV_ID_KEY, SystemTestContextBuilder
 
@@ -112,7 +122,7 @@ def delete_dynamodb_table(table_name: str):
 @task_group
 def incremental_export(table_name: str, start_time: datetime):
     """
-    Incremental export requires a minimum window of 15 minutes of data to export.
+    Export functions can take a lot of time.
     This task group allows us to have the sample code snippet for the docs while
     skipping the task when we run the actual test.
     """
@@ -147,19 +157,27 @@ def incremental_export(table_name: str, start_time: datetime):
     # This operation can take a long time to complete
     backup_db_to_point_in_time_incremental_export.max_attempts = 90
 
-    @task.branch
-    def skip_incremental_export(start_time: datetime, end_time: datetime):
-        not_enough_time = end_time < (start_time + timedelta(minutes=15))
-        return (
-            end_workflow.task_id if not_enough_time else backup_db_to_point_in_time_incremental_export.task_id
-        )
+    # [START howto_transfer_dynamodb_to_s3_in_some_point_in_time_full_export]
+    backup_db_to_point_in_time_full_export = DynamoDBToS3Operator(
+        task_id="backup_db_to_point_in_time_full_export",
+        dynamodb_table_name=table_name,
+        s3_bucket_name=bucket_name,
+        point_in_time_export=True,
+        export_time=export_time,
+        s3_key_prefix=f"{S3_KEY_PREFIX}-3-",
+    )
+    # [END howto_transfer_dynamodb_to_s3_in_some_point_in_time_full_export]
+    backup_db_to_point_in_time_full_export.max_attempts = 90
 
-    skip_incremental = skip_incremental_export(start_time, end_time)
+    @task
+    def stop_execution():
+        raise AirflowSkipException("Skipping this task.")
 
-    end_workflow = EmptyOperator(task_id="end_workflow", trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+    stop = stop_execution()
 
-    chain(end_time, skip_incremental, Label("Incremental backup skipped"), end_workflow)
-    chain(end_time, skip_incremental, backup_db_to_point_in_time_incremental_export, end_workflow)
+    chain(
+        end_time, stop, backup_db_to_point_in_time_incremental_export, backup_db_to_point_in_time_full_export
+    )
 
 
 with DAG(
@@ -167,7 +185,6 @@ with DAG(
     schedule="@once",
     start_date=datetime(2021, 1, 1),
     catchup=False,
-    tags=["example"],
 ) as dag:
     test_context = sys_test_context_task()
     env_id = test_context[ENV_ID_KEY]
@@ -218,17 +235,6 @@ with DAG(
     # [END howto_transfer_dynamodb_to_s3_segmented]
 
     export_time = get_export_time(table_name)
-    # [START howto_transfer_dynamodb_to_s3_in_some_point_in_time_full_export]
-    backup_db_to_point_in_time_full_export = DynamoDBToS3Operator(
-        task_id="backup_db_to_point_in_time_full_export",
-        dynamodb_table_name=table_name,
-        s3_bucket_name=bucket_name,
-        point_in_time_export=True,
-        export_time=export_time,
-        s3_key_prefix=f"{S3_KEY_PREFIX}-3-",
-    )
-    # [END howto_transfer_dynamodb_to_s3_in_some_point_in_time_full_export]
-    backup_db_to_point_in_time_full_export.max_attempts = 90
 
     delete_table = delete_dynamodb_table(table_name=table_name)
 
@@ -250,7 +256,6 @@ with DAG(
         backup_db_segment_1,
         backup_db_segment_2,
         export_time,
-        backup_db_to_point_in_time_full_export,
         incremental_export(table_name=table_name, start_time=export_time),
         # TEST TEARDOWN
         delete_table,
@@ -264,5 +269,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

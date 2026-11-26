@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -34,8 +35,15 @@ class DbtCloudRunJobTrigger(BaseTrigger):
     :param conn_id: The connection identifier for connecting to Dbt.
     :param run_id: The ID of a dbt Cloud job.
     :param end_time: Time in seconds to wait for a job run to reach a terminal status. Defaults to 7 days.
+    :param execution_deadline: Optional absolute timestamp (in seconds since the epoch) after which
+        the task is considered timed out.
     :param account_id: The ID of a dbt Cloud account.
     :param poll_interval:  polling period in seconds to check for the status.
+    :param hook_params: Extra arguments passed to the DbtCloudHook constructor. Airflow serializes
+        trigger arguments to store them in the metadata database, so the trigger keeps only the
+        arguments whose values can be serialized to JSON. For example, the trigger drops a
+        ``retry_args`` value that holds tenacity objects, and the hook in the trigger then retries
+        according to ``retry_limit`` and ``retry_delay``.
     """
 
     def __init__(
@@ -45,13 +53,32 @@ class DbtCloudRunJobTrigger(BaseTrigger):
         end_time: float,
         poll_interval: float,
         account_id: int | None,
+        hook_params: dict[str, Any] | None = None,
+        execution_deadline: float | None = None,
     ):
         super().__init__()
         self.run_id = run_id
         self.account_id = account_id
         self.conn_id = conn_id
         self.end_time = end_time
+        self.execution_deadline = execution_deadline
         self.poll_interval = poll_interval
+        # Since Airflow 3.2, the task runner serializes trigger arguments with airflow.sdk.serde instead
+        # of BaseSerialization. When the task defers, serde raises TypeError for a type that it has no
+        # serializer for, such as a tenacity object. The operator has already started the dbt Cloud job
+        # before the task defers. Before 3.2, BaseSerialization stores the same value as a string.
+        self.hook_params: dict[str, Any] = {}
+        for name, value in (hook_params or {}).items():
+            try:
+                json.dumps(value)
+            except (TypeError, ValueError):
+                self.log.warning(
+                    "The trigger drops hook_params[%r] because the value cannot be serialized to JSON. "
+                    "The DbtCloudHook in the trigger uses the default value for this argument instead.",
+                    name,
+                )
+            else:
+                self.hook_params[name] = value
 
     def serialize(self) -> tuple[str, dict[str, Any]]:
         """Serialize DbtCloudRunJobTrigger arguments and classpath."""
@@ -62,53 +89,78 @@ class DbtCloudRunJobTrigger(BaseTrigger):
                 "account_id": self.account_id,
                 "conn_id": self.conn_id,
                 "end_time": self.end_time,
+                "execution_deadline": self.execution_deadline,
                 "poll_interval": self.poll_interval,
+                "hook_params": self.hook_params,
             },
         )
 
     async def run(self) -> AsyncIterator[TriggerEvent]:
         """Make async connection to Dbt, polls for the pipeline run status."""
-        hook = DbtCloudHook(self.conn_id)
+        hook = DbtCloudHook(self.conn_id, **self.hook_params)
         try:
-            while await self.is_still_running(hook):
-                if self.end_time < time.time():
+            while True:
+                now = time.time()
+
+                job_run_status = await hook.get_job_status(self.run_id, self.account_id)
+
+                if job_run_status == DbtCloudJobRunStatus.SUCCESS.value:
                     yield TriggerEvent(
                         {
-                            "status": "error",
-                            "message": f"Job run {self.run_id} has not reached a terminal status after "
-                            f"{self.end_time} seconds.",
+                            "status": "success",
+                            "message": f"Job run {self.run_id} has completed successfully.",
                             "run_id": self.run_id,
                         }
                     )
                     return
+
+                elif job_run_status == DbtCloudJobRunStatus.CANCELLED.value:
+                    yield TriggerEvent(
+                        {
+                            "status": "cancelled",
+                            "message": f"Job run {self.run_id} has been cancelled.",
+                            "run_id": self.run_id,
+                        }
+                    )
+                    return
+
+                elif job_run_status == DbtCloudJobRunStatus.ERROR.value:
+                    yield TriggerEvent(
+                        {
+                            "status": "error",
+                            "message": f"Job run {self.run_id} has failed.",
+                            "run_id": self.run_id,
+                        }
+                    )
+                    return
+
+                if self.execution_deadline is not None:
+                    if self.execution_deadline <= now:
+                        yield TriggerEvent(
+                            {
+                                "status": "timeout",
+                                "message": f"Job run {self.run_id} has timed out.",
+                                "run_id": self.run_id,
+                            }
+                        )
+                        return
+
+                if self.end_time <= now:
+                    yield TriggerEvent(
+                        {
+                            "status": "error",
+                            "message": f"Job run {self.run_id} has not reached a terminal status "
+                            f"within the configured timeout.",
+                            "run_id": self.run_id,
+                        }
+                    )
+                    return
+
                 await asyncio.sleep(self.poll_interval)
-            job_run_status = await hook.get_job_status(self.run_id, self.account_id)
-            if job_run_status == DbtCloudJobRunStatus.SUCCESS.value:
-                yield TriggerEvent(
-                    {
-                        "status": "success",
-                        "message": f"Job run {self.run_id} has completed successfully.",
-                        "run_id": self.run_id,
-                    }
-                )
-            elif job_run_status == DbtCloudJobRunStatus.CANCELLED.value:
-                yield TriggerEvent(
-                    {
-                        "status": "cancelled",
-                        "message": f"Job run {self.run_id} has been cancelled.",
-                        "run_id": self.run_id,
-                    }
-                )
-            else:
-                yield TriggerEvent(
-                    {
-                        "status": "error",
-                        "message": f"Job run {self.run_id} has failed.",
-                        "run_id": self.run_id,
-                    }
-                )
+
         except Exception as e:
             yield TriggerEvent({"status": "error", "message": str(e), "run_id": self.run_id})
+            return
 
     async def is_still_running(self, hook: DbtCloudHook) -> bool:
         """Check whether the submitted job is running."""

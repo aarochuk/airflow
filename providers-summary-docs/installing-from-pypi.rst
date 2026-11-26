@@ -24,7 +24,7 @@ PyPI <https://pypi.org/search/?q=apache-airflow-providers>`__.
 Installation tools
 ''''''''''''''''''
 
-Only ``pip`` installation is currently officially supported.
+Only ``pip`` and ``uv`` installation is officially supported.
 
 .. note::
 
@@ -41,10 +41,10 @@ Only ``pip`` installation is currently officially supported.
   newer versions of ``bazel`` will handle it.
 
 
-Typical command to install airflow from PyPI looks like below (you need to use the right Airflow version and Python version):
+Typical command to install Airflow from PyPI looks like below (you need to use the right Airflow version and Python version):
 
 .. code-block::
 
-    pip install "apache-airflow-providers-celery" --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.2/constraints-3.9.txt"
+    pip install "apache-airflow-providers-celery" --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.2/constraints-3.11.txt"
 
 This is an example, see :doc:`apache-airflow:installation/installing-from-pypi` for more examples, including how to upgrade the providers.

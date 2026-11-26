@@ -26,8 +26,7 @@ from opensearchpy import OpenSearch, RequestsHttpConnection
 if TYPE_CHECKING:
     from opensearchpy import Connection as OpenSearchConnectionClass
 
-from airflow.exceptions import AirflowException
-from airflow.hooks.base import BaseHook
+from airflow.providers.common.compat.sdk import AirflowException, BaseHook
 from airflow.utils.strings import to_boolean
 
 
@@ -37,6 +36,12 @@ class OpenSearchClientArguments(TypedDict, total=False):
     hosts: str | list[dict] | None
     use_ssl: bool
     verify_certs: bool
+    url_prefix: str
+    timeout: int
+    headers: dict[str, str] | None
+    http_compress: bool | None
+    opaque_id: str | None
+    scheme: str
     connection_class: type[OpenSearchConnectionClass] | None
     http_auth: tuple[str, str]
 
@@ -65,8 +70,18 @@ class OpenSearchHook(BaseHook):
         self.conn_id = open_search_conn_id
         self.log_query = log_query
 
-        self.use_ssl = to_boolean(str(self.conn.extra_dejson.get("use_ssl", False)))
-        self.verify_certs = to_boolean(str(self.conn.extra_dejson.get("verify_certs", False)))
+        extra = self.conn.extra_dejson
+        self.use_ssl = to_boolean(str(extra.get("use_ssl", False)))
+        self.verify_certs = to_boolean(str(extra.get("verify_certs", False)))
+        self.url_prefix = extra.get("url_prefix")
+        self.timeout = int(extra["timeout"]) if extra.get("timeout") is not None else None
+        self.headers = extra.get("headers")
+        self.http_compress = (
+            to_boolean(str(extra["http_compress"])) if extra.get("http_compress") is not None else None
+        )
+        self.opaque_id = extra.get("opaque_id")
+        self.scheme = extra.get("scheme")
+
         self.connection_class = open_search_conn_class
         self.__SERVICE = "es"
 
@@ -83,6 +98,18 @@ class OpenSearchHook(BaseHook):
             verify_certs=self.verify_certs,
             connection_class=self.connection_class,
         )
+        if self.scheme:
+            client_args["scheme"] = self.scheme
+        if self.url_prefix:
+            client_args["url_prefix"] = self.url_prefix
+        if self.timeout is not None:
+            client_args["timeout"] = self.timeout
+        if self.headers is not None:
+            client_args["headers"] = self.headers
+        if self.http_compress is not None:
+            client_args["http_compress"] = self.http_compress
+        if self.opaque_id is not None:
+            client_args["opaque_id"] = self.opaque_id
         if self.conn.login and self.conn.password:
             client_args["http_auth"] = (self.conn.login, self.conn.password)
         client = OpenSearch(**client_args)
@@ -122,7 +149,7 @@ class OpenSearchHook(BaseHook):
             if self.log_query:
                 self.log.info("Deleting from %s using Query: %s", index_name, query)
             return self.client.delete_by_query(index=index_name, body=query)
-        elif doc_id is not None:
+        if doc_id is not None:
             return self.client.delete(index=index_name, id=doc_id)
         raise AirflowException(
             "To delete a document you must include one of either a query or a document id."

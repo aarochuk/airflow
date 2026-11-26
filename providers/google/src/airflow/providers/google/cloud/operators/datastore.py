@@ -22,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks.datastore import DatastoreHook
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
 from airflow.providers.google.cloud.links.datastore import (
@@ -34,7 +34,7 @@ from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID
 from airflow.providers.google.common.links.storage import StorageLink
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class CloudDatastoreExportEntitiesOperator(GoogleCloudBaseOperator):
@@ -78,6 +78,8 @@ class CloudDatastoreExportEntitiesOperator(GoogleCloudBaseOperator):
         "entity_filter",
         "labels",
         "impersonation_chain",
+        "datastore_conn_id",
+        "cloud_storage_conn_id",
     )
     operator_extra_links = (StorageLink(),)
 
@@ -136,7 +138,6 @@ class CloudDatastoreExportEntitiesOperator(GoogleCloudBaseOperator):
             raise AirflowException(f"Operation failed: result={result}")
         StorageLink.persist(
             context=context,
-            task_instance=self,
             uri=f"{self.bucket}/{result['response']['outputUrl'].split('/')[3]}",
             project_id=self.project_id or ds_hook.project_id,
         )
@@ -183,6 +184,7 @@ class CloudDatastoreImportEntitiesOperator(GoogleCloudBaseOperator):
         "entity_filter",
         "labels",
         "impersonation_chain",
+        "datastore_conn_id",
     )
     operator_extra_links = (CloudDatastoreImportExportLink(),)
 
@@ -211,6 +213,12 @@ class CloudDatastoreImportEntitiesOperator(GoogleCloudBaseOperator):
         self.project_id = project_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         self.log.info("Importing data from Cloud Storage bucket %s", self.bucket)
         ds_hook = DatastoreHook(
@@ -231,8 +239,7 @@ class CloudDatastoreImportEntitiesOperator(GoogleCloudBaseOperator):
         state = result["metadata"]["common"]["state"]
         if state != "SUCCESSFUL":
             raise AirflowException(f"Operation failed: result={result}")
-
-        CloudDatastoreImportExportLink.persist(context=context, task_instance=self)
+        CloudDatastoreImportExportLink.persist(context=context)
         return result
 
 
@@ -263,6 +270,7 @@ class CloudDatastoreAllocateIdsOperator(GoogleCloudBaseOperator):
     template_fields: Sequence[str] = (
         "partial_keys",
         "impersonation_chain",
+        "gcp_conn_id",
     )
     operator_extra_links = (CloudDatastoreEntitiesLink(),)
 
@@ -282,6 +290,12 @@ class CloudDatastoreAllocateIdsOperator(GoogleCloudBaseOperator):
         self.project_id = project_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context) -> list:
         hook = DatastoreHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -291,7 +305,7 @@ class CloudDatastoreAllocateIdsOperator(GoogleCloudBaseOperator):
             partial_keys=self.partial_keys,
             project_id=self.project_id,
         )
-        CloudDatastoreEntitiesLink.persist(context=context, task_instance=self)
+        CloudDatastoreEntitiesLink.persist(context=context)
         return keys
 
 
@@ -322,6 +336,7 @@ class CloudDatastoreBeginTransactionOperator(GoogleCloudBaseOperator):
     template_fields: Sequence[str] = (
         "transaction_options",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -379,6 +394,7 @@ class CloudDatastoreCommitOperator(GoogleCloudBaseOperator):
     template_fields: Sequence[str] = (
         "body",
         "impersonation_chain",
+        "gcp_conn_id",
     )
     operator_extra_links = (CloudDatastoreEntitiesLink(),)
 
@@ -398,6 +414,12 @@ class CloudDatastoreCommitOperator(GoogleCloudBaseOperator):
         self.project_id = project_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context) -> dict:
         hook = DatastoreHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -407,7 +429,7 @@ class CloudDatastoreCommitOperator(GoogleCloudBaseOperator):
             body=self.body,
             project_id=self.project_id,
         )
-        CloudDatastoreEntitiesLink.persist(context=context, task_instance=self)
+        CloudDatastoreEntitiesLink.persist(context=context)
         return response
 
 
@@ -438,6 +460,7 @@ class CloudDatastoreRollbackOperator(GoogleCloudBaseOperator):
     template_fields: Sequence[str] = (
         "transaction",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -494,6 +517,7 @@ class CloudDatastoreRunQueryOperator(GoogleCloudBaseOperator):
     template_fields: Sequence[str] = (
         "body",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -550,6 +574,7 @@ class CloudDatastoreGetOperationOperator(GoogleCloudBaseOperator):
     template_fields: Sequence[str] = (
         "name",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -601,6 +626,7 @@ class CloudDatastoreDeleteOperationOperator(GoogleCloudBaseOperator):
     template_fields: Sequence[str] = (
         "name",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(

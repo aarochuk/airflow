@@ -24,14 +24,12 @@ from typing import TYPE_CHECKING
 
 import pendulum
 
-from airflow.exceptions import AirflowSkipException
-from airflow.models.baseoperator import BaseOperator
-from airflow.models.dag import DAG
 from airflow.providers.standard.operators.empty import EmptyOperator
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.sdk import DAG, BaseOperator, TriggerRule
+from airflow.sdk.exceptions import AirflowSkipException
 
 if TYPE_CHECKING:
-    from airflow.sdk.definitions.context import Context
+    from airflow.sdk import Context
 
 
 # Create some placeholder operators
@@ -50,7 +48,6 @@ def create_test_pipeline(suffix, trigger_rule):
 
     :param str suffix: Suffix to append to the operator task_ids
     :param str trigger_rule: TriggerRule for the join task
-    :param DAG dag_: The DAG to run the operators on
     """
     skip_operator = EmptySkipOperator(task_id=f"skip_operator_{suffix}")
     always_true = EmptyOperator(task_id=f"always_true_{suffix}")

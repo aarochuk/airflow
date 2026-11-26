@@ -22,7 +22,6 @@ Example Airflow DAG that creates and deletes Bigquery data transfer configuratio
 from __future__ import annotations
 
 import os
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -43,7 +42,12 @@ from airflow.providers.google.cloud.operators.bigquery_dts import (
 from airflow.providers.google.cloud.operators.gcs import GCSCreateBucketOperator, GCSDeleteBucketOperator
 from airflow.providers.google.cloud.sensors.bigquery_dts import BigQueryDataTransferServiceTransferRunSensor
 from airflow.providers.google.cloud.transfers.local_to_gcs import LocalFilesystemToGCSOperator
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 from system.openlineage.operator import OpenLineageTestOperator
@@ -131,7 +135,7 @@ with DAG(
         task_id="gcp_bigquery_start_transfer",
         project_id=PROJECT_ID,
         transfer_config_id=transfer_config_id,
-        requested_run_time={"seconds": int(time.time() + 60)},
+        requested_run_time={"seconds": "{{ (macros.datetime.now().timestamp() | int) + 60 }}"},
     )
     # [END howto_bigquery_start_transfer]
 
@@ -199,5 +203,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

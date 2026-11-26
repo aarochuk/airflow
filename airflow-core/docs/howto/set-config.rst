@@ -103,9 +103,9 @@ The following config options support this ``_cmd`` and ``_secret`` version:
 * ``broker_url`` in ``[celery]`` section
 * ``flower_basic_auth`` in ``[celery]`` section
 * ``result_backend`` in ``[celery]`` section
-* ``password`` in ``[atlas]`` section
 * ``smtp_password`` in ``[smtp]`` section
-* ``secret_key`` in ``[webserver]`` section
+* ``secret_key`` in ``[api]`` section
+* ``jwt_secret`` in ``[api_auth]`` section
 
 The ``_cmd`` config options can also be set using a corresponding environment variable
 the same way the usual config options can. For example:
@@ -157,26 +157,31 @@ the example below.
     See :doc:`/administration-and-deployment/modules_management` for details on how Python and Airflow manage modules.
 
 .. note::
-    Use the same configuration across all the Airflow components. While each component
-    does not require all, some configurations need to be same otherwise they would not
-    work as expected. A good example for that is :ref:`secret_key<config:webserver__secret_key>` which
-    should be same on the Webserver and Worker to allow Webserver to fetch logs from Worker.
+    Different Airflow components may require different configuration parameters. For improved
+    security, restrict sensitive configuration to only the components that need it rather than
+    sharing all configuration across all components. Some values must be consistent across specific
+    components — for example, the JWT signing key must match between components that generate and
+    validate tokens. However, sensitive parameters such as database connection strings, Fernet keys,
+    and secrets backend credentials should only be provided to components that actually need them.
 
-    The webserver key is also used to authorize requests to Celery workers when logs are retrieved. The token
-    generated using the secret key has a short expiry time though - make sure that time on ALL the machines
-    that you run airflow components on is synchronized (for example using ntpd) otherwise you might get
-    "forbidden" errors when the logs are accessed.
+    For security-sensitive deployments, pass configuration values via environment variables scoped
+    to individual components. See :doc:`/security/security_model` for detailed guidance on
+    restricting configuration parameters.
+
+    Make sure that time on ALL the machines that you run Airflow components on is synchronized
+    (for example using ntpd) otherwise you might get "forbidden" errors when the logs are
+    accessed or API calls are made.
 
 .. _set-config:configuring-local-settings:
 
 Configuring local settings
-==========================
+--------------------------
 
 Some Airflow configuration is configured via local setting, because they require changes in the
 code that is executed when Airflow is initialized. Usually it is mentioned in the detailed documentation
 where you can configure such local settings - This is usually done in the ``airflow_local_settings.py`` file.
 
-You should create a ``airflow_local_settings.py`` file and put it in a directory in ``sys.path`` or
+You should create an ``airflow_local_settings.py`` file and put it in a directory in ``sys.path`` or
 in the ``$AIRFLOW_HOME/config`` folder. (Airflow adds ``$AIRFLOW_HOME/config`` to ``sys.path`` when
 Airflow is initialized)
 Starting from Airflow 2.10.1, the $AIRFLOW_HOME/dags folder is no longer included in sys.path at initialization, so any local settings in that folder will not be imported. Ensure that airflow_local_settings.py is located in a path that is part of sys.path during initialization, like $AIRFLOW_HOME/config.
@@ -192,31 +197,7 @@ Example settings you can configure this way:
 * :ref:`Advanced logging configuration <write-logs-advanced>`
 * :ref:`Dag serialization <dag-serialization>`
 * :ref:`Pod mutation hook in Kubernetes Executor<kubernetes:pod_mutation_hook>`
-* :ref:`Control DAG parsing time <faq:how-to-control-dag-file-parsing-timeout>`
+* :ref:`Control Dag parsing time <faq:how-to-control-dag-file-parsing-timeout>`
 * :ref:`Customize your UI <customizing-the-ui>`
 * :ref:`Configure more variables to export <export_dynamic_environment_variables>`
 * :ref:`Customize your DB configuration <set-up-database-backend>`
-
-
-Configuring Flask Application for Airflow Webserver
-===================================================
-
-Airflow uses Flask to render the web UI. When you initialize the Airflow webserver, predefined configuration
-is used, based on the ``webserver`` section of the ``airflow.cfg`` file. You can override these settings
-and add any extra settings however by adding flask configuration to ``webserver_config.py`` file in your
-``$AIRFLOW_HOME`` directory. This file is automatically loaded by the webserver.
-
-For example if you would like to change rate limit strategy to "moving window", you can set the
-``RATELIMIT_STRATEGY`` to ``moving-window``.
-
-You could also enhance / modify the underlying flask app directly,
-as the `app context <https://flask.palletsprojects.com/en/2.3.x/appcontext/>`_ is pushed to ``webserver_config.py``:
-
-.. code-block:: python
-
-    from flask import current_app as app
-
-
-    @app.before_request
-    def print_custom_message() -> None:
-        print("Executing before every request")

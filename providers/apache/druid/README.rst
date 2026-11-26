@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-apache-druid``
 
-Release: ``4.1.0``
+Release: ``4.6.1``
 
 
 `Apache Druid <https://druid.apache.org/>`__.
@@ -36,30 +36,31 @@ This is a provider package for ``apache.druid`` provider. All classes for this p
 are in ``airflow.providers.apache.druid`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-apache-druid/4.1.0/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-apache-druid/4.6.1/>`_.
 
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation (see ``Requirements`` below
+You can install this package on top of an existing Airflow installation (see ``Requirements`` below
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-apache-druid``
 
-The package supports the following python versions: 3.9,3.10,3.11,3.12
+The package supports the following python versions: 3.11,3.12,3.13,3.14
 
 Requirements
 ------------
 
-=======================================  ==================
-PIP package                              Version required
-=======================================  ==================
-``apache-airflow``                       ``>=2.9.0``
-``apache-airflow-providers-common-sql``  ``>=1.20.0``
-``pydruid``                              ``>=0.4.1``
-=======================================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-sql``     ``>=1.32.0``
+``apache-airflow-providers-common-compat``  ``>=1.10.1``
+``pydruid``                                 ``>=0.6.6``
+==========================================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified providers in order to use them.
@@ -75,8 +76,16 @@ You can install such cross-provider dependencies when installing from PyPI. For 
 Dependent package                                                                                               Extra
 ==============================================================================================================  ===============
 `apache-airflow-providers-apache-hive <https://airflow.apache.org/docs/apache-airflow-providers-apache-hive>`_  ``apache.hive``
-`apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_    ``common.sql``
 ==============================================================================================================  ===============
 
+Optional dependencies
+----------------------
+
+===============  ========================================
+Extra            Dependencies
+===============  ========================================
+``apache.hive``  ``apache-airflow-providers-apache-hive``
+===============  ========================================
+
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-apache-druid/4.1.0/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-apache-druid/4.6.1/changelog.html>`_.

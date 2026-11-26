@@ -1,4 +1,4 @@
-.. Licensed to the Apache Software Foundation (ASF) under one
+ .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
     regarding copyright ownership.  The ASF licenses this file
@@ -51,6 +51,24 @@ To wait on the state of an Amazon Bedrock customize model job until it reaches a
     :dedent: 4
     :start-after: [START howto_sensor_opensearch_collection_active]
     :end-before: [END howto_sensor_opensearch_collection_active]
+
+
+Operators
+---------
+
+.. _howto/operator:OpenSearchServerlessCreateCollectionOperator:
+
+Create a Collection
+===================
+
+To create an Amazon OpenSearch Serverless collection, use
+:class:`~airflow.providers.amazon.aws.operators.opensearch_serverless.OpenSearchServerlessCreateCollectionOperator`.
+
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_opensearch_serverless.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_opensearch_serverless_create_collection]
+    :end-before: [END howto_operator_opensearch_serverless_create_collection]
 
 Reference
 ---------

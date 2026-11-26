@@ -20,20 +20,25 @@ from __future__ import annotations
 import time
 from enum import Enum
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, TypeVar, overload
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
+from openai.auth import (
+    azure_managed_identity_token_provider,
+    gcp_id_token_provider,
+    k8s_service_account_token_provider,
+)
 
 if TYPE_CHECKING:
+    from openai.auth import SubjectTokenProvider, WorkloadIdentity
     from openai.types import (
+        CreateEmbeddingResponse,
         FileDeleted,
         FileObject,
         VectorStore,
         VectorStoreDeleted,
     )
     from openai.types.batch import Batch
-    from openai.types.beta import Assistant, AssistantDeleted, Thread, ThreadDeleted
-    from openai.types.beta.threads import Message, Run
     from openai.types.chat import (
         ChatCompletionAssistantMessageParam,
         ChatCompletionFunctionMessageParam,
@@ -42,9 +47,27 @@ if TYPE_CHECKING:
         ChatCompletionToolMessageParam,
         ChatCompletionUserMessageParam,
     )
+    from openai.types.conversations import Conversation, ConversationDeletedResource
+    from openai.types.responses import ParsedResponse, Response
     from openai.types.vector_stores import VectorStoreFile, VectorStoreFileBatch, VectorStoreFileDeleted
-from airflow.hooks.base import BaseHook
-from airflow.providers.openai.exceptions import OpenAIBatchJobException, OpenAIBatchTimeout
+    from pydantic import BaseModel
+
+    from airflow.providers.common.compat.sdk import Connection
+from airflow.providers.common.compat.connection import get_async_connection, get_async_extra_dejson
+from airflow.providers.common.compat.module_loading import import_string
+from airflow.providers.common.compat.sdk import AirflowException, BaseHook
+from airflow.providers.openai.exceptions import (
+    OpenAIAgentSessionError,
+    OpenAIBatchCancelled,
+    OpenAIBatchJobException,
+    OpenAIBatchTimeout,
+    OpenAITriggerEventError,
+)
+
+#: Generic type variable for the Pydantic model used as the ``text_format`` in structured-output
+#: Responses API calls. Mirrors the SDK's ``TextFormatT`` so ``parse_response`` returns a
+#: ``ParsedResponse[T]`` — callers get ``output_parsed`` typed as ``T | None``.
+_TextFormatT = TypeVar("_TextFormatT", bound="BaseModel")
 
 
 class BatchStatus(str, Enum):
@@ -66,6 +89,62 @@ class BatchStatus(str, Enum):
     def is_in_progress(cls, status: str) -> bool:
         """Check if the batch status is in progress."""
         return status in (cls.VALIDATING, cls.IN_PROGRESS, cls.FINALIZING)
+
+
+#: Statuses the provider's trigger emits in its terminal event.
+TRIGGER_EVENT_STATUSES = frozenset({"success", "error", "cancelled"})
+
+
+class TerminationReason(str, Enum):
+    """Enum for the ``termination_reason`` field of a trigger's terminal event."""
+
+    TIMEOUT = "timeout"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+    EXPIRED = "expired"
+    UNEXPECTED_STATUS = "unexpected_status"
+    POLLING_ERROR = "polling_error"
+
+
+# Maps the trigger's ``termination_reason`` field to the exception ``execute_complete``
+# should raise. Keyed on the reason field, never on the message text, so that a
+# rewording of the trigger's message never silently changes which exception a
+# downstream task can catch.
+_TERMINATION_REASON_EXCEPTIONS: dict[str, type[AirflowException]] = {
+    TerminationReason.TIMEOUT: OpenAIBatchTimeout,
+    TerminationReason.CANCELLED: OpenAIBatchCancelled,
+}
+
+
+def build_batch_error(message: str, termination_reason: str | None) -> AirflowException:
+    """
+    Build (but do not raise) the exception matching a trigger event's termination reason.
+
+    ``termination_reason`` is ``None`` when the event was produced by a trigger
+    serialized before this field existed (a rolling upgrade in flight); that case
+    falls back to ``OpenAIBatchJobException``, matching today's behavior.
+    """
+    if termination_reason is None:
+        return OpenAIBatchJobException(message)
+    exception_class = _TERMINATION_REASON_EXCEPTIONS.get(termination_reason, OpenAIBatchJobException)
+    return exception_class(message)
+
+
+def validate_execute_complete_event(event: dict[str, Any] | None = None) -> dict[str, Any]:
+    """
+    Validate the event a deferred task resumes with, returning it if well-formed.
+
+    The event crosses the triggerer/worker boundary through the metadata DB, so a
+    resuming task can receive ``None`` or a status its handler does not recognize
+    (version skew, a custom trigger). Both must fail loudly instead of crashing
+    opaquely or being misread as an outcome.
+    """
+    if event is None:
+        raise OpenAITriggerEventError("Trigger error: event is None")
+    if event.get("status") not in TRIGGER_EVENT_STATUSES:
+        raise OpenAITriggerEventError(f"Unexpected trigger event status {event.get('status')!r}: {event!r}")
+    return event
 
 
 class OpenAIHook(BaseHook):
@@ -107,18 +186,125 @@ class OpenAIHook(BaseHook):
         """Return an OpenAI connection object."""
         return self.get_conn()
 
-    def get_conn(self) -> OpenAI:
-        """Return an OpenAI connection object."""
+    @overload
+    def get_conn(self, *, async_client: Literal[False] = False) -> OpenAI: ...
+
+    @overload
+    def get_conn(self, *, async_client: Literal[True]) -> AsyncOpenAI: ...
+
+    def get_conn(self, *, async_client: bool = False) -> OpenAI | AsyncOpenAI:
+        """
+        Return an OpenAI connection object.
+
+        The authentication mechanism is selected with the ``auth_type`` key in the connection
+        ``extra`` (default ``"api_key"``):
+
+        * ``"api_key"`` -- use the API key from the connection password (or ``openai_client_kwargs``).
+        * ``"workload_identity"`` -- exchange a short-lived identity token for API access using the
+          OpenAI client's workload identity support. See :meth:`_build_workload_identity`.
+
+        :param async_client: Return an ``AsyncOpenAI`` instead, for sync code that passes one to
+            an async library. The connection lookup blocks, so in async code use :meth:`aget_conn`.
+            Each call builds a new client. An async client is tied to the event loop it first
+            runs in, so use it inside one loop and get a new client for each ``asyncio.run`` call.
+        """
         conn = self.get_connection(self.conn_id)
-        extras = conn.extra_dejson
-        openai_client_kwargs = extras.get("openai_client_kwargs", {})
-        api_key = openai_client_kwargs.pop("api_key", None) or conn.password
+        client_class = AsyncOpenAI if async_client else OpenAI
+        return client_class(**self._client_kwargs(conn, conn.extra_dejson))
+
+    async def aget_conn(self) -> AsyncOpenAI:
+        """
+        Return an ``AsyncOpenAI`` client configured like :meth:`get_conn`.
+
+        From Airflow 3.3.2 the connection is resolved without a blocking call to the
+        supervisor, so this is safe on an event loop with other async calls in flight.
+
+        Each call builds a new client: close it with ``async with`` or ``await client.close()``.
+        With ``workload_identity`` each client exchanges its own token, so reuse one client
+        for many calls.
+        """
+        conn = await get_async_connection(self.conn_id, hook=self)
+        return AsyncOpenAI(**self._client_kwargs(conn, await get_async_extra_dejson(conn)))
+
+    def _client_kwargs(self, conn: Connection, extras: dict[str, Any]) -> dict[str, Any]:
+        """Build the ``OpenAI`` / ``AsyncOpenAI`` constructor kwargs from the connection."""
+        openai_client_kwargs = dict(extras.get("openai_client_kwargs", {}))
         base_url = openai_client_kwargs.pop("base_url", None) or conn.host or None
-        return OpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            **openai_client_kwargs,
+        # Pop api_key for every path so it is never forwarded alongside ``workload_identity``
+        # (the OpenAI client rejects both being set at once).
+        api_key = openai_client_kwargs.pop("api_key", None)
+        auth_type = extras.get("auth_type", "api_key")
+
+        if auth_type == "api_key":
+            return {"api_key": api_key or conn.password, "base_url": base_url, **openai_client_kwargs}
+
+        if auth_type == "workload_identity":
+            return {
+                "workload_identity": self._build_workload_identity(extras),
+                "base_url": base_url,
+                **openai_client_kwargs,
+            }
+
+        raise ValueError(
+            f"Unsupported auth_type {auth_type!r} for OpenAI connection {self.conn_id!r}; "
+            "expected 'api_key' or 'workload_identity'."
         )
+
+    def _build_workload_identity(self, extras: dict[str, Any]) -> WorkloadIdentity:
+        """
+        Build the OpenAI ``workload_identity`` config from the connection ``extra``.
+
+        Returns the ``workload_identity`` mapping (``identity_provider_id``, ``service_account_id``,
+        ``provider``, and optional ``refresh_buffer_seconds``) for the token source selected by
+        ``workload_identity_provider``. Raises ``ValueError`` when a required key is missing or the
+        source is unknown. See :ref:`howto/connection:openai` for the full key reference.
+        """
+        for key in ("identity_provider_id", "service_account_id"):
+            if key not in extras:
+                raise ValueError(
+                    f"Missing required {key!r} for workload_identity auth on OpenAI connection "
+                    f"{self.conn_id!r}."
+                )
+
+        provider_name = extras.get("workload_identity_provider")
+        provider: SubjectTokenProvider
+        if provider_name == "kubernetes":
+            kwargs = {key: extras[key] for key in ("token_file_path",) if key in extras}
+            provider = k8s_service_account_token_provider(**kwargs)
+        elif provider_name == "azure":
+            kwargs = {
+                key: extras[key]
+                for key in ("resource", "object_id", "client_id", "msi_res_id", "api_version")
+                if key in extras
+            }
+            provider = azure_managed_identity_token_provider(**kwargs)
+        elif provider_name == "gcp":
+            kwargs = {key: extras[key] for key in ("audience",) if key in extras}
+            provider = gcp_id_token_provider(**kwargs)
+        elif provider_name == "custom":
+            if "token_provider" not in extras:
+                raise ValueError(
+                    f"Missing required 'token_provider' for custom workload_identity auth on OpenAI "
+                    f"connection {self.conn_id!r}."
+                )
+            provider = {
+                "token_type": extras.get("token_type", "jwt"),
+                "get_token": import_string(extras["token_provider"]),
+            }
+        else:
+            raise ValueError(
+                f"Unsupported workload_identity_provider {provider_name!r} for OpenAI connection "
+                f"{self.conn_id!r}; expected one of 'kubernetes', 'azure', 'gcp', 'custom'."
+            )
+
+        workload_identity: WorkloadIdentity = {
+            "identity_provider_id": extras["identity_provider_id"],
+            "service_account_id": extras["service_account_id"],
+            "provider": provider,
+        }
+        if "refresh_buffer_seconds" in extras:
+            workload_identity["refresh_buffer_seconds"] = extras["refresh_buffer_seconds"]
+        return workload_identity
 
     def create_chat_completion(
         self,
@@ -129,7 +315,7 @@ class OpenAIHook(BaseHook):
             | ChatCompletionToolMessageParam
             | ChatCompletionFunctionMessageParam
         ],
-        model: str = "gpt-3.5-turbo",
+        model: str = "gpt-6-luna",
         **kwargs: Any,
     ) -> list[ChatCompletionMessage]:
         """
@@ -141,174 +327,168 @@ class OpenAIHook(BaseHook):
         response = self.conn.chat.completions.create(model=model, messages=messages, **kwargs)
         return response.choices
 
-    def create_assistant(self, model: str = "gpt-3.5-turbo", **kwargs: Any) -> Assistant:
+    def create_response(self, input: Any, model: str = "gpt-6-luna", **kwargs: Any) -> Response:
         """
-        Create an OpenAI assistant using the given model.
+        Create a model response using the Responses API.
 
-        :param model: The OpenAI model for the assistant to use.
+        :param input: Text, image, or file input(s) to the model.
+        :param model: ID of the model to use.
         """
-        assistant = self.conn.beta.assistants.create(model=model, **kwargs)
-        return assistant
+        return self.conn.responses.create(model=model, input=input, **kwargs)
 
-    def get_assistant(self, assistant_id: str) -> Assistant:
+    def parse_response(
+        self,
+        input: Any,
+        model: str = "gpt-6-luna",
+        *,
+        text_format: type[_TextFormatT],
+        **kwargs: Any,
+    ) -> ParsedResponse[_TextFormatT]:
         """
-        Get an OpenAI assistant.
+        Create a model response and parse it into a Pydantic model via the Responses API.
 
-        :param assistant_id: The ID of the assistant to retrieve.
+        Wraps :py:meth:`openai.resources.responses.Responses.parse`. The SDK converts
+        ``text_format`` into a JSON schema, sends it as a structured-output request, and
+        returns a :class:`~openai.types.responses.ParsedResponse` whose ``output_parsed``
+        attribute is an instance of ``text_format``, or ``None`` when the response carries no
+        parsed output (for example a refusal).
+
+        :param input: Text, image, or file input(s) to the model.
+        :param model: ID of the model to use.
+        :param text_format: A Pydantic ``BaseModel`` subclass describing the expected
+            structured output. Keyword-only, as in the SDK. The SDK converts it to a JSON schema
+            and sends the structured-output request.
         """
-        assistant = self.conn.beta.assistants.retrieve(assistant_id=assistant_id)
-        return assistant
+        return self.conn.responses.parse(input=input, model=model, text_format=text_format, **kwargs)
 
-    def get_assistants(self, **kwargs: Any) -> list[Assistant]:
-        """Get a list of Assistant objects."""
-        assistants = self.conn.beta.assistants.list(**kwargs)
-        return assistants.data
-
-    def modify_assistant(self, assistant_id: str, **kwargs: Any) -> Assistant:
+    def get_response(self, response_id: str, **kwargs: Any) -> Response:
         """
-        Modify an existing Assistant object.
+        Retrieve a previously created model response.
 
-        :param assistant_id: The ID of the assistant to be modified.
+        :param response_id: The ID of the response to retrieve.
         """
-        assistant = self.conn.beta.assistants.update(assistant_id=assistant_id, **kwargs)
-        return assistant
+        return self.conn.responses.retrieve(response_id, **kwargs)
 
-    def delete_assistant(self, assistant_id: str) -> AssistantDeleted:
+    def delete_response(self, response_id: str) -> None:
         """
-        Delete an OpenAI Assistant for a given ID.
+        Delete a model response.
 
-        :param assistant_id: The ID of the assistant to delete.
+        :param response_id: The ID of the response to delete.
         """
-        response = self.conn.beta.assistants.delete(assistant_id=assistant_id)
-        return response
+        self.conn.responses.delete(response_id)
 
-    def create_thread(self, **kwargs: Any) -> Thread:
-        """Create an OpenAI thread."""
-        thread = self.conn.beta.threads.create(**kwargs)
-        return thread
-
-    def modify_thread(self, thread_id: str, metadata: dict[str, Any]) -> Thread:
+    def cancel_response(self, response_id: str) -> Response:
         """
-        Modify an existing Thread object.
+        Cancel an in-progress response created with ``background=True``.
 
-        :param thread_id: The ID of the thread to modify. Only the metadata can be modified.
-        :param metadata: Set of 16 key-value pairs that can be attached to an object.
+        :param response_id: The ID of the response to cancel.
         """
-        thread = self.conn.beta.threads.update(thread_id=thread_id, metadata=metadata)
-        return thread
+        return self.conn.responses.cancel(response_id)
 
-    def delete_thread(self, thread_id: str) -> ThreadDeleted:
-        """
-        Delete an OpenAI thread for a given thread_id.
+    def create_conversation(self, **kwargs: Any) -> Conversation:
+        """Create a conversation that can be reused across responses to persist state."""
+        return self.conn.conversations.create(**kwargs)
 
-        :param thread_id: The ID of the thread to delete.
+    def get_conversation(self, conversation_id: str) -> Conversation:
         """
-        response = self.conn.beta.threads.delete(thread_id=thread_id)
-        return response
+        Retrieve a conversation.
 
-    def create_message(
-        self, thread_id: str, role: Literal["user", "assistant"], content: str, **kwargs: Any
-    ) -> Message:
+        :param conversation_id: The ID of the conversation to retrieve.
         """
-        Create a message for a given Thread.
+        return self.conn.conversations.retrieve(conversation_id)
 
-        :param thread_id: The ID of the thread to create a message for.
-        :param role: The role of the entity that is creating the message. Allowed values include: 'user', 'assistant'.
-        :param content: The content of the message.
+    def update_conversation(self, conversation_id: str, metadata: dict[str, str]) -> Conversation:
         """
-        thread_message = self.conn.beta.threads.messages.create(
-            thread_id=thread_id, role=role, content=content, **kwargs
-        )
-        return thread_message
+        Update a conversation's metadata.
 
-    def get_messages(self, thread_id: str, **kwargs: Any) -> list[Message]:
+        :param conversation_id: The ID of the conversation to update.
+        :param metadata: Set of key-value pairs to attach to the conversation.
         """
-        Return a list of messages for a given Thread.
+        return self.conn.conversations.update(conversation_id, metadata=metadata)
 
-        :param thread_id: The ID of the thread the messages belong to.
+    def delete_conversation(self, conversation_id: str) -> ConversationDeletedResource:
         """
-        messages = self.conn.beta.threads.messages.list(thread_id=thread_id, **kwargs)
-        return messages.data
+        Delete a conversation.
 
-    def modify_message(self, thread_id: str, message_id, **kwargs: Any) -> Message:
+        :param conversation_id: The ID of the conversation to delete.
         """
-        Modify an existing message for a given Thread.
+        return self.conn.conversations.delete(conversation_id)
 
-        :param thread_id: The ID of the thread to which this message belongs.
-        :param message_id: The ID of the message to modify.
-        """
-        thread_message = self.conn.beta.threads.messages.update(
-            thread_id=thread_id, message_id=message_id, **kwargs
-        )
-        return thread_message
+    @overload
+    def create_embeddings(
+        self,
+        text: str | list[int],
+        model: str = "text-embedding-3-small",
+        **kwargs: Any,
+    ) -> list[float]: ...
 
-    def create_run(self, thread_id: str, assistant_id: str, **kwargs: Any) -> Run:
-        """
-        Create a run for a given thread and assistant.
-
-        :param thread_id: The ID of the thread to run.
-        :param assistant_id: The ID of the assistant to use to execute this run.
-        """
-        run = self.conn.beta.threads.runs.create(thread_id=thread_id, assistant_id=assistant_id, **kwargs)
-        return run
-
-    def create_run_and_poll(self, thread_id: str, assistant_id: str, **kwargs: Any) -> Run:
-        """
-        Create a run for a given thread and assistant and then polls until completion.
-
-        :param thread_id: The ID of the thread to run.
-        :param assistant_id: The ID of the assistant to use to execute this run.
-        :return: An OpenAI Run object
-        """
-        run = self.conn.beta.threads.runs.create_and_poll(
-            thread_id=thread_id, assistant_id=assistant_id, **kwargs
-        )
-        return run
-
-    def get_run(self, thread_id: str, run_id: str) -> Run:
-        """
-        Retrieve a run for a given thread and run.
-
-        :param thread_id: The ID of the thread that was run.
-        :param run_id: The ID of the run to retrieve.
-        """
-        run = self.conn.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run_id)
-        return run
-
-    def get_runs(self, thread_id: str, **kwargs: Any) -> list[Run]:
-        """
-        Return a list of runs belonging to a thread.
-
-        :param thread_id: The ID of the thread the run belongs to.
-        """
-        runs = self.conn.beta.threads.runs.list(thread_id=thread_id, **kwargs)
-        return runs.data
-
-    def modify_run(self, thread_id: str, run_id: str, **kwargs: Any) -> Run:
-        """
-        Modify a run on a given thread.
-
-        :param thread_id: The ID of the thread that was run.
-        :param run_id: The ID of the run to modify.
-        """
-        run = self.conn.beta.threads.runs.update(thread_id=thread_id, run_id=run_id, **kwargs)
-        return run
+    @overload
+    def create_embeddings(
+        self,
+        text: list[str] | list[list[int]],
+        model: str = "text-embedding-3-small",
+        **kwargs: Any,
+    ) -> list[list[float]]: ...
 
     def create_embeddings(
         self,
         text: str | list[str] | list[int] | list[list[int]],
-        model: str = "text-embedding-ada-002",
+        model: str = "text-embedding-3-small",
         **kwargs: Any,
-    ) -> list[float]:
+    ) -> list[float] | list[list[float]]:
         """
         Generate embeddings for the given text using the given model.
 
         :param text: The text to generate embeddings for.
         :param model: The model to use for generating embeddings.
+        :return: One embedding for a single text or token array; one embedding per item for a batch.
         """
         response = self.conn.embeddings.create(model=model, input=text, **kwargs)
-        embeddings: list[float] = response.data[0].embedding
-        return embeddings
+        return self._embeddings_result(text, response)
+
+    @overload
+    async def acreate_embeddings(
+        self,
+        text: str | list[int],
+        model: str = "text-embedding-3-small",
+        **kwargs: Any,
+    ) -> list[float]: ...
+
+    @overload
+    async def acreate_embeddings(
+        self,
+        text: list[str] | list[list[int]],
+        model: str = "text-embedding-3-small",
+        **kwargs: Any,
+    ) -> list[list[float]]: ...
+
+    async def acreate_embeddings(
+        self,
+        text: str | list[str] | list[int] | list[list[int]],
+        model: str = "text-embedding-3-small",
+        **kwargs: Any,
+    ) -> list[float] | list[list[float]]:
+        """
+        Async version of :meth:`create_embeddings`.
+
+        Each call opens and closes its own client, so for many inputs pass one batched ``text`` list.
+
+        :param text: The text to generate embeddings for.
+        :param model: The model to use for generating embeddings.
+        :return: One embedding for a single text or token array; one embedding per item for a batch.
+        """
+        async with await self.aget_conn() as client:
+            response = await client.embeddings.create(model=model, input=text, **kwargs)
+        return self._embeddings_result(text, response)
+
+    @staticmethod
+    def _embeddings_result(
+        text: str | list[str] | list[int] | list[list[int]], response: CreateEmbeddingResponse
+    ) -> list[float] | list[list[float]]:
+        """Return one vector for a single text or token array, one vector per item in input order for a batch."""
+        if isinstance(text, str) or (text and isinstance(text[0], int)):
+            return response.data[0].embedding
+        return [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
 
     def upload_file(self, file: str, purpose: Literal["fine-tune", "assistants", "batch"]) -> FileObject:
         """
@@ -316,7 +496,7 @@ class OpenAIHook(BaseHook):
 
         :param file: The File object (not file name) to be uploaded.
         :param purpose: The intended purpose of the uploaded file. Use "fine-tune" for
-            Fine-tuning, "assistants" for Assistants and Messages, and "batch" for Batch API.
+            Fine-tuning, "assistants" for file search and vector stores, and "batch" for Batch API.
         """
         with open(file, "rb") as file_stream:
             file_object = self.conn.files.create(file=file_stream, purpose=purpose)
@@ -419,21 +599,29 @@ class OpenAIHook(BaseHook):
     def create_batch(
         self,
         file_id: str,
-        endpoint: Literal["/v1/chat/completions", "/v1/embeddings", "/v1/completions"],
+        endpoint: str,
         metadata: dict[str, str] | None = None,
         completion_window: Literal["24h"] = "24h",
+        **kwargs: Any,
     ) -> Batch:
         """
         Create a batch for a given model and files.
 
         :param file_id: The ID of the file to be used for this batch.
-        :param endpoint: The endpoint to use for this batch. Allowed values include:
-            '/v1/chat/completions', '/v1/embeddings', '/v1/completions'.
+        :param endpoint: The endpoint to use for this batch. Allowed values are determined by the
+            OpenAI Batch API; see https://platform.openai.com/docs/api-reference/batch/create for
+            the current list.
         :param metadata: A set of key-value pairs that can be attached to an object.
         :param completion_window: The time window for the batch to complete. Default is 24 hours.
         """
         batch = self.conn.batches.create(
-            input_file_id=file_id, endpoint=endpoint, metadata=metadata, completion_window=completion_window
+            input_file_id=file_id,
+            # endpoint is intentionally str (not the SDK's Literal) so templated values type-check;
+            # the OpenAI service validates the actual value.
+            endpoint=endpoint,  # type: ignore[arg-type]
+            metadata=metadata,
+            completion_window=completion_window,
+            **kwargs,
         )
         return batch
 
@@ -458,7 +646,12 @@ class OpenAIHook(BaseHook):
         start = time.monotonic()
         while True:
             if start + timeout < time.monotonic():
-                self.cancel_batch(batch_id=batch_id)
+                try:
+                    self.cancel_batch(batch_id=batch_id)
+                except Exception as e:
+                    self.log.warning(
+                        "Failed to request cancellation of batch %s after timeout: %s", batch_id, e
+                    )
                 raise OpenAIBatchTimeout(f"Timeout: OpenAI Batch {batch_id} is not ready after {timeout}s")
             batch = self.get_batch(batch_id=batch_id)
 
@@ -469,11 +662,11 @@ class OpenAIHook(BaseHook):
                 return
             if batch.status == BatchStatus.FAILED:
                 raise OpenAIBatchJobException(f"Batch failed - \n{batch_id}")
-            elif batch.status in (BatchStatus.CANCELLED, BatchStatus.CANCELLING):
-                raise OpenAIBatchJobException(f"Batch failed - batch was cancelled:\n{batch_id}")
-            elif batch.status == BatchStatus.EXPIRED:
+            if batch.status in (BatchStatus.CANCELLED, BatchStatus.CANCELLING):
+                raise OpenAIBatchCancelled(f"Batch failed - batch was cancelled:\n{batch_id}")
+            if batch.status == BatchStatus.EXPIRED:
                 raise OpenAIBatchJobException(
-                    f"Batch failed - batch couldn't be completed within the hour time window :\n{batch_id}"
+                    f"Batch failed - batch couldn't be completed within its completion window:\n{batch_id}"
                 )
 
             raise OpenAIBatchJobException(
@@ -488,3 +681,69 @@ class OpenAIHook(BaseHook):
         """
         batch = self.conn.batches.cancel(batch_id=batch_id)
         return batch
+
+    #: Consecutive ``poll_agent_session`` failures tolerated before an agent wait gives up.
+    MAX_CONSECUTIVE_POLL_FAILURES = 3
+
+    @cached_property
+    def _managed_agents(self) -> Any:
+        agents = getattr(self.conn.beta, "agents", None)
+        if agents is None:
+            raise OpenAIAgentSessionError(
+                "Managed Agents requires openai>=3.13.0. Upgrade the OpenAI SDK on workers and triggerers."
+            )
+        return agents
+
+    def create_agent(self, **kwargs: Any) -> Any:
+        """Create a reusable Managed Agent using the SDK's agent configuration arguments."""
+        return self._managed_agents.create(**kwargs)
+
+    def create_agent_session(self, *, input: str, environment: dict[str, Any], **kwargs: Any) -> Any:
+        """Create a fresh Managed Agents session and submit its initial turn."""
+        if "stream" in kwargs:
+            raise ValueError("create_agent_session does not support streaming")
+        return self._managed_agents.sessions.create(
+            input=input, environment=environment, stream=False, **kwargs
+        )
+
+    def get_agent_session(self, session_id: str) -> Any:
+        """Retrieve a Managed Agents session, including required actions and usage."""
+        return self._managed_agents.sessions.retrieve(session_id)
+
+    def cancel_agent_session(self, session_id: str) -> None:
+        """Request cancellation of the session's active turn, preserving its history and artifacts."""
+        self._managed_agents.sessions.events.create(
+            session_id, events=[{"type": "agent.session.input.cancel"}]
+        )
+
+    def poll_agent_session(self, session_id: str) -> dict[str, Any] | None:
+        """
+        Check the first turn of a fresh, exclusively owned session.
+
+        Return a terminal result, or ``None`` while waiting. An idle session without
+        a visible turn is not completion: the submitted input may still be queued.
+        This helper must not be used to wait for subsequent turns of a reused session.
+        """
+        session = self.get_agent_session(session_id)
+        turns = self._managed_agents.sessions.turns.list(session_id, order="asc", limit=1)
+        turn = turns.data[0] if turns.data else None
+        result: dict[str, Any] = {"session_id": session_id}
+        if turn is not None:
+            result["turn_id"] = turn.id
+            result["usage"] = turn.usage.model_dump(mode="json") if turn.usage is not None else None
+            if turn.status == "completed":
+                return {**result, "status": "success"}
+            if turn.status in {"failed", "cancelled"}:
+                message = f"Agent turn {turn.id} {turn.status}"
+                if turn.error is not None:
+                    message += f" ({turn.error.code}): {turn.error.message}"
+                return {**result, "status": "error", "message": message}
+        if session.status == "failed":
+            return {**result, "status": "error", "message": f"Agent session failed: {session.error}"}
+        if any(action.type == "function_call" for action in session.required_actions):
+            return {
+                **result,
+                "status": "error",
+                "message": "The agent requested a client-side function tool. Use server-side tools with this operator.",
+            }
+        return None

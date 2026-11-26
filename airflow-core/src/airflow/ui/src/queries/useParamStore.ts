@@ -18,10 +18,9 @@
  */
 import { create } from "zustand";
 
-import type { ParamsSpec, ParamSpec } from "src/queries/useDagParams";
+import type { ParamsSpec, ParamSpec, ParamValue } from "src/queries/useDagParams";
 
 export const paramPlaceholder: ParamSpec = {
-  // eslint-disable-next-line unicorn/no-null
   description: null,
   schema: {
     const: undefined,
@@ -44,59 +43,101 @@ export const paramPlaceholder: ParamSpec = {
 
 type FormStore = {
   conf: string;
+  disabled: boolean;
   initialParamDict: ParamsSpec;
   paramsDict: ParamsSpec;
   setConf: (confString: string) => void;
-  setinitialParamDict: (newParamsDict: ParamsSpec) => void;
+  setDisabled: (disabled: boolean) => void;
+  setInitialParamDict: (newParamsDict: ParamsSpec) => void;
   setParamsDict: (newParamsDict: ParamsSpec) => void;
 };
 
-export const useParamStore = create<FormStore>((set) => ({
-  conf: "{}",
-  initialParamDict: {},
-  paramsDict: {},
+const createParamStore = () =>
+  create<FormStore>((set) => ({
+    conf: "{}",
+    disabled: false,
+    initialParamDict: {},
+    paramsDict: {},
 
-  setConf: (confString: string) =>
-    set((state) => {
-      if (state.conf === confString) {
-        return {};
-      }
+    setConf: (confString: string) =>
+      set((state) => {
+        if (state.conf === confString) {
+          return {};
+        }
 
-      const parsedConf = JSON.parse(confString) as JSON;
+        const parsedConf = JSON.parse(confString) as Record<string, ParamValue>;
+        const baseDict =
+          Object.keys(state.initialParamDict).length > 0 ? state.initialParamDict : state.paramsDict;
 
-      const updatedParamsDict: ParamsSpec = Object.fromEntries(
-        Object.entries(parsedConf).map(([key, value]) => {
-          const existingParam = state.paramsDict[key];
+        // Preserve a stable ordering of parameters (and thus sections in the trigger form)
+        // by following the order from the initial param dict when available.
+        const updatedParamsDictEntries: Array<[string, ParamSpec]> = [];
+        const inBase = new Set<string>(Object.keys(baseDict));
 
-          return [
-            key,
-            {
-              // eslint-disable-next-line unicorn/no-null
-              description: existingParam?.description ?? null,
-              schema: existingParam?.schema ?? paramPlaceholder.schema,
-              value: value as unknown,
-            },
-          ];
-        }),
-      );
+        for (const [key, baseParam] of Object.entries(baseDict)) {
+          if (Object.hasOwn(parsedConf, key)) {
+            updatedParamsDictEntries.push([
+              key,
+              {
+                description: baseParam.description ?? null,
+                schema: baseParam.schema,
+                value: parsedConf[key] ?? null,
+              },
+            ]);
+          }
+        }
 
-      return { conf: confString, paramsDict: updatedParamsDict };
-    }),
+        // Append any extra keys that exist in the JSON but not in the base dict.
+        for (const [key, value] of Object.entries(parsedConf)) {
+          if (!inBase.has(key)) {
+            const existingParam = state.paramsDict[key] ?? state.initialParamDict[key];
 
-  setinitialParamDict: (newParamsDict: ParamsSpec) => set(() => ({ initialParamDict: newParamsDict })),
+            updatedParamsDictEntries.push([
+              key,
+              {
+                description: existingParam?.description ?? null,
+                schema: existingParam?.schema ?? paramPlaceholder.schema,
+                value,
+              },
+            ]);
+          }
+        }
 
-  setParamsDict: (newParamsDict: ParamsSpec) =>
-    set((state) => {
-      const newConf = JSON.stringify(
-        Object.fromEntries(Object.entries(newParamsDict).map(([key, { value }]) => [key, value])),
-        undefined,
-        2,
-      );
+        const updatedParamsDict: ParamsSpec = Object.fromEntries(updatedParamsDictEntries);
 
-      if (state.conf === newConf && JSON.stringify(state.paramsDict) === JSON.stringify(newParamsDict)) {
-        return {};
-      }
+        return { conf: confString, paramsDict: updatedParamsDict };
+      }),
 
-      return { conf: newConf, paramsDict: newParamsDict };
-    }),
-}));
+    setDisabled: (disabled: boolean) => set(() => ({ disabled })),
+
+    setInitialParamDict: (newParamsDict: ParamsSpec) => set(() => ({ initialParamDict: newParamsDict })),
+
+    setParamsDict: (newParamsDict: ParamsSpec) =>
+      set((state) => {
+        const newConf = JSON.stringify(
+          Object.fromEntries(Object.entries(newParamsDict).map(([key, { value }]) => [key, value])),
+          undefined,
+          2,
+        );
+
+        return state.conf === newConf && JSON.stringify(state.paramsDict) === JSON.stringify(newParamsDict)
+          ? {}
+          : { conf: newConf, paramsDict: newParamsDict };
+      }),
+  }));
+
+const stores = new Map<string, ReturnType<typeof createParamStore>>();
+
+export const useParamStore = (namespace = "default") => {
+  if (!stores.has(namespace)) {
+    stores.set(namespace, createParamStore());
+  }
+
+  const store = stores.get(namespace);
+
+  if (!store) {
+    throw new Error(`Failed to create store for namespace: ${namespace}`);
+  }
+
+  return store();
+};

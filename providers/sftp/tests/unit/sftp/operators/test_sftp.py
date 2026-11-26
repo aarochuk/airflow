@@ -1,4 +1,3 @@
-#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -18,6 +17,8 @@
 from __future__ import annotations
 
 import contextlib
+import errno
+import logging
 import os
 import socket
 from base64 import b64encode
@@ -26,15 +27,15 @@ from unittest import mock
 import paramiko
 import pytest
 
-from airflow.exceptions import AirflowException
+from airflow.exceptions import TaskDeferred
 from airflow.models import DAG, Connection
 from airflow.providers.common.compat.openlineage.facet import Dataset
+from airflow.providers.common.compat.sdk import AirflowException, timezone
 from airflow.providers.sftp.hooks.sftp import SFTPHook
 from airflow.providers.sftp.operators.sftp import SFTPOperation, SFTPOperator
+from airflow.providers.sftp.triggers.sftp import SFTPTransferTrigger
 from airflow.providers.ssh.hooks.ssh import SSHHook
 from airflow.providers.ssh.operators.ssh import SSHOperator
-from airflow.utils import timezone
-from airflow.utils.timezone import datetime
 
 from tests_common.test_utils.config import conf_vars
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
@@ -42,7 +43,7 @@ from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 pytestmark = pytest.mark.db_test
 
 
-DEFAULT_DATE = datetime(2017, 1, 1)
+DEFAULT_DATE = timezone.datetime(2017, 1, 1)
 TEST_CONN_ID = "conn_id_for_testing"
 
 LOCAL_FILEPATH = "/path/local"
@@ -96,6 +97,21 @@ class TestSFTPOperator:
         if os.path.exists(self.test_remote_dir):
             os.rmdir(self.test_remote_dir)
 
+    def test_default_args(self):
+        operator = SFTPOperator(
+            task_id="test_default_args",
+            remote_filepath="/tmp/remote_file",
+        )
+        assert operator.operation == SFTPOperation.PUT
+        assert operator.confirm is True
+        assert operator.create_intermediate_dirs is False
+        assert operator.concurrency == 1
+        assert operator.prefetch is True
+        assert operator.local_filepath is None
+        assert operator.sftp_hook is None
+        assert operator.ssh_conn_id is None
+        assert operator.remote_host is None
+
     @pytest.mark.skipif(AIRFLOW_V_3_0_PLUS, reason="Pickle support is removed in Airflow 3")
     @conf_vars({("core", "enable_xcom_pickling"): "True"})
     def test_pickle_file_transfer_put(self, dag_maker):
@@ -123,16 +139,16 @@ class TestSFTPOperator:
                 do_xcom_push=True,
             )
 
-        tis = {ti.task_id: ti for ti in dag_maker.create_dagrun().task_instances}
-        tis["put_test_task"].run()
-        tis["check_file_task"].run()
+        dr = dag_maker.create_dagrun()
+        dag_maker.run_ti("put_test_task", dr)
+        check_file_task_ti = dag_maker.run_ti("check_file_task", dr)
 
-        pulled = tis["check_file_task"].xcom_pull(task_ids="check_file_task", key="return_value")
+        pulled = check_file_task_ti.xcom_pull(task_ids="check_file_task", key="return_value")
         assert pulled.strip() == test_local_file_content
 
     @pytest.mark.skipif(AIRFLOW_V_3_0_PLUS, reason="Pickle support is removed in Airflow 3")
     @conf_vars({("core", "enable_xcom_pickling"): "True"})
-    def test_file_transfer_no_intermediate_dir_error_put(self, create_task_instance_of_operator):
+    def test_file_transfer_no_intermediate_dir_error_put(self, dag_maker):
         test_local_file_content = (
             b"This is local file content \n which is multiline "
             b"continuing....with other character\nanother line here \n this is last line"
@@ -143,20 +159,17 @@ class TestSFTPOperator:
 
         # Try to put test file to remote. This should raise an error with
         # "No such file" as the directory does not exist.
-        ti2 = create_task_instance_of_operator(
-            SFTPOperator,
-            dag_id="unit_tests_sftp_op_file_transfer_no_intermediate_dir_error_put",
-            task_id="test_sftp",
-            sftp_hook=self.sftp_hook,
-            local_filepath=self.test_local_filepath,
-            remote_filepath=self.test_remote_filepath_int_dir,
-            operation=SFTPOperation.PUT,
-            create_intermediate_dirs=False,
-        )
-        with (
-            pytest.raises(AirflowException) as ctx,
-        ):
-            ti2.run()
+        with dag_maker(dag_id="unit_tests_sftp_op_file_transfer_no_intermediate_dir_error_put"):
+            SFTPOperator(
+                task_id="test_sftp",
+                sftp_hook=self.sftp_hook,
+                local_filepath=self.test_local_filepath,
+                remote_filepath=self.test_remote_filepath_int_dir,
+                operation=SFTPOperation.PUT,
+                create_intermediate_dirs=False,
+            )
+        with pytest.raises(AirflowException) as ctx:
+            dag_maker.run_ti("test_sftp")
         assert "No such file" in str(ctx.value)
 
     @pytest.mark.skipif(AIRFLOW_V_3_0_PLUS, reason="Pickle support is removed in Airflow 3")
@@ -186,10 +199,9 @@ class TestSFTPOperator:
                 do_xcom_push=True,
             )
         dagrun = dag_maker.create_dagrun(logical_date=timezone.utcnow())
-        tis = {ti.task_id: ti for ti in dagrun.task_instances}
-        tis["test_sftp"].run()
-        tis["test_check_file"].run()
-        pulled = tis["test_check_file"].xcom_pull(task_ids="test_check_file", key="return_value")
+        dag_maker.run_ti("test_sftp", dagrun)
+        test_check_file_ti = dag_maker.run_ti("test_check_file", dagrun)
+        pulled = test_check_file_ti.xcom_pull(task_ids="test_check_file", key="return_value")
         assert pulled.strip() == test_local_file_content
 
     @conf_vars({("core", "enable_xcom_pickling"): "False"})
@@ -217,12 +229,10 @@ class TestSFTPOperator:
                 do_xcom_push=True,
             )
         dagrun = dag_maker.create_dagrun(logical_date=timezone.utcnow())
-        tis = {ti.task_id: ti for ti in dagrun.task_instances}
+        dag_maker.run_ti("put_test_task", dagrun)
+        check_file_task_ti = dag_maker.run_ti("check_file_task", dagrun)
 
-        tis["put_test_task"].run()
-        tis["check_file_task"].run()
-
-        pulled = tis["check_file_task"].xcom_pull(task_ids="check_file_task", key="return_value")
+        pulled = check_file_task_ti.xcom_pull(task_ids="check_file_task", key="return_value")
         assert pulled.strip() == b64encode(test_local_file_content).decode("utf-8")
 
     @pytest.fixture
@@ -243,8 +253,7 @@ class TestSFTPOperator:
                 remote_filepath=self.test_remote_filepath,
                 operation=SFTPOperation.GET,
             )
-        for ti in dag_maker.create_dagrun(logical_date=timezone.utcnow()).task_instances:
-            ti.run()
+        dag_maker.run_ti("test_sftp")
 
         # Test the received content.
         with open(self.test_local_filepath, "rb") as file:
@@ -261,8 +270,7 @@ class TestSFTPOperator:
                 remote_filepath=self.test_remote_filepath,
                 operation=SFTPOperation.GET,
             )
-        for ti in dag_maker.create_dagrun(logical_date=timezone.utcnow()).task_instances:
-            ti.run()
+        dag_maker.run_ti("test_sftp")
 
         # Test the received content.
         content_received = None
@@ -282,14 +290,11 @@ class TestSFTPOperator:
                 operation=SFTPOperation.GET,
             )
 
-        for ti in dag_maker.create_dagrun(logical_date=timezone.utcnow()).task_instances:
-            # This should raise an error with "No such file" as the directory
-            # does not exist.
-            with (
-                pytest.raises(AirflowException) as ctx,
-            ):
-                ti.run()
-            assert "No such file" in str(ctx.value)
+        # This should raise an error with "No such file" as the directory
+        # does not exist.
+        with pytest.raises(AirflowException) as ctx:
+            dag_maker.run_ti("test_sftp")
+        assert "No such file" in str(ctx.value)
 
     @pytest.mark.skipif(AIRFLOW_V_3_0_PLUS, reason="Pickle support is removed in Airflow 3")
     @conf_vars({("core", "enable_xcom_pickling"): "True"})
@@ -303,9 +308,7 @@ class TestSFTPOperator:
                 operation=SFTPOperation.GET,
                 create_intermediate_dirs=True,
             )
-
-        for ti in dag_maker.create_dagrun(logical_date=timezone.utcnow()).task_instances:
-            ti.run()
+        dag_maker.run_ti("test_sftp")
 
         # Test the received content.
         content_received = None
@@ -374,12 +377,29 @@ class TestSFTPOperator:
         assert task_3.sftp_hook.remote_host == "remotehost"
 
     def test_unequal_local_remote_file_paths(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="1 paths in local_filepath != 2 paths in remote_filepath"):
             SFTPOperator(
                 task_id="test_sftp_unequal_paths",
                 local_filepath="/tmp/test",
                 remote_filepath=["/tmp/test1", "/tmp/test2"],
             ).execute(None)
+
+    @pytest.mark.parametrize(
+        "operation", ["GET", "Get", "get", "PUT", "Put", "put", "DELETE", "Delete", "delete"]
+    )
+    @mock.patch("airflow.providers.sftp.operators.sftp.SFTPHook.transfer", autospec=True)
+    def test_operation_is_case_insensitive(self, mock_transfer, operation):
+        """Mixed-case operation values must not raise, matching the pre-refactor behavior."""
+        local_filepath = None if operation.lower() == SFTPOperation.DELETE else "/tmp/test"
+        SFTPOperator(
+            task_id="test_sftp_case_insensitive_operation",
+            sftp_hook=self.sftp_hook,
+            local_filepath=local_filepath,
+            remote_filepath="/tmp/remotetest",
+            operation=operation,
+        ).execute(None)
+        assert mock_transfer.call_count == 1
+        assert mock_transfer.call_args.kwargs["operation"] == operation
 
     @mock.patch("airflow.providers.sftp.operators.sftp.SFTPHook.retrieve_file")
     def test_str_filepaths_get(self, mock_get):
@@ -429,6 +449,21 @@ class TestSFTPOperator:
         args, _ = mock_get.call_args_list[0]
         assert args == (remote_dirpath, local_dirpath)
 
+    @mock.patch("airflow.providers.sftp.operators.sftp.SFTPHook.retrieve_directory_concurrently")
+    def test_str_dirpaths_get_concurrently(self, mock_get):
+        local_dirpath = "/tmp_local"
+        remote_dirpath = "/tmp"
+        SFTPOperator(
+            task_id="test_str_to_list",
+            sftp_hook=self.sftp_hook,
+            local_filepath=local_dirpath,
+            remote_filepath=remote_dirpath,
+            operation=SFTPOperation.GET,
+            concurrency=2,
+        ).execute(None)
+        assert mock_get.call_count == 1
+        assert mock_get.call_args == mock.call(remote_dirpath, local_dirpath, workers=2, prefetch=True)
+
     @mock.patch("airflow.providers.sftp.operators.sftp.SFTPHook.store_file")
     def test_str_filepaths_put(self, mock_get):
         local_filepath = "/tmp/test"
@@ -472,6 +507,22 @@ class TestSFTPOperator:
             local_filepath=local_dirpath,
             remote_filepath=remote_dirpath,
             operation=SFTPOperation.PUT,
+        ).execute(None)
+        assert mock_get.call_count == 1
+        args, _ = mock_get.call_args_list[0]
+        assert args == (remote_dirpath, local_dirpath)
+
+    @mock.patch("airflow.providers.sftp.operators.sftp.SFTPHook.store_directory_concurrently")
+    def test_str_dirpaths_put_concurrently(self, mock_get):
+        local_dirpath = "/tmp"
+        remote_dirpath = "/tmp_remote"
+        SFTPOperator(
+            task_id="test_str_dirpaths_put",
+            sftp_hook=self.sftp_hook,
+            local_filepath=local_dirpath,
+            remote_filepath=remote_dirpath,
+            operation=SFTPOperation.PUT,
+            concurrency=2,
         ).execute(None)
         assert mock_get.call_count == 1
         args, _ = mock_get.call_args_list[0]
@@ -533,6 +584,46 @@ class TestSFTPOperator:
         args, _ = mock_delete.call_args_list[0]
         assert args == (remote_filepath,)
 
+    @pytest.mark.parametrize(
+        "missing_error",
+        [
+            pytest.param(FileNotFoundError("missing"), id="file_not_found"),
+            pytest.param(OSError(errno.ENOENT, "No such file"), id="paramiko_enoent_ioerror"),
+        ],
+    )
+    @mock.patch("airflow.providers.sftp.operators.sftp.SFTPHook.delete_file")
+    @mock.patch("airflow.providers.sftp.operators.sftp.SFTPHook.isdir")
+    def test_delete_missing_file_warns(self, mock_isdir, mock_delete, missing_error, caplog):
+        mock_isdir.return_value = False
+        mock_delete.side_effect = missing_error
+        remote_filepath = "/tmp/missing"
+        sftp_op = SFTPOperator(
+            task_id="test_missing_file_delete_warns",
+            sftp_hook=self.sftp_hook,
+            remote_filepath=remote_filepath,
+            operation=SFTPOperation.DELETE,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            sftp_op.execute(None)
+
+        assert "does not exist. Skipping delete." in caplog.text
+
+    @mock.patch("airflow.providers.sftp.operators.sftp.SFTPHook.delete_file")
+    @mock.patch("airflow.providers.sftp.operators.sftp.SFTPHook.isdir")
+    def test_delete_permission_error_raises(self, mock_isdir, mock_delete):
+        mock_isdir.return_value = False
+        mock_delete.side_effect = PermissionError(errno.EACCES, "denied")
+        remote_filepath = "/tmp/protected"
+
+        with pytest.raises(AirflowException):
+            SFTPOperator(
+                task_id="test_permission_error_delete_raises",
+                sftp_hook=self.sftp_hook,
+                remote_filepath=remote_filepath,
+                operation=SFTPOperation.DELETE,
+            ).execute(None)
+
     @mock.patch("airflow.providers.sftp.operators.sftp.SFTPHook.delete_file")
     def test_local_filepath_exists_error_delete(self, mock_delete):
         local_filepath = "/tmp"
@@ -547,7 +638,7 @@ class TestSFTPOperator:
             ).execute(None)
 
     @pytest.mark.parametrize(
-        "operation, expected",
+        ("operation", "expected"),
         TEST_GET_PUT_PARAMS,
     )
     @mock.patch("airflow.providers.ssh.hooks.ssh.SSHHook.get_conn", spec=paramiko.SSHClient)
@@ -578,7 +669,7 @@ class TestSFTPOperator:
         assert lineage.outputs == expected[1]
 
     @pytest.mark.parametrize(
-        "operation, expected",
+        ("operation", "expected"),
         TEST_GET_PUT_PARAMS,
     )
     @mock.patch("airflow.providers.ssh.hooks.ssh.SSHHook.get_conn", spec=paramiko.SSHClient)
@@ -607,3 +698,210 @@ class TestSFTPOperator:
 
         assert lineage.inputs == expected[0]
         assert lineage.outputs == expected[1]
+
+
+class TestSFTPOperatorDeferrable:
+    """Tests for SFTPOperator deferrable mode."""
+
+    def test_sftp_operator_defers_when_deferrable_true(self):
+        """Test that SFTPOperator defers when deferrable=True."""
+        operator = SFTPOperator(
+            task_id="test_sftp_defer",
+            ssh_conn_id="ssh_default",
+            local_filepath="/tmp/test.txt",
+            remote_filepath="/remote/test.txt",
+            operation=SFTPOperation.PUT,
+            deferrable=True,
+        )
+        with pytest.raises(TaskDeferred) as exc:
+            operator.execute(context={})
+        assert isinstance(exc.value.trigger, SFTPTransferTrigger)
+        assert exc.value.method_name == "execute_complete"
+
+    @mock.patch.dict("os.environ", {"AIRFLOW_CONN_MY_PROD_SFTP": "sftp://user@example.com"})
+    def test_sftp_operator_defer_uses_sftp_hook_conn_id_when_ssh_conn_id_unset(self):
+        """
+        Assert that deferring honors a supplied sftp_hook's connection id.
+
+        Regression test: previously, when only ``sftp_hook`` (not ``ssh_conn_id``) was
+        provided, the trigger silently fell back to ``SFTPHookAsync.default_conn_name``
+        ("sftp_default") instead of the hook's actual connection, redirecting the
+        deferred transfer to the wrong server.
+        """
+        operator = SFTPOperator(
+            task_id="test_sftp_defer_hook_conn_id",
+            sftp_hook=SFTPHook(ssh_conn_id="my_prod_sftp"),
+            local_filepath="/tmp/test.txt",
+            remote_filepath="/remote/test.txt",
+            operation=SFTPOperation.PUT,
+            deferrable=True,
+        )
+        with pytest.raises(TaskDeferred) as exc:
+            operator.execute(context={})
+        assert exc.value.trigger.sftp_conn_id == "my_prod_sftp"
+
+    @mock.patch("asyncssh.connect", new_callable=mock.AsyncMock)
+    @mock.patch("airflow.providers.sftp.hooks.sftp.get_async_connection")
+    @mock.patch.dict("os.environ", {"AIRFLOW_CONN_MY_PROD_SFTP": "sftp://user@example.com"})
+    @pytest.mark.asyncio
+    async def test_sftp_operator_defer_keeps_hook_no_host_key_check(self, mock_get_connection, mock_connect):
+        """A host key opt-out set on the supplied hook survives deferral into the trigger's async hook."""
+        mock_get_connection.return_value = Connection(
+            conn_id="my_prod_sftp", conn_type="sftp", host="example.com", login="user"
+        )
+        operator = SFTPOperator(
+            task_id="test_sftp_defer_no_host_key_check",
+            sftp_hook=SFTPHook(ssh_conn_id="my_prod_sftp", no_host_key_check=True),
+            local_filepath="/tmp/test.txt",
+            remote_filepath="/remote/test.txt",
+            operation=SFTPOperation.PUT,
+            deferrable=True,
+        )
+        with pytest.raises(TaskDeferred) as exc:
+            operator.execute(context={})
+
+        trigger = exc.value.trigger
+        assert trigger.serialize()[1]["no_host_key_check"] is True
+        await trigger._get_async_hook()._get_conn()
+        assert mock_connect.call_args.kwargs["known_hosts"] is None
+
+    def test_sftp_operator_defer_without_any_conn_id_raises(self):
+        operator = SFTPOperator(
+            task_id="test_sftp_defer_no_conn_id",
+            sftp_hook=SFTPHook(ssh_conn_id=None, remote_host="example.com"),
+            local_filepath="/tmp/test.txt",
+            remote_filepath="/remote/test.txt",
+            operation=SFTPOperation.PUT,
+            deferrable=True,
+        )
+        with pytest.raises(ValueError, match="requires a connection id"):
+            operator.execute(context={})
+
+    def test_sftp_operator_execute_complete_success(self):
+        """Test execute_complete returns local_filepath on success."""
+        operator = SFTPOperator(
+            task_id="test_sftp_complete",
+            ssh_conn_id="ssh_default",
+            local_filepath="/tmp/test.txt",
+            remote_filepath="/remote/test.txt",
+            operation=SFTPOperation.PUT,
+            deferrable=True,
+        )
+        event = {"status": "success", "local_filepath": "/tmp/test.txt"}
+        result = operator.execute_complete(context={}, event=event)
+        assert result == "/tmp/test.txt"
+
+    def test_sftp_operator_execute_complete_raises_on_error(self):
+        """Test execute_complete raises AirflowException on error."""
+        operator = SFTPOperator(
+            task_id="test_sftp_error",
+            ssh_conn_id="ssh_default",
+            local_filepath="/tmp/test.txt",
+            remote_filepath="/remote/test.txt",
+            operation=SFTPOperation.PUT,
+            deferrable=True,
+        )
+        event = {"status": "error", "message": "Connection refused"}
+        with pytest.raises(AirflowException, match="Connection refused"):
+            operator.execute_complete(context={}, event=event)
+
+
+class TestSFTPTransferTrigger:
+    """Tests for SFTPTransferTrigger."""
+
+    def test_serialize_roundtrip(self):
+        """Test that serialize() produces correct output for reconstruction."""
+        trigger = SFTPTransferTrigger(
+            sftp_conn_id="ssh_default",
+            local_filepath="/tmp/test.txt",
+            remote_filepath="/remote/test.txt",
+            operation="put",
+            confirm=True,
+            create_intermediate_dirs=False,
+            remote_host=None,
+            concurrency=1,
+            prefetch=True,
+        )
+        classpath, kwargs = trigger.serialize()
+        assert classpath == "airflow.providers.sftp.triggers.sftp.SFTPTransferTrigger"
+        assert kwargs["sftp_conn_id"] == "ssh_default"
+        assert kwargs["local_filepath"] == "/tmp/test.txt"
+        assert kwargs["remote_filepath"] == "/remote/test.txt"
+        assert kwargs["operation"] == "put"
+        assert kwargs["confirm"] is True
+        assert kwargs["remote_host"] is None
+        assert kwargs["concurrency"] == 1
+        assert kwargs["prefetch"] is True
+
+    @mock.patch("airflow.providers.sftp.triggers.sftp.SFTPHookAsync", autospec=True)
+    def test_get_async_hook_forwards_remote_host(self, mock_hook_async):
+        """Test that an explicit remote_host override reaches SFTPHookAsync, not just the conn_id."""
+        trigger = SFTPTransferTrigger(
+            sftp_conn_id="ssh_default",
+            local_filepath="/tmp/test.txt",
+            remote_filepath="/remote/test.txt",
+            operation="put",
+            remote_host="explicit-host.example.com",
+        )
+        trigger._get_async_hook()
+        mock_hook_async.assert_called_once_with(
+            sftp_conn_id="ssh_default", host="explicit-host.example.com", no_host_key_check=None
+        )
+
+    @mock.patch("airflow.providers.sftp.triggers.sftp.SFTPHookAsync", autospec=True)
+    def test_get_async_hook_defaults_remote_host_to_none(self, mock_hook_async):
+        """Test that omitting remote_host does not force an unexpected host onto the hook."""
+        trigger = SFTPTransferTrigger(
+            sftp_conn_id="ssh_default",
+            local_filepath="/tmp/test.txt",
+            remote_filepath="/remote/test.txt",
+            operation="put",
+        )
+        trigger._get_async_hook()
+        mock_hook_async.assert_called_once_with(sftp_conn_id="ssh_default", host=None, no_host_key_check=None)
+
+    def test_run_success(self):
+        """Test run() yields TriggerEvent with status success."""
+        import asyncio
+
+        trigger = SFTPTransferTrigger(
+            sftp_conn_id="ssh_default",
+            local_filepath="/tmp/test.txt",
+            remote_filepath="/remote/test.txt",
+            operation="put",
+        )
+        with mock.patch("airflow.providers.sftp.triggers.sftp.SFTPHookAsync.transfer", return_value=None):
+            events = []
+
+            async def collect():
+                async for event in trigger.run():
+                    events.append(event)
+
+            asyncio.run(collect())
+        assert len(events) == 1
+        assert events[0].payload["status"] == "success"
+
+    def test_run_error(self):
+        """Test run() yields TriggerEvent with status error on exception."""
+        import asyncio
+
+        trigger = SFTPTransferTrigger(
+            sftp_conn_id="ssh_default",
+            local_filepath="/tmp/test.txt",
+            remote_filepath="/remote/test.txt",
+            operation="put",
+        )
+        with mock.patch(
+            "airflow.providers.sftp.triggers.sftp.SFTPHookAsync.transfer",
+            side_effect=Exception("Connection failed"),
+        ):
+            events = []
+
+            async def collect():
+                async for event in trigger.run():
+                    events.append(event)
+
+            asyncio.run(collect())
+        assert len(events) == 1
+        assert events[0].payload["status"] == "error"
+        assert "Connection failed" in events[0].payload["message"]

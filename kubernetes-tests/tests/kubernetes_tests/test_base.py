@@ -16,14 +16,16 @@
 # under the License.
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import check_call, check_output
+from typing import Literal
 
 import pytest
 import requests
@@ -32,6 +34,8 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import RetryError
 from urllib3.exceptions import MaxRetryError
 from urllib3.util.retry import Retry
+
+from tests_common.test_utils.api_client_helpers import generate_access_token
 
 CLUSTER_FORWARDED_PORT = os.environ.get("CLUSTER_FORWARDED_PORT") or "8080"
 KUBERNETES_HOST_PORT = (os.environ.get("CLUSTER_HOST") or "localhost") + ":" + CLUSTER_FORWARDED_PORT
@@ -47,7 +51,10 @@ print()
 
 class StringContainingId(str):
     def __eq__(self, other):
-        return self in other
+        return self in other.strip() or self in other
+
+    def __hash__(self):
+        return hash(self)
 
 
 class BaseK8STest:
@@ -57,13 +64,22 @@ class BaseK8STest:
     temp_dir = Path(tempfile.gettempdir())  # Refers to global temp directory, in linux it usual "/tmp"
     session: requests.Session
     test_id: str
+    use_fab_auth_manager: bool = os.environ.get("USE_FAB_AUTH_MANAGER", "true").lower() == "true"
+    password: str = "admin"  # Default password for FAB auth manager
 
     @pytest.fixture(autouse=True)
     def base_tests_setup(self, request):
         # Replacement for unittests.TestCase.id()
         self.test_id = f"{request.node.cls.__name__}_{request.node.name}"
         # Ensure the api-server deployment is healthy at kubernetes level before calling the any API
-        self.ensure_deployment_health("airflow-api-server")
+        self.ensure_resource_health("airflow-api-server")
+        if not self.use_fab_auth_manager:
+            # If we are not using FAB auth manager, we need to retrieve the admin password from
+            # the airflow-api-server pod
+            self.password = self.get_generated_admin_password(namespace="airflow")
+            print("Using retrieved admin password for API calls from generated file")
+        else:
+            print("Using default 'admin' password for API calls")
         try:
             self.session = self._get_session_with_retries()
             self._ensure_airflow_api_server_is_healthy()
@@ -84,7 +100,7 @@ class BaseK8STest:
         with open(output_file_path, "w") as output_file:
             print("=" * 80, file=output_file)
             print(f"Describe resources for namespace {namespace}", file=output_file)
-            print(f"Datetime: {datetime.now(tz=timezone.utc)}", file=output_file)
+            print(f"Datetime: {datetime.now(tz=UTC)}", file=output_file)
             print("=" * 80, file=output_file)
             print("Describing pods", file=output_file)
             print("-" * 80, file=output_file)
@@ -112,10 +128,10 @@ class BaseK8STest:
             print("=" * 80, file=output_file)
 
     @staticmethod
-    def _num_pods_in_namespace(namespace):
+    def _num_pods_in_namespace(namespace: str):
         air_pod = check_output(["kubectl", "get", "pods", "-n", namespace]).decode()
-        air_pod = air_pod.splitlines()
-        names = [re.compile(r"\s+").split(x)[0] for x in air_pod if "airflow" in x]
+        pod_lines = air_pod.splitlines()
+        names = [re.compile(r"\s+").split(x)[0] for x in pod_lines if "airflow" in x]
         return len(names)
 
     @staticmethod
@@ -127,45 +143,9 @@ class BaseK8STest:
         if names:
             check_call(["kubectl", "delete", "pod", names[0]])
 
-    @staticmethod
-    def _get_jwt_token(username: str, password: str) -> str:
-        """
-        Get the JWT token for the given username and password.
-
-        Note: API server is still using FAB Auth Manager.
-
-        Steps:
-        1. Login with the username and password
-            - Must use the same session to keep the csrf token session
-        2. Extract the JWT token from the auth/token url
-
-        :param session: The session to use for the request
-        :param username: The username to use for the login
-        :param password: The password to use for the login
-        :return: The JWT token
-        """
-        # get csrf token from login page
-        Retry.DEFAULT_BACKOFF_MAX = 32
-        retry = Retry(total=10, backoff_factor=1)
-        # Backoff Retry Formula: min(1 × (2^(retry - 1)), 32) seconds
-        # 1 + 2 + 4 + 8 + 16 + 32 + 32 + 32 + 32 + 32 = 191 sec (~3.2 min)
-        session = requests.Session()
-        session.mount("http://", HTTPAdapter(max_retries=retry))
-        session.mount("https://", HTTPAdapter(max_retries=retry))
-        url = f"http://{KUBERNETES_HOST_PORT}/auth/token"
-        login_response = session.post(
-            url,
-            json={"username": username, "password": password},
-        )
-        jwt_token = login_response.json().get("access_token")
-
-        assert jwt_token, f"Failed to get JWT token from redirect url {url} with status code {login_response}"
-        return jwt_token
-
     def _get_session_with_retries(self):
         class JWTRefreshAdapter(HTTPAdapter):
-            def __init__(self, base_instance, **kwargs):
-                self.base_instance = base_instance
+            def __init__(self, **kwargs):
                 super().__init__(**kwargs)
 
             def send(self, request, **kwargs):
@@ -176,7 +156,9 @@ class BaseK8STest:
                     jwt_token = None
                     while attempts < 5:
                         try:
-                            jwt_token = self.base_instance._get_jwt_token("admin", "admin")
+                            jwt_token = generate_access_token(
+                                "admin", BaseK8STest.password, KUBERNETES_HOST_PORT
+                            )
                             break
                         except Exception:
                             attempts += 1
@@ -187,7 +169,7 @@ class BaseK8STest:
                     response = super().send(request, **kwargs)
                 return response
 
-        jwt_token = self._get_jwt_token("admin", "admin")
+        jwt_token = generate_access_token("admin", self.password, KUBERNETES_HOST_PORT)
         session = requests.Session()
         session.headers.update({"Authorization": f"Bearer {jwt_token}"})
         retries = Retry(
@@ -196,7 +178,7 @@ class BaseK8STest:
             status_forcelist=[404],
             allowed_methods=Retry.DEFAULT_ALLOWED_METHODS | frozenset(["PATCH", "POST"]),
         )
-        adapter = JWTRefreshAdapter(self, max_retries=retries)
+        adapter = JWTRefreshAdapter(max_retries=retries)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         return session
@@ -256,21 +238,88 @@ class BaseK8STest:
                 tries += 1
             except requests.exceptions.ConnectionError as e:
                 check_call(["echo", f"api call failed. trying again. error {e}"])
-        if state != expected_final_state:
-            print(f"The expected state is wrong {state} != {expected_final_state} (expected)!")
-        assert state == expected_final_state
+        outcome = f"ended {state!r}" if state else "was never seen (API returned 404 or timed out)"
+        assert state == expected_final_state, (
+            f"Task {dag_id}.{task_id} in run {dag_run_id} {outcome}, expected {expected_final_state!r}"
+        )
+
+    def _print_task_instance_states(self, host, dag_id, dag_run_id):
+        """Print every task instance of a Dag run with its state, failed ones first.
+
+        This is only diagnostic output for a failing test, so it never raises.
+        """
+        try:
+            get_string = f"http://{host}/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances"
+            result = self.session.get(get_string, params={"limit": 100})
+            if result.status_code != 200:
+                print(
+                    f"Could not list task instances of run {dag_run_id}: {result.status_code} {result.text}"
+                )
+                return
+            result_json = result.json()
+            task_instances = result_json["task_instances"]
+            failed_states = ("failed", "upstream_failed")
+            task_instances = sorted(task_instances, key=lambda ti: ti["state"] not in failed_states)
+            print(f"Task instances of {dag_id} run {dag_run_id}:")
+            for ti in task_instances:
+                map_index = f"[{ti['map_index']}]" if ti["map_index"] >= 0 else ""
+                print(f"  {ti['task_id']}{map_index}: {ti['state']} (try {ti['try_number']})")
+            total = result_json.get("total_entries")
+            if total is not None and total > len(task_instances):
+                print(f"  ... and {total - len(task_instances)} more")
+        except Exception as e:
+            print(f"Could not list task instances of run {dag_run_id}: {e!r}")
+
+    def wait_until_task_in_executor(self, host, dag_run_id, dag_id, task_id, timeout=60):
+        """Poll until the task instance has been handed to the executor.
+
+        Once the state is ``queued`` (or any post-queued state), the scheduler
+        has already pushed the task to the executor queue, so a subsequent
+        scheduler crash does not race with the very first scheduling step.
+        """
+        deadline = time.monotonic() + timeout
+        post_queued_states = {"queued", "running", "success", "failed", "upstream_failed", "removed"}
+        get_string = f"http://{host}/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances/{task_id}"
+        state: str | None = None
+        while time.monotonic() < deadline:
+            try:
+                result = self.session.get(get_string)
+                if result.status_code == 200:
+                    state = result.json().get("state")
+                    print(f"[wait_until_task_in_executor] {task_id} state={state}")
+                    if state in post_queued_states:
+                        return state
+            except requests.exceptions.ConnectionError as exc:
+                print(f"[wait_until_task_in_executor] api call failed, retrying. error={exc}")
+            time.sleep(2)
+        raise AssertionError(
+            f"task {task_id} did not reach a post-queued state within {timeout}s (last seen state: {state})"
+        )
 
     @staticmethod
-    def ensure_deployment_health(deployment_name: str, namespace: str = "airflow"):
-        """Watch the deployment until it is healthy."""
-        deployment_rollout_status = check_output(
-            ["kubectl", "rollout", "status", "deployment", deployment_name, "-n", namespace, "--watch"]
+    def ensure_resource_health(
+        resource_name: str,
+        namespace: str = "airflow",
+        resource_type: Literal["deployment", "statefulset"] = "deployment",
+    ):
+        """Watch the resource until it is healthy.
+        Args:
+            resource_name (str): Name of the resource to check.
+            resource_type (str): Type of the resource (e.g., deployment, statefulset).
+            namespace (str): Kubernetes namespace where the resource is located.
+        """
+        rollout_status = check_output(
+            ["kubectl", "rollout", "status", f"{resource_type}/{resource_name}", "-n", namespace, "--watch"],
         ).decode()
-        assert "successfully rolled out" in deployment_rollout_status
+        # kubectl output can vary between versions and resource types. Accept either
+        # the common "successfully rolled out" wording or the alternative
+        # "roll out complete" phrasing to reduce flakiness across environments.
+        assert "successfully rolled out" in rollout_status or "roll out complete" in rollout_status
 
     def ensure_dag_expected_state(self, host, logical_date, dag_id, expected_final_state, timeout):
         tries = 0
         state = ""
+        dag_run_id = None
         max_tries = max(int(timeout / 5), 1)
         # Wait some time for the operator to complete
         while tries < max_tries:
@@ -283,9 +332,11 @@ class BaseK8STest:
             result_json = result.json()
             print(f"Received: {result}")
             state = None
+            dag_run_id = None
             for dag_run in result_json["dag_runs"]:
                 if dag_run["logical_date"] == logical_date:
                     state = dag_run["state"]
+                    dag_run_id = dag_run["dag_run_id"]
             check_call(["echo", f"Attempt {tries}: Current state of dag is {state}"])
             print(f"Attempt {tries}: Current state of dag is {state}")
 
@@ -297,9 +348,14 @@ class BaseK8STest:
             self._describe_resources("airflow")
             self._describe_resources("default")
             tries += 1
-        assert state == expected_final_state
-
-        # Maybe check if we can retrieve the logs, but then we need to extend the API
+        if dag_run_id is None:
+            raise AssertionError(f"No run of Dag {dag_id} with logical date {logical_date} was found")
+        if state != expected_final_state:
+            self._print_task_instance_states(host, dag_id, dag_run_id)
+        assert state == expected_final_state, (
+            f"Dag {dag_id} run {dag_run_id} (logical date {logical_date}) ended {state!r}, "
+            f"expected {expected_final_state!r}"
+        )
 
     def start_dag(self, dag_id, host):
         patch_string = f"http://{host}/dags/{dag_id}"
@@ -329,7 +385,7 @@ class BaseK8STest:
         post_string = f"http://{host}/dags/{dag_id}/dagRuns"
         print(f"Calling [start_dag]#2 {post_string}")
 
-        logical_date = datetime.now(timezone.utc).isoformat()
+        logical_date = datetime.now(UTC).isoformat()
         # Trigger a new dagrun
         result = self.session.post(post_string, json={"logical_date": logical_date})
         try:
@@ -363,3 +419,30 @@ class BaseK8STest:
                 break
         assert run_after is not None, f"No run_after can be found for the dag with {dag_id}"
         return dag_run_id, logical_date
+
+    def get_generated_admin_password(self, namespace: str) -> str:
+        api_sever_pod = (
+            check_output(["kubectl", "get", "pods", "--namespace", namespace]).decode().splitlines()
+        )
+        names = [re.compile(r"\s+").split(x)[0] for x in api_sever_pod if "airflow-api-server" in x]
+        if not names:
+            self._describe_resources(namespace)
+            raise ValueError("There should be exactly one airflow-api-server pod running.")
+        airflow_api_server_pod_name = names[0]
+        temp_generated_passwords_json_file_path = (
+            self.temp_dir / "simple_auth_manager_passwords.json.generated"
+        )
+        check_call(
+            [
+                "kubectl",
+                "cp",
+                "--container",
+                "api-server",
+                f"{namespace}/{airflow_api_server_pod_name}:simple_auth_manager_passwords.json.generated",
+                temp_generated_passwords_json_file_path.as_posix(),
+            ]
+        )
+        users = json.loads(temp_generated_passwords_json_file_path.read_text())
+        if "admin" not in users:
+            raise ValueError(f"There should be an admin user in the generated passwords file: {users}")
+        return users["admin"]

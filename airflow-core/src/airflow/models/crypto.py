@@ -17,76 +17,67 @@
 # under the License.
 from __future__ import annotations
 
-import logging
-from typing import Protocol
+from sqlalchemy import Boolean, Text
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column, synonym
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
-
-log = logging.getLogger(__name__)
-
-
-class FernetProtocol(Protocol):
-    """This class is only used for TypeChecking (for IDEs, mypy, etc)."""
-
-    def decrypt(self, b):
-        """Decrypt with Fernet."""
-
-    def encrypt(self, b):
-        """Encrypt with Fernet."""
+# Preserve imports from the original module, including the shared Fernet cache.
+from airflow.crypto import (
+    FernetProtocol as FernetProtocol,
+    _NullFernet as _NullFernet,
+    _RealFernet as _RealFernet,
+    get_fernet as get_fernet,
+)
 
 
-class NullFernet:
-    """
-    A "Null" encryptor class that doesn't encrypt or decrypt but that presents a similar interface to Fernet.
+class FernetFieldsMixin:
+    """Mixin providing Fernet-encrypted ``password`` and ``extra`` fields."""
 
-    The purpose of this is to make the rest of the code not have to know the
-    difference, and to only display the message once, not 20 times when
-    `airflow db migrate` is run.
-    """
+    _password: Mapped[str | None] = mapped_column("password", Text(), nullable=True)
+    _extra: Mapped[str | None] = mapped_column("extra", Text(), nullable=True)
+    is_encrypted: Mapped[bool] = mapped_column(Boolean, unique=False, default=False, nullable=False)
+    is_extra_encrypted: Mapped[bool] = mapped_column(Boolean, unique=False, default=False, nullable=False)
 
-    is_encrypted = False
+    def get_password(self) -> str | None:
+        """Decrypt and return password."""
+        if self._password and self.is_encrypted:
+            fernet = get_fernet()
+            if not fernet.is_encrypted:
+                raise ValueError("Can't decrypt encrypted password, FERNET_KEY configuration is missing")
+            return fernet.decrypt(bytes(self._password, "utf-8")).decode()
+        return self._password
 
-    def decrypt(self, b):
-        """Decrypt with Fernet."""
-        return b
+    def set_password(self, value: str | None):
+        """Encrypt and store password."""
+        if value:
+            fernet = get_fernet()
+            self._password = fernet.encrypt(bytes(value, "utf-8")).decode()
+            self.is_encrypted = fernet.is_encrypted
 
-    def encrypt(self, b):
-        """Encrypt with Fernet."""
-        return b
+    @declared_attr
+    def password(cls):
+        """Password. The value is decrypted/encrypted when reading/setting the value."""
+        return synonym("_password", descriptor=property(cls.get_password, cls.set_password))
 
+    def get_extra(self) -> str | None:
+        """Decrypt and return extra data."""
+        if self._extra and self.is_extra_encrypted:
+            fernet = get_fernet()
+            if not fernet.is_encrypted:
+                raise ValueError("Can't decrypt `extra` params, FERNET_KEY configuration is missing")
+            return fernet.decrypt(bytes(self._extra, "utf-8")).decode()
+        return self._extra
 
-_fernet: FernetProtocol | None = None
-
-
-def get_fernet():
-    """
-    Deferred load of Fernet key.
-
-    This function could fail either because Cryptography is not installed
-    or because the Fernet key is invalid.
-
-    :return: Fernet object
-    :raises: airflow.exceptions.AirflowException if there's a problem trying to load Fernet
-    """
-    from cryptography.fernet import Fernet, MultiFernet
-
-    global _fernet
-
-    if _fernet:
-        return _fernet
-
-    try:
-        fernet_key = conf.get("core", "FERNET_KEY")
-        if not fernet_key:
-            log.warning("empty cryptography key - values will not be stored encrypted.")
-            _fernet = NullFernet()
+    def set_extra(self, value: str | None):
+        """Encrypt and store extra data."""
+        if value:
+            fernet = get_fernet()
+            self._extra = fernet.encrypt(bytes(value, "utf-8")).decode()
+            self.is_extra_encrypted = fernet.is_encrypted
         else:
-            _fernet = MultiFernet(
-                [Fernet(fernet_part.encode("utf-8")) for fernet_part in fernet_key.split(",")]
-            )
-            _fernet.is_encrypted = True
-    except (ValueError, TypeError) as value_error:
-        raise AirflowException(f"Could not create Fernet object: {value_error}")
+            self._extra = value
+            self.is_extra_encrypted = False
 
-    return _fernet
+    @declared_attr
+    def extra(cls):
+        """Extra data. The value is decrypted/encrypted when reading/setting the value."""
+        return synonym("_extra", descriptor=property(cls.get_extra, cls.set_extra))

@@ -21,23 +21,30 @@ from datetime import timedelta
 
 import pytest
 
-from airflow.exceptions import AirflowSensorTimeout
-from airflow.models import DagBag
 from airflow.models.dag import DAG
+from airflow.providers.common.compat.sdk import AirflowSensorTimeout
 from airflow.providers.standard.sensors.weekday import DayOfWeekSensor
 from airflow.providers.standard.utils.weekday import WeekDay
-from airflow.providers.standard.version_compat import AIRFLOW_V_3_0_PLUS
-from airflow.utils import timezone
-from airflow.utils.timezone import datetime
 
 from tests_common.test_utils import db
+from tests_common.test_utils.version_compat import (
+    AIRFLOW_V_3_0_PLUS,
+    AIRFLOW_V_3_2_PLUS,
+    AIRFLOW_V_3_3_PLUS,
+    timezone,
+)
+
+if AIRFLOW_V_3_2_PLUS:
+    from airflow.dag_processing.dagbag import DagBag
+else:
+    from airflow.models import DagBag
 
 pytestmark = pytest.mark.db_test
 
 
-DEFAULT_DATE = datetime(2018, 12, 10)
-WEEKDAY_DATE = datetime(2018, 12, 20)
-WEEKEND_DATE = datetime(2018, 12, 22)
+DEFAULT_DATE = timezone.datetime(2018, 12, 10)
+WEEKDAY_DATE = timezone.datetime(2018, 12, 20)
+WEEKEND_DATE = timezone.datetime(2018, 12, 22)
 TEST_DAG_ID = "weekday_sensor_dag"
 DEV_NULL = "/dev/null"
 TEST_CASE_WEEKDAY_SENSOR_TRUE = {
@@ -64,7 +71,10 @@ class TestDayOfWeekSensor:
 
     def setup_method(self):
         self.clean_db()
-        self.dagbag = DagBag(dag_folder=DEV_NULL, include_examples=True)
+        if AIRFLOW_V_3_3_PLUS:
+            self.dagbag = DagBag(dag_folder=DEV_NULL)
+        else:
+            self.dagbag = DagBag(dag_folder=DEV_NULL, include_examples=True)
         self.args = {"owner": "airflow", "start_date": DEFAULT_DATE}
         dag = DAG(TEST_DAG_ID, schedule=timedelta(days=1), default_args=self.args)
         self.dag = dag
@@ -143,10 +153,10 @@ class TestDayOfWeekSensor:
                 use_task_logical_date=True,
                 dag=dag,
             )
-            dr = dag_maker.create_dagrun(
-                run_id="manual_run",
-                start_date=DEFAULT_DATE,
-                logical_date=None,
-                **{"run_after": timezone.utcnow()},
-            )
-            assert op.poke(context={"logical_date": None, "dag_run": dr}) is True
+        dr = dag_maker.create_dagrun(
+            run_id="manual_run",
+            start_date=DEFAULT_DATE,
+            logical_date=None,
+            **{"run_after": timezone.utcnow()},
+        )
+        assert op.poke(context={"logical_date": None, "dag_run": dr}) is True

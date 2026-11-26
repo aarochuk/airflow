@@ -26,9 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-apache-iceberg",
         "name": "Apache Iceberg",
         "description": "`Iceberg <https://iceberg.apache.org/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477775,
-        "versions": ["1.2.1", "1.2.0", "1.1.0", "1.0.0"],
         "integrations": [
             {
                 "integration-name": "Iceberg",
@@ -43,12 +40,27 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.apache.iceberg.hooks.iceberg"],
             }
         ],
+        "triggers": [
+            {
+                "integration-name": "Iceberg",
+                "python-modules": ["airflow.providers.apache.iceberg.triggers.iceberg"],
+            }
+        ],
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.apache.iceberg.hooks.iceberg.IcebergHook",
+                "hook-name": "Iceberg",
                 "connection-type": "iceberg",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema", "port"],
+                    "relabeling": {"host": "Catalog URI", "login": "Client ID", "password": "Client Secret"},
+                    "placeholders": {
+                        "host": "https://your-catalog.example.com/ws/v1",
+                        "login": "client_id (OAuth2 credentials)",
+                        "password": "client_secret (OAuth2 credentials)",
+                        "extra": '{"warehouse": "s3://my-warehouse/", "s3.region": "us-east-1"}',
+                    },
+                },
             }
         ],
-        "dependencies": ["apache-airflow>=2.9.0"],
-        "devel-dependencies": ["pyiceberg>=0.5.0"],
     }

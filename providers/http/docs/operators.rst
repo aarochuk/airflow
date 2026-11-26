@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -52,6 +51,11 @@ HttpOperator
 Use the :class:`~airflow.providers.http.operators.http.HttpOperator` to call HTTP requests and get
 the response text back.
 
+Deferrable mode runs the request in the Triggerer. A Triggerer restart can replay
+it, so non-idempotent methods (including the default ``POST``) log a warning.
+See :ref:`howto/deferrable:HttpOperator` for the idempotent method set and how
+to silence the warning with ``warn_on_non_idempotent=False``.
+
 .. warning:: Configuring ``https`` via HttpOperator is counter-intuitive
 
    For historical reasons, configuring ``HTTPS`` connectivity via HTTP operator is, well, difficult and
@@ -89,14 +93,15 @@ Here we are calling a ``GET`` request and pass params to it. The task will succe
     :end-before: [END howto_operator_http_task_get_op]
 
 HttpOperator returns the response body as text by default. If you want to modify the response before passing
-it on the next task downstream use ``response_filter``. This is useful if:
+it on to the next downstream task, use ``response_filter``. The value returned by ``response_filter`` becomes
+the task result, which can be pulled by downstream tasks with XCom. This is useful if:
 
 - the API you are consuming returns a large JSON payload and you're interested in a subset of the data
 - the API returns data in xml or csv and you want to convert it to JSON
 - you're interested in the headers of the response instead of the body
 
-Below is an example of retrieving data from a REST API and only returning a nested property instead of the full
-response body.
+Below is an example of retrieving data from a REST API and only returning the ``status`` query parameter from
+the response body.
 
 .. exampleinclude:: /../../http/tests/system/http/example_http.py
     :language: python
@@ -125,8 +130,6 @@ Here we pass form data to a ``POST`` operation which is equal to a usual form su
     :language: python
     :start-after: [START howto_operator_http_task_post_op_formenc]
     :end-before: [END howto_operator_http_task_post_op_formenc]
-
-
 
 The :class:`~airflow.providers.http.operators.paginated.HttpOperator` also allows to repeatedly call an API
 endpoint, typically to loop over its pages. All API responses are stored in memory by the Operator and returned

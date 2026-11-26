@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import datetime
 
-from airflow.decorators import task
+from airflow._shared.timezones import timezone
 from airflow.models.dag import DAG
-from airflow.utils import timezone
+from airflow.sdk import task
 
 from tests_common.test_utils.compat import DateTimeSensor
 

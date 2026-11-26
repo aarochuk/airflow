@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -24,7 +25,7 @@ from airflow.providers.amazon.aws.hooks.chime import ChimeWebhookHook
 from airflow.providers.common.compat.notifier import BaseNotifier
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class ChimeNotifier(BaseNotifier):
@@ -37,7 +38,10 @@ class ChimeNotifier(BaseNotifier):
 
     """
 
-    template_fields = ("message",)
+    template_fields: Sequence[str] = (
+        "message",
+        "chime_conn_id",
+    )
 
     def __init__(self, *, chime_conn_id: str, message: str = "This is the default chime notifier message"):
         super().__init__()
@@ -49,7 +53,7 @@ class ChimeNotifier(BaseNotifier):
         """To reduce overhead cache the hook for the notifier."""
         return ChimeWebhookHook(chime_conn_id=self.chime_conn_id)
 
-    def notify(self, context: Context) -> None:  # type: ignore[override]
+    def notify(self, context: Context) -> None:
         """Send a message to a Chime Chat Room."""
         self.hook.send_message(message=self.message)
 

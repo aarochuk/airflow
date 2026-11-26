@@ -17,20 +17,20 @@
 
 from __future__ import annotations
 
+from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from airflow.api_fastapi.common.router import AirflowRouter
 from airflow.api_fastapi.execution_api.deps import DepContainer
 
-router = AirflowRouter()
+router = APIRouter()
 
 
-@router.get("")
+@router.get("/health")
 def health() -> dict:
     return {"status": "healthy"}
 
 
-@router.get("/ping")
+@router.get("/health/ping")
 async def ping(services=DepContainer):
     ok: list[str] = []
     failing: dict[str, str] = {}

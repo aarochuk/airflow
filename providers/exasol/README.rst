@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-exasol``
 
-Release: ``4.7.3``
+Release: ``5.0.0``
 
 
 `Exasol <https://www.exasol.com/>`__
@@ -36,47 +36,40 @@ This is a provider package for ``exasol`` provider. All classes for this provide
 are in ``airflow.providers.exasol`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-exasol/4.7.3/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-exasol/5.0.0/>`_.
 
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation (see ``Requirements`` below
+You can install this package on top of an existing Airflow installation (see ``Requirements`` below
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-exasol``
 
-The package supports the following python versions: 3.9,3.10,3.11,3.12
+The package supports the following python versions: 3.11,3.12,3.13,3.14
 
 Requirements
 ------------
 
-=======================================  ==================
-PIP package                              Version required
-=======================================  ==================
-``apache-airflow``                       ``>=2.9.0``
-``apache-airflow-providers-common-sql``  ``>=1.20.0``
-``pyexasol``                             ``>=0.5.1``
-``pandas``                               ``>=2.1.2,<2.2``
-=======================================  ==================
+==========================================  =================================================================
+PIP package                                 Version required
+==========================================  =================================================================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.12.0``
+``apache-airflow-providers-common-sql``     ``>=1.32.0``
+``pyexasol``                                ``>=0.26.0``
+``pandas``                                  ``>=2.1.2; python_version < "3.13"``
+``pandas``                                  ``>=2.2.3; python_version >= "3.13" and python_version < "3.14"``
+``pandas``                                  ``>=2.3.3; python_version >= "3.14"``
+==========================================  =================================================================
 
-Cross provider package dependencies
------------------------------------
+Optional dependencies
+----------------------
 
-Those are dependencies that might be needed in order to use all the features of the package.
-You need to install the specified providers in order to use them.
-
-You can install such cross-provider dependencies when installing from PyPI. For example:
-
-.. code-block:: bash
-
-    pip install apache-airflow-providers-exasol[common.sql]
-
-
-============================================================================================================  ==============
-Dependent package                                                                                             Extra
-============================================================================================================  ==============
-`apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_  ``common.sql``
-============================================================================================================  ==============
+==============  ==============================
+Extra           Dependencies
+==============  ==============================
+``sqlalchemy``  ``sqlalchemy>=1.4.54,!=2.1.0``
+==============  ==============================
 
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-exasol/4.7.3/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-exasol/5.0.0/changelog.html>`_.

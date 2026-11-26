@@ -15,18 +15,19 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""This module contains Google Cloud Looker operators."""
+"""This module contains Google Cloud Looker operators and Data Studio aliases."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, TypeAlias
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks.looker import LookerHook
 from airflow.providers.google.cloud.operators.cloud_base import GoogleCloudBaseOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class LookerStartPdtBuildOperator(GoogleCloudBaseOperator):
@@ -48,6 +49,8 @@ class LookerStartPdtBuildOperator(GoogleCloudBaseOperator):
     :param wait_timeout: Optional. How many seconds wait for job to be ready.
         Used only if ``asynchronous`` is False.
     """
+
+    template_fields: Sequence[str] = ("looker_conn_id",)
 
     def __init__(
         self,
@@ -103,3 +106,6 @@ class LookerStartPdtBuildOperator(GoogleCloudBaseOperator):
     def on_kill(self):
         if self.materialization_id and self.cancel_on_kill:
             self.hook.stop_pdt_build(materialization_id=self.materialization_id)
+
+
+DataStudioStartPdtBuildOperator: TypeAlias = LookerStartPdtBuildOperator

@@ -43,6 +43,26 @@ To enable this feature, ``airflow.cfg`` must be configured as follows:
 
 In the above example, Airflow will try to use ``S3Hook(aws_conn_id='my_s3_conn')``.
 
+Setting an object ACL for cross-account logging
+'''''''''''''''''''''''''''''''''''''''''''''''
+
+When Airflow runs under one AWS account but writes logs to a bucket owned by a different
+account, S3 makes the writing account the owner of each uploaded log object. As a result the
+bucket owner cannot read or manage the logs. Applying the ``bucket-owner-full-control`` ACL
+on upload grants the bucket owner full control over the log objects.
+
+Set the ACL with the ``[aws] s3_task_handler_acl_policy`` option:
+
+.. code-block:: ini
+
+    [aws]
+    # ACL applied to every task log object uploaded to S3, e.g. for cross-account buckets.
+    s3_task_handler_acl_policy = bucket-owner-full-control
+
+When unset, no ACL is sent and the bucket's default object ownership applies. The same value can
+also be supplied through ``[logging] remote_task_handler_kwargs``, for example
+``{"acl_policy": "bucket-owner-full-control"}``.
+
 You can also use `LocalStack <https://localstack.cloud/>`_ to emulate Amazon S3 locally.
 To configure it, you must additionally set the endpoint url to point to your local stack.
 You can do this via the Connection Extra ``endpoint_url`` field.
@@ -98,7 +118,7 @@ We are  using the existing ``serviceAccount`` hence ``create: false`` with exist
       serviceAccount:
         create: false
         name: airflow-sa
-        # Annotations are automatically added by **Step1** to serviceAccount. So, you dont need to mention the annotations. We have added this for information purpose
+        # Annotations are automatically added by **Step1** to serviceAccount. So, you don't need to mention the annotations. We have added this for information purpose
         annotations:
           eks.amazonaws.com/role-arn: <ENTER_IAM_ROLE_ARN_CREATED_BY_EKSCTL_COMMAND>
 
@@ -106,7 +126,7 @@ We are  using the existing ``serviceAccount`` hence ``create: false`` with exist
       serviceAccount:
         create: false
         name: airflow-sa
-        # Annotations are automatically added by **Step1** to serviceAccount. So, you dont need to mention the annotations. We have added this for information purpose
+        # Annotations are automatically added by **Step1** to serviceAccount. So, you don't need to mention the annotations. We have added this for information purpose
         annotations:
           eks.amazonaws.com/role-arn: <ENTER_IAM_ROLE_ARN_CREATED_BY_EKSCTL_COMMAND
 
@@ -125,7 +145,7 @@ With the above configurations, Webserver and Worker Pods can access Amazon S3 bu
 
 - Using Airflow Web UI
 
-  The final step to create connections under Airflow UI before executing the DAGs.
+  The final step to create connections under Airflow UI before executing the Dags.
 
   * Login to Airflow Web UI with ``admin`` credentials and Navigate to ``Admin -> Connections``
   * Create connection for ``Amazon Web Services`` and select the options (Connection ID and Connection Type) as shown in the image.
@@ -141,6 +161,6 @@ With the above configurations, Webserver and Worker Pods can access Amazon S3 bu
 
 Step4: Verify the logs
 ~~~~~~~~~~~~~~~~~~~~~~
-* Execute example DAGs
+* Execute example Dags
 * Verify the logs in S3 bucket
-* Verify the logs from Airflow UI from DAGs log
+* Verify the logs from Airflow UI from Dags log

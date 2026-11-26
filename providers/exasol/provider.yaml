@@ -22,9 +22,33 @@ description: |
     `Exasol <https://www.exasol.com/>`__
 
 state: ready
-source-date-epoch: 1743477819
-# note that those versions are maintained by release manager - do not update them manually
+lifecycle: production
+source-date-epoch: 1793816745
+# Note that those versions are maintained by release manager - do not update them manually
+# with the exception of case where other provider in sources has >= new provider version.
+# In such case adding >= NEW_VERSION and bumping to NEW_VERSION in a provider have
+# to be done in the same PR
 versions:
+  - 5.0.0
+  - 4.11.1
+  - 4.11.0
+  - 4.10.5
+  - 4.10.4
+  - 4.10.3
+  - 4.10.2
+  - 4.10.1
+  - 4.10.0
+  - 4.9.3
+  - 4.9.2
+  - 4.9.1
+  - 4.9.0
+  - 4.8.4
+  - 4.8.3
+  - 4.8.2
+  - 4.8.1
+  - 4.8.0
+  - 4.7.5
+  - 4.7.4
   - 4.7.3
   - 4.7.2
   - 4.7.0
@@ -66,6 +90,8 @@ versions:
 integrations:
   - integration-name: Exasol
     external-doc-url: https://docs.exasol.com/home.htm
+    how-to-guide:
+      - /docs/apache-airflow-providers-exasol/operators.rst
     logo: /docs/integration-logos/Exasol.png
     tags: [software]
 
@@ -81,4 +107,5 @@ hooks:
 
 connection-types:
   - hook-class-name: airflow.providers.exasol.hooks.exasol.ExasolHook
+    hook-name: "Exasol"
     connection-type: exasol

@@ -20,14 +20,14 @@
 Modules Management
 ==================
 
-Airflow allows you to use your own Python modules in the DAG and in the
+Airflow allows you to use your own Python modules in the Dag and in the
 Airflow configuration. The following article will describe how you can
 create your own module so that Airflow can load it correctly, as well as
 diagnose problems when modules are not loaded properly.
 
 Often you want to use your own python code in your Airflow deployment,
-for example common code, libraries, you might want to generate dags using
-shared python code and have several DAG python files.
+for example common code, libraries, you might want to generate Dags using
+shared python code and have several Dag python files.
 
 You can do it in one of those ways:
 
@@ -118,13 +118,13 @@ In the case above, these are the ways you could import the python files:
 
 You can see the ``.airflowignore`` file at the root of your folder. This is a file that you can put in your
 ``dags`` folder to tell Airflow which files from the folder should be ignored when the Airflow
-scheduler looks for dags. It should contain either regular expressions (the default) or glob expressions
+scheduler looks for Dags. It should contain either glob expressions (the default) or regular expressions
 for the paths that should be ignored. You do not need to have that file in any other folder in
-``PYTHONPATH`` (and also you can only keep shared code in the other folders, not the actual dags).
+``PYTHONPATH`` (and also you can only keep shared code in the other folders, not the actual Dags).
 
-In the example above the dags are only in ``my_custom_dags`` folder, the ``common_package`` should not be
-scanned by scheduler when searching for DAGS, so we should ignore ``common_package`` folder. You also
-want to ignore the ``base_dag.py`` if you keep a base DAG there that ``my_dag1.py`` and ``my_dag2.py`` derives
+In the example above the Dags are only in ``my_custom_dags`` folder, the ``common_package`` should not be
+scanned by scheduler when searching for Dags, so we should ignore ``common_package`` folder. You also
+want to ignore the ``base_dag.py`` if you keep a base Dag there that ``my_dag1.py`` and ``my_dag2.py`` derives
 from. Your ``.airflowignore`` should look then like this (using the default ``glob`` syntax):
 
 .. code-block:: none
@@ -141,15 +141,29 @@ Airflow, when running dynamically adds three directories to the ``sys.path``:
 - The ``config`` folder: It is configured by setting ``AIRFLOW_HOME`` variable (``{AIRFLOW_HOME}/config``) by default.
 - The ``plugins`` Folder: It is configured with option ``plugins_folder`` in section ``[core]``.
 
+.. _plugins-auto-import:
+
+.. warning::
+   Unlike ``dags`` and ``config`` — which are only added to ``sys.path`` — the ``plugins``
+   folder's ``.py`` files are **actively imported at startup** and registered as top-level
+   modules using just the bare filename, regardless of subdirectory structure. This applies
+   to **all** ``.py`` files in the plugins tree, not only those defining an
+   ``AirflowPlugin`` subclass.
+
+   For example, a file at ``plugins/my_company/utils/logging.py`` is registered as the
+   module ``logging``, shadowing the standard library module globally and preventing Airflow
+   from starting. Collisions with third-party package names produce subtler failures that
+   are harder to trace. See :doc:`Plugins <plugins>` for an overview of the plugin system.
+
 .. note::
-   The DAGS folder in Airflow 2 should not be shared with the webserver. While you can do it, unlike in Airflow 1.10,
-   Airflow has no expectations that the DAGS folder is present in the webserver. In fact it's a bit of
-   security risk to share the ``dags`` folder with the webserver, because it means that people who write DAGS
+   The Dags folder in Airflow 2 and 3 should not be shared with the webserver. While you can do it, unlike in Airflow 1.10,
+   Airflow has no expectations that the Dags folder is present in the webserver. In fact it's a bit of
+   security risk to share the ``dags`` folder with the webserver, because it means that people who write Dags
    can write code that the webserver will be able to execute (ideally the webserver should
-   never run code which can be modified by users who write dags). Therefore if you need to share some code
+   never run code which can be modified by users who write Dags). Therefore if you need to share some code
    with the webserver, it is highly recommended that you share it via ``config`` or ``plugins`` folder or
    via installed Airflow packages (see below). Those folders are usually managed and accessible by different
-   users (Admins/DevOps) than DAG folders (those are usually data-scientists), so they are considered
+   users (Admins/DevOps) than Dag folders (those are usually data-scientists), so they are considered
    as safe because they are part of configuration of the Airflow installation and controlled by the
    people managing the installation.
 
@@ -180,11 +194,21 @@ as packages (i.e. folders with ``__init__.py``) or as modules (i.e. ``.py`` file
 The same applies to ``config`` and ``plugins`` folders which are also at the ``PYTHONPATH`` and anything
 you add to your ``PYTHONPATH`` manually (see details in the following chapters).
 
-It is recommended that you always put your dags / common files in a subpackage which is unique to your
+It is recommended that you always put your Dags / common files in a subpackage which is unique to your
 deployment (``my_company`` in the example below). It is far too easy to use generic names for the
 folders that will clash with other packages already present in the system. For example if you
 create ``airflow/operators`` subfolder it will not be accessible because Airflow already has a package
 named ``airflow.operators`` and it will look there when importing ``from airflow.operators``.
+
+.. warning::
+   For the ``plugins`` folder, this advice extends beyond top-level names to ``.py`` files
+   at **any depth** — see the :ref:`warning above <plugins-auto-import>`. Placing files in
+   subdirectories does **not** prevent collisions. Every ``.py`` filename in the
+   ``plugins`` tree must be unique and must not match any standard library or installed
+   third-party module name.
+
+   If a conflicting file is added while Airflow is already running, the collision will not
+   occur until the next restart, making the root cause difficult to diagnose.
 
 Don't use relative imports
 ..........................
@@ -197,7 +221,7 @@ This is tempting to do something like that it in ``my_dag1.py``:
 
    from .base_dag import BaseDag  # NEVER DO THAT!!!!
 
-You should import such shared DAG using full path (starting from the directory which is added to
+You should import such shared Dags using full path (starting from the directory which is added to
 ``PYTHONPATH``):
 
 .. code-block:: python
@@ -205,9 +229,9 @@ You should import such shared DAG using full path (starting from the directory w
    from my_company.my_custom_dags.base_dag import BaseDag  # This is cool
 
 The relative imports are counter-intuitive, and depending on how you start your python code, they can behave
-differently. In Airflow the same DAG file might be parsed in different contexts (by schedulers, by workers
+differently. In Airflow the same Dag file might be parsed in different contexts (by the Dag processor, by workers
 or during tests) and in those cases, relative imports might behave differently. Always use full
-python package paths when you import anything in Airflow dags, this will save you a lot of troubles.
+python package paths when you import anything in Airflow Dags, this will save you a lot of troubles.
 You can read more about relative import caveats in
 `this Stack Overflow thread <https://stackoverflow.com/q/16981921/516701>`_.
 
@@ -246,7 +270,7 @@ Below is the sample output of the ``airflow info`` command:
     uname           | uname_result(system='Linux', node='85cd7ab7018e', release='4.19.76-linuxkit', version='#1 SMP Tue May 26 11:42:35 UTC 2020', machine='x86_64', processor='')
     locale          | ('en_US', 'UTF-8')
     python_version  | 3.9.6 (default, Nov 25 2020, 02:47:44)  [GCC 8.3.0]
-    python_location | /usr/local/bin/python
+    python_location | /usr/python/bin/python
 
     Tools info
     git             | git version 2.20.1
@@ -269,7 +293,7 @@ Below is the sample output of the ``airflow info`` command:
     Config info
     executor             | LocalExecutor
     task_logging_handler | airflow.utils.log.file_task_handler.FileTaskHandler
-    sql_alchemy_conn     | postgresql+psycopg2://postgres:airflow@postgres/airflow
+    sql_alchemy_conn     | postgresql+psycopg://postgres:airflow@postgres/airflow
     dags_folder          | /files/dags
     plugins_folder       | /root/airflow/plugins
     base_log_folder      | /root/airflow/logs
@@ -318,7 +342,7 @@ try to import the package now:
     >>>
 
 We can also use :envvar:`PYTHONPATH` variable with the airflow commands.
-For example, if we run the following airflow command:
+For example, if we run the following Airflow command:
 
 .. code-block:: bash
 
@@ -337,7 +361,7 @@ Creating a package in Python
 This is most organized way of adding your custom code. Thanks to using packages,
 you might organize your versioning approach, control which versions of the shared code are installed
 and deploy the code to all your instances and containers in controlled way - all by system admins/DevOps
-rather than by the DAG writers. It is usually suitable when you have a separate team that manages this
+rather than by the Dag authors. It is usually suitable when you have a separate team that manages this
 shared code, but if you know your python ways you can also distribute your code this way in smaller
 deployments. You can also install your :doc:`../administration-and-deployment/plugins` and :doc:`apache-airflow-providers:index` as python
 packages, so learning how to build your package is handy.
@@ -355,7 +379,7 @@ The popular choices are setuptools, poetry, hatch, flit.
 
     mkdir airflow_operators
 
-3. Create the file ``__init__.py`` inside the package and add following code:
+3. Create a file called ``__init__.py`` inside the package and add the following code:
 
 .. code-block:: python
 

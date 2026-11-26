@@ -21,13 +21,37 @@ package-name: apache-airflow-providers-openai
 name: OpenAI
 
 description: |
-    `OpenAI <https://platform.openai.com/docs/introduction>`__
+    `OpenAI <https://platform.openai.com/docs/introduction>`__ provider for Apache Airflow.
+    Enables interaction with OpenAI APIs for text generation, embeddings,
+    and other AI-powered workflows directly from Airflow Dags.
 
 state: ready
-source-date-epoch: 1743477857
+lifecycle: production
+source-date-epoch: 1792489528
 
-# note that those versions are maintained by release manager - do not update them manually
+# Note that those versions are maintained by release manager - do not update them manually
+# with the exception of case where other provider in sources has >= new provider version.
+# In such case adding >= NEW_VERSION and bumping to NEW_VERSION in a provider have
+# to be done in the same PR
 versions:
+  - 2.2.0
+  - 2.1.0
+  - 2.0.0
+  - 1.8.2
+  - 1.8.1
+  - 1.8.0
+  - 1.7.5
+  - 1.7.4
+  - 1.7.3
+  - 1.7.2
+  - 1.7.1
+  - 1.7.0
+  - 1.6.4
+  - 1.6.3
+  - 1.6.2
+  - 1.6.1
+  - 1.6.0
+  - 1.5.4
   - 1.5.3
   - 1.5.2
   - 1.5.1
@@ -44,9 +68,18 @@ versions:
 integrations:
   - integration-name: OpenAI
     external-doc-url: https://platform.openai.com/docs/introduction
+    logo: /docs/integration-logos/OpenAI.png
     how-to-guide:
       - /docs/apache-airflow-providers-openai/operators/openai.rst
-    tags: [software]
+    tags:
+      - ai
+      - openai
+      - machine-learning
+      - generative-ai
+      - llm
+      - text-generation
+      - embeddings
+      - ai-inference
 
 hooks:
   - integration-name: OpenAI
@@ -57,12 +90,23 @@ operators:
   - integration-name: OpenAI
     python-modules:
       - airflow.providers.openai.operators.openai
+      - airflow.providers.openai.operators.agent
 
 triggers:
   - integration-name: OpenAI
     python-modules:
       - airflow.providers.openai.triggers.openai
+      - airflow.providers.openai.triggers.agent
 
 connection-types:
   - hook-class-name: airflow.providers.openai.hooks.openai.OpenAIHook
+    hook-name: "OpenAI"
     connection-type: openai
+    ui-field-behaviour:
+      hidden-fields:
+        - schema
+        - port
+        - login
+      relabeling:
+        password: API Key
+      placeholders: {}

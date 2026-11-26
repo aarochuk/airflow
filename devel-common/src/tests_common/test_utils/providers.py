@@ -18,11 +18,14 @@
 from __future__ import annotations
 
 import semver
+import yaml
+
+from tests_common.test_utils.paths import AIRFLOW_PROVIDERS_ROOT_PATH
 
 
 def object_exists(path: str):
     """Return true if importable python object is there."""
-    from airflow.utils.module_loading import import_string
+    from airflow_shared.module_loading import import_string
 
     try:
         import_string(path)
@@ -48,11 +51,34 @@ def get_provider_version(provider_name):
     return semver.VersionInfo.parse(info.version)
 
 
-def get_provider_min_airflow_version(provider_name):
-    from airflow.providers_manager import ProvidersManager
+def get_provider_min_airflow_version(provider_name: str) -> tuple[int, ...]:
+    from importlib import metadata
 
-    p = ProvidersManager()
-    deps = p.providers[provider_name].data["dependencies"]
+    from packaging.version import Version
+
+    deps = metadata.requires(provider_name)
+    if not deps:
+        raise RuntimeError(f"The provider should have dependencies: {provider_name}")
     airflow_dep = next(x for x in deps if x.startswith("apache-airflow"))
-    min_airflow_version = tuple(map(int, airflow_dep.split(">=")[1].split(".")))
-    return min_airflow_version
+    if not airflow_dep:
+        raise RuntimeError(
+            f"The provider should have `apache-airflow>=` in their dependencies: {provider_name}"
+        )
+    return Version(airflow_dep.split(">=")[1]).release
+
+
+# Ignore module import errors for any suspended provider paths used in example dags
+IGNORE_MODULE_IMPORT_ERRORS: list[str] = []
+
+
+def get_suspended_providers_folders() -> list[str]:
+    """
+    Returns a list of suspended providers folders that should be
+    skipped when running tests (without any prefix - for example apache/beam, yandex, google etc.).
+    """
+    suspended_providers = []
+    for provider_path in AIRFLOW_PROVIDERS_ROOT_PATH.rglob("provider.yaml"):
+        provider_yaml = yaml.safe_load(provider_path.read_text(encoding="utf-8"))
+        if provider_yaml["state"] == "suspended":
+            suspended_providers.append(provider_path.parent.resolve().as_posix())
+    return suspended_providers

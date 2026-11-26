@@ -21,9 +21,9 @@ from unittest import mock
 
 import pytest
 
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.hooks.sagemaker import SageMakerHook
 from airflow.providers.amazon.aws.sensors.sagemaker import SageMakerEndpointSensor
+from airflow.providers.common.compat.sdk import AirflowException
 
 DESCRIBE_ENDPOINT_CREATING_RESPONSE = {
     "EndpointStatus": "Creating",
@@ -87,5 +87,5 @@ class TestSageMakerEndpointSensor:
         assert mock_describe.call_count == 3
 
         # make sure the hook was initialized with the specific params
-        calls = [mock.call(aws_conn_id="aws_test")]
+        calls = [mock.call(aws_conn_id="aws_test", config=None, verify=None, region_name=None)]
         hook_init.assert_has_calls(calls)

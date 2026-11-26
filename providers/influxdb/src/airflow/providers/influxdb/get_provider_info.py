@@ -26,54 +26,89 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-influxdb",
         "name": "Influxdb",
         "description": "`InfluxDB <https://www.influxdata.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477836,
-        "versions": [
-            "2.8.3",
-            "2.8.2",
-            "2.8.0",
-            "2.7.1",
-            "2.7.0",
-            "2.6.0",
-            "2.5.1",
-            "2.5.0",
-            "2.4.1",
-            "2.4.0",
-            "2.3.0",
-            "2.2.3",
-            "2.2.2",
-            "2.2.1",
-            "2.2.0",
-            "2.1.0",
-            "2.0.0",
-            "1.1.3",
-            "1.1.2",
-            "1.1.1",
-            "1.1.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Influxdb",
                 "external-doc-url": "https://www.influxdata.com/",
+                "logo": "/docs/integration-logos/Influxdb.svg",
                 "tags": ["software"],
-            }
+            },
+            {
+                "integration-name": "InfluxDB 3",
+                "external-doc-url": "https://www.influxdata.com/",
+                "tags": ["software"],
+            },
         ],
         "hooks": [
-            {"integration-name": "Influxdb", "python-modules": ["airflow.providers.influxdb.hooks.influxdb"]}
+            {"integration-name": "Influxdb", "python-modules": ["airflow.providers.influxdb.hooks.influxdb"]},
+            {
+                "integration-name": "InfluxDB 3",
+                "python-modules": ["airflow.providers.influxdb.hooks.influxdb3"],
+            },
         ],
         "operators": [
             {
                 "integration-name": "Influxdb",
                 "python-modules": ["airflow.providers.influxdb.operators.influxdb"],
+            },
+            {
+                "integration-name": "InfluxDB 3",
+                "python-modules": ["airflow.providers.influxdb.operators.influxdb3"],
+            },
+        ],
+        "sensors": [
+            {
+                "integration-name": "InfluxDB 3",
+                "python-modules": ["airflow.providers.influxdb.sensors.influxdb3"],
+            }
+        ],
+        "triggers": [
+            {
+                "integration-name": "InfluxDB 3",
+                "python-modules": ["airflow.providers.influxdb.triggers.influxdb3"],
             }
         ],
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.influxdb.hooks.influxdb.InfluxDBHook",
+                "hook-name": "Influxdb",
                 "connection-type": "influxdb",
-            }
+                "ui-field-behaviour": {
+                    "hidden-fields": ["login", "password"],
+                    "relabeling": {},
+                    "placeholders": {},
+                },
+                "conn-fields": {
+                    "token": {
+                        "label": "Token",
+                        "schema": {"type": ["string", "null"], "format": "password", "default": ""},
+                    },
+                    "org": {
+                        "label": "Organization Name",
+                        "schema": {"type": ["string", "null"], "default": ""},
+                    },
+                },
+            },
+            {
+                "hook-class-name": "airflow.providers.influxdb.hooks.influxdb3.InfluxDB3Hook",
+                "hook-name": "InfluxDB 3",
+                "connection-type": "influxdb3",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["login", "password"],
+                    "relabeling": {},
+                    "placeholders": {},
+                },
+                "conn-fields": {
+                    "token": {
+                        "label": "Token",
+                        "schema": {"type": ["string", "null"], "format": "password", "default": ""},
+                    },
+                    "database": {"label": "Database", "schema": {"type": ["string", "null"], "default": ""}},
+                    "org": {
+                        "label": "Organization Name (optional)",
+                        "schema": {"type": ["string", "null"], "default": ""},
+                    },
+                },
+            },
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "influxdb-client>=1.19.0", "requests>=2.31.0,<3"],
-        "devel-dependencies": [],
     }

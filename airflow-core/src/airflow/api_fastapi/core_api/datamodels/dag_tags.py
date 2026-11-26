@@ -17,18 +17,21 @@
 
 from __future__ import annotations
 
+from pydantic import AliasPath, Field
+
 from airflow.api_fastapi.core_api.base import BaseModel
 
 
 class DagTagResponse(BaseModel):
-    """DAG Tag serializer for responses."""
+    """Dag Tag serializer for responses."""
 
     name: str
     dag_id: str
+    dag_display_name: str = Field(validation_alias=AliasPath("dag", "dag_display_name"))
 
 
 class DAGTagCollectionResponse(BaseModel):
-    """DAG Tags Collection serializer for responses."""
+    """Dag Tags Collection serializer for responses."""
 
     tags: list[str]
     total_entries: int

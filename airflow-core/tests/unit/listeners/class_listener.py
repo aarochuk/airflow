@@ -20,111 +20,66 @@ from __future__ import annotations
 from airflow.listeners import hookimpl
 from airflow.utils.state import DagRunState, TaskInstanceState
 
-from tests_common.test_utils.version_compat import AIRFLOW_V_2_10_PLUS, AIRFLOW_V_3_0_PLUS
 
-if AIRFLOW_V_3_0_PLUS:
+class ClassBasedListener:
+    def __init__(self):
+        self.started_component = None
+        self.stopped_component = None
+        self.state = []
+        self.dag_run_msg: str | None = None
+        self.dag_run_has_dag_attr: bool | None = None
+        self.dag_run_note_at_listener: str | None = None
+        self.ti_note_at_listener: str | None = None
 
-    class ClassBasedListener:
-        def __init__(self):
-            self.started_component = None
-            self.stopped_component = None
-            self.state = []
+    @hookimpl
+    def on_starting(self, component):
+        self.started_component = component
+        self.state.append(DagRunState.RUNNING)
 
-        @hookimpl
-        def on_starting(self, component):
-            self.started_component = component
-            self.state.append(DagRunState.RUNNING)
+    @hookimpl
+    def before_stopping(self, component):
+        self.stopped_component = component
+        self.state.append(DagRunState.SUCCESS)
 
-        @hookimpl
-        def before_stopping(self, component):
-            global stopped_component
-            stopped_component = component
-            self.state.append(DagRunState.SUCCESS)
+    # ``AirflowTestPlugin`` registers this listener in every test run, including tasks run by the
+    # Task SDK, whose ``RuntimeTaskInstance`` has no ``note``.
+    @hookimpl
+    def on_task_instance_running(self, previous_state, task_instance):
+        self.state.append(TaskInstanceState.RUNNING)
+        self.ti_note_at_listener = getattr(task_instance, "note", None)
 
-        @hookimpl
-        def on_task_instance_running(self, previous_state, task_instance):
-            self.state.append(TaskInstanceState.RUNNING)
+    @hookimpl
+    def on_task_instance_success(self, previous_state, task_instance):
+        self.state.append(TaskInstanceState.SUCCESS)
+        self.ti_note_at_listener = getattr(task_instance, "note", None)
 
-        @hookimpl
-        def on_task_instance_success(self, previous_state, task_instance):
-            self.state.append(TaskInstanceState.SUCCESS)
+    @hookimpl
+    def on_task_instance_failed(self, previous_state, task_instance, error: None | str | BaseException):
+        self.state.append(TaskInstanceState.FAILED)
+        self.ti_note_at_listener = getattr(task_instance, "note", None)
 
-        @hookimpl
-        def on_task_instance_failed(self, previous_state, task_instance, error: None | str | BaseException):
-            self.state.append(TaskInstanceState.FAILED)
+    @hookimpl
+    def on_task_instance_skipped(self, previous_state, task_instance):
+        self.state.append(TaskInstanceState.SKIPPED)
+        self.ti_note_at_listener = getattr(task_instance, "note", None)
 
-        @hookimpl
-        def on_dag_run_running(self, dag_run, msg: str):
-            self.state.append(DagRunState.RUNNING)
+    @hookimpl
+    def on_dag_run_running(self, dag_run, msg: str):
+        self.state.append(DagRunState.RUNNING)
 
-        @hookimpl
-        def on_dag_run_success(self, dag_run, msg: str):
-            self.state.append(DagRunState.SUCCESS)
+    @hookimpl
+    def on_dag_run_success(self, dag_run, msg: str):
+        self.state.append(DagRunState.SUCCESS)
+        self.dag_run_msg = msg
+        self.dag_run_has_dag_attr = dag_run.dag is not None
+        self.dag_run_note_at_listener = dag_run.note
 
-        @hookimpl
-        def on_dag_run_failed(self, dag_run, msg: str):
-            self.state.append(DagRunState.FAILED)
-
-elif AIRFLOW_V_2_10_PLUS:
-
-    class ClassBasedListener:  # type: ignore[no-redef]
-        def __init__(self):
-            self.started_component = None
-            self.stopped_component = None
-            self.state = []
-
-        @hookimpl
-        def on_starting(self, component):
-            self.started_component = component
-            self.state.append(DagRunState.RUNNING)
-
-        @hookimpl
-        def before_stopping(self, component):
-            global stopped_component
-            stopped_component = component
-            self.state.append(DagRunState.SUCCESS)
-
-        @hookimpl
-        def on_task_instance_running(self, previous_state, task_instance):
-            self.state.append(TaskInstanceState.RUNNING)
-
-        @hookimpl
-        def on_task_instance_success(self, previous_state, task_instance):
-            self.state.append(TaskInstanceState.SUCCESS)
-
-        @hookimpl
-        def on_task_instance_failed(self, previous_state, task_instance, error: None | str | BaseException):
-            self.state.append(TaskInstanceState.FAILED)
-else:
-
-    class ClassBasedListener:  # type: ignore[no-redef]
-        def __init__(self):
-            self.started_component = None
-            self.stopped_component = None
-            self.state = []
-
-        @hookimpl
-        def on_starting(self, component):
-            self.started_component = component
-            self.state.append(DagRunState.RUNNING)
-
-        @hookimpl
-        def before_stopping(self, component):
-            global stopped_component
-            stopped_component = component
-            self.state.append(DagRunState.SUCCESS)
-
-        @hookimpl
-        def on_task_instance_running(self, previous_state, task_instance, session):
-            self.state.append(TaskInstanceState.RUNNING)
-
-        @hookimpl
-        def on_task_instance_success(self, previous_state, task_instance, session):
-            self.state.append(TaskInstanceState.SUCCESS)
-
-        @hookimpl
-        def on_task_instance_failed(self, previous_state, task_instance, session):
-            self.state.append(TaskInstanceState.FAILED)
+    @hookimpl
+    def on_dag_run_failed(self, dag_run, msg: str):
+        self.state.append(DagRunState.FAILED)
+        self.dag_run_msg = msg
+        self.dag_run_has_dag_attr = dag_run.dag is not None
+        self.dag_run_note_at_listener = dag_run.note
 
 
 def clear():

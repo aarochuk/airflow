@@ -21,12 +21,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator
 from airflow.providers.google.cloud.hooks.looker import JobStatus, LookerHook
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class LookerCheckPdtBuildSensor(BaseSensorOperator):
@@ -39,7 +38,7 @@ class LookerCheckPdtBuildSensor(BaseSensorOperator):
         when on_kill is called.
     """
 
-    template_fields = ["materialization_id"]
+    template_fields = ["materialization_id", "looker_conn_id"]
 
     def __init__(
         self, materialization_id: str, looker_conn_id: str, cancel_on_kill: bool = True, **kwargs
@@ -65,13 +64,13 @@ class LookerCheckPdtBuildSensor(BaseSensorOperator):
             msg = status_dict["message"]
             message = f'PDT materialization job failed. Job id: {self.materialization_id}. Message:\n"{msg}"'
             raise AirflowException(message)
-        elif status == JobStatus.CANCELLED.value:
+        if status == JobStatus.CANCELLED.value:
             message = f"PDT materialization job was cancelled. Job id: {self.materialization_id}."
             raise AirflowException(message)
-        elif status == JobStatus.UNKNOWN.value:
+        if status == JobStatus.UNKNOWN.value:
             message = f"PDT materialization job has unknown status. Job id: {self.materialization_id}."
             raise AirflowException(message)
-        elif status == JobStatus.DONE.value:
+        if status == JobStatus.DONE.value:
             self.log.debug(
                 "PDT materialization job completed successfully. Job id: %s.", self.materialization_id
             )

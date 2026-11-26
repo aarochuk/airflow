@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-hashicorp``
 
-Release: ``4.1.0``
+Release: ``4.8.5``
 
 
 Hashicorp including `Hashicorp Vault <https://www.vaultproject.io/>`__
@@ -36,29 +36,30 @@ This is a provider package for ``hashicorp`` provider. All classes for this prov
 are in ``airflow.providers.hashicorp`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-hashicorp/4.1.0/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-hashicorp/4.8.5/>`_.
 
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation (see ``Requirements`` below
+You can install this package on top of an existing Airflow installation (see ``Requirements`` below
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-hashicorp``
 
-The package supports the following python versions: 3.9,3.10,3.11,3.12
+The package supports the following python versions: 3.11,3.12,3.13,3.14
 
 Requirements
 ------------
 
-==================  ==================
-PIP package         Version required
-==================  ==================
-``apache-airflow``  ``>=2.9.0``
-``hvac``            ``>=1.1.0``
-==================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.12.0``
+``hvac``                                    ``>=1.1.0``
+==========================================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified providers in order to use them.
@@ -76,5 +77,15 @@ Dependent package                                                               
 `apache-airflow-providers-google <https://airflow.apache.org/docs/apache-airflow-providers-google>`_  ``google``
 ====================================================================================================  ==========
 
+Optional dependencies
+----------------------
+
+==========  ===================================
+Extra       Dependencies
+==========  ===================================
+``boto3``   ``boto3>=1.43.6``
+``google``  ``apache-airflow-providers-google``
+==========  ===================================
+
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-hashicorp/4.1.0/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-hashicorp/4.8.5/changelog.html>`_.

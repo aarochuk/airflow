@@ -15,58 +15,38 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""This module contains Google Stackdriver links."""
+"""Deprecated aliases for :mod:`airflow.providers.google.cloud.links.cloud_monitoring`."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.providers.google.cloud.links.cloud_monitoring import (
+    CLOUD_MONITORING_BASE_LINK,
+    CLOUD_MONITORING_NOTIFICATIONS_LINK,
+    CLOUD_MONITORING_POLICIES_LINK,
+    CloudMonitoringNotificationsLink,
+    CloudMonitoringPoliciesLink,
+)
+from airflow.providers.google.common.deprecated import deprecated
 
-from airflow.providers.google.cloud.links.base import BaseGoogleLink
-
-if TYPE_CHECKING:
-    from airflow.models import BaseOperator
-    from airflow.utils.context import Context
-
-STACKDRIVER_BASE_LINK = "/monitoring/alerting"
-STACKDRIVER_NOTIFICATIONS_LINK = STACKDRIVER_BASE_LINK + "/notifications?project={project_id}"
-STACKDRIVER_POLICIES_LINK = STACKDRIVER_BASE_LINK + "/policies?project={project_id}"
-
-
-class StackdriverNotificationsLink(BaseGoogleLink):
-    """Helper class for constructing Stackdriver Notifications Link."""
-
-    name = "Cloud Monitoring Notifications"
-    key = "stackdriver_notifications"
-    format_str = STACKDRIVER_NOTIFICATIONS_LINK
-
-    @staticmethod
-    def persist(
-        operator_instance: BaseOperator,
-        context: Context,
-        project_id: str | None,
-    ):
-        operator_instance.xcom_push(
-            context,
-            key=StackdriverNotificationsLink.key,
-            value={"project_id": project_id},
-        )
+STACKDRIVER_BASE_LINK = CLOUD_MONITORING_BASE_LINK
+STACKDRIVER_NOTIFICATIONS_LINK = CLOUD_MONITORING_NOTIFICATIONS_LINK
+STACKDRIVER_POLICIES_LINK = CLOUD_MONITORING_POLICIES_LINK
 
 
-class StackdriverPoliciesLink(BaseGoogleLink):
-    """Helper class for constructing Stackdriver Policies Link."""
+@deprecated(
+    planned_removal_date="March 31, 2027",
+    use_instead="airflow.providers.google.cloud.links.cloud_monitoring.CloudMonitoringNotificationsLink",
+    category=AirflowProviderDeprecationWarning,
+)
+class StackdriverNotificationsLink(CloudMonitoringNotificationsLink):
+    """Deprecated. Use :class:`CloudMonitoringNotificationsLink`."""
 
-    name = "Cloud Monitoring Policies"
-    key = "stackdriver_policies"
-    format_str = STACKDRIVER_POLICIES_LINK
 
-    @staticmethod
-    def persist(
-        operator_instance: BaseOperator,
-        context: Context,
-        project_id: str | None,
-    ):
-        operator_instance.xcom_push(
-            context,
-            key=StackdriverPoliciesLink.key,
-            value={"project_id": project_id},
-        )
+@deprecated(
+    planned_removal_date="March 31, 2027",
+    use_instead="airflow.providers.google.cloud.links.cloud_monitoring.CloudMonitoringPoliciesLink",
+    category=AirflowProviderDeprecationWarning,
+)
+class StackdriverPoliciesLink(CloudMonitoringPoliciesLink):
+    """Deprecated. Use :class:`CloudMonitoringPoliciesLink`."""

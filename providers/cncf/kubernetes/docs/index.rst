@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -44,6 +43,8 @@
 
     Connection types <connections/kubernetes>
     Operators <operators>
+    Kubernetes RBAC permissions <kubernetes_rbac>
+    Secrets backends <secrets-backends/kubernetes-secrets-backend>
 
 .. toctree::
     :hidden:
@@ -66,7 +67,7 @@
     :maxdepth: 1
     :caption: Resources
 
-    Example DAGs <https://github.com/apache/airflow/tree/providers-cncf-kubernetes/|version|/providers/cncf/kubernetes/tests/system/cncf/kubernetes>
+    Example Dags <https://github.com/apache/airflow/tree/providers-cncf-kubernetes/|version|/providers/cncf/kubernetes/tests/system/cncf/kubernetes>
     PyPI Repository <https://pypi.org/project/apache-airflow-providers-cncf-kubernetes/>
     Installing from sources <installing-providers-from-sources>
 
@@ -87,7 +88,7 @@ apache-airflow-providers-cncf-kubernetes package
 `Kubernetes <https://kubernetes.io/>`__
 
 
-Release: 10.4.0
+Release: 11.1.0
 
 Provider package
 ----------------
@@ -98,22 +99,34 @@ All classes for this package are included in the ``airflow.providers.cncf.kubern
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-cncf-kubernetes``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-======================  =====================
-PIP package             Version required
-======================  =====================
-``aiofiles``            ``>=23.2.0``
-``apache-airflow``      ``>=2.9.0``
-``asgiref``             ``>=3.5.2``
-``cryptography``        ``>=41.0.0``
-``kubernetes``          ``>=29.0.0,<=31.0.0``
-``kubernetes_asyncio``  ``>=29.0.0,<=31.0.0``
-======================  =====================
+==========================================  ======================================
+PIP package                                 Version required
+==========================================  ======================================
+``aiofiles``                                ``>=23.2.0``
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.15.0``
+``asgiref``                                 ``>=3.5.2; python_version < "3.14"``
+``asgiref``                                 ``>=3.11.1; python_version >= "3.14"``
+``cryptography``                            ``>=44.0.3``
+``kubernetes``                              ``>=37.0.0,<38.0.0``
+``urllib3``                                 ``>=2.1.0,!=2.6.0``
+``kubernetes_asyncio``                      ``>=32.0.0,<37.0.0``
+==========================================  ======================================
+
+Downloading official packages
+-----------------------------
+
+You can download officially released packages and verify their checksums and signatures from the
+`Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
+
+* `The apache-airflow-providers-cncf-kubernetes 11.1.0 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_cncf_kubernetes-11.1.0.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_cncf_kubernetes-11.1.0.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_cncf_kubernetes-11.1.0.tar.gz.sha512>`__)
+* `The apache-airflow-providers-cncf-kubernetes 11.1.0 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_cncf_kubernetes-11.1.0-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_cncf_kubernetes-11.1.0-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_cncf_kubernetes-11.1.0-py3-none-any.whl.sha512>`__)

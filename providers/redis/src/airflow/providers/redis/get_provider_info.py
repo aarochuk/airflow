@@ -26,35 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-redis",
         "name": "Redis",
         "description": "`Redis <https://redis.io/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477877,
-        "versions": [
-            "4.0.2",
-            "4.0.1",
-            "4.0.0",
-            "3.8.0",
-            "3.7.1",
-            "3.7.0",
-            "3.6.1",
-            "3.6.0",
-            "3.5.0",
-            "3.4.1",
-            "3.4.0",
-            "3.3.2",
-            "3.3.1",
-            "3.3.0",
-            "3.2.1",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.0.4",
-            "2.0.3",
-            "2.0.2",
-            "2.0.1",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Redis",
@@ -69,6 +40,7 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.redis.operators.redis_publish"],
             }
         ],
+        "queues": ["airflow.providers.redis.queues.redis.RedisPubSubMessageQueueProvider"],
         "sensors": [
             {
                 "integration-name": "Redis",
@@ -78,11 +50,49 @@ def get_provider_info():
                 ],
             }
         ],
+        "triggers": [
+            {
+                "integration-name": "Redis",
+                "python-modules": ["airflow.providers.redis.triggers.redis_await_message"],
+            }
+        ],
         "hooks": [{"integration-name": "Redis", "python-modules": ["airflow.providers.redis.hooks.redis"]}],
         "connection-types": [
-            {"hook-class-name": "airflow.providers.redis.hooks.redis.RedisHook", "connection-type": "redis"}
+            {
+                "hook-class-name": "airflow.providers.redis.hooks.redis.RedisHook",
+                "hook-name": "Redis",
+                "connection-type": "redis",
+                "ui-field-behaviour": {"hidden-fields": ["schema", "extra"], "relabeling": {}},
+                "conn-fields": {
+                    "db": {"label": "DB", "schema": {"type": ["integer", "null"], "default": 0}},
+                    "cluster": {
+                        "label": "Is cluster",
+                        "schema": {"type": ["boolean", "null"], "default": False},
+                    },
+                    "startup_nodes": {
+                        "label": "Startup nodes",
+                        "description": "Comma-separated extra bootstrap nodes as host:port. Only for cluster Redis deployments.",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "ssl": {"label": "Enable SSL", "schema": {"type": ["boolean", "null"], "default": False}},
+                    "ssl_cert_reqs": {
+                        "label": "SSL verify mode",
+                        "description": "Must be one of: required, optional, none.",
+                        "schema": {
+                            "type": ["string", "null"],
+                            "default": "required",
+                            "enum": ["required", "optional", "none"],
+                        },
+                    },
+                    "ssl_ca_certs": {"label": "CA certificate path", "schema": {"type": ["string", "null"]}},
+                    "ssl_keyfile": {"label": "Private key path", "schema": {"type": ["string", "null"]}},
+                    "ssl_certfile": {"label": "Certificate path", "schema": {"type": ["string", "null"]}},
+                    "ssl_check_hostname": {
+                        "label": "Enable hostname check",
+                        "schema": {"type": ["boolean", "null"], "default": False},
+                    },
+                },
+            }
         ],
-        "logging": ["airflow.providers.redis.redis_task_handler.RedisTaskHandler"],
-        "dependencies": ["apache-airflow>=2.9.0", "redis>=4.5.2,!=4.5.5,!=5.0.2"],
-        "devel-dependencies": [],
+        "logging": ["airflow.providers.redis.log.redis_task_handler.RedisTaskHandler"],
     }

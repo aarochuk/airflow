@@ -17,11 +17,14 @@
 # under the License.
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
+from uuid import UUID
 
-import sqlalchemy_jsonfield
+import sqlalchemy as sa
 from sqlalchemy import (
+    JSON,
     Column,
     ForeignKey,
     ForeignKeyConstraint,
@@ -30,46 +33,30 @@ from sqlalchemy import (
     PrimaryKeyConstraint,
     String,
     Table,
+    UniqueConstraint,
     delete,
     select,
-    text,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.ext.associationproxy import association_proxy
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
+from airflow._shared.timezones import timezone
+from airflow.configuration import conf as airflow_conf
 from airflow.models.base import Base, StringID
-from airflow.settings import json
-from airflow.utils import timezone
-from airflow.utils.sqlalchemy import UtcDateTime
+from airflow.utils.session import NEW_SESSION, provide_session
+from airflow.utils.sqlalchemy import UtcDateTime, get_dialect_name
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-    from typing import Any
+    from collections.abc import Iterable, Sequence
+    from typing import Any, TypeAlias
 
+    from sqlalchemy import Insert
     from sqlalchemy.orm import Session
+    from sqlalchemy.sql.elements import ColumnElement, SQLColumnExpression
 
-    from airflow.sdk.definitions.asset import Asset, AssetAlias
-
-
-def fetch_active_assets_by_name(names: Iterable[str], session: Session) -> dict[str, Asset]:
-    return {
-        asset_model.name: asset_model.to_public()
-        for asset_model in session.scalars(
-            select(AssetModel)
-            .join(AssetActive, AssetActive.name == AssetModel.name)
-            .where(AssetActive.name.in_(names))
-        )
-    }
-
-
-def fetch_active_assets_by_uri(uris: Iterable[str], session: Session) -> dict[str, Asset]:
-    return {
-        asset_model.uri: asset_model.to_public()
-        for asset_model in session.scalars(
-            select(AssetModel)
-            .join(AssetActive, AssetActive.uri == AssetModel.uri)
-            .where(AssetActive.uri.in_(uris))
-        )
-    }
+    from airflow.models.dag import DagModel
+    from airflow.models.trigger import Trigger
+    from airflow.serialization.definitions.assets import SerializedAsset, SerializedAssetAlias
 
 
 def expand_alias_to_assets(alias_name: str, *, session: Session) -> Iterable[AssetModel]:
@@ -108,12 +95,17 @@ def remove_references_to_deleted_dags(session: Session):
         DagScheduleAssetAliasReference,
         TaskOutletAssetReference,
     ]
-    for model in models_to_check:
-        session.execute(
-            delete(model)
-            .where(model.dag_id.in_(select(DagModel.dag_id).where(~DagModel.is_active)))
-            .execution_options(synchronize_session="fetch")
-        )
+
+    # The queries need to be done in separate steps, because in the case of multiple
+    # dag processors on MySQL, there could be a deadlock caused by acquiring both an
+    # exclusive lock for deletion and shared lock for query in reverse sequence
+    if stale_dag_ids := session.scalars(select(DagModel.dag_id).where(DagModel.is_stale)).all():
+        for model in models_to_check:
+            session.execute(
+                delete(model)
+                .where(model.dag_id.in_(stale_dag_ids))
+                .execution_options(synchronize_session="fetch")
+            )
 
 
 alias_association_table = Table(
@@ -134,25 +126,11 @@ asset_alias_asset_event_association_table = Table(
     Index("idx_asset_alias_asset_event_event_id", "event_id"),
 )
 
-asset_trigger_association_table = Table(
-    "asset_trigger",
-    Base.metadata,
-    Column("asset_id", ForeignKey("asset.id", ondelete="CASCADE"), primary_key=True),
-    Column("trigger_id", ForeignKey("trigger.id", ondelete="CASCADE"), primary_key=True),
-    Index("idx_asset_trigger_asset_id", "asset_id"),
-    Index("idx_asset_trigger_trigger_id", "trigger_id"),
-)
 
+class AssetWatcherModel(Base):
+    """A table to store asset watchers."""
 
-class AssetAliasModel(Base):
-    """
-    A table to store asset alias.
-
-    :param uri: a string that uniquely identifies the asset alias
-    """
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(
+    name: Mapped[str] = mapped_column(
         String(length=1500).with_variant(
             String(
                 length=1500,
@@ -164,7 +142,58 @@ class AssetAliasModel(Base):
         ),
         nullable=False,
     )
-    group = Column(
+    asset_id: Mapped[int] = mapped_column(Integer, primary_key=True, nullable=False)
+    trigger_id: Mapped[int] = mapped_column(Integer, primary_key=True, nullable=False)
+
+    asset = relationship("AssetModel", back_populates="watchers")
+    trigger = relationship("Trigger", back_populates="asset_watchers")
+
+    __tablename__ = "asset_watcher"
+    __table_args__ = (
+        PrimaryKeyConstraint(asset_id, trigger_id, name="asset_watcher_pkey"),
+        ForeignKeyConstraint(
+            columns=(asset_id,),
+            refcolumns=["asset.id"],
+            name="awm_asset_id_fkey",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            columns=(trigger_id,),
+            refcolumns=["trigger.id"],
+            name="awm_trigger_id_fkey",
+            ondelete="CASCADE",
+        ),
+        Index("idx_awm_trigger_id", trigger_id),
+    )
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}"
+            f"(name={self.name!r}, asset_id={self.asset_id!r}, trigger_id={self.trigger_id!r})"
+        )
+
+
+class AssetAliasModel(Base):
+    """
+    A table to store asset alias.
+
+    :param uri: a string that uniquely identifies the asset alias
+    """
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(
+        String(length=1500).with_variant(
+            String(
+                length=1500,
+                # latin1 allows for more indexed length in mysql
+                # and this field should only be ascii chars
+                collation="latin1_general_cs",
+            ),
+            "mysql",
+        ),
+        nullable=False,
+    )
+    group: Mapped[str] = mapped_column(
         String(length=1500).with_variant(
             String(
                 length=1500,
@@ -194,11 +223,11 @@ class AssetAliasModel(Base):
         secondary=asset_alias_asset_event_association_table,
         back_populates="source_aliases",
     )
-    consuming_dags = relationship("DagScheduleAssetAliasReference", back_populates="asset_alias")
+    scheduled_dags = relationship("DagScheduleAssetAliasReference", back_populates="asset_alias")
 
     @classmethod
-    def from_public(cls, obj: AssetAlias) -> AssetAliasModel:
-        return cls(name=obj.name)
+    def from_serialized(cls, obj: SerializedAssetAlias) -> AssetAliasModel:
+        return cls(name=obj.name, group=obj.group)
 
     def __repr__(self):
         return f"{self.__class__.__name__}(name={self.name!r})"
@@ -206,18 +235,22 @@ class AssetAliasModel(Base):
     def __hash__(self):
         return hash(self.name)
 
-    def __eq__(self, other):
-        from airflow.sdk.definitions.asset import AssetAlias
+    def __eq__(self, other: object) -> bool:
+        from airflow.serialization.definitions.assets import SerializedAssetAlias
 
-        if isinstance(other, (self.__class__, AssetAlias)):
+        try:
+            from airflow.sdk import AssetAlias
+        except ModuleNotFoundError:
+            AssetAlias: TypeAlias = SerializedAssetAlias  # type: ignore[no-redef]
+
+        if isinstance(other, (self.__class__, AssetAlias, SerializedAssetAlias)):
             return self.name == other.name
-        else:
-            return NotImplemented
+        return NotImplemented
 
-    def to_public(self) -> AssetAlias:
-        from airflow.sdk.definitions.asset import AssetAlias
+    def to_serialized(self) -> SerializedAssetAlias:
+        from airflow.serialization.definitions.assets import SerializedAssetAlias
 
-        return AssetAlias(name=self.name)
+        return SerializedAssetAlias(name=self.name, group=self.group)
 
 
 class AssetModel(Base):
@@ -228,8 +261,8 @@ class AssetModel(Base):
     :param extra: JSON field for arbitrary extra info
     """
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(
         String(length=1500).with_variant(
             String(
                 length=1500,
@@ -241,7 +274,7 @@ class AssetModel(Base):
         ),
         nullable=False,
     )
-    uri = Column(
+    uri: Mapped[str] = mapped_column(
         String(length=1500).with_variant(
             String(
                 length=1500,
@@ -253,7 +286,7 @@ class AssetModel(Base):
         ),
         nullable=False,
     )
-    group = Column(
+    group: Mapped[str] = mapped_column(
         String(length=1500).with_variant(
             String(
                 length=1500,
@@ -266,31 +299,41 @@ class AssetModel(Base):
         default=str,
         nullable=False,
     )
-    extra = Column(sqlalchemy_jsonfield.JSONField(json=json), nullable=False, default={})
+    extra: Mapped[dict] = mapped_column(sa.JSON(), nullable=False, default={})
 
-    created_at = Column(UtcDateTime, default=timezone.utcnow, nullable=False)
-    updated_at = Column(UtcDateTime, default=timezone.utcnow, onupdate=timezone.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=timezone.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime, default=timezone.utcnow, onupdate=timezone.utcnow, nullable=False
+    )
 
     active = relationship("AssetActive", uselist=False, viewonly=True, back_populates="asset")
 
-    consuming_dags = relationship("DagScheduleAssetReference", back_populates="asset")
+    scheduled_dags = relationship("DagScheduleAssetReference", back_populates="asset")
     producing_tasks = relationship("TaskOutletAssetReference", back_populates="asset")
-    triggers = relationship("Trigger", secondary=asset_trigger_association_table, back_populates="assets")
+    consuming_tasks = relationship("TaskInletAssetReference", back_populates="asset")
+    watchers = relationship("AssetWatcherModel", back_populates="asset", cascade="all, delete, delete-orphan")
+    triggers = association_proxy("watchers", "trigger")
 
     __tablename__ = "asset"
     __table_args__ = (
         Index("idx_asset_name_uri_unique", name, uri, unique=True),
+        Index("idx_asset_uri", uri),
         {"sqlite_autoincrement": True},  # ensures PK values not reused
     )
 
     @classmethod
-    def from_public(cls, obj: Asset) -> AssetModel:
-        return cls(name=obj.name, uri=obj.uri, group=obj.group, extra=obj.extra)
+    def from_serialized(cls, obj: SerializedAsset) -> AssetModel:
+        return cls(
+            name=obj.name,
+            uri=obj.uri,
+            group=obj.group,
+            extra=dict(obj.extra),
+        )
 
     def __init__(self, name: str = "", uri: str = "", **kwargs):
         if not name and not uri:
             raise TypeError("must provide either 'name' or 'uri'")
-        elif not name:
+        if not name:
             name = uri
         elif not uri:
             uri = name
@@ -303,10 +346,15 @@ class AssetModel(Base):
             raise ValueError("Scheme 'airflow' is reserved.")
         super().__init__(name=name, uri=uri, **kwargs)
 
-    def __eq__(self, other):
-        from airflow.sdk.definitions.asset import Asset
+    def __eq__(self, other: object) -> bool:
+        from airflow.serialization.definitions.assets import SerializedAsset
 
-        if isinstance(other, (self.__class__, Asset)):
+        try:
+            from airflow.sdk import Asset
+        except ModuleNotFoundError:
+            Asset: TypeAlias = SerializedAsset  # type: ignore[no-redef]
+
+        if isinstance(other, (self.__class__, Asset, SerializedAsset)):
             return self.name == other.name and self.uri == other.uri
         return NotImplemented
 
@@ -316,10 +364,26 @@ class AssetModel(Base):
     def __repr__(self):
         return f"{self.__class__.__name__}(name={self.name!r}, uri={self.uri!r}, extra={self.extra!r})"
 
-    def to_public(self) -> Asset:
-        from airflow.sdk.definitions.asset import Asset
+    def to_serialized(self) -> SerializedAsset:
+        from airflow.serialization.definitions.assets import SerializedAsset
 
-        return Asset(name=self.name, uri=self.uri, group=self.group, extra=self.extra)
+        return SerializedAsset(
+            name=self.name,
+            uri=self.uri,
+            group=self.group,
+            extra=self.extra,
+            watchers=[],
+        )
+
+    def add_trigger(self, trigger: Trigger, watcher_name: str):
+        self.watchers.append(AssetWatcherModel(name=watcher_name, trigger_id=trigger.id))
+
+    @staticmethod
+    @provide_session
+    def get_name_and_uri(asset_id: int, *, session: Session = NEW_SESSION) -> tuple[str, str] | None:
+        stmt = select(AssetModel.name, AssetModel.uri).where(AssetModel.id == asset_id)
+        row = session.execute(stmt).one_or_none()
+        return (row.name, row.uri) if row is not None else None
 
 
 class AssetActive(Base):
@@ -334,7 +398,7 @@ class AssetActive(Base):
     *name and URI are each unique* within active assets.
     """
 
-    name = Column(
+    name: Mapped[str] = mapped_column(
         String(length=1500).with_variant(
             String(
                 length=1500,
@@ -346,7 +410,7 @@ class AssetActive(Base):
         ),
         nullable=False,
     )
-    uri = Column(
+    uri: Mapped[str] = mapped_column(
         String(length=1500).with_variant(
             String(
                 length=1500,
@@ -382,7 +446,7 @@ class AssetActive(Base):
 class DagScheduleAssetNameReference(Base):
     """Reference from a DAG to an asset name reference of which it is a consumer."""
 
-    name = Column(
+    name: Mapped[str] = mapped_column(
         String(length=1500).with_variant(
             String(
                 length=1500,
@@ -395,8 +459,8 @@ class DagScheduleAssetNameReference(Base):
         primary_key=True,
         nullable=False,
     )
-    dag_id = Column(StringID(), primary_key=True, nullable=False)
-    created_at = Column(UtcDateTime, default=timezone.utcnow, nullable=False)
+    dag_id: Mapped[str] = mapped_column(StringID(), primary_key=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=timezone.utcnow, nullable=False)
 
     dag = relationship("DagModel", back_populates="schedule_asset_name_references")
 
@@ -412,7 +476,7 @@ class DagScheduleAssetNameReference(Base):
         Index("idx_dag_schedule_asset_name_reference_dag_id", dag_id),
     )
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, self.__class__):
             return self.name == other.name and self.dag_id == other.dag_id
         return NotImplemented
@@ -428,7 +492,7 @@ class DagScheduleAssetNameReference(Base):
 class DagScheduleAssetUriReference(Base):
     """Reference from a DAG to an asset URI reference of which it is a consumer."""
 
-    uri = Column(
+    uri: Mapped[str] = mapped_column(
         String(length=1500).with_variant(
             String(
                 length=1500,
@@ -441,8 +505,8 @@ class DagScheduleAssetUriReference(Base):
         primary_key=True,
         nullable=False,
     )
-    dag_id = Column(StringID(), primary_key=True, nullable=False)
-    created_at = Column(UtcDateTime, default=timezone.utcnow, nullable=False)
+    dag_id: Mapped[str] = mapped_column(StringID(), primary_key=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=timezone.utcnow, nullable=False)
 
     dag = relationship("DagModel", back_populates="schedule_asset_uri_references")
 
@@ -458,7 +522,7 @@ class DagScheduleAssetUriReference(Base):
         Index("idx_dag_schedule_asset_uri_reference_dag_id", dag_id),
     )
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, self.__class__):
             return self.uri == other.uri and self.dag_id == other.dag_id
         return NotImplemented
@@ -474,12 +538,14 @@ class DagScheduleAssetUriReference(Base):
 class DagScheduleAssetAliasReference(Base):
     """References from a DAG to an asset alias of which it is a consumer."""
 
-    alias_id = Column(Integer, primary_key=True, nullable=False)
-    dag_id = Column(StringID(), primary_key=True, nullable=False)
-    created_at = Column(UtcDateTime, default=timezone.utcnow, nullable=False)
-    updated_at = Column(UtcDateTime, default=timezone.utcnow, onupdate=timezone.utcnow, nullable=False)
+    alias_id: Mapped[int] = mapped_column(Integer, primary_key=True, nullable=False)
+    dag_id: Mapped[str] = mapped_column(StringID(), primary_key=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=timezone.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime, default=timezone.utcnow, onupdate=timezone.utcnow, nullable=False
+    )
 
-    asset_alias = relationship("AssetAliasModel", back_populates="consuming_dags")
+    asset_alias = relationship("AssetAliasModel", back_populates="scheduled_dags")
     dag = relationship("DagModel", back_populates="schedule_asset_alias_references")
 
     __tablename__ = "dag_schedule_asset_alias_reference"
@@ -500,7 +566,7 @@ class DagScheduleAssetAliasReference(Base):
         Index("idx_dag_schedule_asset_alias_reference_dag_id", dag_id),
     )
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, self.__class__):
             return self.alias_id == other.alias_id and self.dag_id == other.dag_id
         return NotImplemented
@@ -516,13 +582,27 @@ class DagScheduleAssetAliasReference(Base):
 class DagScheduleAssetReference(Base):
     """References from a DAG to an asset of which it is a consumer."""
 
-    asset_id = Column(Integer, primary_key=True, nullable=False)
-    dag_id = Column(StringID(), primary_key=True, nullable=False)
-    created_at = Column(UtcDateTime, default=timezone.utcnow, nullable=False)
-    updated_at = Column(UtcDateTime, default=timezone.utcnow, onupdate=timezone.utcnow, nullable=False)
+    asset_id: Mapped[int] = mapped_column(Integer, primary_key=True, nullable=False)
+    dag_id: Mapped[str] = mapped_column(StringID(), primary_key=True, nullable=False)
+    allow_producer_teams: Mapped[list | None] = mapped_column(sa.JSON(), nullable=True)
+    allow_global_producers: Mapped[bool] = mapped_column(
+        sa.Boolean(), nullable=False, server_default=sa.true()
+    )
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=timezone.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime, default=timezone.utcnow, onupdate=timezone.utcnow, nullable=False
+    )
 
-    asset = relationship("AssetModel", back_populates="consuming_dags")
+    asset = relationship("AssetModel", back_populates="scheduled_dags")
     dag = relationship("DagModel", back_populates="schedule_asset_references")
+
+    @property
+    def team_name(self) -> str | None:
+        """Name of the team owning the Dag scheduled by this asset, or ``None``."""
+        # Gate before touching ``dag``: single-team deployments must not pay for the load.
+        if not airflow_conf.getboolean("core", "multi_team"):
+            return None
+        return self.dag.team_name if self.dag else None
 
     queue_records = relationship(
         "AssetDagRunQueue",
@@ -551,7 +631,7 @@ class DagScheduleAssetReference(Base):
         Index("idx_dag_schedule_asset_reference_dag_id", dag_id),
     )
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, self.__class__):
             return self.asset_id == other.asset_id and self.dag_id == other.dag_id
         return NotImplemented
@@ -567,13 +647,28 @@ class DagScheduleAssetReference(Base):
 class TaskOutletAssetReference(Base):
     """References from a task to an asset that it updates / produces."""
 
-    asset_id = Column(Integer, primary_key=True, nullable=False)
-    dag_id = Column(StringID(), primary_key=True, nullable=False)
-    task_id = Column(StringID(), primary_key=True, nullable=False)
-    created_at = Column(UtcDateTime, default=timezone.utcnow, nullable=False)
-    updated_at = Column(UtcDateTime, default=timezone.utcnow, onupdate=timezone.utcnow, nullable=False)
+    asset_id: Mapped[int] = mapped_column(Integer, primary_key=True, nullable=False)
+    dag_id: Mapped[str] = mapped_column(StringID(), primary_key=True, nullable=False)
+    task_id: Mapped[str] = mapped_column(StringID(), primary_key=True, nullable=False)
+    allow_consumer_teams: Mapped[list | None] = mapped_column(sa.JSON(), nullable=True)
+    allow_global_consumers: Mapped[bool] = mapped_column(
+        sa.Boolean(), nullable=False, server_default=sa.true()
+    )
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=timezone.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime, default=timezone.utcnow, onupdate=timezone.utcnow, nullable=False
+    )
 
     asset = relationship("AssetModel", back_populates="producing_tasks")
+    dag = relationship("DagModel", viewonly=True)
+
+    @property
+    def team_name(self) -> str | None:
+        """Name of the team owning the Dag producing this asset, or ``None``."""
+        # Gate before touching ``dag``: single-team deployments must not pay for the load.
+        if not airflow_conf.getboolean("core", "multi_team"):
+            return None
+        return self.dag.team_name if self.dag else None
 
     __tablename__ = "task_outlet_asset_reference"
     __table_args__ = (
@@ -593,7 +688,7 @@ class TaskOutletAssetReference(Base):
         Index("idx_task_outlet_asset_reference_dag_id", dag_id),
     )
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, self.__class__):
             return (
                 self.asset_id == other.asset_id
@@ -613,21 +708,75 @@ class TaskOutletAssetReference(Base):
         return f"{self.__class__.__name__}({', '.join(args)})"
 
 
+class TaskInletAssetReference(Base):
+    """References from a task to an asset that it references as an inlet."""
+
+    asset_id: Mapped[int] = mapped_column(Integer, primary_key=True, nullable=False)
+    dag_id: Mapped[str] = mapped_column(StringID(), primary_key=True, nullable=False)
+    task_id: Mapped[str] = mapped_column(StringID(), primary_key=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=timezone.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime, default=timezone.utcnow, onupdate=timezone.utcnow, nullable=False
+    )
+
+    asset = relationship("AssetModel", back_populates="consuming_tasks")
+
+    __tablename__ = "task_inlet_asset_reference"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            (asset_id,),
+            ["asset.id"],
+            name="tiar_asset_fkey",
+            ondelete="CASCADE",
+        ),
+        PrimaryKeyConstraint(asset_id, dag_id, task_id, name="tiar_pkey"),
+        ForeignKeyConstraint(
+            columns=(dag_id,),
+            refcolumns=["dag.dag_id"],
+            name="tiar_dag_id_fkey",
+            ondelete="CASCADE",
+        ),
+        Index("idx_task_inlet_asset_reference_dag_id", dag_id),
+    )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return (
+            self.asset_id == other.asset_id and self.dag_id == other.dag_id and self.task_id == other.task_id
+        )
+
+    def __hash__(self):
+        return hash(self.__mapper__.primary_key)
+
+    def __repr__(self):
+        args = (f"{(attr := x.name)}={getattr(self, attr)!r}" for x in self.__mapper__.primary_key)
+        return f"{self.__class__.__name__}({', '.join(args)})"
+
+
 class AssetDagRunQueue(Base):
     """Model for storing asset events that need processing."""
 
-    asset_id = Column(Integer, primary_key=True, nullable=False)
-    target_dag_id = Column(StringID(), primary_key=True, nullable=False)
-    created_at = Column(UtcDateTime, default=timezone.utcnow, nullable=False)
-    asset = relationship("AssetModel", viewonly=True)
+    target_dag_id: Mapped[str] = mapped_column(StringID(), primary_key=True, nullable=False)
+    asset_event_id: Mapped[int] = mapped_column(Integer, primary_key=True, nullable=False)
+    asset_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=timezone.utcnow, nullable=False)
+    asset: Mapped[AssetModel] = relationship("AssetModel", viewonly=True)
+    dag_model: Mapped[DagModel] = relationship("DagModel", viewonly=True)
 
     __tablename__ = "asset_dag_run_queue"
     __table_args__ = (
-        PrimaryKeyConstraint(asset_id, target_dag_id, name="assetdagrunqueue_pkey"),
+        PrimaryKeyConstraint(target_dag_id, asset_event_id, name="assetdagrunqueue_pkey"),
         ForeignKeyConstraint(
             (asset_id,),
             ["asset.id"],
             name="adrq_asset_fkey",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            (asset_event_id,),
+            ["asset_event.id"],
+            name="adrq_asset_event_fkey",
             ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
@@ -636,14 +785,13 @@ class AssetDagRunQueue(Base):
             name="adrq_dag_fkey",
             ondelete="CASCADE",
         ),
-        Index("idx_asset_dag_run_queue_target_dag_id", target_dag_id),
+        Index("idx_adrq_asset_id", asset_id),
     )
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, self.__class__):
-            return self.asset_id == other.asset_id and self.target_dag_id == other.target_dag_id
-        else:
-            return NotImplemented
+            return self.target_dag_id == other.target_dag_id and self.asset_event_id == other.asset_event_id
+        return NotImplemented
 
     def __hash__(self):
         return hash(self.__mapper__.primary_key)
@@ -665,6 +813,44 @@ association_table = Table(
 )
 
 
+def build_consumed_by_dag_clause(
+    dag_id: str | SQLColumnExpression[str], event_id: SQLColumnExpression[int]
+) -> ColumnElement[bool]:
+    """Check whether the asset event *event_id* has been consumed by a run of the Dag *dag_id*."""
+    from airflow.models.dagrun import DagRun  # Avoid circular import
+
+    return (
+        select(association_table.c.event_id)
+        .join(DagRun, DagRun.id == association_table.c.dag_run_id)
+        .where(DagRun.dag_id == dag_id, association_table.c.event_id == event_id)
+        .exists()
+    )
+
+
+def insert_asset_dag_run_queue_rows(values: Sequence[dict[str, Any]], *, session: Session) -> None:
+    """Insert ADRQ rows, ignoring rows that are already queued."""
+    stmt: Insert
+    if (dialect_name := get_dialect_name(session)) == "mysql":
+        from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+        # The on-dup update is a no-op since we are always working on ADRQs
+        # for the asset. It may not hold if you change e.g. ADRQ schema.
+        stmt = mysql_insert(AssetDagRunQueue).on_duplicate_key_update(asset_id=AssetDagRunQueue.asset_id)
+    elif dialect_name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        stmt = pg_insert(AssetDagRunQueue).on_conflict_do_nothing(
+            index_elements=["target_dag_id", "asset_event_id"]
+        )
+    else:
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        stmt = sqlite_insert(AssetDagRunQueue).on_conflict_do_nothing(
+            index_elements=["target_dag_id", "asset_event_id"]
+        )
+    session.execute(stmt, values)
+
+
 class AssetEvent(Base):
     """
     A table to store assets events.
@@ -676,23 +862,28 @@ class AssetEvent(Base):
     :param source_run_id: the run_id of the TI which updated the asset
     :param source_map_index: the map_index of the TI which updated the asset
     :param timestamp: the time the event was logged
+    :param partition_key: the key for the partition associated with event, if applicable
 
     We use relationships instead of foreign keys so that asset events are not deleted even
     if the foreign key object is.
     """
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    asset_id = Column(Integer, nullable=False)
-    extra = Column(sqlalchemy_jsonfield.JSONField(json=json), nullable=False, default={})
-    source_task_id = Column(StringID(), nullable=True)
-    source_dag_id = Column(StringID(), nullable=True)
-    source_run_id = Column(StringID(), nullable=True)
-    source_map_index = Column(Integer, nullable=True, server_default=text("-1"))
-    timestamp = Column(UtcDateTime, default=timezone.utcnow, nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    extra: Mapped[dict] = mapped_column(sa.JSON(), nullable=False, default={})
+    source_task_id: Mapped[str | None] = mapped_column(StringID(), nullable=True)
+    source_dag_id: Mapped[str | None] = mapped_column(StringID(), nullable=True)
+    source_run_id: Mapped[str | None] = mapped_column(StringID(), nullable=True)
+    source_task_instance_id: Mapped[UUID | None] = mapped_column(sa.Uuid(), nullable=True)
+    source_map_index: Mapped[int | None] = mapped_column(Integer, nullable=True, server_default="-1")
+    timestamp: Mapped[datetime] = mapped_column(UtcDateTime, default=timezone.utcnow, nullable=False)
+    partition_key: Mapped[str | None] = mapped_column(StringID(), nullable=True)
 
     __tablename__ = "asset_event"
     __table_args__ = (
         Index("idx_asset_id_timestamp", asset_id, timestamp),
+        Index("idx_asset_event_source_ti", source_task_instance_id),
+        Index("idx_asset_event_asset_id_partition_key", asset_id, partition_key),
         {"sqlite_autoincrement": True},  # ensures PK values not reused
     )
 
@@ -710,12 +901,7 @@ class AssetEvent(Base):
 
     source_task_instance = relationship(
         "TaskInstance",
-        primaryjoin="""and_(
-            AssetEvent.source_dag_id == foreign(TaskInstance.dag_id),
-            AssetEvent.source_run_id == foreign(TaskInstance.run_id),
-            AssetEvent.source_task_id == foreign(TaskInstance.task_id),
-            AssetEvent.source_map_index == foreign(TaskInstance.map_index),
-        )""",
+        primaryjoin="foreign(AssetEvent.source_task_instance_id) == TaskInstance.id",
         viewonly=True,
         lazy="select",
         uselist=False,
@@ -763,4 +949,109 @@ class AssetEvent(Base):
             "source_aliases",
         ]:
             args.append(f"{attr}={getattr(self, attr)!r}")
+        return f"{self.__class__.__name__}({', '.join(args)})"
+
+
+class AssetPartitionDagRun(Base):
+    """
+    Keep track of new runs of a dag run per partition key.
+
+    Think of AssetPartitionDagRun as a provisional dag run. This record is created
+    when there's an asset event that contributes to the creation of a dag run for
+    this dag_id / partition_key combo. It may need to wait for other events before
+    it's ready to be created though, and the scheduler will make this determination.
+
+    We can look up the AssetEvents that contribute to AssetPartitionDagRun entities
+    with the PartitionedAssetKeyLog mapping table.
+
+    Rows are never deleted from this table, so multiple records with the same
+    target_dag_id / partition_key are expected in general; each dag run that
+    gets created leaves its APDR record behind.
+
+    Where created_dag_run_id is null, the Dag run has not yet been created.
+    With batching disabled, each event creates its own row, so multiple pending
+    rows for the same pair are expected. With event batching enabled, events
+    accumulate on one pending row per target_dag_id / partition_key, and a
+    unique constraint on (target_dag_id, pending_partition_key) keeps
+    concurrent writers from creating a second one.
+
+    pending_partition_key mirrors partition_key on a pending row created with
+    batching enabled, and is null otherwise; the `_sync_pending_partition_key`
+    validator clears it once the Dag run is created. A unique index treats null
+    as distinct from every value on all three supported backends, so it only
+    compares batched pending rows. It stands in for a partial unique index on
+    (target_dag_id, partition_key) WHERE created_dag_run_id IS NULL, which
+    MySQL does not support.
+    """
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    target_dag_id: Mapped[str] = mapped_column(StringID(), nullable=False)
+    created_dag_run_id: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    partition_key: Mapped[str] = mapped_column(StringID(), nullable=False)
+    pending_partition_key: Mapped[str | None] = mapped_column(StringID(), nullable=True)
+    partition_date: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    # Serialized snapshot of the rollup definition (mapper + window for every
+    # partitioned asset in the timetable) at the time this APDR was created.
+    # The scheduler discards APDRs whose stored fingerprint no longer matches
+    # the current timetable's fingerprint, because the mapper or window that
+    # drove the APDR's required upstream key set may have changed. Only
+    # mapper / window edits invalidate the fingerprint; unrelated Dag changes
+    # (task additions, description updates) do not. Nullable to tolerate
+    # legacy rows that pre-date the column; they are treated as stale on the
+    # next scheduler tick.
+    rollup_fingerprint: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=timezone.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime, default=timezone.utcnow, onupdate=timezone.utcnow, nullable=False
+    )
+
+    __tablename__ = "asset_partition_dag_run"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            columns=(created_dag_run_id,),
+            refcolumns=["dag_run.id"],
+            name="apdr_created_dag_run_id_fkey",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "target_dag_id",
+            "pending_partition_key",
+            name="apdr_target_dag_id_pending_partition_key_uq",
+        ),
+    )
+
+    @validates("created_dag_run_id")
+    def _sync_pending_partition_key(self, key: str, value: int | None) -> int | None:
+        """Clear pending_partition_key once a Dag run is created for this row."""
+        if value is not None:
+            self.pending_partition_key = None
+        return value
+
+
+class PartitionedAssetKeyLog(Base):
+    """
+    Mapping table between AssetPartitionDagRun and AssetEvent.
+
+    PartitionedAssetKeyLog tells us which events contributed to a particular
+    AssetPartitionDagRun record.
+    """
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    asset_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    asset_event_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    asset_partition_dag_run_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_partition_key: Mapped[str] = mapped_column(StringID(), nullable=False)
+    target_dag_id: Mapped[str] = mapped_column(StringID(), nullable=False)
+    target_partition_key: Mapped[str] = mapped_column(StringID(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=timezone.utcnow, nullable=False)
+
+    __tablename__ = "partitioned_asset_key_log"
+    __table_args__ = (
+        # Filter column for the stale-APDR cleanup bulk DELETE in
+        # ``SchedulerJobRunner._create_dagruns_for_partitioned_asset_dags``.
+        Index("idx_pakl_apdr_id", "asset_partition_dag_run_id"),
+    )
+
+    def __repr__(self):
+        args = (f"{x.name}={getattr(self, x.name)!r}" for x in self.__mapper__.primary_key)
         return f"{self.__class__.__name__}({', '.join(args)})"

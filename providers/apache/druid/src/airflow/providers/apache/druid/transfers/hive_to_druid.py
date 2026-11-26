@@ -22,12 +22,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from airflow.models import BaseOperator
 from airflow.providers.apache.druid.hooks.druid import DruidHook
 from airflow.providers.apache.hive.hooks.hive import HiveCliHook, HiveMetastoreHook
+from airflow.providers.common.compat.sdk import BaseOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 LOAD_CHECK_INTERVAL = 5
 DEFAULT_TARGET_PARTITION_SIZE = 5000000
@@ -67,7 +67,13 @@ class HiveToDruidOperator(BaseOperator):
     :param job_properties: additional properties for job
     """
 
-    template_fields: Sequence[str] = ("sql", "intervals")
+    template_fields: Sequence[str] = (
+        "sql",
+        "intervals",
+        "hive_cli_conn_id",
+        "druid_ingest_conn_id",
+        "metastore_conn_id",
+    )
     template_ext: Sequence[str] = (".sql",)
     template_fields_renderers = {"sql": "hql"}
 

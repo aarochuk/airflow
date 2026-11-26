@@ -16,9 +16,10 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Button, type DialogBodyProps, Heading } from "@chakra-ui/react";
+import { Button, type DialogBodyProps } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 
-import { Dialog } from "src/components/ui";
+import { Modal } from "src/system-components";
 
 type Props = {
   readonly children?: DialogBodyProps["children"];
@@ -28,32 +29,29 @@ type Props = {
   readonly open: boolean;
 };
 
-export const ConfirmationModal = ({ children, header, onConfirm, onOpenChange, open }: Props) => (
-  <Dialog.Root onOpenChange={onOpenChange} open={open}>
-    <Dialog.Content backdrop>
-      <Dialog.Header>
-        <Heading>{header}</Heading>
-      </Dialog.Header>
+export const ConfirmationModal = ({ children, header, onConfirm, onOpenChange, open }: Props) => {
+  const { t: translate } = useTranslation();
 
-      <Dialog.CloseTrigger />
-
-      <Dialog.Body>{children}</Dialog.Body>
-      <Dialog.Footer>
-        <Dialog.ActionTrigger asChild>
-          <Button onClick={() => onOpenChange({ open })} variant="outline">
-            Cancel
-          </Button>
-        </Dialog.ActionTrigger>
+  return (
+    <Modal
+      cancelActionProps={{ "data-testid": "confirmation-cancel-button" }}
+      data-testid="confirmation-modal"
+      footerActions={
         <Button
-          colorPalette="blue"
+          data-testid="confirmation-confirm-button"
           onClick={() => {
             onConfirm();
             onOpenChange({ open });
           }}
         >
-          Confirm
+          {translate("modal.confirm")}
         </Button>
-      </Dialog.Footer>
-    </Dialog.Content>
-  </Dialog.Root>
-);
+      }
+      onOpenChange={onOpenChange}
+      open={open}
+      title={header}
+    >
+      {children}
+    </Modal>
+  );
+};

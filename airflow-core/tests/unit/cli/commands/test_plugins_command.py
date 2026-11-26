@@ -16,12 +16,14 @@
 # under the License.
 from __future__ import annotations
 
+import importlib
 import io
 import json
 import textwrap
 from contextlib import redirect_stdout
 
 import pytest
+import yaml
 
 from airflow.cli import cli_parser
 from airflow.cli.commands import plugins_command
@@ -30,7 +32,13 @@ from airflow.plugins_manager import AirflowPlugin
 from airflow.sdk import BaseOperatorLink
 
 from tests_common.test_utils.mock_plugins import mock_plugin_manager
-from unit.plugins.test_plugin import AirflowTestPlugin as ComplexAirflowPlugin
+
+if importlib.util.find_spec("flask_appbuilder"):
+    flask_appbuilder_installed = True
+    from unit.plugins.test_plugin import AirflowTestPlugin as ComplexAirflowPlugin
+else:
+    ComplexAirflowPlugin = None  # type: ignore [misc, assignment]
+    flask_appbuilder_installed = False
 
 pytestmark = pytest.mark.db_test
 
@@ -54,13 +62,55 @@ class TestPluginsCommand:
     def setup_class(cls):
         cls.parser = cli_parser.get_parser()
 
+    @pytest.mark.parametrize("output", ["table", "plain"])
     @mock_plugin_manager(plugins=[])
-    def test_should_display_no_plugins(self):
+    def test_should_display_no_plugins(self, output):
         with redirect_stdout(io.StringIO()) as temp_stdout:
-            plugins_command.dump_plugins(self.parser.parse_args(["plugins", "--output=json"]))
+            plugins_command.dump_plugins(self.parser.parse_args(["plugins", f"--output={output}"]))
             stdout = temp_stdout.getvalue()
         assert "No plugins loaded" in stdout
 
+    @pytest.mark.parametrize(("output", "loader"), [("json", json.loads), ("yaml", yaml.safe_load)])
+    @mock_plugin_manager(plugins=[])
+    def test_should_display_no_plugins_as_empty_list(self, output, loader):
+        with redirect_stdout(io.StringIO()) as temp_stdout:
+            plugins_command.dump_plugins(self.parser.parse_args(["plugins", f"--output={output}"]))
+            stdout = temp_stdout.getvalue()
+        assert loader(stdout) == []
+
+    def test_dumps_the_validated_ui_actions(self):
+        """`airflow plugins` reports the actions that survived validation, not what was declared."""
+
+        class ActionsPlugin(AirflowPlugin):
+            name = "cli_actions_plugin"
+            ui_actions = [
+                {
+                    "action_type": "link",
+                    "name": "Runbook",
+                    "destination": "dag",
+                    "href": "https://example.com/{DAG_ID}",
+                },
+                # Dropped at load: the plugin is still reported, without this action.
+                {"action_type": "link", "name": "Broken", "destination": "nowhere"},
+            ]
+
+        with mock_plugin_manager(plugins=[ActionsPlugin()]):
+            with redirect_stdout(io.StringIO()) as temp_stdout:
+                plugins_command.dump_plugins(self.parser.parse_args(["plugins", "--output=json"]))
+                stdout = temp_stdout.getvalue()
+
+        plugin = next(entry for entry in json.loads(stdout) if entry["name"] == "cli_actions_plugin")
+
+        assert plugin["ui_actions"] == [
+            {
+                "action_type": "link",
+                "name": "Runbook",
+                "destination": "dag",
+                "href": "https://example.com/{DAG_ID}",
+            }
+        ]
+
+    @pytest.mark.skipif(not flask_appbuilder_installed, reason="Flask AppBuilder is not installed")
     @mock_plugin_manager(plugins=[ComplexAirflowPlugin])
     def test_should_display_one_plugin(self):
         with redirect_stdout(io.StringIO()) as temp_stdout:
@@ -71,6 +121,7 @@ class TestPluginsCommand:
         assert info == [
             {
                 "name": "test_plugin",
+                "team_name": None,
                 "admin_views": [],
                 "macros": ["unit.plugins.test_plugin.plugin_macro"],
                 "menu_links": [],
@@ -82,6 +133,36 @@ class TestPluginsCommand:
                         "app": "fastapi.applications.FastAPI",
                         "url_prefix": "/some_prefix",
                         "name": "Name of the App",
+                    }
+                ],
+                "fastapi_root_middlewares": [
+                    {
+                        "middleware": "unit.plugins.test_plugin.DummyMiddleware",
+                        "name": "Name of the Middleware",
+                    }
+                ],
+                "external_views": [
+                    {
+                        "destination": "dag",
+                        "icon": "https://raw.githubusercontent.com/lucide-icons/lucide/refs/heads/main/icons/plug.svg",
+                        "name": "Test IFrame Airflow Docs",
+                        "href": "https://airflow.apache.org/",
+                        "url_route": "test_iframe_plugin",
+                        "category": "browse",
+                        "applies_to": {
+                            "dag.tags.name": ["ml", "production"],
+                            "dag.dag_id": ["example_dag"],
+                        },
+                    },
+                ],
+                "react_apps": [
+                    {
+                        "name": "Test React App",
+                        "bundle_url": "https://example.com/test-plugin-bundle.js",
+                        "icon": "https://raw.githubusercontent.com/lucide-icons/lucide/refs/heads/main/icons/plug.svg",
+                        "url_route": "test_react_app",
+                        "destination": "nav",
+                        "category": "browse",
                     }
                 ],
                 "appbuilder_views": [
@@ -97,6 +178,7 @@ class TestPluginsCommand:
                     "<tests_common.test_utils.mock_operators.GithubLink object>",
                 ],
                 "timetables": ["unit.plugins.test_plugin.CustomCronDataIntervalTimetable"],
+                "ui_actions": [],
                 "operator_extra_links": [
                     "<tests_common.test_utils.mock_operators.GoogleLink object>",
                     "<tests_common.test_utils.mock_operators.AirflowLink2 object>",

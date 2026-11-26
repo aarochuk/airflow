@@ -25,7 +25,6 @@ from unittest.mock import patch
 import pytest
 from moto import mock_aws
 
-from airflow.exceptions import TaskDeferred
 from airflow.models import DAG
 from airflow.providers.amazon.aws.hooks.rds import RdsHook
 from airflow.providers.amazon.aws.operators.rds import (
@@ -43,8 +42,10 @@ from airflow.providers.amazon.aws.operators.rds import (
     RdsStopDbOperator,
 )
 from airflow.providers.amazon.aws.triggers.rds import RdsDbAvailableTrigger, RdsDbStoppedTrigger
-from airflow.utils import timezone
+from airflow.providers.common.compat.sdk import TaskDeferred
 
+from tests_common.test_utils.compat import timezone
+from unit.amazon.aws.utils.test_deferral import expect_deferral_warning
 from unit.amazon.aws.utils.test_template_fields import validate_template_fields
 
 if TYPE_CHECKING:
@@ -53,6 +54,8 @@ if TYPE_CHECKING:
 DEFAULT_DATE = timezone.datetime(2019, 1, 1)
 
 AWS_CONN = "amazon_default"
+
+REGION = "us-east-1"
 
 DB_INSTANCE_NAME = "my-db-instance"
 DB_CLUSTER_NAME = "my-db-cluster"
@@ -172,6 +175,18 @@ class TestBaseRdsOperator:
         assert hasattr(self.op, "hook")
         assert self.op.hook.__class__.__name__ == "RdsHook"
 
+    def test_overwritten_conn_passed_to_hook(self):
+        OVERWRITTEN_CONN = "new-conn-id"
+        op = RdsBaseOperator(
+            task_id="test_overwritten_conn_passed_to_hook_task", aws_conn_id=OVERWRITTEN_CONN, dag=self.dag
+        )
+        assert op.hook.aws_conn_id == OVERWRITTEN_CONN
+
+    def test_default_conn_passed_to_hook(self):
+        DEFAULT_CONN = "aws_default"
+        op = RdsBaseOperator(task_id="test_default_conn_passed_to_hook_task", dag=self.dag)
+        assert op.hook.aws_conn_id == DEFAULT_CONN
+
 
 class TestRdsCreateDbSnapshotOperator:
     @classmethod
@@ -282,6 +297,7 @@ class TestRdsCreateDbSnapshotOperator:
             db_snapshot_identifier=DB_INSTANCE_SNAPSHOT,
             db_identifier=DB_INSTANCE_NAME,
             aws_conn_id=AWS_CONN,
+            region_name=REGION,
         )
         validate_template_fields(operator)
 
@@ -410,6 +426,7 @@ class TestRdsCopyDbSnapshotOperator:
             source_db_snapshot_identifier=DB_CLUSTER_SNAPSHOT,
             target_db_snapshot_identifier=DB_CLUSTER_SNAPSHOT_COPY,
             aws_conn_id=AWS_CONN,
+            region_name=REGION,
         )
         validate_template_fields(operator)
 
@@ -527,6 +544,7 @@ class TestRdsDeleteDbSnapshotOperator:
             db_snapshot_identifier=DB_CLUSTER_SNAPSHOT,
             aws_conn_id=AWS_CONN,
             wait_for_completion=False,
+            region_name=REGION,
         )
         validate_template_fields(operator)
 
@@ -610,6 +628,7 @@ class TestRdsStartExportTaskOperator:
             s3_bucket_name=EXPORT_TASK_BUCKET,
             aws_conn_id=AWS_CONN,
             wait_for_completion=False,
+            region_name=REGION,
         )
         validate_template_fields(operator)
 
@@ -682,6 +701,7 @@ class TestRdsCancelExportTaskOperator:
             task_id="test_cancel",
             export_task_identifier=EXPORT_TASK_NAME,
             aws_conn_id=AWS_CONN,
+            region_name=REGION,
         )
         validate_template_fields(operator)
 
@@ -759,6 +779,7 @@ class TestRdsCreateEventSubscriptionOperator:
             source_type="db-instance",
             source_ids=[DB_INSTANCE_NAME],
             aws_conn_id=AWS_CONN,
+            region_name=REGION,
         )
         validate_template_fields(operator)
 
@@ -800,6 +821,7 @@ class TestRdsDeleteEventSubscriptionOperator:
             task_id="test_delete",
             subscription_name=SUBSCRIPTION_NAME,
             aws_conn_id=AWS_CONN,
+            region_name=REGION,
         )
         validate_template_fields(operator)
 
@@ -869,6 +891,26 @@ class TestRdsCreateDbInstanceOperator:
         assert db_instances[0]["DBInstanceStatus"] == "available"
         mock_await_status.assert_not_called()
 
+    @pytest.mark.parametrize("wait_for_completion", [True, False])
+    @mock.patch.object(RdsCreateDbInstanceOperator, "defer")
+    @mock.patch.object(RdsHook, "conn")
+    def test_deferred(self, conn_mock, defer_mock, wait_for_completion):
+        op = RdsCreateDbInstanceOperator(
+            task_id="test_create_db_instance",
+            db_instance_identifier=DB_INSTANCE_NAME,
+            db_instance_class="db.m5.large",
+            engine="postgres",
+            deferrable=True,
+            wait_for_completion=wait_for_completion,
+        )
+
+        with expect_deferral_warning(deferrable=True, wait_for_completion=wait_for_completion):
+            op.execute({})
+
+        assert op.wait_for_completion is wait_for_completion
+        defer_mock.assert_called_once()
+        conn_mock.get_waiter.assert_not_called()
+
     def test_template_fields(self):
         operator = RdsCreateDbInstanceOperator(
             task_id="test_create_db_instance",
@@ -879,6 +921,7 @@ class TestRdsCreateDbInstanceOperator:
                 "DBName": DB_INSTANCE_NAME,
             },
             aws_conn_id=AWS_CONN,
+            region_name=REGION,
         )
         validate_template_fields(operator)
 
@@ -940,6 +983,24 @@ class TestRdsDeleteDbInstanceOperator:
             self.hook.conn.describe_db_instances(DBInstanceIdentifier=DB_INSTANCE_NAME)
         mock_await_status.assert_not_called()
 
+    @pytest.mark.parametrize("wait_for_completion", [True, False])
+    @mock.patch.object(RdsDeleteDbInstanceOperator, "defer")
+    @mock.patch.object(RdsHook, "conn")
+    def test_deferred(self, conn_mock, defer_mock, wait_for_completion):
+        op = RdsDeleteDbInstanceOperator(
+            task_id="test_delete_db_instance",
+            db_instance_identifier=DB_INSTANCE_NAME,
+            deferrable=True,
+            wait_for_completion=wait_for_completion,
+        )
+
+        with expect_deferral_warning(deferrable=True, wait_for_completion=wait_for_completion):
+            op.execute({})
+
+        assert op.wait_for_completion is wait_for_completion
+        defer_mock.assert_called_once()
+        conn_mock.get_waiter.assert_not_called()
+
     def test_template_fields(self):
         operator = RdsDeleteDbInstanceOperator(
             task_id="test_delete_db_instance_no_wait",
@@ -949,6 +1010,7 @@ class TestRdsDeleteDbInstanceOperator:
             },
             aws_conn_id=AWS_CONN,
             wait_for_completion=False,
+            region_name=REGION,
         )
         validate_template_fields(operator)
 
@@ -993,15 +1055,20 @@ class TestRdsStopDbOperator:
         assert status == "stopped"
         mock_get_waiter.assert_not_called()
 
+    @pytest.mark.parametrize("wait_for_completion", [True, False])
     @mock.patch.object(RdsHook, "conn")
-    def test_deferred(self, conn_mock):
+    def test_deferred(self, conn_mock, wait_for_completion):
         op = RdsStopDbOperator(
             task_id="test_stop_db_instance_no_wait",
             db_identifier=DB_INSTANCE_NAME,
             deferrable=True,
+            wait_for_completion=wait_for_completion,
         )
 
-        with pytest.raises(TaskDeferred) as defer:
+        with (
+            expect_deferral_warning(deferrable=True, wait_for_completion=wait_for_completion),
+            pytest.raises(TaskDeferred) as defer,
+        ):
             op.execute({})
 
         assert isinstance(defer.value.trigger, RdsDbStoppedTrigger)
@@ -1062,6 +1129,7 @@ class TestRdsStopDbOperator:
             db_identifier=DB_CLUSTER_NAME,
             db_type="cluster",
             db_snapshot_identifier=DB_CLUSTER_SNAPSHOT,
+            region_name=REGION,
         )
         validate_template_fields(operator)
 
@@ -1118,21 +1186,30 @@ class TestRdsStartDbOperator:
         status_after = result_after["DBClusters"][0]["Status"]
         assert status_after == "available"
 
+    @pytest.mark.parametrize("wait_for_completion", [True, False])
     @mock.patch.object(RdsHook, "conn")
-    def test_deferred(self, conn_mock):
+    def test_deferred(self, conn_mock, wait_for_completion):
         op = RdsStartDbOperator(
             task_id="test_stop_db_instance_no_wait",
             db_identifier=DB_INSTANCE_NAME,
             deferrable=True,
+            wait_for_completion=wait_for_completion,
         )
 
-        with pytest.raises(TaskDeferred) as defer:
+        with (
+            expect_deferral_warning(deferrable=True, wait_for_completion=wait_for_completion),
+            pytest.raises(TaskDeferred) as defer,
+        ):
             op.execute({})
 
         assert isinstance(defer.value.trigger, RdsDbAvailableTrigger)
 
     def test_template_fields(self):
         operator = RdsStartDbOperator(
-            task_id="test_start_db_cluster", db_identifier=DB_CLUSTER_NAME, db_type="cluster"
+            region_name=REGION,
+            aws_conn_id=AWS_CONN,
+            task_id="test_start_db_cluster",
+            db_identifier=DB_CLUSTER_NAME,
+            db_type="cluster",
         )
         validate_template_fields(operator)

@@ -18,7 +18,7 @@
 
 # This is an example docker build script. It is not intended for PRODUCTION use
 set -euo pipefail
-AIRFLOW_SOURCES="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../" && pwd)"
+AIRFLOW_SOURCES="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../" && pwd)"
 
 TEMP_DOCKER_DIR=$(mktemp -d)
 pushd "${TEMP_DOCKER_DIR}"
@@ -26,17 +26,17 @@ pushd "${TEMP_DOCKER_DIR}"
 cp "${AIRFLOW_SOURCES}/Dockerfile" "${TEMP_DOCKER_DIR}"
 
 # [START build]
-export AIRFLOW_VERSION=2.2.4
+export AIRFLOW_VERSION=3.5.0
 export DOCKER_BUILDKIT=1
 
 docker build . -f Dockerfile \
     --pull \
     --platform 'linux/amd64' \
-    --build-arg PYTHON_BASE_IMAGE="python:3.9-slim-bookworm" \
+    --build-arg BASE_IMAGE="${BASE_IMAGE:-ghcr.io/apache/airflow/base/python:3.14.10-debian13-dev}" \
     --build-arg AIRFLOW_VERSION="${AIRFLOW_VERSION}" \
     --build-arg ADDITIONAL_AIRFLOW_EXTRAS="slack,odbc" \
     --build-arg ADDITIONAL_PYTHON_DEPS=" \
-        azure-storage-blob<12.9.0 \
+        azure-storage-blob \
         oauth2client \
         beautifulsoup4 \
         dateparser \

@@ -17,6 +17,7 @@
 # under the License.
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import sqlite3
@@ -29,13 +30,9 @@ from unittest.mock import MagicMock, Mock, patch
 import jaydebeapi
 import pytest
 
-from airflow.exceptions import AirflowException
 from airflow.models import Connection
+from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException
 from airflow.providers.jdbc.hooks.jdbc import JdbcHook, suppress_and_warn
-from airflow.utils import db
-
-pytestmark = pytest.mark.db_test
-
 
 jdbc_conn_mock = Mock(name="jdbc_conn")
 logger = logging.getLogger(__name__)
@@ -79,8 +76,9 @@ def get_hook(
 
 
 class TestJdbcHook:
-    def setup_method(self):
-        db.merge_conn(
+    @pytest.fixture(autouse=True)
+    def setup_connections(self, create_connection_without_db):
+        create_connection_without_db(
             Connection(
                 conn_id="jdbc_default",
                 conn_type="jdbc",
@@ -219,7 +217,7 @@ class TestJdbcHook:
         hook_params = {"driver_path": "ParamDriverPath", "driver_class": "ParamDriverClass"}
         hook = get_hook(hook_params=hook_params)
 
-        with pytest.raises(AirflowException):
+        with pytest.raises(ValueError, match="'sqlalchemy_scheme' must be defined"):
             hook.sqlalchemy_url
 
     def test_sqlalchemy_url_with_sqlalchemy_scheme(self):
@@ -227,7 +225,8 @@ class TestJdbcHook:
         hook_params = {"driver_path": "ParamDriverPath", "driver_class": "ParamDriverClass"}
         hook = get_hook(conn_params=conn_params, hook_params=hook_params)
 
-        assert str(hook.sqlalchemy_url) == "mssql://login:password@host:1234/schema"
+        expected = "mssql://login:password@host:1234/schema"
+        assert hook.sqlalchemy_url.render_as_string(hide_password=False) == expected
 
     def test_sqlalchemy_url_with_sqlalchemy_scheme_and_query(self):
         conn_params = dict(
@@ -236,15 +235,27 @@ class TestJdbcHook:
         hook_params = {"driver_path": "ParamDriverPath", "driver_class": "ParamDriverClass"}
         hook = get_hook(conn_params=conn_params, hook_params=hook_params)
 
-        assert str(hook.sqlalchemy_url) == "mssql://login:password@host:1234/schema?servicename=test"
+        expected = "mssql://login:password@host:1234/schema?servicename=test"
+        assert hook.sqlalchemy_url.render_as_string(hide_password=False) == expected
 
     def test_sqlalchemy_url_with_sqlalchemy_scheme_and_wrong_query_value(self):
         conn_params = dict(extra=json.dumps(dict(sqlalchemy_scheme="mssql", sqlalchemy_query="wrong type")))
         hook_params = {"driver_path": "ParamDriverPath", "driver_class": "ParamDriverClass"}
         hook = get_hook(conn_params=conn_params, hook_params=hook_params)
 
-        with pytest.raises(AirflowException):
+        with pytest.raises(TypeError, match="'sqlalchemy_query' must be of type dict"):
             hook.sqlalchemy_url
+
+    def test_sqlalchemy_url_raises_when_sqlalchemy_is_not_installed(self):
+        conn_params = dict(extra=json.dumps(dict(sqlalchemy_scheme="mssql")))
+        hook = get_hook(conn_params=conn_params)
+
+        with patch.dict("sys.modules", {"sqlalchemy.engine": None}):
+            with pytest.raises(
+                AirflowOptionalProviderFeatureException,
+                match=r"apache-airflow-providers-jdbc\[sqlalchemy\]",
+            ):
+                hook.sqlalchemy_url
 
     def test_get_sqlalchemy_engine_verify_creator_is_being_used(self):
         jdbc_hook = get_hook(
@@ -270,6 +281,25 @@ class TestJdbcHook:
             host="localhost",
             schema="sap",
             port=30215,
+        )
+
+        assert jdbc_hook.dialect_name == "hana"
+
+    def test_dialect_name_when_host_is_jdbc_url(self):
+        jdbc_hook = get_hook(
+            conn_params=dict(
+                extra={
+                    "driver_class": "com.sap.db.jdbc.Driver",
+                    "driver_path": "/usr/local/lib/java/ngdbc.jar",
+                    "placeholder": "?",
+                    "sqlalchemy_scheme": "hana",
+                    "replace_statement_format": "UPSERT {} {} VALUES ({}) WITH PRIMARY KEY",
+                }
+            ),
+            conn_type="jdbc",
+            login=None,
+            password=None,
+            host="jdbc:sap://localhost:30015",
         )
 
         assert jdbc_hook.dialect_name == "hana"
@@ -309,3 +339,287 @@ class TestJdbcHook:
                     future.result()  # This will raise OSError if get_conn isn't threadsafe
 
             assert mock_connect.call_count == 10
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    @patch("airflow.providers.jdbc.hooks.jdbc.jaydebeapi.connect", autospec=True, return_value=jdbc_conn_mock)
+    def test_run_hook_lineage(self, jdbc_mock, mock_send_lineage):
+        hook = get_hook()
+        jdbc_conn_mock.cursor.return_value.rowcount = 0
+        sql = "SELECT 1"
+        hook.run(sql)
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] is None
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    @patch("airflow.providers.jdbc.hooks.jdbc.jaydebeapi.connect", autospec=True, return_value=jdbc_conn_mock)
+    def test_insert_rows_hook_lineage(self, jdbc_mock, mock_send_lineage):
+        hook = get_hook()
+        table = "table"
+        rows = [("hello",), ("world",)]
+        hook.insert_rows(table, rows)
+
+        mock_send_lineage.assert_called()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is hook
+        assert call_kw["sql"] == "INSERT INTO table  VALUES (%s)"
+        assert call_kw["row_count"] == 2
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    @mock.patch("airflow.providers.common.sql.hooks.sql.DbApiHook._get_pandas_df")
+    def test_get_df_hook_lineage(self, mock_get_pandas_df, mock_send_lineage):
+        hook = get_hook()
+        sql = "SELECT 1"
+        hook.get_df(sql, df_type="pandas")
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] is None
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    @mock.patch("airflow.providers.common.sql.hooks.sql.DbApiHook._get_pandas_df_by_chunks")
+    def test_get_df_by_chunks_hook_lineage(self, mock_get_pandas_df_by_chunks, mock_send_lineage):
+        hook = get_hook()
+        sql = "SELECT 1"
+        parameters = ("x",)
+        hook.get_df_by_chunks(sql, parameters=parameters, chunksize=1)
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] == parameters
+
+    @pytest.mark.parametrize(
+        ("params", "expected_uri"),
+        [
+            # JDBC URL fallback cases
+            pytest.param(
+                {"host": "jdbc:mysql://localhost:3306/test"},
+                "jdbc:mysql://localhost:3306/test",
+                id="jdbc-mysql",
+            ),
+            pytest.param(
+                {"host": "jdbc:postgresql://localhost:5432/test?user=user&password=pass%40word"},
+                "jdbc:postgresql://localhost:5432/test?user=user&password=pass%40word",
+                id="jdbc-postgresql",
+            ),
+            pytest.param(
+                {"host": "jdbc:oracle:thin:@localhost:1521:xe"},
+                "jdbc:oracle:thin:@localhost:1521:xe",
+                id="jdbc-oracle",
+            ),
+            pytest.param(
+                {"host": "jdbc:sqlserver://localhost:1433;databaseName=test;trustServerCertificate=true"},
+                "jdbc:sqlserver://localhost:1433;databaseName=test;trustServerCertificate=true",
+                id="jdbc-sqlserver",
+            ),
+            # SQLAlchemy URI cases
+            pytest.param(
+                {
+                    "conn_params": {
+                        "extra": json.dumps(
+                            {"sqlalchemy_scheme": "mssql", "sqlalchemy_query": {"servicename": "test"}}
+                        )
+                    }
+                },
+                "mssql://login:password@host:1234/schema?servicename=test",
+                id="sqlalchemy-scheme-with-query",
+            ),
+            pytest.param(
+                {
+                    "conn_params": {
+                        "extra": json.dumps(
+                            {"sqlalchemy_scheme": "postgresql", "sqlalchemy_driver": "psycopg2"}
+                        )
+                    }
+                },
+                "postgresql+psycopg2://login:password@host:1234/schema",
+                id="sqlalchemy-scheme-with-driver",
+            ),
+            pytest.param(
+                {
+                    "conn_params": {
+                        "extra": json.dumps(
+                            {"sqlalchemy_scheme": "postgresql", "sqlalchemy_driver": "psycopg"}
+                        )
+                    }
+                },
+                "postgresql+psycopg://login:password@host:1234/schema",
+                id="sqlalchemy-scheme-with-driver-ppg3",
+            ),
+            pytest.param(
+                {
+                    "login": "user@domain",
+                    "password": "pass/word",
+                    "schema": "my/db",
+                    "conn_params": {"extra": json.dumps({"sqlalchemy_scheme": "mysql"})},
+                },
+                "mysql://user%40domain:pass%2Fword@host:1234/my%2Fdb",
+                id="sqlalchemy-with-encoding",
+            ),
+        ],
+    )
+    def test_get_uri(self, params, expected_uri):
+        """Test get_uri with different configurations including JDBC URLs and SQLAlchemy URIs."""
+        valid_keys = {"host", "login", "password", "schema", "conn_params"}
+        hook_params = {key: params[key] for key in valid_keys & params.keys()}
+
+        jdbc_hook = get_hook(**hook_params)
+        assert jdbc_hook.get_uri() == expected_uri
+
+
+class TestJdbcHookOpenLineage:
+    """Static tests for the OpenLineage methods on JdbcHook."""
+
+    pytestmark = pytest.mark.skipif(
+        importlib.util.find_spec("airflow.providers.openlineage") is None,
+        reason="apache-airflow-providers-openlineage is not installed",
+    )
+
+    @pytest.mark.parametrize(
+        ("conn_params", "host", "port", "schema", "expected"),
+        [
+            # sqlalchemy_scheme extra (preferred path)
+            (
+                {"extra": json.dumps({"sqlalchemy_scheme": "postgresql"})},
+                "myhost",
+                5432,
+                "mydb",
+                {
+                    "scheme": "postgres",  # normalized from postgresql
+                    "authority": "myhost:5432",
+                    "database": "mydb",
+                },
+            ),
+            # sqlalchemy_scheme with driver — driver suffix stripped
+            (
+                {"extra": json.dumps({"sqlalchemy_scheme": "oracle+oracledb"})},
+                "oracle-host",
+                1521,
+                "ORCL",
+                {
+                    "scheme": "oracle",
+                    "authority": "oracle-host:1521",
+                    "database": "ORCL",
+                },
+            ),
+            # JDBC URL in host (no sqlalchemy_scheme extra)
+            (
+                {"extra": json.dumps({})},
+                "jdbc:mysql://mysql-host:3306/mydb",
+                None,
+                "mydb",
+                {
+                    "scheme": "mysql",
+                    "authority": "mysql-host:3306",
+                    "database": "mydb",
+                },
+            ),
+            # sqlalchemy_scheme passthrough for non-normalized dialects
+            (
+                {"extra": json.dumps({"sqlalchemy_scheme": "snowflake"})},
+                "account.snowflakecomputing.com",
+                443,
+                "WAREHOUSE_DB",
+                {
+                    "scheme": "snowflake",
+                    "authority": "account.snowflakecomputing.com:443",
+                    "database": "WAREHOUSE_DB",
+                },
+            ),
+        ],
+    )
+    def test_get_openlineage_database_info_returns_expected_fields(
+        self, conn_params, host, port, schema, expected
+    ):
+        hook = get_hook(host=host, port=port, schema=schema, conn_params=conn_params)
+        info = hook.get_openlineage_database_info(hook.get_connection("jdbc_default"))
+        assert info is not None
+        assert info.scheme == expected["scheme"]
+        assert info.authority == expected["authority"]
+        assert info.database == expected["database"]
+
+    def test_get_openlineage_database_info_returns_none_when_scheme_unknown(self):
+        """No sqlalchemy_scheme extra and host is not a JDBC URL — returns None.
+
+        OL then skips dataset event emission rather than emit events with an
+        unidentifiable namespace.
+        """
+        hook = get_hook(host="plain-host", port=1234, conn_params={"extra": json.dumps({})})
+        assert hook.get_openlineage_database_info(hook.get_connection("jdbc_default")) is None
+
+    @pytest.mark.parametrize(
+        ("conn_params", "host", "expected_dialect"),
+        [
+            # sqlalchemy_scheme path with normalization
+            ({"extra": json.dumps({"sqlalchemy_scheme": "postgresql"})}, "h", "postgres"),
+            ({"extra": json.dumps({"sqlalchemy_scheme": "mysql"})}, "h", "mysql"),
+            ({"extra": json.dumps({"sqlalchemy_scheme": "oracle+oracledb"})}, "h", "oracle"),
+            # JDBC URL fallback
+            ({"extra": json.dumps({})}, "jdbc:trino://h:8080/c", "trino"),
+            ({"extra": json.dumps({})}, "jdbc:postgresql://h:5432/db", "postgres"),
+            # ``jdbc:`` prefix is case-insensitive; extracted dialect is lower-cased
+            ({"extra": json.dumps({})}, "JDBC:POSTGRESQL://h:5432/db", "postgres"),
+            # neither path resolves -> generic fallback
+            ({"extra": json.dumps({})}, "plain-host", "generic"),
+            ({"extra": json.dumps({})}, "", "generic"),
+        ],
+    )
+    def test_get_openlineage_database_dialect(self, conn_params, host, expected_dialect):
+        hook = get_hook(host=host, port=None, conn_params=conn_params)
+        dialect = hook.get_openlineage_database_dialect(hook.get_connection("jdbc_default"))
+        assert dialect == expected_dialect
+
+    @pytest.mark.parametrize(
+        ("schema", "expected"),
+        [
+            ("mydb", "mydb"),
+            (None, None),
+            ("", None),
+        ],
+    )
+    def test_get_openlineage_default_schema(self, schema, expected):
+        hook = get_hook(schema=schema)
+        assert hook.get_openlineage_default_schema() == expected
+
+    @pytest.mark.parametrize(
+        ("host", "port", "expected_authority"),
+        [
+            # plain host + port (sqlalchemy-style setup)
+            ("myhost", 5432, "myhost:5432"),
+            # JDBC URL with embedded host:port
+            ("jdbc:postgresql://pg-host:5432/mydb", None, "pg-host:5432"),
+            # JDBC URL with query-string options after the database
+            ("jdbc:mysql://my-host:3306/mydb?useSSL=true", None, "my-host:3306"),
+            # SQL Server uses ``;`` to separate connection properties
+            ("jdbc:sqlserver://sql-host:1433;databaseName=db", None, "sql-host:1433"),
+            # plain host without port falls through to host-only
+            ("plain-host", None, "plain-host"),
+            # Non-standard JDBC URL with no ``://`` — unparsable, returns None
+            # (Oracle thin SID ``thin:@host:port:sid`` and H2 ``mem:test`` formats)
+            ("jdbc:oracle:thin:@host:1521:sid", None, None),
+            ("jdbc:h2:mem:test", None, None),
+            # Oracle thin service-name format uses ``@//`` instead of ``://``
+            ("jdbc:oracle:thin:@//ora-host:1521/service", None, "ora-host:1521"),
+            # Userinfo embedded in URL (legal for several drivers) is stripped
+            # so credentials never leak into the OL namespace
+            ("jdbc:postgresql://user:pass@pg-host:5432/mydb", None, "pg-host:5432"),
+            # ``jdbc:`` prefix is case-insensitive per the JDBC spec
+            ("JDBC:postgresql://pg-host:5432/mydb", None, "pg-host:5432"),
+        ],
+    )
+    def test_get_openlineage_authority_extraction(self, host, port, expected_authority):
+        hook = get_hook(
+            host=host,
+            port=port,
+            conn_params={"extra": json.dumps({"sqlalchemy_scheme": "postgresql"})},
+        )
+        info = hook.get_openlineage_database_info(hook.get_connection("jdbc_default"))
+        assert info is not None
+        assert info.authority == expected_authority

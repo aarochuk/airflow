@@ -1,4 +1,4 @@
-.. Licensed to the Apache Software Foundation (ASF) under one
+ .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
     regarding copyright ownership.  The ASF licenses this file
@@ -17,7 +17,7 @@
 
 
 
-.. _howto/connection:acr:
+.. _howto/connection:azure_container_registry:
 
 Microsoft Azure Container Registry Connection
 ==============================================

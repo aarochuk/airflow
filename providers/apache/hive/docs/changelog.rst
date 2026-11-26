@@ -25,6 +25,407 @@
 
 
 Changelog
+---------
+
+10.0.0
+......
+
+.. warning::
+  The deprecated ``HiveServer2Hook.get_pandas_df`` method has been removed. Use ``get_df(..., df_type="pandas")`` instead.
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+* ``Remove deprecated get_pandas_df methods from SQL hooks (#76130)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] Upgrade important CI environment (#76278)``
+   * ``Fix Hive invalid-port tests after core connection port validation (#75119)``
+
+9.7.1
+.....
+
+Misc
+~~~~
+
+* ``Drop support for Python 3.10 (#74157)``
+* ``Exclude SQLAlchemy 2.1.0 (#73865)``
+
+Doc-only
+~~~~~~~~
+
+* ``Update provider READMEs for the Python 3.11 baseline (#74158)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Apply ruff Python 3.11 fixes to providers (#74155)``
+   * ``[main] Upgrade important CI environment (#73629)``
+
+9.7.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Template every connection id accepted by provider operators (#73286)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert "[main] Upgrade important CI environment (#73308)" (#73621)``
+   * ``[main] Upgrade important CI environment (#73308)``
+   * ``Add tests for Hive plugin registration (#71970)``
+
+9.6.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Use parameterized queries in HiveStatsCollectionOperator (#66751)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Enable ruff B023 (function-uses-loop-variable) and fix violations (#70640)``
+   * ``Use common.compat.sdk for the remaining provider timezone imports (#71209)``
+   * ``Fix typos across contributor and provider documentation (#71884)``
+   * ``Collect the test classes pytest silently skipped (#71643)``
+   * ``Prepare providers release 2026-08-18 (#71794)``
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+   * ``Update changelog with better wording (#71161)``
+
+9.6.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Move template-field checks out of __init__ in Hive sensors (#70334)``
+
+Misc
+~~~~
+
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Use common.compat.sdk for timezone imports in providers (#70492)``
+   * ``Limit pandas to < 3 for DataFrame XComs (#70791)``
+   * ``Revert "Limit pandas to < 3 for DataFrame XComs (#70791)" (#71100)``
+
+9.6.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add Beeline JDBC parameters to HiveCliHook (#68144)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix Hive metastore partition sensor initialization (#69612)``
+
+Misc
+~~~~
+
+* ``Flag conn-fields in hook but absent from provider.yaml in static checks (#69655)``
+
+Doc-only
+~~~~~~~~
+
+* ``Document each provider's optional extras in its docs index (#69478)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+
+9.5.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add uri sanitizers and asset factories for new schemes (#66426)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``refactor: word changed from DAG to Dag in providers/apache/ (#66153)``
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Add team name to task CTX (#65617)``
+   * ``Fix stale system test documentation links (#65071)``
+
+9.4.2
+.....
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+9.4.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Replace print with logger in Hive Hook kill method (#62990)``
+* ``Pass through user-provided password in HiveServer2Hook for all auth modes (#62888)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+
+9.4.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Make hive cli 'zooKeeperNamespace' and 'ssl' parameters configurable (#63193)``
+
+Misc
+~~~~
+
+* ``Made sqlalchemy dependency optional for hive (#62329)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``change to owner airflow in example dag (#62957)``
+
+9.3.0
+.....
+
+Features
+~~~~~~~~
+
+* ``feat: Add Hook Level Lineage to SQL hooks (#61535)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix HiveServer2Hook password handling for PLAIN auth (#62364)``
+
+Misc
+~~~~
+
+* ``Bump min sqlalchemy version to 1.4.54 (#62299)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``Fix mypy type error in MsSqlToHiveOperator (#61902)``
+   * ``Migrate apache/hive connection UI metadata to YAML (#62380)``
+
+9.2.5
+.....
+
+Misc
+~~~~
+
+* ``Cleanup some dependencies (#60992)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+9.2.4
+.....
+
+Misc
+~~~~
+
+* ``Add SQLAlchemy to the dev‑dependency group in providers (#60472)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+9.2.3
+.....
+
+Misc
+~~~~
+
+* ``Consume ''AirflowOptionalProviderFeatureException'' from compat sdk in providers (#60335)``
+* ``New year means updated Copyright notices (#60344)``
+* ``Move over plugins_manager to a shared library (#59956)``
+* ``Source conf from 'airflow.sdk.configuration.conf' for apache providers (#59966)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+9.2.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix apache hive server2 hook for sqlalchemy URL (#59878)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+9.2.1
+.....
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+9.2.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+
+9.1.4
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+* ``Remove direct dependency on thrift (#57423)``
+* ``Add Kerberos dependency to hive provider (#55773)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable ruff PLW2101,PLW2901,PLW3301 rule (#57700)``
+   * ``Enable PT006 rule to 13 files in providers (apache) (#57998)``
+
+
+9.1.3
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``FIX: incorrect access of logical_date in google bigquery operator and google workflow operator (#55110)``
+* ``Replace sasl with pyhive.get_installed_sasl for pure-sasl compatibility (#55772)``
+
+Misc
+~~~~
+
+* ``Migrate Apache providers & Elasticsearch to ''common.compat'' (#57016)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Enable PT011 rule to prvoider tests (#56608)``
+   * ``Prepare release for Sep 2025 2nd wave of providers (#55688)``
+   * ``Prepare release for Sep 2025 1st wave of providers (#55203)``
+   * ``Fix Airflow 2 reference in README/index of providers (#55240)``
+   * ``Make term Dag consistent in providers docs (#55101)``
+   * ``Switch pre-commit to prek (#54258)``
+   * ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+9.1.2
+.....
+
+Misc
+~~~~
+
+* ``Fix hive changelog (#53665)``
+* ``Deprecate decorators from Core (#53629)``
+* ``Bump mypy to 1.17.0 (#53523)``
+* ``Add Python 3.13 support for Airflow. (#46891)``
+* ``Cleanup type ignores in apache/hive provider (#53302)``
+* ``Remove type ignore across codebase after mypy upgrade (#53243)``
+* ``Remove upper-binding for "python-requires" (#52980)``
+* ``Temporarily switch to use >=,< pattern instead of '~=' (#52967)``
+* ``Replace 'BaseHook' to Task SDK for 'apache/hive' (#52685)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+9.1.1
+.....
+
+Misc
+~~~~
+
+* ``Move 'BaseHook' implementation to task SDK (#51873)``
+* ``Provider Migration: Replace 'models.BaseOperator' to Task SDK for apache/hive (#52453)``
+* ``Drop support for Python 3.9 (#52072)``
+* ``Use BaseSensorOperator from task sdk in providers (#52296)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Remove pytest db markers from apache hive provider (#52097)``
+
+9.1.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.10+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Refine type overload for Hive (#50211)``
+* ``Migrate HiveServer2Hook to use get_df (#50070)``
+* ``Bump min Airflow version in providers to 2.10 (#49843)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Update description of provider.yaml dependencies (#50231)``
+   * ``Avoid committing history for providers (#49907)``
+
+9.0.6
+.....
+
+Misc
+~~~~
+
+* ``remove superfluous else block (#49199)``
+
+Doc-only
+~~~~~~~~
+
+* ``Improve example docs around SQLExecuteQueryOperator in Druid/Hive/Impala/Kylin/Pinot (#48856)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare docs for Apr 2nd wave of providers (#49051)``
+   * ``Remove unnecessary entries in get_provider_info and update the schema (#48849)``
+   * ``Remove fab from preinstalled providers (#48457)``
+   * ``Improve documentation building iteration (#48760)``
+
+9.0.5
+.....
+
+Misc
+~~~~
+
+* ``Fix MyPy failing on mssql Cursor (#48686)``
+* ``Tell mypy that pymssql.BINARY, etc have a .value (#48671)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Simplify tooling by switching completely to uv (#48223)``
+   * ``Upgrade ruff to latest version (#48553)``
 
 9.0.4
 .....
@@ -59,7 +460,7 @@ Misc
 .....
 
 .. note::
-  This version has no code changes. It's released due to yank of previous version due to packaging issues.
+  This version contains no code changes. It was released to replace a previous version that was yanked due to a packaging issue.
 
 9.0.1
 .....
@@ -107,8 +508,6 @@ Misc
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):
    * ``Use Python 3.9 as target version for Ruff & Black rules (#44298)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Update path of example dags in docs (#45069)``
 
 8.2.1
@@ -205,7 +604,8 @@ Features
 
 * ``Adding support to hive hook for high availability Hive installations (#38651)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``Fix TRY002 for apache hive provider (#38781)``
    * ``Bump ruff to 0.3.3 (#38240)``
    * ``Fix D105 for Apache Hive Provider (#38042)``
@@ -242,7 +642,8 @@ Misc
 
 * ``Fix pyhive hive_pure_sasl extra name (#37323)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``D401 Support in Providers (simple) (#37258)``
 
 6.4.2
@@ -517,7 +918,6 @@ of ``apache.hive`` the hive macros are provided by the Provider.
 * ``Move Hive macros to the provider (#28538)``
 * ``Make pandas dependency optional for Amazon Provider (#28505)``
 
-.. Review and move the new changes to one of the sections above:
 
 5.0.0
 .....
@@ -578,7 +978,8 @@ Misc
 
 * ``Add common-sql lower bound for common-sql (#25789)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``Apply PEP-563 (Postponed Evaluation of Annotations) to non-core airflow (#26289)``
 
 4.0.0

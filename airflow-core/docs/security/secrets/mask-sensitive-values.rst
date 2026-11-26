@@ -20,12 +20,25 @@
 Masking sensitive data
 ----------------------
 
-Airflow will by default mask Connection passwords and sensitive Variables and keys from a Connection's
-extra (JSON) field when they appear in Task logs, in the Variable and in the Rendered fields views of the UI.
+Airflow will by default mask Connection passwords, sensitive Variables, and keys from a Connection's
+extra (JSON) field whose names contain one or more of the sensitive keywords when they appear in Task logs,
+in the Variables UI, and in the Rendered fields views of the UI. Keys in the extra JSON that do not include
+any of these sensitive keywords will not be redacted automatically.
 
 It does this by looking for the specific *value* appearing anywhere in your output. This means that if you
 have a connection with a password of ``a``, then every instance of the letter a in your logs will be replaced
 with ``***``.
+
+A value that spans several lines, such as a private key, is also masked line by line: each eligible non-blank line,
+with surrounding whitespace removed, is masked in addition to the whole value. This also masks matching lines when
+a formatter such as ``pprint`` splits a multi-line string into separate string literals, as happens when a
+Kubernetes pod spec is printed. Lines shorter than :ref:`config:logging__min_length_masked_secret` are not masked
+on their own.
+
+This also applies to a Connection's extra field that is stored as pretty-printed, multi-line JSON: each eligible
+line of it, such as ``"timeout": 30,``, is replaced with ``***`` in your logs, including in unrelated text.
+Compact, single-line JSON does not have this effect, but saving the connection in the UI formats extra with
+indentation again.
 
 To disable masking you can set :ref:`config:core__hide_sensitive_var_conn_fields` to false.
 
@@ -38,27 +51,59 @@ Sensitive field names
 When masking is enabled, Airflow will always mask the password field of every Connection that is accessed by a
 task.
 
-It will also mask the value of a Variable, rendered template dictionaries, XCom dictionaries or the
-field of a Connection's extra JSON blob if the name is in the list of known-sensitive fields (i.e. 'access_token',
-'api_key', 'apikey', 'authorization', 'passphrase', 'passwd', 'password', 'private_key', 'secret' or 'token').
-This list can also be extended:
+It will also mask the value of an Airflow Variable, rendered template dictionaries, XCom dictionaries or the field of a Connection's extra JSON blob if the
+Variable name or field name contains any of the known-sensitive keywords.
+
+**Default Sensitive Keywords:**
+
+``access_token``, ``api_key``, ``apikey``, ``authorization``, ``passphrase``, ``passwd``, ``password``,
+``private_key``, ``secret``, ``token``, ``keyfile_dict``, ``service_account``.
+
+This list can also be extended using the environment variable ``AIRFLOW__CORE__SENSITIVE_VAR_CONN_NAMES``:
 
 .. code-block:: ini
 
     [core]
     sensitive_var_conn_names = comma,separated,sensitive,names
 
+**Examples of Masking Behavior:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 25 20 35
+
+   * - Source
+     - Key / Variable Name
+     - Matching Keyword
+     - Masking Scope
+   * - Connection Extra
+     - google_keyfile_dict
+     - keyfile_dict
+     - Everywhere (Logs, Rendered Templates, UI)
+   * - Connection Extra
+     - hello
+     - None
+     - Not Masked
+   * - Variable
+     - service_account
+     - service_account
+     - Everywhere (Logs, Rendered Templates, UI)
+   * - Variable
+     - test_keyfile_dict
+     - keyfile_dict
+     - Variables UI Only
+
 Adding your own masks
 """""""""""""""""""""
 
 If you want to mask an additional secret that is not already masked by one of the above methods, you can do it in
-your DAG file or operator's ``execute`` function using the ``mask_secret`` function. For example:
+your Dag file or operator's ``execute`` function using the ``mask_secret`` function. For example:
 
 .. code-block:: python
 
     @task
     def my_func():
-        from airflow.sdk.execution_time.secrets_masker import mask_secret
+        from airflow.sdk.log import mask_secret
 
         mask_secret("custom_value")
 
@@ -71,7 +116,7 @@ or
 
     class MyOperator(BaseOperator):
         def execute(self, context):
-            from airflow.sdk.execution_time.secrets_masker import mask_secret
+            from airflow.sdk.log import mask_secret
 
             mask_secret("custom_value")
 

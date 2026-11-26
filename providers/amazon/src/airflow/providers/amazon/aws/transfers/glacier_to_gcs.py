@@ -21,12 +21,12 @@ import tempfile
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
 from airflow.providers.amazon.aws.hooks.glacier import GlacierHook
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class GlacierToGCSOperator(BaseOperator):
@@ -59,7 +59,13 @@ class GlacierToGCSOperator(BaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields: Sequence[str] = ("vault_name", "bucket_name", "object_name")
+    template_fields: Sequence[str] = (
+        "vault_name",
+        "bucket_name",
+        "object_name",
+        "aws_conn_id",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,

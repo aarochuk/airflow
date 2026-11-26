@@ -17,8 +17,9 @@
 # under the License.
 from __future__ import annotations
 
+import re
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest import mock
 from unittest.mock import patch
 
@@ -27,7 +28,6 @@ from botocore.exceptions import ClientError
 from dateutil.tz import tzlocal
 from moto import mock_aws
 
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.hooks.logs import AwsLogsHook
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.amazon.aws.hooks.sagemaker import (
@@ -36,6 +36,9 @@ from airflow.providers.amazon.aws.hooks.sagemaker import (
     secondary_training_status_changed,
     secondary_training_status_message,
 )
+from airflow.providers.common.compat.sdk import AirflowException
+
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_1_PLUS
 
 role = "arn:aws:iam:role/test-role"
 
@@ -57,7 +60,7 @@ create_training_params = {
     "AlgorithmSpecification": {"TrainingImage": image, "TrainingInputMode": "File"},
     "RoleArn": role,
     "OutputDataConfig": {"S3OutputPath": output_url},
-    "ResourceConfig": {"InstanceCount": 2, "InstanceType": "ml.c4.8xlarge", "VolumeSizeInGB": 50},
+    "ResourceConfig": {"InstanceCount": 2, "InstanceType": "ml.c6g.8xlarge", "VolumeSizeInGB": 50},
     "TrainingJobName": job_name,
     "HyperParameters": {"k": "10", "feature_dim": "784", "mini_batch_size": "500", "force_dense": "True"},
     "StoppingCondition": {"MaxRuntimeInSeconds": 60 * 60},
@@ -121,7 +124,7 @@ create_transform_params = {
     "TransformOutput": {
         "S3OutputPath": output_url,
     },
-    "TransformResources": {"InstanceType": "ml.m4.xlarge", "InstanceCount": 123},
+    "TransformResources": {"InstanceType": "ml.m6g.xlarge", "InstanceCount": 123},
 }
 
 create_transform_params_fs = {
@@ -141,7 +144,7 @@ create_transform_params_fs = {
     "TransformOutput": {
         "S3OutputPath": output_url,
     },
-    "TransformResources": {"InstanceType": "ml.m4.xlarge", "InstanceCount": 123},
+    "TransformResources": {"InstanceType": "ml.m6g.xlarge", "InstanceCount": 123},
 }
 
 create_model_params = {
@@ -160,7 +163,7 @@ create_endpoint_config_params = {
             "VariantName": "AllTraffic",
             "ModelName": model_name,
             "InitialInstanceCount": 1,
-            "InstanceType": "ml.c4.xlarge",
+            "InstanceType": "ml.c6g.xlarge",
         }
     ],
 }
@@ -171,7 +174,7 @@ update_endpoint_params = create_endpoint_params
 
 DESCRIBE_TRAINING_COMPLETED_RETURN = {
     "TrainingJobStatus": "Completed",
-    "ResourceConfig": {"InstanceCount": 1, "InstanceType": "ml.c4.xlarge", "VolumeSizeInGB": 10},
+    "ResourceConfig": {"InstanceCount": 1, "InstanceType": "ml.c6g.xlarge", "VolumeSizeInGB": 10},
     "TrainingStartTime": datetime(2018, 2, 17, 7, 15, 0, 103000),
     "TrainingEndTime": datetime(2018, 2, 17, 7, 19, 34, 953000),
     "ResponseMetadata": {
@@ -528,7 +531,7 @@ class TestSageMakerHook:
     def test_secondary_training_status_message_status_changed(self):
         now = datetime.now(tzlocal())
         SECONDARY_STATUS_DESCRIPTION_1["LastModifiedTime"] = now
-        expected_time = now.astimezone(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        expected_time = now.astimezone(tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
         expected = f"{expected_time} {status} - {message}"
         assert (
             secondary_training_status_message(SECONDARY_STATUS_DESCRIPTION_1, SECONDARY_STATUS_DESCRIPTION_2)
@@ -703,7 +706,8 @@ class TestSageMakerHook:
             hook.delete_model(model_name="test")
         ex = raised_exception.value
         assert ex.operation_name == "DeleteModel"
-        assert ex.response["ResponseMetadata"]["HTTPStatusCode"] == 404
+        # moto changed from 404 to 400 (matching real AWS) in newer versions; accept both for compat
+        assert ex.response["ResponseMetadata"]["HTTPStatusCode"] in (400, 404)
 
     @patch("airflow.providers.amazon.aws.hooks.sagemaker.SageMakerHook.conn", new_callable=mock.PropertyMock)
     def test_start_pipeline_returns_arn(self, mock_conn):
@@ -727,6 +731,98 @@ class TestSageMakerHook:
             assert transformed_param["Name"] in params_dict.keys()
             # Value contains the value associated with the key in Name
             assert transformed_param["Value"] == params_dict[transformed_param["Name"]]
+
+    @patch("airflow.providers.amazon.aws.hooks.sagemaker.SageMakerHook.conn", new_callable=mock.PropertyMock)
+    def test_stop_processing_job(self, mock_conn):
+        hook = SageMakerHook(aws_conn_id="aws_default")
+
+        hook.stop_processing_job(processing_job_name="job_name")
+
+        mock_conn().stop_processing_job.assert_called_once_with(ProcessingJobName="job_name")
+
+    @patch("airflow.providers.amazon.aws.hooks.sagemaker.SageMakerHook.conn", new_callable=mock.PropertyMock)
+    def test_stop_processing_job_swallows_validation_exception(self, mock_conn):
+        mock_conn().stop_processing_job.side_effect = ClientError(
+            error_response={"Error": {"Code": "ValidationException", "Message": "already Completed"}},
+            operation_name="StopProcessingJob",
+        )
+
+        hook = SageMakerHook(aws_conn_id="aws_default")
+
+        hook.stop_processing_job(processing_job_name="job_name")
+
+        mock_conn().stop_processing_job.assert_called_once_with(ProcessingJobName="job_name")
+
+    @patch("airflow.providers.amazon.aws.hooks.sagemaker.SageMakerHook.conn", new_callable=mock.PropertyMock)
+    def test_stop_processing_job_raises_other_client_errors(self, mock_conn):
+        error = ClientError(
+            error_response={"Error": {"Code": "AccessDeniedException"}},
+            operation_name="StopProcessingJob",
+        )
+        mock_conn().stop_processing_job.side_effect = error
+
+        hook = SageMakerHook(aws_conn_id="aws_default")
+
+        with pytest.raises(ClientError) as raised_exception:
+            hook.stop_processing_job(processing_job_name="job_name")
+
+        assert raised_exception.value == error
+
+    @patch("airflow.providers.amazon.aws.hooks.sagemaker.SageMakerHook.conn", new_callable=mock.PropertyMock)
+    def test_stop_training_job(self, mock_conn):
+        hook = SageMakerHook(aws_conn_id="aws_default")
+
+        hook.stop_training_job(training_job_name="job_name")
+
+        mock_conn().stop_training_job.assert_called_once_with(TrainingJobName="job_name")
+
+    @patch("airflow.providers.amazon.aws.hooks.sagemaker.SageMakerHook.conn", new_callable=mock.PropertyMock)
+    def test_stop_training_job_swallows_validation_exception(self, mock_conn):
+        mock_conn().stop_training_job.side_effect = ClientError(
+            error_response={"Error": {"Code": "ValidationException", "Message": "already Completed"}},
+            operation_name="StopTrainingJob",
+        )
+
+        hook = SageMakerHook(aws_conn_id="aws_default")
+
+        hook.stop_training_job(training_job_name="job_name")
+
+        mock_conn().stop_training_job.assert_called_once_with(TrainingJobName="job_name")
+
+    @pytest.mark.skipif(
+        not AIRFLOW_V_3_1_PLUS,
+        reason="caplog only supports structured assertions under structlog, from Airflow 3.1+",
+    )
+    @patch("airflow.providers.amazon.aws.hooks.sagemaker.SageMakerHook.conn", new_callable=mock.PropertyMock)
+    def test_stop_training_job_warns_when_the_job_is_not_running(self, mock_conn, caplog):
+        mock_conn().stop_training_job.side_effect = ClientError(
+            error_response={"Error": {"Code": "ValidationException", "Message": "already Completed"}},
+            operation_name="StopTrainingJob",
+        )
+
+        hook = SageMakerHook(aws_conn_id="aws_default")
+
+        hook.stop_training_job(training_job_name="job_name")
+
+        assert {
+            "event": re.compile(r"Could not stop training job job_name"),
+            "log_level": "warning",
+        } in caplog
+
+    @patch("airflow.providers.amazon.aws.hooks.sagemaker.SageMakerHook.conn", new_callable=mock.PropertyMock)
+    def test_stop_training_job_raises_other_client_errors(self, mock_conn):
+        error = ClientError(
+            error_response={"Error": {"Code": "AccessDeniedException"}},
+            operation_name="StopTrainingJob",
+        )
+        mock_conn().stop_training_job.side_effect = error
+
+        hook = SageMakerHook(aws_conn_id="aws_default")
+
+        with pytest.raises(ClientError) as raised_exception:
+            hook.stop_training_job(training_job_name="job_name")
+
+        assert raised_exception.value == error
 
     @patch("airflow.providers.amazon.aws.hooks.sagemaker.SageMakerHook.conn", new_callable=mock.PropertyMock)
     def test_stop_pipeline_returns_status(self, mock_conn):

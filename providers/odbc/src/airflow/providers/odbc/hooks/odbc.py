@@ -97,18 +97,19 @@ class OdbcHook(DbApiHook):
     def driver(self) -> str | None:
         """Driver from init param if given; else try to find one in connection extra."""
         extra_driver = self.connection_extra_lower.get("driver")
-        from airflow.configuration import conf
+        from airflow.providers.common.compat.sdk import conf
 
-        if extra_driver and conf.getboolean("providers.odbc", "allow_driver_in_extra", fallback=False):
-            self._driver = extra_driver
-        else:
-            self.log.warning(
-                "You have supplied 'driver' via connection extra but it will not be used. In order to "
-                "use 'driver' from extra you must set airflow config setting `allow_driver_in_extra = True` "
-                "in section `providers.odbc`. Alternatively you may specify driver via 'driver' parameter of "
-                "the hook constructor or via 'hook_params' dictionary with key 'driver' if using SQL "
-                "operators."
-            )
+        if extra_driver:
+            if conf.getboolean("providers.odbc", "allow_driver_in_extra", fallback=False):
+                self._driver = extra_driver
+            else:
+                self.log.warning(
+                    "You have supplied 'driver' via connection extra but it will not be used. In order to "
+                    "use 'driver' from extra you must set airflow config setting `allow_driver_in_extra = True` "
+                    "in section `providers.odbc`. Alternatively you may specify driver via 'driver' parameter of "
+                    "the hook constructor or via 'hook_params' dictionary with key 'driver' if using SQL "
+                    "operators."
+                )
         if not self._driver:
             self._driver = self.default_driver
         return self._driver.strip().lstrip("{").rstrip("}").strip() if self._driver else None
@@ -224,6 +225,5 @@ class OdbcHook(DbApiHook):
             field_names = [col[0] for col in result[0].cursor_description]
             row_object = namedtuple("Row", field_names, rename=True)  # type: ignore
             return cast("list[tuple]", [row_object(*row) for row in result])
-        else:
-            field_names = [col[0] for col in result.cursor_description]
-            return cast("tuple", namedtuple("Row", field_names, rename=True)(*result))  # type: ignore
+        field_names = [col[0] for col in result.cursor_description]
+        return cast("tuple", namedtuple("Row", field_names, rename=True)(*result))  # type: ignore

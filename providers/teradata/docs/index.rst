@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -77,7 +76,7 @@ apache-airflow-providers-teradata package
 `Teradata <https://www.teradata.com/>`__
 
 
-Release: 3.0.2
+Release: 3.7.2
 
 Provider package
 ----------------
@@ -88,26 +87,27 @@ All classes for this package are included in the ``airflow.providers.teradata`` 
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-teradata``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-=======================================  ==================
-PIP package                              Version required
-=======================================  ==================
-``apache-airflow``                       ``>=2.9.0``
-``apache-airflow-providers-common-sql``  ``>=1.20.0``
-``teradatasqlalchemy``                   ``>=17.20.0.0``
-``teradatasql``                          ``>=17.20.0.28``
-=======================================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.12.0``
+``apache-airflow-providers-common-sql``     ``>=1.32.0``
+``teradatasqlalchemy``                      ``>=17.20.0.0``
+``teradatasql``                             ``>=17.20.0.28``
+==========================================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified provider distributions in order to use them.
@@ -123,9 +123,29 @@ You can install such cross-provider dependencies when installing from PyPI. For 
 Dependent package                                                                                                       Extra
 ======================================================================================================================  ===================
 `apache-airflow-providers-amazon <https://airflow.apache.org/docs/apache-airflow-providers-amazon>`_                    ``amazon``
-`apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_            ``common.sql``
 `apache-airflow-providers-microsoft-azure <https://airflow.apache.org/docs/apache-airflow-providers-microsoft-azure>`_  ``microsoft.azure``
+`apache-airflow-providers-ssh <https://airflow.apache.org/docs/apache-airflow-providers-ssh>`_                          ``ssh``
 ======================================================================================================================  ===================
+
+Optional dependencies
+---------------------
+
+These extras install optional third-party libraries that enable additional features of the provider.
+Install them when installing from PyPI. For example:
+
+.. code-block:: bash
+
+    pip install apache-airflow-providers-teradata[microsoft.azure]
+
+
+===================  ============================================
+Extra                Dependencies
+===================  ============================================
+``microsoft.azure``  ``apache-airflow-providers-microsoft-azure``
+``amazon``           ``apache-airflow-providers-amazon``
+``sqlalchemy``       ``sqlalchemy>=1.4.54,!=2.1.0``
+``ssh``              ``apache-airflow-providers-ssh``
+===================  ============================================
 
 Downloading official packages
 -----------------------------
@@ -133,5 +153,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-teradata 3.0.2 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_teradata-3.0.2.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_teradata-3.0.2.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_teradata-3.0.2.tar.gz.sha512>`__)
-* `The apache-airflow-providers-teradata 3.0.2 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_teradata-3.0.2-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_teradata-3.0.2-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_teradata-3.0.2-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-teradata 3.7.2 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_teradata-3.7.2.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_teradata-3.7.2.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_teradata-3.7.2.tar.gz.sha512>`__)
+* `The apache-airflow-providers-teradata 3.7.2 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_teradata-3.7.2-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_teradata-3.7.2-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_teradata-3.7.2-py3-none-any.whl.sha512>`__)

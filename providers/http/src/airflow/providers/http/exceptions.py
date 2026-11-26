@@ -16,7 +16,7 @@
 # under the License.
 from __future__ import annotations
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 
 
 class HttpErrorException(AirflowException):
@@ -25,3 +25,7 @@ class HttpErrorException(AirflowException):
 
 class HttpMethodException(AirflowException):
     """Exception raised for invalid HTTP methods in Http hook."""
+
+
+class HttpSrvLookupException(AirflowException):
+    """Exception raised when DNS SRV record resolution fails or is misconfigured in Http hook."""

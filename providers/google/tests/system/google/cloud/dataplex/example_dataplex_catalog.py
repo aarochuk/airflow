@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """
-Example Airflow DAG that shows how to use Dataplex Catalog.
+Example Airflow DAG that shows how to use Knowledge Catalog Catalog.
 """
 
 from __future__ import annotations
@@ -48,7 +48,12 @@ from airflow.providers.google.cloud.operators.dataplex import (
     DataplexCatalogUpdateEntryOperator,
     DataplexCatalogUpdateEntryTypeOperator,
 )
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
@@ -269,8 +274,8 @@ with DAG(
     search_entry = DataplexCatalogSearchEntriesOperator(
         task_id="search_entry",
         project_id=PROJECT_ID,
-        location="global",
-        query="displayname:Display Name",
+        location=GCP_LOCATION,
+        query=f"name={ENTRY_NAME}",
     )
     # [END howto_operator_dataplex_catalog_search_entry]
 
@@ -326,15 +331,22 @@ with DAG(
     # [END howto_operator_dataplex_catalog_delete_entry]
 
     (
-        [
-            create_entry_group >> get_entry_group >> update_entry_group >> delete_entry >> delete_entry_group,
-            list_entry_group,
-            create_entry_type >> get_entry_type >> update_entry_type >> update_entry >> delete_entry_type,
-            list_entry_type,
-            create_aspect_type >> get_aspect_type >> update_aspect_type >> delete_aspect_type,
-            list_aspect_type >> list_entry,
-            create_entry_type >> create_entry >> [get_entry, lookup_entry, search_entry],
-        ]
+        create_entry_group
+        >> create_entry_type
+        >> create_aspect_type
+        >> create_entry
+        >> search_entry
+        >> [get_entry_group, get_entry_type, get_aspect_type, get_entry]
+        >> lookup_entry
+        >> [list_entry, list_entry_group, list_entry_type, list_aspect_type]
+        >> update_entry_group
+        >> update_entry_type
+        >> update_entry
+        >> update_aspect_type
+        >> delete_entry
+        >> delete_aspect_type
+        >> delete_entry_type
+        >> delete_entry_group
     )
 
     from tests_common.test_utils.watcher import watcher
@@ -346,5 +358,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

@@ -16,7 +16,6 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 /**
  * @import { FlatConfig } from "@typescript-eslint/utils/ts-eslint";
  */
@@ -344,6 +343,9 @@ export const reactRules = /** @type {const} @satisfies {FlatConfig.Config} */ ({
      */
     [`${reactHooksNamespace}/rules-of-hooks`]: ERROR,
 
+    // https://github.com/facebook/react/blob/3640f38/compiler/packages/babel-plugin-react-compiler/src/CompilerError.ts#L807-L1111
+    [`${reactHooksNamespace}/todo`]: ERROR,
+
     /**
      * Prevent usage of button elements without an explicit type attribute.
      *
@@ -472,13 +474,6 @@ export const reactRules = /** @type {const} @satisfies {FlatConfig.Config} */ ({
     [`${reactNamespace}/jsx-no-comment-textnodes`]: ERROR,
 
     /**
-     * Prevent react contexts from taking non-stable values.
-     *
-     * @see [react/jsx-no-constructed-context-values](https://github.com/jsx-eslint/eslint-plugin-react/blob/HEAD/docs/rules/jsx-no-constructed-context-values.md)
-     */
-    [`${reactNamespace}/jsx-no-constructed-context-values`]: ERROR,
-
-    /**
      * Disallow problematic leaked values from being rendered.
      *
      * @see [react/jsx-no-leaked-render](https://github.com/jsx-eslint/eslint-plugin-react/blob/HEAD/docs/rules/jsx-no-leaked-render.md)
@@ -599,13 +594,6 @@ export const reactRules = /** @type {const} @satisfies {FlatConfig.Config} */ ({
     [`${reactNamespace}/self-closing-comp`]: ERROR,
 
     /**
-     * Enforce property declarations alphabetical sorting.
-     *
-     * @see [react/sort-prop-types](https://github.com/jsx-eslint/eslint-plugin-react/blob/HEAD/docs/rules/sort-prop-types.md)
-     */
-    [`${reactNamespace}/sort-prop-types`]: ERROR,
-
-    /**
      * Disallow void DOM elements from receiving children.
      *
      * @see [react/void-dom-elements-no-children](https://github.com/jsx-eslint/eslint-plugin-react/blob/HEAD/docs/rules/void-dom-elements-no-children.md)
@@ -619,5 +607,5 @@ export const reactRules = /** @type {const} @satisfies {FlatConfig.Config} */ ({
      */
     [`${reactRefreshNamespace}/only-export-components`]: [WARN, { allowConstantExport: true }],
   },
-  settings: { react: { version: "18" } },
+  settings: { react: { version: "19" } },
 });

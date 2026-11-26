@@ -27,6 +27,446 @@
 Changelog
 ---------
 
+7.0.3
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix SSHHookAsync deadlock on the extra and compress by default like SSHHook; raise asyncssh minimum to 2.18.0 (#76528)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+7.0.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix 'SSHRemoteJobOperator' on Windows hosts (#73352)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] Upgrade important CI environment (#76278)``
+
+7.0.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix 'SSHRemoteJobOperator' mangling environment values with spaces or shell characters (#74810)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+7.0.0
+.....
+
+.. warning::
+  The ``no_host_key_check`` connection extra now defaults to ``false``. A connection to a host that has
+  no entry in the known hosts file is refused unless host key verification is disabled explicitly or a
+  ``host_key`` is supplied in the connection's extra field.
+
+  Deployments that relied on the previous default can keep the earlier behaviour by adding the host key
+  to the known hosts file, supplying ``host_key`` on the connection, setting the ``no_host_key_check``
+  connection extra to ``true``, or -- when building ``SSHHook``/``SFTPHook`` directly rather than from a
+  connection -- passing the new ``no_host_key_check=True`` constructor argument. The constructor argument
+  takes precedence over the connection extra.
+
+  The previously undocumented ``ignore_hostkey_verification`` extra is now honoured as a deprecated alias
+  for ``no_host_key_check`` and emits a ``DeprecationWarning``. It had no effect before: connections that
+  set it were relying on the old permissive default rather than on the setting itself.
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+* ``Verify SSH host keys by default in SSH and SFTP hooks (#73419)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix SSH commands failing when the task holds over 1024 file descriptors (#74211)``
+
+Misc
+~~~~
+
+* ``Drop support for Python 3.10 (#74157)``
+
+Doc-only
+~~~~~~~~
+
+* ``Update provider READMEs for the Python 3.11 baseline (#74158)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] Upgrade important CI environment (#73629)``
+
+6.1.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Template every connection id accepted by provider operators (#73286)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert "[main] Upgrade important CI environment (#73308)" (#73621)``
+   * ``[main] Upgrade important CI environment (#73308)``
+   * ``Fix DeadlockImminentError when a connection is resolved inside an async task (#71890)``
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+
+6.0.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix SSHRemoteJobOperator cleanup failing with custom remote_base_dir (#69885)``
+* ``Quote remote job paths in posix ssh command builders (#70091)``
+* ``Keep SSH remote job running when its PTY session hangs up (#70573)``
+* ``Fix template-field validation timing in ssh provider operators (#70315)``
+
+Misc
+~~~~
+
+* ``Support Paramiko 5 (#69712)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix flaky test_command_timeout_fail in SSH provider (#65864)``
+   * ``Make SSH remote-job kill test diagnosable and stop it reddening main (#70562)``
+
+6.0.0
+.....
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+* ``Bump minimum paramiko to 4.0.0; DSA/DSS private keys and ssh-dss host keys are no longer supported (#69669)``
+
+  Paramiko 4.0 removed DSS/DSA support; see `paramiko changelog <https://www.paramiko.org/changelog.html>`__ for upstream details. If you use a DSA private key in an SSH connection, generate a new key (for example ``ssh-keygen -t ed25519`` or ``-t rsa``), install the public key on the server, and point your Airflow connection at the new key file or ``private_key`` extra. If you pin the remote host with a ``host_key`` extra in ``ssh-dss`` form, obtain the server's current RSA, ECDSA, or Ed25519 host key and replace the value. The same constraints apply to SFTP connections that rely on paramiko via the SSH provider.
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix SSHRemoteJobOperator still orphaning the remote job on cancellation (#69490)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+5.0.4
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix 'SSHRemoteJobOperator' orphaning the remote job on cancellation (#68644)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+   * ``Rerun flaky SSHRemoteJobOperator kill test on process-group races (#69384)``
+
+5.0.3
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Reduce SSH connection churn in 'SSHRemoteJobOperator' under high fan-out (#68115)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix flaky SSH test_command_timeout_fail on loaded CI runners (#67829)``
+
+5.0.2
+.....
+
+Misc
+~~~~
+
+* ``Use contextlib.suppress instead of try-except-pass in providers (#66178)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Providers wave 2026-04-21 (#65614)``
+   * ``Providers wave 2026-04-21``
+
+5.0.1
+.....
+
+Misc
+~~~~
+
+* ``Bump paramiko lower bound to >=3.5.1 due to adding Vespa provider (#63988)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.0.0
+.....
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+* ``Replace 'sshtunnel' with native paramiko/asyncssh tunneling (#64299)``
+
+With this change we provide minimal backward compatibility shim,
+Rather than fully re-implementing SSHTunnelForwarder's API surface. While most
+of the usages of the get_tunnel() method in the codebase should work without
+modifications - some of the more advanced use cases might require code changes,
+user need to inspect changes between the old SSHTunnelForwarder and SSHTunnel
+class if they used advanced featured of the forwarder.
+
+The details and suggestion of the code changes are explained by the deprecation/
+errors when the properties are used.
+
+The SSHTunnel provides:
+
+* Context manager (enter/exit) - the recommended interface
+* .start()/.stop() - deprecated, emit AirflowProviderDeprecationWarning
+* .local_bind_port and .local_bind_address - preserved as properties
+* getattr - raises AttributeError with migration hint for
+* SSHTunnelForwarder-specific attributes (e.g., tunnel_is_up, ssh_host)
+
+AsyncSSHTunnel is a thin wrapper that:
+
+* Manages the lifecycle (listener + SSH connection cleanup in ``aexit``)
+* Exposes .local_bind_port via listener.get_port()
+* Handles cleanup on ``aenter`` failure (closes SSH connection if forward_local_port raises)
+* Follows the async with await hook.get_tunnel(...) pattern
+* Eager socket binding in constructor
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix SSHHookAsync defaulting no_host_key_check to False unlike SSHHook (#64225)``
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.3.3
+.....
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+
+4.3.2
+.....
+
+Misc
+~~~~
+
+* ``Bump minimum cryptography to 44.0.3 and paramiko to 3.4.0 (#62723)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare documentation for next release of providers (2026-02-24) (#62495)``
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``[Part 2] Migrate connection UI metadata to YAML for more providers (#62109)``
+
+4.3.1
+.....
+
+Misc
+~~~~
+
+* ``Use common provider's get_async_connection in other providers (#56791)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.3.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add ''SSHRemoteJobOperator'' for resilient remote job execution (#60297)``
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+* ``Migrate ssh provider to use airflow.sdk.configuration.conf (#59981)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``TaskInstance unused method cleanup (#59835)``
+
+4.2.1
+.....
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.2.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Move out some exceptions to TaskSDK (#54505)``
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+* ``Remove SDK reference for NOTSET in Airflow Core (#58258)``
+* ``Fix lower bound dependency to common-compat provider (#58833)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare release for 2025-11-27 wave of providers (#58697)``
+
+4.1.6
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+
+Doc-only
+~~~~~~~~
+
+* ``[Doc] Fixing some typos and spelling errors (#57225)``
+* ``Fixing some typos and spelling errors (#57186)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to ssh Provider test (#57929)``
+
+4.1.5
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Pass required remote_host arg to SSHHook (#55664)``
+
+Misc
+~~~~
+
+* ``Migrate ssh provider to ''common.compat'' (#57004)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Enable PT001 rule to provider tests (#55935)``
+
+4.1.4
+.....
+
+
+Misc
+~~~~
+
+* ``Switch all airflow logging to structlog (#52651)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare release for Sep 2025 1st wave of providers (#55203)``
+   * ``Fix Airflow 2 reference in README/index of providers (#55240)``
+   * ``Remove airflow.models.DAG (#54383)``
+   * ``Replace API server's direct Connection access workaround in BaseHook (#54083)``
+   * ``Switch pre-commit to prek (#54258)``
+
+4.1.3
+.....
+
+Misc
+~~~~
+
+* ``Limit paramiko to '< 4.0.0' till we remove DSS support (#54078)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.1.2
+.....
+
+Misc
+~~~~
+
+* ``Add Python 3.13 support for Airflow. (#46891)``
+* ``Remove type ignore across codebase after mypy upgrade (#53243)``
+* ``Cleanup type ignores in ssh provider where possible (#53257)``
+* ``Remove upper-binding for "python-requires" (#52980)``
+* ``Temporarily switch to use >=,< pattern instead of '~=' (#52967)``
+* ``Move all BaseHook usages in providers to version_compat in ssh (#52780)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Make dag_version_id in TI non-nullable (#50825)``
+
+4.1.1
+.....
+
+Misc
+~~~~
+
+* ``Move 'BaseHook' implementation to task SDK (#51873)``
+* ``Provider Migration: Replace 'BaseOperator' to Task SDK for 'ssh' (#52558)``
+* ``Drop support for Python 3.9 (#52072)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Introducing fixture to create 'Connections' without DB in provider tests (#51930)``
+
+4.1.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.10+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump min Airflow version in providers to 2.10 (#49843)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Update description of provider.yaml dependencies (#50231)``
+   * ``Avoid committing history for providers (#49907)``
+   * ``Prepare docs for Apr 2nd wave of providers (#49051)``
+   * ``Remove unnecessary entries in get_provider_info and update the schema (#48849)``
+   * ``Remove fab from preinstalled providers (#48457)``
+   * ``Improve documentation building iteration (#48760)``
+   * ``Prepare docs for Apr 1st wave of providers (#48828)``
+   * ``Simplify tooling by switching completely to uv (#48223)``
+   * ``Prepare docs for Mar 2nd wave of providers (#48383)``
+   * ``Upgrade providers flit build requirements to 3.12.0 (#48362)``
+   * ``Move airflow sources to airflow-core package (#47798)``
+   * ``Remove links to x/twitter.com (#47801)``
+
 4.0.1
 .....
 
@@ -605,7 +1045,7 @@ Bug Fixes
    * ``Updated documentation for June 2021 provider release (#16294)``
    * ``Add Connection Documentation to more Providers (#15408)``
    * ``More documentation update for June providers release (#16405)``
-   * ``Synchronizes updated changelog after buggfix release (#16464)``
+   * ``Synchronizes updated changelog after bugfix release (#16464)``
 
 1.3.0
 .....

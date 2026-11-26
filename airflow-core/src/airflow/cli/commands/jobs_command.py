@@ -20,28 +20,36 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
-from airflow.jobs.job import Job
+from airflow.cli.utils import deprecated_for_airflowctl
+from airflow.jobs.job import EXECUTOR_JOB_TYPE, Job, JobState
 from airflow.utils.net import get_hostname
 from airflow.utils.providers_configuration_loader import providers_configuration_loaded
 from airflow.utils.session import NEW_SESSION, provide_session
-from airflow.utils.state import JobState
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
 
+@deprecated_for_airflowctl("airflowctl jobs check")
 @providers_configuration_loaded
 @provide_session
-def check(args, session: Session = NEW_SESSION) -> None:
+def check(args, *, session: Session = NEW_SESSION) -> None:
     """Check if job(s) are still alive."""
-    if args.allow_multiple and args.limit <= 1:
-        raise SystemExit("To use option --allow-multiple, you must set the limit to a value greater than 1.")
+    if args.allow_multiple and args.limit == 1:
+        raise SystemExit(
+            "To use option --allow-multiple, you must set the limit to a value greater than 1 "
+            "or 0 to disable it."
+        )
     if args.hostname and args.local:
         raise SystemExit("You can't use --hostname and --local at the same time")
 
     query = select(Job).where(Job.state == JobState.RUNNING).order_by(Job.latest_heartbeat.desc())
     if args.job_type:
         query = query.where(Job.job_type == args.job_type)
+    else:
+        # ExecutorJob rows share a host with the scheduler that owns them, not a host of their own,
+        # so an unscoped check should not count them alongside the job types --job-type can select.
+        query = query.where(Job.job_type != EXECUTOR_JOB_TYPE)
     if args.hostname:
         query = query.where(Job.hostname == args.hostname)
     if args.local:

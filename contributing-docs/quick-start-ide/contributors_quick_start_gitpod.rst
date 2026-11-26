@@ -15,12 +15,14 @@
     specific language governing permissions and limitations
     under the License.
 
-**The outline for this document in GitHub is available at top-right corner button (with 3-dots and 3 lines).**
+.. contents:: Table of Contents
+   :depth: 2
+   :local:
 
 Connect your project to Gitpod
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-1. Goto |airflow_github| and fork the project.
+1. Go to |airflow_github| and fork the project.
 
    .. |airflow_github| raw:: html
 
@@ -33,7 +35,7 @@ Connect your project to Gitpod
             alt="Forking Apache Airflow project">
      </div>
 
-2. Goto your github account's fork of airflow, click on ``Code``, and copy the clone link.
+2. Go to your github account's fork of airflow, click on ``Code``, and copy the clone link.
 
    .. raw:: html
 
@@ -42,34 +44,36 @@ Connect your project to Gitpod
              alt="Cloning github fork of Apache airflow">
       </div>
 
-3. Add goto https://gitpod.io/#<copied-url> as shown.
+3. Add go to https://gitpod.io/#<copied-url> as shown.
 
    .. raw:: html
 
       <div align="center" style="padding-bottom:10px">
         <img src="images/airflow_gitpod_url.png"
-             alt="Open personal airflow clone with Gitpod">
+             alt="Open personal Airflow clone with Gitpod">
       </div>
 
 
 Installing Breeze
 ---------------
 
-Gitpod's default image includes the required packages. You can install Breeze using either uv or pipx:
-
-Using uv (recommended):
+Gitpod's default image includes the required packages. The recommended way to install Breeze is
+the shim installer, which works the same in Gitpod as on a local machine:
 
 .. code-block:: bash
 
    pip install uv
-   uv tool install -e ./dev/breeze
+   ./scripts/tools/setup_breeze
 
-Using pipx (alternative):
+This installs ``~/.local/bin/breeze`` as a small shim that runs Breeze via ``uv run --locked``
+from the current git worktree's ``dev/breeze`` folder, with dependencies pinned by
+``dev/breeze/uv.lock``. See
+`ADR 0017 <../../dev/breeze/doc/adr/0017-use-uvx-to-run-breeze-from-local-sources.md>`_ for the
+rationale.
 
-.. code-block:: bash
-
-   pip install pipx
-   pipx install -e ./dev/breeze
+The legacy global install path (``uv tool install -e ./dev/breeze`` or
+``pipx install -e ./dev/breeze``) still works for users who explicitly want a single shared
+install, but is no longer recommended.
 
 Initializing the Database
 -----------------------
@@ -103,7 +107,7 @@ Starting Airflow
 To start Airflow using Breeze:
 
 .. image:: images/airflow-gitpod.png
-   :alt: Open personal airflow clone with Gitpod
+   :alt: Open personal Airflow clone with Gitpod
    :align: center
    :width: 600px
 
@@ -125,4 +129,4 @@ To start Airflow in development mode:
 Next Steps
 ---------
 
-For typical development tasks, refer to the `Quick Start Guide <../03_contributors_quick_start.rst>`_.
+For typical development tasks, refer to the `Quick Start Guide <../03b_contributors_quick_start_seasoned_developers.rst>`_.

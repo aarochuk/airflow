@@ -26,34 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-discord",
         "name": "Discord",
         "description": "`Discord <https://discord.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477813,
-        "versions": [
-            "3.9.4",
-            "3.9.3",
-            "3.9.2",
-            "3.9.0",
-            "3.8.0",
-            "3.7.1",
-            "3.7.0",
-            "3.6.0",
-            "3.5.0",
-            "3.4.1",
-            "3.4.0",
-            "3.3.1",
-            "3.3.0",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.1.4",
-            "2.0.4",
-            "2.0.3",
-            "2.0.2",
-            "2.0.1",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Discord",
@@ -77,14 +49,12 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.discord.hooks.discord_webhook.DiscordWebhookHook",
+                "hook-name": "Discord",
                 "connection-type": "discord",
+                "conn-fields": {
+                    "webhook_endpoint": {"label": "Webhook Endpoint", "schema": {"type": ["string", "null"]}}
+                },
             }
         ],
         "notifications": ["airflow.providers.discord.notifications.discord.DiscordNotifier"],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-common-compat>=1.6.0",
-            "apache-airflow-providers-http",
-        ],
-        "devel-dependencies": [],
     }

@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 import os
 from importlib.util import find_spec
+from tomllib import loads as load_tomllib
 
 import pytest
+import yaml
 from python_on_whales import DockerException
 
 from docker_tests.constants import AIRFLOW_ROOT_PATH
@@ -35,11 +37,6 @@ from docker_tests.docker_utils import (
 PROD_IMAGE_PROVIDERS_FILE_PATH = AIRFLOW_ROOT_PATH / "prod_image_installed_providers.txt"
 AIRFLOW_CORE_PYPROJECT_TOML = AIRFLOW_ROOT_PATH / "airflow-core" / "pyproject.toml"
 
-try:
-    from tomllib import loads as load_tomllib
-except ImportError:
-    from tomli import loads as load_tomllib
-
 airflow_core_pyproject_toml = load_tomllib(AIRFLOW_CORE_PYPROJECT_TOML.read_text())
 
 SLIM_IMAGE_PROVIDERS = []
@@ -53,6 +50,41 @@ REGULAR_IMAGE_PROVIDERS = [
     for provider_id in PROD_IMAGE_PROVIDERS_FILE_PATH.read_text().splitlines()
     if not provider_id.startswith("#")
 ]
+
+testing_slim_image = os.environ.get("TEST_SLIM_IMAGE", str(False)).lower() in ("true", "1", "yes")
+
+
+def _get_provider_python_exclusions() -> dict[str, list[str]]:
+    """Return mapping of provider_id -> list of excluded Python minor versions from provider.yaml."""
+    exclusions: dict[str, list[str]] = {}
+    providers_root = AIRFLOW_ROOT_PATH / "providers"
+    for line in PROD_IMAGE_PROVIDERS_FILE_PATH.read_text().splitlines():
+        provider_id = line.split(">=")[0].strip()
+        if not provider_id or provider_id.startswith("#"):
+            continue
+        provider_yaml_path = providers_root / provider_id.replace(".", "/") / "provider.yaml"
+        if not provider_yaml_path.exists():
+            continue
+        with open(provider_yaml_path) as f:
+            data = yaml.safe_load(f)
+        excluded = data.get("excluded-python-versions", [])
+        if excluded:
+            exclusions[provider_id] = [str(v) for v in excluded]
+    return exclusions
+
+
+PROVIDER_PYTHON_EXCLUSIONS = _get_provider_python_exclusions()
+
+
+def _get_python_minor_version(default_docker_image: str) -> str:
+    """Get Python minor version (e.g. '3.14') from the Docker image."""
+    python_version = run_bash_in_docker("python --version", image=default_docker_image)
+    return ".".join(python_version.strip().split()[1].split(".")[:2])
+
+
+def _get_excluded_provider_ids(python_minor: str) -> set[str]:
+    """Return set of provider IDs excluded for the given Python minor version."""
+    return {pid for pid, versions in PROVIDER_PYTHON_EXCLUSIONS.items() if python_minor in versions}
 
 
 class TestCommands:
@@ -86,12 +118,13 @@ class TestCommands:
 
 class TestPythonPackages:
     def test_required_providers_are_installed(self, default_docker_image):
-        if os.environ.get("TEST_SLIM_IMAGE"):
+        if testing_slim_image:
             packages_to_install = set(SLIM_IMAGE_PROVIDERS)
-            package_file = "hatch_build.py"
         else:
-            packages_to_install = set(REGULAR_IMAGE_PROVIDERS)
-            package_file = PROD_IMAGE_PROVIDERS_FILE_PATH
+            python_minor = _get_python_minor_version(default_docker_image)
+            excluded_ids = _get_excluded_provider_ids(python_minor)
+            excluded_packages = {f"apache-airflow-providers-{pid.replace('.', '-')}" for pid in excluded_ids}
+            packages_to_install = set(REGULAR_IMAGE_PROVIDERS) - excluded_packages
         assert len(packages_to_install) != 0
         output = run_bash_in_docker(
             "airflow providers list --output json",
@@ -102,9 +135,18 @@ class TestPythonPackages:
         packages_installed = set(d["package_name"] for d in providers)
         assert len(packages_installed) != 0
 
-        assert packages_to_install == packages_installed, (
-            f"List of expected installed packages and image content mismatch. Check {package_file} file."
-        )
+        message = "List of expected installed packages and image content mismatch.\n"
+        message += f"Expected packages: {sorted(packages_to_install)}\n"
+        message += f"Installed packages: {sorted(packages_installed)}\n"
+        if testing_slim_image:
+            message += (
+                f"Please check the {AIRFLOW_CORE_PYPROJECT_TOML} file for the "
+                f"'apache-airflow-providers-' packages in `dependencies`.\n"
+            )
+        else:
+            message += f"Please check the {PROD_IMAGE_PROVIDERS_FILE_PATH} file for the expected packages.\n"
+
+        assert packages_to_install == packages_installed, message
 
     def test_pip_dependencies_conflict(self, default_docker_image):
         try:
@@ -113,7 +155,7 @@ class TestPythonPackages:
             display_dependency_conflict_message()
             raise
 
-    PACKAGE_IMPORTS = {
+    REGULAR_PACKAGE_IMPORTS: dict[str, list[str]] = {
         "amazon": ["boto3", "botocore", "watchtower"],
         "async": ["gevent", "eventlet", "greenlet"],
         "azure": [
@@ -138,11 +180,9 @@ class TestPythonPackages:
             "googleapiclient",
             "google.auth",
             "google_auth_httplib2",
-            "google.cloud.automl",
             "google.cloud.bigquery_datatransfer",
             "google.cloud.bigtable",
             "google.cloud.container",
-            "google.cloud.datacatalog",
             "google.cloud.dataproc",
             "google.cloud.dlp",
             "google.cloud.kms",
@@ -171,15 +211,33 @@ class TestPythonPackages:
         "pyodbc": ["pyodbc"],
         "redis": ["redis"],
         "sendgrid": ["sendgrid"],
-        "sftp/ssh": ["paramiko", "sshtunnel"],
+        "sftp/ssh": ["paramiko"],
         "slack": ["slack_sdk"],
         "statsd": ["statsd"],
+        "providers": [provider[len("apache-") :].replace("-", ".") for provider in REGULAR_IMAGE_PROVIDERS],
     }
 
-    @pytest.mark.skipif(os.environ.get("TEST_SLIM_IMAGE") == "true", reason="Skipped with slim image")
-    @pytest.mark.parametrize("package_name,import_names", PACKAGE_IMPORTS.items())
-    def test_check_dependencies_imports(self, package_name, import_names, default_docker_image):
-        run_python_in_docker(f"import {','.join(import_names)}", image=default_docker_image)
+    SLIM_PACKAGE_IMPORTS: dict[str, list[str]] = {
+        "providers": [provider[len("apache-") :].replace("-", ".") for provider in SLIM_IMAGE_PROVIDERS]
+    }
+
+    @pytest.mark.parametrize(
+        ("package_name", "import_names"),
+        SLIM_PACKAGE_IMPORTS.items() if testing_slim_image else REGULAR_PACKAGE_IMPORTS.items(),
+    )
+    def test_check_dependencies_imports(
+        self, package_name: str, import_names: list[str], default_docker_image: str
+    ):
+        python_minor = _get_python_minor_version(default_docker_image)
+        excluded_ids = _get_excluded_provider_ids(python_minor)
+        # Skip individual provider test cases if the provider is excluded for this Python version
+        if package_name in excluded_ids:
+            pytest.skip(f"Provider {package_name} is excluded for Python {python_minor}")
+        if package_name == "providers":
+            excluded_imports = {f"airflow.providers.{pid}" for pid in excluded_ids}
+            import_names = [name for name in import_names if name not in excluded_imports]
+        if import_names:
+            run_python_in_docker(f"import {','.join(import_names)}", image=default_docker_image)
 
     def test_there_is_no_opt_airflow_airflow_folder(self, default_docker_image):
         output = run_bash_in_docker(

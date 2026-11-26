@@ -32,6 +32,11 @@ Prerequisite Tasks
 
 .. include:: ../../_partials/prerequisite_tasks.rst
 
+Generic Parameters
+------------------
+
+.. include:: ../../_partials/generic_parameters.rst
+
 Operators
 ---------
 
@@ -48,12 +53,12 @@ Create an EMR job flow
 You can use :class:`~airflow.providers.amazon.aws.operators.emr.EmrCreateJobFlowOperator` to
 create a new EMR job flow.  The cluster will be terminated automatically after finishing the steps.
 
-The default behaviour is to mark the DAG Task node as success as soon as the cluster is launched
+The default behaviour is to mark the Dag Task node as success as soon as the cluster is launched
 (``wait_policy=None``).
 It is possible to modify this behaviour by using a different ``wait_policy``. Available options are:
 
-- ``WaitPolicy.WAIT_FOR_COMPLETION`` - DAG Task node waits for the cluster to be running
-- ``WaitPolicy.WAIT_FOR_STEPS_COMPLETION`` - DAG Task node waits for the cluster to terminate
+- ``WaitPolicy.WAIT_FOR_COMPLETION`` - Dag Task node waits for the cluster to be running
+- ``WaitPolicy.WAIT_FOR_STEPS_COMPLETION`` - Dag Task node waits for the cluster to terminate
 
 
 This operator can be run in deferrable mode by passing ``deferrable=True`` as a parameter.
@@ -112,6 +117,23 @@ available in your deployment.
     :dedent: 4
     :start-after: [START howto_operator_emr_add_steps]
     :end-before: [END howto_operator_emr_add_steps]
+
+OpenLineage parent job information
+""""""""""""""""""""""""""""""""""
+
+For Spark steps launched through ``command-runner.jar`` with ``spark-submit`` or ``run-example``,
+:class:`~airflow.providers.amazon.aws.operators.emr.EmrAddStepsOperator` can inject OpenLineage parent job
+information into the Spark arguments. This links OpenLineage events emitted by the Spark application to the
+Airflow task that submitted the step.
+
+Enable injection globally with the ``[openlineage] spark_inject_parent_job_info`` configuration option, or for
+one operator by passing ``openlineage_inject_parent_job_info=True``. The operator preserves manually configured
+``spark.openlineage.parent*`` properties and does not modify non-Spark steps. The Spark application must still
+have the OpenLineage Spark integration installed and enabled.
+
+See the `OpenLineage Spark automatic injection documentation
+<https://airflow.apache.org/docs/apache-airflow-providers-openlineage/stable/spark.html#automatic-injection>`__
+for configuration details and an example.
 
 .. _howto/operator:EmrTerminateJobFlowOperator:
 

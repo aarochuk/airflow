@@ -26,39 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-mongo",
         "name": "MongoDB",
         "description": "`MongoDB <https://www.mongodb.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477850,
-        "versions": [
-            "5.0.2",
-            "5.0.1",
-            "5.0.0",
-            "4.2.2",
-            "4.2.1",
-            "4.2.0",
-            "4.1.2",
-            "4.1.1",
-            "4.1.0",
-            "4.0.0",
-            "3.6.0",
-            "3.5.0",
-            "3.4.0",
-            "3.3.0",
-            "3.2.2",
-            "3.2.1",
-            "3.2.0",
-            "3.1.1",
-            "3.1.0",
-            "3.0.0",
-            "2.3.3",
-            "2.3.2",
-            "2.3.1",
-            "2.3.0",
-            "2.2.0",
-            "2.1.0",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "MongoDB",
@@ -71,9 +38,36 @@ def get_provider_info():
             {"integration-name": "MongoDB", "python-modules": ["airflow.providers.mongo.sensors.mongo"]}
         ],
         "hooks": [{"integration-name": "MongoDB", "python-modules": ["airflow.providers.mongo.hooks.mongo"]}],
-        "connection-types": [
-            {"hook-class-name": "airflow.providers.mongo.hooks.mongo.MongoHook", "connection-type": "mongo"}
+        "asset-uris": [
+            {
+                "schemes": ["mongodb"],
+                "handler": "airflow.providers.mongo.assets.mongo.sanitize_uri",
+                "factory": "airflow.providers.mongo.assets.mongo.create_asset",
+                "to_openlineage_converter": "airflow.providers.mongo.assets.mongo.convert_asset_to_openlineage",
+            }
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "dnspython>=1.13.0", "pymongo>=4.0.0,<4.11.0"],
-        "devel-dependencies": ["mongomock>=4.0.0"],
+        "dataset-uris": [
+            {
+                "schemes": ["mongodb"],
+                "handler": "airflow.providers.mongo.assets.mongo.sanitize_uri",
+                "factory": "airflow.providers.mongo.assets.mongo.create_asset",
+                "to_openlineage_converter": "airflow.providers.mongo.assets.mongo.convert_asset_to_openlineage",
+            }
+        ],
+        "connection-types": [
+            {
+                "hook-class-name": "airflow.providers.mongo.hooks.mongo.MongoHook",
+                "hook-name": "MongoDB",
+                "connection-type": "mongo",
+                "conn-fields": {
+                    "srv": {"label": "Srv", "schema": {"type": ["boolean", "null"]}},
+                    "ssl": {"label": "Ssl", "schema": {"type": ["boolean", "null"]}},
+                    "allow_insecure": {"label": "Allow Insecure", "schema": {"type": ["boolean", "null"]}},
+                },
+                "ui-field-behaviour": {
+                    "relabeling": {"login": "Username", "schema": "Default DB"},
+                    "placeholders": {"port": "Note: port should not be set for SRV connections"},
+                },
+            }
+        ],
     }

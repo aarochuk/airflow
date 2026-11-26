@@ -17,12 +17,37 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 
 def _wrap(val):
     if isinstance(val, dict):
         return AttributeDict(val)
     return val
+
+
+def resolve_nested(hit: dict[Any, Any], parent_class=None) -> type[Hit]:
+    """
+    Resolve nested hits from Elasticsearch by iteratively navigating the `_nested` field.
+
+    The result is used to fetch the appropriate document class to handle the hit.
+
+    This method can be used with nested Elasticsearch fields which are structured
+    as dictionaries with "field" and "_nested" keys.
+    """
+    nested_path: list[str] = []
+    nesting = hit["_nested"]
+    while nesting and "field" in nesting:
+        nested_path.append(nesting["field"])
+        nesting = nesting.get("_nested")
+    nested_path_str = ".".join(nested_path)
+
+    if hasattr(parent_class, "_index"):
+        nested_field = parent_class._index.resolve_field(nested_path_str)
+        if nested_field is not None:
+            return nested_field._doc_class
+
+    return Hit
 
 
 class AttributeList:
@@ -36,7 +61,7 @@ class AttributeList:
     def __getitem__(self, k):
         """Retrieve an item or a slice from the list. If the item is a dictionary, it is wrapped in an AttributeDict."""
         val = self._l_[k]
-        if isinstance(val, slice):
+        if isinstance(k, slice):
             return AttributeList(val)
         return _wrap(val)
 
@@ -79,9 +104,7 @@ class Hit(AttributeDict):
     """
 
     def __init__(self, document):
-        data = {}
-        if "_source" in document:
-            data = document["_source"]
+        data = dict(document.get("_source", {}))
         if "fields" in document:
             data.update(document["fields"])
 

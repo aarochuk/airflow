@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -31,25 +32,24 @@ from google.cloud.bigquery import (
     ExtractJob,
     LoadJob,
     QueryJob,
-    SchemaField,
     UnknownJob,
 )
 from google.cloud.bigquery.table import EncryptionConfiguration, Table, TableReference
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
-from airflow.models import BaseOperator
+from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.providers.common.compat.sdk import AirflowException, conf
 from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook, BigQueryJob
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
 from airflow.providers.google.cloud.links.bigquery import BigQueryTableLink
 from airflow.providers.google.cloud.triggers.bigquery import BigQueryInsertJobTrigger
 from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID
+from airflow.providers.google.version_compat import BaseOperator
 from airflow.utils.helpers import merge_dicts
 
 if TYPE_CHECKING:
     from google.api_core.retry import Retry
 
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 ALLOWED_FORMATS = [
     "CSV",
@@ -58,6 +58,7 @@ ALLOWED_FORMATS = [
     "GOOGLE_SHEETS",
     "DATASTORE_BACKUP",
     "PARQUET",
+    "ORC",
 ]
 
 
@@ -119,6 +120,9 @@ class GCSToBigQueryOperator(BaseOperator):
         If true, the extra values are ignored. If false, records with extra columns
         are treated as bad records, and if there are too many bad records, an
         invalid error is returned in the job result.
+        For CSV and JSON sources with ``autodetect=True`` and no schema provided, the values are
+        checked against the schema inferred from the source data rather than the destination
+        table's schema - see ``autodetect``.
     :param allow_quoted_newlines: Whether to allow quoted newlines (true) or not (false).
     :param allow_jagged_rows: Accept rows that are missing trailing optional columns.
         The missing values are treated as nulls. If false, records with missing trailing
@@ -136,23 +140,36 @@ class GCSToBigQueryOperator(BaseOperator):
         future executions, you can pick up from the max ID.
     :param schema_update_options: Allows the schema of the destination
         table to be updated as a side effect of the load job.
-    :param src_fmt_configs: configure optional fields specific to the source format
+    :param src_fmt_configs: (Deprecated) configure optional fields specific to the source format.
+        Use ``extra_config`` instead. Note when migrating that ``extra_config`` uses the fully-nested API
+        structure, so format-specific options must be nested under their parent key
+        (e.g., ``{"parquetOptions": {"enableListInference": True}}`` rather than
+        ``{"enableListInference": True}``).
+    :param extra_config: Dict of additional properties to apply over the BigQuery job configuration.
+        When ``external_table=False``, applied over the load job configuration
+        (see `JobConfigurationLoad <https://cloud.google.com/bigquery/docs/reference/rest/v2/Job#JobConfigurationLoad>`_).
+        When ``external_table=True``, applied over the external table configuration
+        (see `ExternalDataConfiguration <https://cloud.google.com/bigquery/docs/reference/rest/v2/tables#ExternalDataConfiguration>`_).
+        Applied after all top-level params, so keys here take precedence over overlapping top-level
+        operator params. Nested dicts are replaced entirely, not deep-merged.
     :param external_table: Flag to specify if the destination table should be
         a BigQuery external table. Default Value is False.
     :param time_partitioning: configure optional time partitioning fields i.e.
         partition by field, type and  expiration as per API specifications.
         Note that 'field' is not available in concurrency with
         dataset.table$partition.
+        Ignored if 'range_partitioning' is set.
+    :param range_partitioning: configure optional range partitioning fields i.e.
+        partition by field and integer interval as per API specifications.
     :param cluster_fields: Request that the result of this load be stored sorted
         by one or more columns. BigQuery supports clustering for both partitioned and
         non-partitioned tables. The order of columns given determines the sort order.
         Not applicable for external tables.
-    :param autodetect: [Optional] Indicates if we should automatically infer the
-        options and schema for CSV and JSON sources. (Default: ``True``).
-        Parameter must be set to True if 'schema_fields' and 'schema_object' are undefined.
-        It is suggested to set to True if table are create outside of Airflow.
-        If autodetect is None and no schema is provided (neither via schema_fields
-        nor a schema_object), assume the table already exists.
+    :param autodetect: [Optional] Whether to infer the schema from the source data for CSV and
+        JSON sources when neither ``schema_fields`` nor ``schema_object`` is provided. If ``True``,
+        the schema is inferred from the source data. If ``False``, either ``schema_fields`` or
+        ``schema_object`` must be provided. If ``None``, the existing destination table's schema
+        is used. (Default: ``True``).
     :param encryption_configuration: [Optional] Custom encryption configuration (e.g., Cloud KMS keys).
 
         .. code-block:: python
@@ -181,12 +198,16 @@ class GCSToBigQueryOperator(BaseOperator):
     template_fields: Sequence[str] = (
         "bucket",
         "source_objects",
+        "schema_fields",
         "schema_object",
         "schema_object_bucket",
         "destination_project_dataset_table",
         "impersonation_chain",
         "src_fmt_configs",
+        "extra_config",
+        "gcp_conn_id",
     )
+    template_fields_renderers = {"schema_fields": "json"}
     template_ext: Sequence[str] = (".sql",)
     ui_color = "#f0eee4"
     operator_extra_links = (BigQueryTableLink(),)
@@ -216,10 +237,12 @@ class GCSToBigQueryOperator(BaseOperator):
         gcp_conn_id="google_cloud_default",
         schema_update_options=(),
         src_fmt_configs=None,
+        extra_config: dict | None = None,
         external_table=False,
         time_partitioning=None,
+        range_partitioning=None,
         cluster_fields=None,
-        autodetect=True,
+        autodetect: bool | None = True,
         encryption_configuration=None,
         location=None,
         impersonation_chain: str | Sequence[str] | None = None,
@@ -241,16 +264,15 @@ class GCSToBigQueryOperator(BaseOperator):
         self.configuration: dict[str, Any] = {}
 
         # GCS config
-        if src_fmt_configs is None:
-            src_fmt_configs = {}
         if time_partitioning is None:
             time_partitioning = {}
+        if range_partitioning is None:
+            range_partitioning = {}
+        if range_partitioning and time_partitioning:
+            raise ValueError("Only one of time_partitioning or range_partitioning can be set.")
         self.bucket = bucket
         self.source_objects = source_objects
         self.schema_object = schema_object
-
-        if schema_object_bucket is None:
-            schema_object_bucket = bucket
         self.schema_object_bucket = schema_object_bucket
 
         # BQ config
@@ -262,8 +284,7 @@ class GCSToBigQueryOperator(BaseOperator):
                 f"{source_format} is not a valid source format. "
                 f"Please use one of the following types: {ALLOWED_FORMATS}."
             )
-        else:
-            self.source_format = source_format.upper()
+        self.source_format = source_format.upper()
         self.compression = compression
         self.create_disposition = create_disposition
         self.skip_leading_rows = skip_leading_rows
@@ -282,7 +303,9 @@ class GCSToBigQueryOperator(BaseOperator):
 
         self.schema_update_options = schema_update_options
         self.src_fmt_configs = src_fmt_configs
+        self.extra_config = extra_config
         self.time_partitioning = time_partitioning
+        self.range_partitioning = range_partitioning
         self.cluster_fields = cluster_fields
         self.autodetect = autodetect
         self.encryption_configuration = encryption_configuration
@@ -324,11 +347,35 @@ class GCSToBigQueryOperator(BaseOperator):
         if job.error_result:
             raise AirflowException(f"BigQuery job {job.job_id} failed: {job.error_result}")
 
+    def _warn_on_deprecated_template_fields(self) -> None:
+        if self.src_fmt_configs:
+            warnings.warn(
+                "The 'src_fmt_configs' parameter is deprecated. Use 'extra_config' instead. "
+                "Note: 'extra_config' uses the fully-nested API structure, so format-specific "
+                "options must be nested under their parent key "
+                "(e.g., {'parquetOptions': {'enableListInference': True}} rather than "
+                "{'enableListInference': True}).",
+                AirflowProviderDeprecationWarning,
+                stacklevel=1,
+            )
+
     def execute(self, context: Context):
+        # Template fields render after __init__, so defaults that depend on a template field
+        # (schema_object_bucket falls back to bucket) and the src_fmt_configs deprecation check
+        # must run here, against the rendered values.
+        if self.src_fmt_configs is None:
+            self.src_fmt_configs = {}
+        if self.schema_object_bucket is None:
+            self.schema_object_bucket = self.bucket
+            # Not captured in the rendered-template view (it defaults after rendering), so log it.
+            self.log.info("schema_object_bucket not set, defaulting to bucket %s", self.bucket)
+        self._warn_on_deprecated_template_fields()
+
         hook = BigQueryHook(
             gcp_conn_id=self.gcp_conn_id,
             location=self.location,
             impersonation_chain=self.impersonation_chain,
+            use_legacy_sql=False,
         )
         self.hook = hook
         self.source_format = self.source_format.upper()
@@ -337,8 +384,9 @@ class GCSToBigQueryOperator(BaseOperator):
             job_id=self.job_id,
             dag_id=self.dag_id,
             task_id=self.task_id,
-            logical_date=context["logical_date"],
+            logical_date=None,
             configuration=self.configuration,
+            run_after=hook.get_run_after_or_logical_date(context),
             force_rerun=self.force_rerun,
         )
 
@@ -373,7 +421,6 @@ class GCSToBigQueryOperator(BaseOperator):
 
             BigQueryTableLink.persist(
                 context=context,
-                task_instance=self,
                 dataset_id=table_obj_api_repr["tableReference"]["datasetId"],
                 project_id=table_obj_api_repr["tableReference"]["projectId"],
                 table_id=table_obj_api_repr["tableReference"]["tableId"],
@@ -406,14 +453,13 @@ class GCSToBigQueryOperator(BaseOperator):
                         f"want to force rerun it consider setting `force_rerun=True`."
                         f"Or, if you want to reattach in this scenario add {job.state} to `reattach_states`"
                     )
-                else:
-                    # Job already reached state DONE
-                    if job.state == "DONE":
-                        raise AirflowException("Job is already in state DONE. Can not reattach to this job.")
+                # Job already reached state DONE
+                if job.state == "DONE":
+                    raise AirflowException("Job is already in state DONE. Can not reattach to this job.")
 
-                    # We are reattaching to a job
-                    self.log.info("Reattaching to existing Job in state %s", job.state)
-                    self._handle_job_error(job)
+                # We are reattaching to a job
+                self.log.info("Reattaching to existing Job in state %s", job.state)
+                self._handle_job_error(job)
 
             job_types = {
                 LoadJob._JOB_TYPE: ["sourceTable", "destinationTable"],
@@ -431,7 +477,6 @@ class GCSToBigQueryOperator(BaseOperator):
                                 table = job_configuration[job_type][table_prop]
                                 persist_kwargs = {
                                     "context": context,
-                                    "task_instance": self,
                                     "table_id": table,
                                 }
                                 if not isinstance(table, str):
@@ -451,6 +496,7 @@ class GCSToBigQueryOperator(BaseOperator):
                         project_id=self.project_id or self.hook.project_id,
                         location=self.location or self.hook.location,
                         impersonation_chain=self.impersonation_chain,
+                        cancel_on_kill=self.cancel_on_kill,
                     ),
                     method_name="execute_complete",
                 )
@@ -482,6 +528,7 @@ class GCSToBigQueryOperator(BaseOperator):
             gcp_conn_id=self.gcp_conn_id,
             location=self.location,
             impersonation_chain=self.impersonation_chain,
+            use_legacy_sql=False,
         )
         if self.max_id_key:
             self.log.info("Selecting the MAX value from BigQuery column %r...", self.max_id_key)
@@ -506,8 +553,7 @@ class GCSToBigQueryOperator(BaseOperator):
                         f"Could not determine MAX value in column {self.max_id_key} "
                         f"since the default value of 'string_field_n' was set by BQ"
                     )
-                else:
-                    raise AirflowException(e.message)
+                raise AirflowException(e.message)
             if rows:
                 for row in rows:
                     max_id = row[0] if row[0] else 0
@@ -539,7 +585,11 @@ class GCSToBigQueryOperator(BaseOperator):
             "allowJaggedRows": self.allow_jagged_rows,
             "encoding": self.encoding,
         }
-        src_fmt_to_param_mapping = {"CSV": "csvOptions", "GOOGLE_SHEETS": "googleSheetsOptions"}
+        src_fmt_to_param_mapping = {
+            "CSV": "csvOptions",
+            "GOOGLE_SHEETS": "googleSheetsOptions",
+            "PARQUET": "parquetOptions",
+        }
         src_fmt_to_configs_mapping = {
             "csvOptions": [
                 "allowJaggedRows",
@@ -549,8 +599,10 @@ class GCSToBigQueryOperator(BaseOperator):
                 "quote",
                 "encoding",
                 "preserveAsciiControlCharacters",
+                "columnNameCharacterMap",
             ],
             "googleSheetsOptions": ["skipLeadingRows"],
+            "parquetOptions": ["enumAsString", "enableListInference", "mapTargetType"],
         }
         if self.source_format in src_fmt_to_param_mapping:
             valid_configs = src_fmt_to_configs_mapping[src_fmt_to_param_mapping[self.source_format]]
@@ -559,11 +611,15 @@ class GCSToBigQueryOperator(BaseOperator):
             )
             external_config_api_repr[src_fmt_to_param_mapping[self.source_format]] = self.src_fmt_configs
 
-        external_config = ExternalConfig.from_api_repr(external_config_api_repr)
         if self.schema_fields:
-            external_config.schema = [SchemaField.from_api_repr(f) for f in self.schema_fields]
+            external_config_api_repr["schema"] = {"fields": self.schema_fields}
         if self.max_bad_records:
-            external_config.max_bad_records = self.max_bad_records
+            external_config_api_repr["maxBadRecords"] = self.max_bad_records
+
+        if self.extra_config:
+            external_config_api_repr.update(self.extra_config)
+
+        external_config = ExternalConfig.from_api_repr(external_config_api_repr)
 
         # build table definition
         table = Table(
@@ -583,9 +639,11 @@ class GCSToBigQueryOperator(BaseOperator):
         table_obj_api_repr = table.to_api_repr()
 
         self.log.info("Creating external table: %s", self.destination_project_dataset_table)
-        self.hook.create_empty_table(
+        self.hook.create_table(
             table_resource=table_obj_api_repr,
             project_id=self.project_id or self.hook.project_id,
+            dataset_id=table.dataset_id,
+            table_id=table.table_id,
             location=self.location,
             exists_ok=True,
         )
@@ -630,6 +688,8 @@ class GCSToBigQueryOperator(BaseOperator):
         )
         if self.time_partitioning:
             self.configuration["load"].update({"timePartitioning": self.time_partitioning})
+        if self.range_partitioning:
+            self.configuration["load"].update({"rangePartitioning": self.range_partitioning})
 
         if self.cluster_fields:
             self.configuration["load"].update({"clustering": {"fields": self.cluster_fields}})
@@ -638,17 +698,10 @@ class GCSToBigQueryOperator(BaseOperator):
             self.configuration["load"]["schema"] = {"fields": self.schema_fields}
 
         if self.schema_update_options:
-            if self.write_disposition not in ["WRITE_APPEND", "WRITE_TRUNCATE"]:
-                raise ValueError(
-                    "schema_update_options is only "
-                    "allowed if write_disposition is "
-                    "'WRITE_APPEND' or 'WRITE_TRUNCATE'."
-                )
-            else:
-                # To provide backward compatibility
-                self.schema_update_options = list(self.schema_update_options or [])
-                self.log.info("Adding experimental 'schemaUpdateOptions': %s", self.schema_update_options)
-                self.configuration["load"]["schemaUpdateOptions"] = self.schema_update_options
+            # To provide backward compatibility
+            self.schema_update_options = list(self.schema_update_options or [])
+            self.log.info("Adding experimental 'schemaUpdateOptions': %s", self.schema_update_options)
+            self.configuration["load"]["schemaUpdateOptions"] = self.schema_update_options
 
         if self.max_bad_records:
             self.configuration["load"]["maxBadRecords"] = self.max_bad_records
@@ -675,14 +728,26 @@ class GCSToBigQueryOperator(BaseOperator):
                 "quote",
                 "encoding",
                 "preserveAsciiControlCharacters",
+                "columnNameCharacterMap",
             ],
             "DATASTORE_BACKUP": ["projectionFields"],
             "NEWLINE_DELIMITED_JSON": ["autodetect", "ignoreUnknownValues"],
             "PARQUET": ["autodetect", "ignoreUnknownValues"],
             "AVRO": ["useAvroLogicalTypes"],
+            "ORC": ["autodetect"],
+        }
+
+        # Some source formats have nested configuration options which are not available
+        # at the top level of the load configuration.
+        src_fmt_to_param_mapping = {"PARQUET": "parquetOptions"}
+        src_fmt_to_nested_configs_mapping = {
+            "parquetOptions": ["enumAsString", "enableListInference", "mapTargetType"],
         }
 
         valid_configs = src_fmt_to_configs_mapping[self.source_format]
+
+        src_fmt_param = src_fmt_to_param_mapping.get(self.source_format)
+        valid_nested_configs = src_fmt_to_nested_configs_mapping[src_fmt_param] if src_fmt_param else None
 
         # if following fields are not specified in src_fmt_configs,
         # honor the top-level params for backward-compatibility
@@ -696,13 +761,50 @@ class GCSToBigQueryOperator(BaseOperator):
         }
 
         self.src_fmt_configs = self._validate_src_fmt_configs(
-            self.source_format, self.src_fmt_configs, valid_configs, backward_compatibility_configs
+            self.source_format,
+            self.src_fmt_configs,
+            valid_configs,
+            backward_compatibility_configs,
+            src_fmt_param,
+            valid_nested_configs,
         )
 
         self.configuration["load"].update(self.src_fmt_configs)
 
         if self.allow_jagged_rows:
             self.configuration["load"]["allowJaggedRows"] = self.allow_jagged_rows
+
+        if self.extra_config:
+            self.configuration["load"].update(self.extra_config)
+
+        # Checked against the assembled load config rather than the operator attributes, because
+        # src_fmt_configs and extra_config can still override any of these keys.
+        # Self-describing formats (Avro, Parquet, ORC, Datastore backups) carry their own schema and
+        # ignoreUnknownValues still drops file fields missing from the table, so only CSV and JSON apply.
+        load_config = self.configuration["load"]
+        if (
+            load_config.get("sourceFormat") in ("CSV", "NEWLINE_DELIMITED_JSON")
+            and load_config.get("autodetect")
+            and load_config.get("ignoreUnknownValues")
+            and "schema" not in load_config
+            and "ALLOW_FIELD_ADDITION" not in (load_config.get("schemaUpdateOptions") or [])
+        ):
+            # autodetect=None only works against a table that exists when the load job runs,
+            # and force_delete deletes it first.
+            if self.force_delete:
+                fix = "Pass `schema_fields` or `schema_object` instead."
+            else:
+                fix = (
+                    "If the destination table already exists, set `autodetect=None` to use its "
+                    "schema; otherwise pass `schema_fields` or `schema_object`."
+                )
+            self.log.warning(
+                "`ignore_unknown_values` is checked against the schema autodetected from the source "
+                "data, not against the destination table's schema, so fields missing from the "
+                "destination table are not dropped. %s",
+                fix,
+            )
+
         return self.configuration
 
     def _validate_src_fmt_configs(
@@ -711,29 +813,51 @@ class GCSToBigQueryOperator(BaseOperator):
         src_fmt_configs: dict,
         valid_configs: list[str],
         backward_compatibility_configs: dict | None = None,
+        src_fmt_param: str | None = None,
+        valid_nested_configs: list[str] | None = None,
     ) -> dict:
         """
-        Validate the given src_fmt_configs against a valid configuration for the source format.
+        Validate and format the given src_fmt_configs against a valid configuration for the source format.
 
         Adds the backward compatibility config to the src_fmt_configs.
+
+        Adds nested source format configurations if valid_nested_configs is provided.
 
         :param source_format: File format to export.
         :param src_fmt_configs: Configure optional fields specific to the source format.
         :param valid_configs: Valid configuration specific to the source format
         :param backward_compatibility_configs: The top-level params for backward-compatibility
+        :param src_fmt_param: The source format parameter for nested configurations.
+        Required when valid_nested_configs is provided.
+        :param valid_nested_configs: Valid nested configuration specific to the source format.
         """
+        valid_src_fmt_configs = {}
+
         if backward_compatibility_configs is None:
             backward_compatibility_configs = {}
 
         for k, v in backward_compatibility_configs.items():
             if k not in src_fmt_configs and k in valid_configs:
-                src_fmt_configs[k] = v
+                valid_src_fmt_configs[k] = v
 
-        for k in src_fmt_configs:
-            if k not in valid_configs:
+        if valid_nested_configs is None:
+            valid_nested_configs = []
+
+        if valid_nested_configs:
+            if src_fmt_param is None:
+                raise ValueError("src_fmt_param is required when valid_nested_configs is provided.")
+
+            valid_src_fmt_configs[src_fmt_param] = {}
+
+        for k, v in src_fmt_configs.items():
+            if k in valid_configs:
+                valid_src_fmt_configs[k] = v
+            elif k in valid_nested_configs:
+                valid_src_fmt_configs[src_fmt_param][k] = v
+            else:
                 raise ValueError(f"{k} is not a valid src_fmt_configs for type {source_format}.")
 
-        return src_fmt_configs
+        return valid_src_fmt_configs
 
     def _cleanse_time_partitioning(
         self, destination_dataset_table: str | None, time_partitioning_in: dict | None
@@ -774,6 +898,7 @@ class GCSToBigQueryOperator(BaseOperator):
                 gcp_conn_id=self.gcp_conn_id,
                 location=self.location,
                 impersonation_chain=self.impersonation_chain,
+                use_legacy_sql=False,
             )
 
         project_id = self.project_id or self.hook.project_id

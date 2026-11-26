@@ -25,28 +25,30 @@ from typing import TYPE_CHECKING, Any
 
 from airbyte_api.models import JobStatusEnum
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
 from airflow.providers.airbyte.hooks.airbyte import AirbyteHook
 from airflow.providers.airbyte.triggers.airbyte import AirbyteSyncTrigger
-from airflow.sensors.base import BaseSensorOperator
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator, conf
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class AirbyteJobSensor(BaseSensorOperator):
     """
     Check for the state of a previously submitted Airbyte job.
 
-    :param airbyte_job_id: Required. Id of the Airbyte job
+    :param airbyte_job_id: Required. Id of the Airbyte job.
     :param airbyte_conn_id: Optional. The name of the Airflow connection to get
-    :param deferrable: Run sensor in the deferrable mode.
         connection information for Airbyte. Defaults to "airbyte_default".
+    :param deferrable: Optional. Runs the sensor in deferrable mode. Defaults
+        to the config value "default_deferrable" or False, if not defined.
     :param api_version: Optional. Airbyte API version. Defaults to "v1".
     """
 
-    template_fields: Sequence[str] = ("airbyte_job_id",)
+    template_fields: Sequence[str] = (
+        "airbyte_job_id",
+        "airbyte_conn_id",
+    )
     ui_color = "#6C51FD"
 
     def __init__(
@@ -78,11 +80,12 @@ class AirbyteJobSensor(BaseSensorOperator):
 
         if status == JobStatusEnum.FAILED:
             message = f"Job failed: \n{job}"
+            self.log.debug("Failed with context: %s", context)
             raise AirflowException(message)
-        elif status == JobStatusEnum.CANCELLED:
+        if status == JobStatusEnum.CANCELLED:
             message = f"Job was cancelled: \n{job}"
             raise AirflowException(message)
-        elif status == JobStatusEnum.SUCCEEDED:
+        if status == JobStatusEnum.SUCCEEDED:
             self.log.info("Job %s completed successfully.", self.airbyte_job_id)
             return True
 
@@ -116,6 +119,7 @@ class AirbyteJobSensor(BaseSensorOperator):
                 self.log.info("%s completed successfully.", self.task_id)
                 return
             elif state == JobStatusEnum.FAILED:
+                self.log.debug("Failed with context: %s", context)
                 raise AirflowException(f"Job failed:\n{job}")
             elif state == JobStatusEnum.CANCELLED:
                 raise AirflowException(f"Job was cancelled:\n{job}")
@@ -125,14 +129,22 @@ class AirbyteJobSensor(BaseSensorOperator):
                 )
 
     def execute_complete(self, context: Context, event: Any = None) -> None:
-        """
-        Invoke this callback when the trigger fires; return immediately.
+        """Invoke this callback when the trigger fires and fail unless the job succeeded."""
+        status = event["status"]
 
-        Relies on trigger to throw an exception, otherwise it assumes execution was
-        successful.
-        """
-        if event["status"] == "error":
-            raise AirflowException(event["message"])
+        if status == "success":
+            self.log.info("%s completed successfully.", self.task_id)
+            return None
 
-        self.log.info("%s completed successfully.", self.task_id)
-        return None
+        if status == "error":
+            self.log.debug("An error occurred with context: %s", context)
+            raise RuntimeError(event["message"])
+
+        if status == "cancelled":
+            # A cancelled job must fail the sensor, matching the poke() behavior.
+            self.log.debug("Job was cancelled, context: %s", context)
+            raise RuntimeError(event["message"])
+
+        # Fail closed: a status this sensor does not model must not reach the success path.
+        self.log.debug("Unexpected status %r, context: %s", status, context)
+        raise RuntimeError(event["message"])

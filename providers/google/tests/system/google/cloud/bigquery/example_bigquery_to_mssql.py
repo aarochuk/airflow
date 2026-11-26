@@ -33,8 +33,14 @@ from datetime import datetime
 import pytest
 from pendulum import duration
 
-from airflow.decorators import task
-from airflow.models import Connection
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import task
+else:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
+
 from airflow.models.dag import DAG
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.providers.google.cloud.hooks.compute import ComputeEngineHook
@@ -51,8 +57,14 @@ from airflow.providers.google.cloud.operators.compute import (
 )
 from airflow.providers.ssh.operators.ssh import SSHOperator
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.settings import Session
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
+
+from system.google.gcp_api_client_helpers import create_airflow_connection, delete_airflow_connection
 
 try:
     from airflow.providers.google.cloud.transfers.bigquery_to_mssql import BigQueryToMsSqlOperator
@@ -63,6 +75,7 @@ ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT", "example-project")
 DAG_ID = "bigquery_to_mssql"
 
+IS_COMPOSER = bool(os.environ.get("COMPOSER_ENVIRONMENT", ""))
 
 REGION = "us-west2"
 ZONE = REGION + "-a"
@@ -106,11 +119,14 @@ GCE_INSTANCE_BODY = {
     "disks": [
         {
             "boot": True,
+            "auto_delete": True,
             "device_name": GCE_INSTANCE_NAME,
             "initialize_params": {
                 "disk_size_gb": "10",
                 "disk_type": f"zones/{ZONE}/diskTypes/pd-balanced",
-                "source_image": "projects/debian-cloud/global/images/debian-12-bookworm-v20240611",
+                # The MSSQL image layers are zstd-compressed, which needs Docker >= 23.0.
+                # Debian 12 ships docker.io 20.10, which fails the pull with "invalid tar header".
+                "source_image": "projects/debian-cloud/global/images/debian-13-trixie-v20261116",
             },
         }
     ],
@@ -149,13 +165,6 @@ fi; \
 if [ $(gcloud compute firewall-rules list --filter=name:{FIREWALL_RULE_NAME} --format="value(name)" --project={PROJECT_ID}) ]; then \
     gcloud compute firewall-rules delete {FIREWALL_RULE_NAME} --project={PROJECT_ID} --quiet; \
 fi;
-"""
-DELETE_PERSISTENT_DISK_COMMAND = f"""
-if [ $AIRFLOW__API__GOOGLE_KEY_PATH ]; then \
- gcloud auth activate-service-account --key-file=$AIRFLOW__API__GOOGLE_KEY_PATH; \
-fi;
-
-gcloud compute disks delete {GCE_INSTANCE_NAME} --project={PROJECT_ID} --zone={ZONE} --quiet
 """
 
 
@@ -230,23 +239,18 @@ with DAG(
 
     @task
     def create_connection(connection_id: str, ip_address: str) -> None:
-        connection = Connection(
-            conn_id=connection_id,
-            description="Example connection",
-            conn_type=CONNECTION_TYPE,
-            host=ip_address,
-            login=DB_USER_NAME,
-            password=DB_USER_PASSWORD,
-            port=DB_PORT,
+        create_airflow_connection(
+            connection_id=connection_id,
+            connection_conf={
+                "description": "Example connection",
+                "conn_type": CONNECTION_TYPE,
+                "host": ip_address,
+                "login": DB_USER_NAME,
+                "password": DB_USER_PASSWORD,
+                "port": DB_PORT,
+            },
+            is_composer=IS_COMPOSER,
         )
-        session = Session()
-        log.info("Removing connection %s if it exists", connection_id)
-        query = session.query(Connection).filter(Connection.conn_id == connection_id)
-        query.delete()
-
-        session.add(connection)
-        session.commit()
-        log.info("Connection %s created", connection_id)
 
     create_connection_task = create_connection(connection_id=CONNECTION_ID, ip_address=get_public_ip_task)
 
@@ -290,19 +294,9 @@ with DAG(
         trigger_rule=TriggerRule.ALL_DONE,
     )
 
-    delete_persistent_disk = BashOperator(
-        task_id="delete_persistent_disk",
-        bash_command=DELETE_PERSISTENT_DISK_COMMAND,
-        trigger_rule=TriggerRule.ALL_DONE,
-    )
-
     @task(task_id="delete_connection")
     def delete_connection(connection_id: str) -> None:
-        session = Session()
-        log.info("Removing connection %s", connection_id)
-        query = session.query(Connection).filter(Connection.conn_id == connection_id)
-        query.delete()
-        session.commit()
+        delete_airflow_connection(connection_id=connection_id, is_composer=IS_COMPOSER)
 
     delete_connection_task = delete_connection(connection_id=CONNECTION_ID)
 
@@ -326,7 +320,6 @@ with DAG(
             delete_gce_instance,
             delete_connection_task,
         ]
-        >> delete_persistent_disk
     )
 
     from tests_common.test_utils.watcher import watcher
@@ -337,5 +330,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

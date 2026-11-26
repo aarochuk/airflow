@@ -16,25 +16,33 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
+
 import { usePoolServiceGetPoolsKey, usePoolServicePostPool } from "openapi/queries";
-import { toaster } from "src/components/ui";
+
+import { toaster } from "src/system-components";
+
 import type { PoolBody } from "src/pages/Pools/PoolForm";
 
 export const useAddPool = ({ onSuccessConfirm }: { onSuccessConfirm: () => void }) => {
   const queryClient = useQueryClient();
   const [error, setError] = useState<unknown>(undefined);
-
+  const { t: translate } = useTranslation(["common", "admin"]);
   const onSuccess = async () => {
     await queryClient.invalidateQueries({
       queryKey: [usePoolServiceGetPoolsKey],
     });
 
     toaster.create({
-      description: "Pool has been added successfully",
-      title: "Pool Add Request Submitted",
+      description: translate("toaster.create.success.description", {
+        resourceName: translate("admin:pools.pool_one"),
+      }),
+      title: translate("toaster.create.success.title", {
+        resourceName: translate("admin:pools.pool_one"),
+      }),
       type: "success",
     });
 
@@ -52,6 +60,7 @@ export const useAddPool = ({ onSuccessConfirm }: { onSuccessConfirm: () => void 
 
   const addPool = (poolRequestBody: PoolBody) => {
     const parsedDescription = poolRequestBody.description === "" ? undefined : poolRequestBody.description;
+    const teamName = poolRequestBody.team_name === "" ? undefined : poolRequestBody.team_name;
 
     mutate({
       requestBody: {
@@ -59,6 +68,7 @@ export const useAddPool = ({ onSuccessConfirm }: { onSuccessConfirm: () => void 
         include_deferred: poolRequestBody.include_deferred,
         name: poolRequestBody.name,
         slots: poolRequestBody.slots,
+        team_name: teamName,
       },
     });
   };

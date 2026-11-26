@@ -21,8 +21,7 @@ from typing import Any
 
 import requests
 
-from airflow.exceptions import AirflowException
-from airflow.hooks.base import BaseHook
+from airflow.providers.common.compat.sdk import AirflowException, BaseHook
 
 OK_STATUS_CODE = 202
 
@@ -32,15 +31,28 @@ class OpenFaasHook(BaseHook):
     Interact with OpenFaaS to query, deploy, invoke and update function.
 
     :param function_name: Name of the function, Defaults to None
-    :param conn_id: openfaas connection to use, Defaults to open_faas_default
-        for example host : http://openfaas.faas.com, Connection Type : Http
+    :param conn_id: OpenFaaS connection to use, defaults to ``open_faas_default``
+        for example host : http://openfaas.faas.com
     """
+
+    conn_name_attr = "conn_id"
+    default_conn_name = "open_faas_default"
+    conn_type = "openfaas"
+    hook_name = "OpenFaaS"
 
     GET_FUNCTION = "/system/function/"
     INVOKE_ASYNC_FUNCTION = "/async-function/"
     INVOKE_FUNCTION = "/function/"
     DEPLOY_FUNCTION = "/system/functions"
     UPDATE_FUNCTION = "/system/functions"
+
+    @classmethod
+    def get_ui_field_behaviour(cls) -> dict[str, Any]:
+        """Return custom field behaviour."""
+        return {
+            "hidden_fields": ["schema", "port", "login", "password", "extra"],
+            "relabeling": {},
+        }
 
     def __init__(self, function_name=None, conn_id: str = "open_faas_default", *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -64,8 +76,7 @@ class OpenFaasHook(BaseHook):
                 self.log.error("Response status %d", response.status_code)
                 self.log.error("Failed to deploy")
                 raise AirflowException("failed to deploy")
-            else:
-                self.log.info("Function deployed %s", self.function_name)
+            self.log.info("Function deployed %s", self.function_name)
 
     def invoke_async_function(self, body: dict[str, Any]) -> None:
         """Invoke function asynchronously."""
@@ -100,8 +111,7 @@ class OpenFaasHook(BaseHook):
             self.log.error("Response status %d", response.status_code)
             self.log.error("Failed to update response %s", response.content.decode("utf-8"))
             raise AirflowException("failed to update " + self.function_name)
-        else:
-            self.log.info("Function was updated")
+        self.log.info("Function was updated")
 
     def does_function_exist(self) -> bool:
         """Whether OpenFaaS function exists or not."""
@@ -110,6 +120,5 @@ class OpenFaasHook(BaseHook):
         response = requests.get(url)
         if response.ok:
             return True
-        else:
-            self.log.error("Failed to find function %s", self.function_name)
-            return False
+        self.log.error("Failed to find function %s", self.function_name)
+        return False

@@ -1,0 +1,1065 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+from __future__ import annotations
+
+import io
+import json
+import logging
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from airflow.providers.common.ai.operators.document_loader import DocumentLoaderOperator
+from airflow.providers.common.compat.sdk import DAG
+
+
+class TestDocumentLoaderInit:
+    def test_template_fields_render_source_path_and_metadata(self):
+        """The templated fields are substituted by render_template_fields, not merely listed."""
+        op = DocumentLoaderOperator(
+            task_id="test",
+            source_path="/data/{{ ds }}/*.pdf",
+            file_type="{{ params.preferred_ext }}",
+            metadata_fields={"run_id": "{{ run_id }}"},
+        )
+
+        op.render_template_fields(
+            context={"ds": "2026-01-01", "run_id": "manual__1", "params": {"preferred_ext": ".pdf"}}
+        )
+
+        assert op.source_path == "/data/2026-01-01/*.pdf"
+        assert op.file_type == ".pdf"
+        assert op.metadata_fields == {"run_id": "manual__1"}
+        # source_bytes intentionally not templated -- Jinja stringifies bytes
+        # to their repr, which would break binary parsing.
+        assert "source_bytes" not in op.template_fields
+
+    def test_both_sources_raises(self):
+        # source_path/source_bytes provision is a constructor-time check now.
+        with pytest.raises(ValueError, match="not both"):
+            DocumentLoaderOperator(task_id="test", source_path="/tmp/file.txt", source_bytes=b"hello")
+
+    def test_neither_source_raises(self):
+        with pytest.raises(ValueError, match="Provide exactly one"):
+            DocumentLoaderOperator(task_id="test")
+
+    def test_source_bytes_without_file_type_raises_at_construction(self):
+        # Whether file_type was supplied at all is knowable without rendering, so it is a
+        # Dag-parse-time error like the source_path/source_bytes pair above it.
+        with pytest.raises(ValueError, match="'file_type' is required"):
+            DocumentLoaderOperator(task_id="test", source_bytes=b"hello")
+
+    def test_empty_bytes_without_file_type_raises_at_construction(self):
+        with pytest.raises(ValueError, match="'file_type' is required"):
+            DocumentLoaderOperator(task_id="test", source_bytes=b"")
+
+    def test_source_path_rendering_to_none_raises(self):
+        """A supplied source_path that renders to None raises ValueError, not TypeError.
+
+        Driven through real templating rather than by assigning the attribute, so the test
+        fails if the field ever stops being rendered.
+        """
+        with DAG(dag_id="native", schedule=None, render_template_as_native_obj=True):
+            op = DocumentLoaderOperator(task_id="test", source_path="{{ none }}")
+
+        op.render_template_fields(context={})
+        assert op.source_path is None
+
+        with pytest.raises(ValueError, match="'source_path' was supplied but rendered to None"):
+            op.execute(context={})
+
+    def test_file_type_rendering_to_none_raises(self):
+        """file_type passes the __init__ guard when supplied, then renders away to None."""
+        with DAG(dag_id="native", schedule=None, render_template_as_native_obj=True):
+            op = DocumentLoaderOperator(task_id="test", source_bytes=b"hello", file_type="{{ none }}")
+
+        op.render_template_fields(context={})
+        assert op.file_type is None
+
+        with pytest.raises(ValueError, match="'file_type' was supplied but rendered to None"):
+            op.execute(context={})
+
+
+class TestTextParser:
+    def test_txt_file(self, tmp_path):
+        f = tmp_path / "doc.txt"
+        f.write_text("Hello world", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 1
+        assert result[0]["text"] == "Hello world"
+        assert result[0]["metadata"]["file_name"] == "doc.txt"
+
+    def test_md_file(self, tmp_path):
+        f = tmp_path / "readme.md"
+        f.write_text("# Title\n\nSome content", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 1
+        assert "# Title" in result[0]["text"]
+
+
+class TestCsvParser:
+    def test_csv_one_doc_per_row(self, tmp_path):
+        f = tmp_path / "data.csv"
+        f.write_text("name,age\nAlice,30\nBob,25\n", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 2
+        assert "Alice" in result[0]["text"]
+        assert "Bob" in result[1]["text"]
+        assert result[0]["metadata"]["row_index"] == 0
+        assert result[1]["metadata"]["row_index"] == 1
+
+    def test_csv_empty_cells_skipped(self, tmp_path):
+        f = tmp_path / "data.csv"
+        # Bob has no age -- "age: " should not appear in his row text.
+        f.write_text("name,age\nAlice,30\nBob,\n", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+        result = op.execute(context=MagicMock())
+
+        assert "age: " not in result[1]["text"]
+        assert "Bob" in result[1]["text"]
+
+    def test_csv_from_bytes(self):
+        raw = b"col1,col2\nval1,val2\n"
+        op = DocumentLoaderOperator(task_id="test", source_bytes=raw, file_type=".csv")
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 1
+        assert "val1" in result[0]["text"]
+
+
+class TestJsonParser:
+    def test_json_array_flattens_dicts(self, tmp_path):
+        f = tmp_path / "items.json"
+        data = [{"title": "First", "tag": "alpha"}, {"title": "Second", "tag": "beta"}]
+        f.write_text(json.dumps(data), encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 2
+        # Embedding should see "title: First, tag: alpha" rather than the raw
+        # JSON syntax tokens.
+        assert "title: First" in result[0]["text"]
+        assert "tag: alpha" in result[0]["text"]
+        assert result[0]["text"].startswith("title:")  # no leading "{"
+        assert result[0]["metadata"]["item_index"] == 0
+
+    def test_json_single_object_flattens(self, tmp_path):
+        f = tmp_path / "config.json"
+        f.write_text('{"key": "value", "other": "thing"}', encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 1
+        assert "key: value" in result[0]["text"]
+        assert "other: thing" in result[0]["text"]
+
+    def test_json_string_primitives(self, tmp_path):
+        f = tmp_path / "strings.json"
+        f.write_text('["alpha", "beta", "gamma"]', encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 3
+        assert result[0]["text"] == "alpha"
+        assert result[1]["text"] == "beta"
+        assert result[2]["text"] == "gamma"
+
+    def test_json_text_field_pulls_body_keeps_rest_as_metadata(self, tmp_path):
+        f = tmp_path / "articles.json"
+        data = [
+            {"title": "Hello", "body": "First article body.", "author": "Alice"},
+            {"title": "World", "body": "Second article body.", "author": "Bob"},
+        ]
+        f.write_text(json.dumps(data), encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f), json_text_field="body")
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 2
+        assert result[0]["text"] == "First article body."
+        assert result[0]["metadata"]["title"] == "Hello"
+        assert result[0]["metadata"]["author"] == "Alice"
+        assert "body" not in result[0]["metadata"]
+
+    def test_json_from_bytes(self):
+        raw = b'[{"a": 1}, {"b": 2}]'
+        op = DocumentLoaderOperator(task_id="test", source_bytes=raw, file_type=".json")
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 2
+
+
+class TestJsonLinesParser:
+    def test_one_document_per_non_empty_line(self, tmp_path):
+        f = tmp_path / "items.jsonl"
+        f.write_text('{"title": "First"}\n\n[1, 2]\n', encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 2
+        assert result[0]["text"] == "title: First"
+        assert result[1]["text"] == "[1, 2]"
+        assert [doc["metadata"]["item_index"] for doc in result] == [0, 1]
+
+    def test_source_bytes_uses_json_text_field(self):
+        raw = b'{"body": "First", "source": "a"}\n{"body": "Second", "source": "b"}\n'
+        op = DocumentLoaderOperator(
+            task_id="test",
+            source_bytes=raw,
+            file_type=".jsonl",
+            json_text_field="body",
+        )
+        result = op.execute(context=MagicMock())
+
+        assert [doc["text"] for doc in result] == ["First", "Second"]
+        assert [doc["metadata"]["source"] for doc in result] == ["a", "b"]
+
+    def test_invalid_json_line(self):
+        raw = b'{"valid": true}\n\n{"invalid": }\n'
+        op = DocumentLoaderOperator(task_id="test", source_bytes=raw, file_type=".jsonl")
+
+        with pytest.raises(
+            ValueError, match=r"Failed to parse <bytes:\.jsonl>: invalid JSON on line 3, column 13"
+        ):
+            op.execute(context=MagicMock())
+
+    def test_invalid_json_line_in_file_names_source(self, tmp_path):
+        f = tmp_path / "invalid.jsonl"
+        f.write_text('{"valid": true}\n{"invalid": }\n', encoding="utf-8")
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+
+        with pytest.raises(ValueError, match=r"invalid JSON on line 2, column 13") as exc_info:
+            op.execute(context=MagicMock())
+
+        assert str(f) in str(exc_info.value)
+
+    def test_line_separator_inside_string_is_not_a_record_break(self):
+        # U+2028 is a legal unescaped character inside a JSON string, but str.splitlines()
+        # breaks on it, which would tear this record in two and shift every later line number.
+        raw = '{"a": "x\u2028y"}\n{"b": 1}\n'.encode()
+        op = DocumentLoaderOperator(task_id="test", source_bytes=raw, file_type=".jsonl")
+
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 2
+        assert result[0]["text"] == "a: x\u2028y"
+        assert result[1]["text"] == "b: 1"
+
+    def test_directory_recognizes_jsonl_extension(self, tmp_path):
+        (tmp_path / "items.jsonl").write_text('{"name": "kept"}\n', encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(tmp_path))
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 1
+        assert result[0]["text"] == "name: kept"
+
+
+def _make_mock_pypdf_module(mock_reader):
+    """Create a fake pypdf module with a PdfReader that returns mock_reader."""
+    mock_module = MagicMock()
+    mock_module.PdfReader = MagicMock(return_value=mock_reader)
+    return mock_module
+
+
+def _create_docx():
+    return pytest.importorskip("docx", reason="needs the 'docx' extra").Document()
+
+
+def _get_docx_bytes(doc) -> bytes:
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    return buffer.getvalue()
+
+
+def _fill_docx_table(table, rows: list[list[str]]) -> None:
+    for r, values in enumerate(rows):
+        for c, value in enumerate(values):
+            table.cell(r, c).text = value
+
+
+def _build_docx_bytes(*blocks: str | list[list[str]]) -> bytes:
+    """Build a DOCX in memory: a ``str`` adds a paragraph, a list of rows adds a table."""
+    doc = _create_docx()
+    for block in blocks:
+        if isinstance(block, str):
+            doc.add_paragraph(block)
+        else:
+            _fill_docx_table(doc.add_table(rows=len(block), cols=len(block[0])), block)
+    return _get_docx_bytes(doc)
+
+
+def _load_docx_text(raw: bytes) -> str:
+    op = DocumentLoaderOperator(task_id="test", source_bytes=raw, file_type=".docx")
+    (document,) = op.execute(context=MagicMock())
+    return document["text"]
+
+
+class TestPdfParser:
+    def test_pdf_parsing(self, tmp_path):
+        mock_page_1 = MagicMock()
+        mock_page_1.extract_text.return_value = "Page one content"
+        mock_page_2 = MagicMock()
+        mock_page_2.extract_text.return_value = "Page two content"
+
+        mock_reader = MagicMock()
+        mock_reader.pages = [mock_page_1, mock_page_2]
+
+        f = tmp_path / "report.pdf"
+        f.write_bytes(b"fake pdf bytes")
+
+        mock_pypdf = _make_mock_pypdf_module(mock_reader)
+        with patch.dict("sys.modules", {"pypdf": mock_pypdf}):
+            op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+            result = op.execute(context=MagicMock())
+
+        assert len(result) == 2
+        assert result[0]["text"] == "Page one content"
+        assert result[0]["metadata"]["page_number"] == 1
+        assert result[1]["metadata"]["page_number"] == 2
+
+    def test_pdf_from_bytes_uses_stream_no_tempfile(self, tmp_path):
+        """Bytes-mode parsing should go through BytesIO, never a temp file."""
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = "Streamed content"
+        mock_reader = MagicMock()
+        mock_reader.pages = [mock_page]
+
+        mock_pypdf = _make_mock_pypdf_module(mock_reader)
+        with patch.dict("sys.modules", {"pypdf": mock_pypdf}):
+            op = DocumentLoaderOperator(task_id="test", source_bytes=b"%PDF-1.4 ...", file_type=".pdf")
+            result = op.execute(context=MagicMock())
+
+        assert len(result) == 1
+        assert result[0]["text"] == "Streamed content"
+        # PdfReader should have been called once with a stream (BytesIO),
+        # not a file path string.
+        mock_pypdf.PdfReader.assert_called_once()
+        (call_arg,) = mock_pypdf.PdfReader.call_args.args
+        import io as _io
+
+        assert isinstance(call_arg, _io.BytesIO)
+
+    def test_pdf_skips_empty_pages(self, tmp_path):
+        mock_page = MagicMock()
+        mock_page.extract_text.return_value = "   "
+        mock_reader = MagicMock()
+        mock_reader.pages = [mock_page]
+
+        f = tmp_path / "empty.pdf"
+        f.write_bytes(b"fake pdf")
+
+        mock_pypdf = _make_mock_pypdf_module(mock_reader)
+        with patch.dict("sys.modules", {"pypdf": mock_pypdf}):
+            op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+            result = op.execute(context=MagicMock())
+
+        assert len(result) == 0
+
+    def test_pdf_missing_raises_optional_feature_exception(self, tmp_path):
+        from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException
+
+        f = tmp_path / "doc.pdf"
+        f.write_bytes(b"fake pdf")
+
+        with patch.dict("sys.modules", {"pypdf": None}):
+            op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+            with pytest.raises(AirflowOptionalProviderFeatureException):
+                op.execute(context=MagicMock())
+
+
+class TestDocxParser:
+    def test_docx_parsing(self, tmp_path):
+        f = tmp_path / "doc.docx"
+        f.write_bytes(_build_docx_bytes("First paragraph", "    ", "Second paragraph"))
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 1
+        assert "First paragraph" in result[0]["text"]
+        assert "Second paragraph" in result[0]["text"]
+
+    def test_docx_from_bytes_uses_stream_no_tempfile(self):
+        docx = pytest.importorskip("docx", reason="needs the 'docx' extra")
+        raw = _build_docx_bytes("Stream paragraph")
+
+        with patch("docx.Document", autospec=True, side_effect=docx.Document) as mock_document:
+            op = DocumentLoaderOperator(task_id="test", source_bytes=raw, file_type=".docx")
+            result = op.execute(context=MagicMock())
+
+        assert "Stream paragraph" in result[0]["text"]
+        mock_document.assert_called_once()
+        (call_arg,) = mock_document.call_args.args
+        assert isinstance(call_arg, io.BytesIO)
+
+    def test_docx_missing_raises_optional_feature_exception(self, tmp_path):
+        from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException
+
+        f = tmp_path / "doc.docx"
+        f.write_bytes(b"fake docx")
+
+        with patch.dict("sys.modules", {"docx": None}):
+            op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+            with pytest.raises(AirflowOptionalProviderFeatureException):
+                op.execute(context=MagicMock())
+
+    @pytest.mark.parametrize(
+        ("blocks", "expected"),
+        [
+            pytest.param(
+                ("Intro", "   ", [["Name", "Qty"], ["Apple", "3"]], "Outro"),
+                "Intro\n\n| Name | Qty |\n| Apple | 3 |\n\nOutro",
+                id="tables-in-document-order",
+            ),
+            pytest.param(([["a", "", "c"]],), "| a |  | c |", id="empty-cell-keeps-its-column"),
+            pytest.param(
+                ([["h1", "h2"], ["", ""], ["x", "y"]],),
+                "| h1 | h2 |\n| x | y |",
+                id="empty-row-skipped",
+            ),
+            pytest.param(
+                ("Before", [["", ""]], "After", [["Name", "Qty"]]),
+                "Before\n\nAfter\n\n| Name | Qty |",
+                id="empty-table-skipped",
+            ),
+            pytest.param(
+                ([["line1\nline2", "b"]],),
+                "| line1 line2 | b |",
+                id="cell-line-break-stays-on-row",
+            ),
+            pytest.param(
+                ([["0", "0"], ["x", "x"]],),
+                "| 0 | 0 |\n| x | x |",
+                id="equal-adjacent-unmerged-cells-kept",
+            ),
+        ],
+    )
+    def test_docx_tables(self, blocks, expected):
+        assert _load_docx_text(_build_docx_bytes(*blocks)) == expected
+
+    def test_docx_merged_cells_horizontal_once_vertical_repeated(self):
+        doc = _create_docx()
+        table = doc.add_table(rows=3, cols=3)
+        _fill_docx_table(table, [["", "", "Note"], ["a", "", "c"], ["d", "", "f"]])
+        table.cell(0, 0).merge(table.cell(0, 1)).text = "Title"
+        table.cell(1, 1).merge(table.cell(2, 1)).text = "Shared"
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == (
+            "| Title |  | Note |\n| a | Shared | c |\n| d | Shared | f |"
+        )
+
+    def test_docx_long_vertical_merge_read_in_full(self):
+        # python-docx's row.cells recurses once per merged row above, so it fails before 1000 rows.
+        # The merge starts in an empty row, which is left out, and the rows below still continue it.
+        row_count = 1100
+        doc = _create_docx()
+        table = doc.add_table(rows=row_count, cols=2)
+        for index, row in enumerate(table.rows):
+            if index:
+                row.cells[1].text = f"r{index}"
+            row._tr.tc_lst[0].vMerge = "continue" if index else "restart"
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == "\n".join(
+            f"|  | r{index} |" for index in range(1, row_count)
+        )
+
+    @patch.object(
+        DocumentLoaderOperator,
+        "_get_docx_cell_text",
+        autospec=True,
+        side_effect=DocumentLoaderOperator._get_docx_cell_text,
+    )
+    def test_docx_vertical_merge_text_extracted_once(self, mock_get_cell_text):
+        doc = _create_docx()
+        table = doc.add_table(rows=3, cols=2)
+        _fill_docx_table(table, [["", "r0"], ["", "r1"], ["", "r2"]])
+        table.cell(0, 0).merge(table.cell(2, 0)).text = "Dept"
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == "| Dept | r0 |\n| Dept | r1 |\n| Dept | r2 |"
+        assert [call.args[1].text for call in mock_get_cell_text.call_args_list] == ["Dept", "r0", "r1", "r2"]
+
+    def test_docx_grid_before_and_after_keep_columns(self):
+        doc = _create_docx()
+        table = doc.add_table(rows=3, cols=3)
+        _fill_docx_table(table, [["Product", "Revenue", "Cost"], ["", "100", "80"], ["Widget", "5", ""]])
+        starts_late, ends_early = table.rows[1]._tr, table.rows[2]._tr
+        starts_late.remove(starts_late.tc_lst[0])
+        starts_late.get_or_add_trPr().get_or_add_gridBefore().val = 1
+        ends_early.remove(ends_early.tc_lst[-1])
+        ends_early.get_or_add_trPr().get_or_add_gridAfter().val = 1
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == (
+            "| Product | Revenue | Cost |\n|  | 100 | 80 |\n| Widget | 5 |  |"
+        )
+
+    @pytest.mark.parametrize(
+        ("grid_before", "grid_after", "expected_row"),
+        [
+            pytest.param(1000, 0, "|  | x |", id="grid-before"),
+            pytest.param(0, 1000, "| x |  |", id="grid-after"),
+            pytest.param(1000, 1000, "|  | x |", id="grid-before-and-after"),
+            pytest.param(-5, 1000, "| x |  |", id="negative-grid-before"),
+        ],
+    )
+    def test_docx_grid_values_capped_at_column_count(self, grid_before, grid_after, expected_row):
+        doc = _create_docx()
+        table = doc.add_table(rows=2, cols=2)
+        _fill_docx_table(table, [["a", "b"], ["x", ""]])
+        row = table.rows[1]._tr
+        row.remove(row.tc_lst[1])
+        tr_pr = row.get_or_add_trPr()
+        tr_pr.get_or_add_gridBefore().val = grid_before
+        tr_pr.get_or_add_gridAfter().val = grid_after
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == f"| a | b |\n{expected_row}"
+
+    @pytest.mark.parametrize(
+        ("grid_before", "grid_after", "expected_row"),
+        [
+            pytest.param(1, 0, "|  | c | d |", id="grid-before"),
+            pytest.param(0, 1, "| c | d |  |", id="grid-after"),
+        ],
+    )
+    def test_docx_table_without_grid_sized_by_widest_row(self, grid_before, grid_after, expected_row):
+        doc = _create_docx()
+        table = doc.add_table(rows=2, cols=2)
+        _fill_docx_table(table, [["a", "b"], ["c", "d"]])
+        tr_pr = table.rows[1]._tr.get_or_add_trPr()
+        tr_pr.get_or_add_gridBefore().val = grid_before
+        tr_pr.get_or_add_gridAfter().val = grid_after
+        table._tbl.remove(table._tbl.tblGrid)
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == f"| a | b |\n{expected_row}"
+
+    @pytest.mark.parametrize(
+        ("grid_before", "grid_after"),
+        [
+            pytest.param(-1, 0, id="negative-grid-before"),
+            pytest.param(0, -1, id="negative-grid-after"),
+        ],
+    )
+    def test_docx_table_without_grid_ignores_negative_grid_values(self, grid_before, grid_after):
+        doc = _create_docx()
+        table = doc.add_table(rows=1, cols=2)
+        _fill_docx_table(table, [["c", "d"]])
+        tr_pr = table.rows[0]._tr.get_or_add_trPr()
+        tr_pr.get_or_add_gridBefore().val = grid_before
+        tr_pr.get_or_add_gridAfter().val = grid_after
+        table._tbl.remove(table._tbl.tblGrid)
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == "| c | d |"
+
+    def test_docx_table_without_grid_or_rows_left_out_without_warning(self, caplog):
+        doc = _create_docx()
+        tbl = doc.add_table(rows=1, cols=2)._tbl
+        tbl.remove(tbl.tr_lst[0])
+        tbl.remove(tbl.tblGrid)
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == ""
+        assert not [message for message in caplog.messages if message.startswith("Skipping a table")]
+
+    @pytest.mark.parametrize(
+        "remove_grid",
+        [
+            pytest.param(False, id="with-grid"),
+            pytest.param(True, id="without-grid"),
+        ],
+    )
+    def test_docx_table_wider_than_limit_skipped_with_warning(self, remove_grid, caplog):
+        doc = _create_docx()
+        for column_count in (1000, 1001):
+            table = doc.add_table(rows=1, cols=column_count)
+            table.cell(0, 0).text = "x"
+            if remove_grid:
+                table._tbl.remove(table._tbl.tblGrid)
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == f"| {' | '.join(['x'] + [''] * 999)} |"
+        assert (
+            "Skipping a table in <bytes:.docx>: "
+            "ValueError('the table has 1001 columns, which exceeds the maximum of 1000')"
+        ) in caplog.messages
+
+    @patch("airflow.providers.common.ai.operators.document_loader._DOCX_TABLE_MAX_CHARS", 12)
+    def test_docx_table_text_over_limit_skipped_with_warning(self, caplog):
+        # A row counts its text plus 3 characters per cell, so 6 + 6 fits the limit and 6 + 7 does not.
+        raw = _build_docx_bytes([["abc"], ["abc"]], [["abc"], ["abcd"]])
+
+        assert _load_docx_text(raw) == "| abc |\n| abc |"
+        assert (
+            "Skipping a table in <bytes:.docx>: "
+            "ValueError('the table text exceeds the maximum of 12 characters')"
+        ) in caplog.messages
+
+    @patch("airflow.providers.common.ai.operators.document_loader._DOCX_TABLE_MAX_CHARS", 12)
+    def test_docx_padding_and_repeated_merge_text_count_toward_text_limit(self, caplog):
+        doc = _create_docx()
+        # "x" padded with w:gridAfter to 4 columns counts 1 + 4 * 3.
+        padded = doc.add_table(rows=1, cols=4)
+        padded.cell(0, 0).text = "x"
+        tr = padded.rows[0]._tr
+        for tc in tr.tc_lst[1:]:
+            tr.remove(tc)
+        tr.get_or_add_trPr().get_or_add_gridAfter().val = 3
+        # A vertical merge repeats its text on each row it spans: 7 + 7.
+        merged = doc.add_table(rows=2, cols=1)
+        merged.cell(0, 0).merge(merged.cell(1, 0)).text = "abcd"
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == ""
+        assert (
+            caplog.messages.count(
+                "Skipping a table in <bytes:.docx>: "
+                "ValueError('the table text exceeds the maximum of 12 characters')"
+            )
+            == 2
+        )
+
+    @patch("airflow.providers.common.ai.operators.document_loader._DOCX_TABLE_MAX_CHARS", 20)
+    def test_docx_nested_table_text_counts_toward_parent_table_limit(self, caplog):
+        doc = _create_docx()
+        outer = doc.add_table(rows=1, cols=2)
+        outer.cell(0, 0).text = "keep"
+        # The inner table fits (8 + 3), but its parent repeats it on both merged rows: 11 + 11.
+        parent = outer.cell(0, 1).add_table(rows=2, cols=1)
+        parent.cell(0, 0).merge(parent.cell(1, 0)).add_table(rows=1, cols=1).cell(0, 0).text = "aaaaaaaa"
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == "| keep |  |"
+        assert (
+            "Skipping a table in <bytes:.docx>: "
+            "ValueError('the table text exceeds the maximum of 20 characters')"
+        ) in caplog.messages
+
+    def test_docx_vmerge_continuation_lines_up_after_capped_grid_before(self):
+        doc = _create_docx()
+        table = doc.add_table(rows=2, cols=2)
+        _fill_docx_table(table, [["a", "b"], ["", ""]])
+        row = table.rows[1]._tr
+        row.remove(row.tc_lst[0])
+        row.get_or_add_trPr().get_or_add_gridBefore().val = 1000
+        table.rows[0]._tr.tc_lst[1].vMerge = "restart"
+        row.tc_lst[0].vMerge = "continue"
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == "| a | b |\n|  | b |"
+
+    @pytest.mark.parametrize(
+        ("break_first_cell", "error"),
+        [
+            pytest.param(
+                # A vMerge continuation in the first row has no cell above it to continue.
+                lambda tc_pr: tc_pr.get_or_add_vMerge(),
+                "ValueError('w:vMerge continuation of cell 1 does not line up with a cell above it')",
+                id="first-row-vmerge-continuation",
+            ),
+            pytest.param(
+                lambda tc_pr: tc_pr.get_or_add_gridSpan(),
+                "InvalidXmlError(\"required 'w:val' attribute not present on element "
+                '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}gridSpan")',
+                id="gridspan-without-val",
+            ),
+            pytest.param(
+                lambda tc_pr: setattr(tc_pr.get_or_add_gridSpan(), "val", 100_000_000),
+                "ValueError('w:gridSpan 100000000 of cell 1 does not fit the 2 table columns')",
+                id="gridspan-wider-than-table",
+            ),
+            pytest.param(
+                lambda tc_pr: setattr(tc_pr.get_or_add_gridSpan(), "val", 0),
+                "ValueError('w:gridSpan 0 of cell 1 does not fit the 2 table columns')",
+                id="gridspan-zero",
+            ),
+            pytest.param(
+                # The first cell spans both columns on its own, so the second cell is one too many.
+                lambda tc_pr: setattr(tc_pr.get_or_add_gridSpan(), "val", 2),
+                "ValueError('w:gridSpan 1 of cell 2 does not fit the 2 table columns')",
+                id="gridspans-together-wider-than-table",
+            ),
+        ],
+    )
+    def test_docx_unreadable_table_skipped_with_warning(self, break_first_cell, error, caplog):
+        doc = _create_docx()
+        doc.add_paragraph("Before")
+        unreadable = doc.add_table(rows=2, cols=2)
+        break_first_cell(unreadable.cell(0, 0)._tc.get_or_add_tcPr())
+        doc.add_paragraph("After")
+        _fill_docx_table(doc.add_table(rows=1, cols=2), [["Name", "Qty"]])
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == "Before\n\nAfter\n\n| Name | Qty |"
+        assert f"Skipping a table in <bytes:.docx>: {error}" in caplog.messages
+
+    @pytest.mark.parametrize(
+        "merged_row",
+        [
+            pytest.param(0, id="continuation-narrower-than-cell-above"),
+            pytest.param(1, id="continuation-wider-than-cell-above"),
+        ],
+    )
+    def test_docx_vmerge_continuation_not_lining_up_skipped_with_warning(self, merged_row, caplog):
+        doc = _create_docx()
+        doc.add_paragraph("Before")
+        unreadable = doc.add_table(rows=2, cols=3)
+        _fill_docx_table(unreadable, [["a", "b", "c"], ["d", "e", "f"]])
+        # The merged row's first cell spans 2 columns while the other row's first cell spans 1.
+        unreadable.cell(merged_row, 0).merge(unreadable.cell(merged_row, 1))
+        unreadable.rows[1]._tr.tc_lst[0].vMerge = "continue"
+        doc.add_paragraph("After")
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == "Before\n\nAfter"
+        assert (
+            "Skipping a table in <bytes:.docx>: "
+            "ValueError('w:vMerge continuation of cell 1 does not line up with a cell above it')"
+        ) in caplog.messages
+
+    def test_docx_unreadable_nested_table_skipped_with_warning(self, caplog):
+        doc = _create_docx()
+        doc.add_paragraph("Before")
+        outer = doc.add_table(rows=2, cols=2)
+        _fill_docx_table(outer, [["Name", "Qty"], ["Apple", ""]])
+        nested = outer.cell(1, 1).add_table(rows=2, cols=2)
+        nested.cell(0, 0)._tc.get_or_add_tcPr().get_or_add_vMerge()
+        doc.add_paragraph("After")
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == "Before\n\n| Name | Qty |\n| Apple |  |\n\nAfter"
+        assert (
+            "Skipping a table in <bytes:.docx>: "
+            "ValueError('w:vMerge continuation of cell 1 does not line up with a cell above it')"
+        ) in caplog.messages
+
+    def test_docx_nested_table_flattened_into_its_cell(self):
+        doc = _create_docx()
+        table = doc.add_table(rows=1, cols=2)
+        _fill_docx_table(table, [["Outer", "Right"]])
+        _fill_docx_table(table.cell(0, 0).add_table(rows=2, cols=2), [["n1", "n2"], ["n3", "n4"]])
+
+        assert _load_docx_text(_get_docx_bytes(doc)) == "| Outer n1 / n2; n3 / n4 | Right |"
+
+
+class TestFileDiscovery:
+    def test_glob_multiple_files(self, tmp_path):
+        (tmp_path / "a.txt").write_text("file a", encoding="utf-8")
+        (tmp_path / "b.txt").write_text("file b", encoding="utf-8")
+        (tmp_path / "c.md").write_text("file c", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(tmp_path / "*.txt"))
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 2
+        texts = {doc["text"] for doc in result}
+        assert texts == {"file a", "file b"}
+
+    def test_recursive_glob(self, tmp_path):
+        nested = tmp_path / "year" / "month"
+        nested.mkdir(parents=True)
+        (tmp_path / "top.txt").write_text("top", encoding="utf-8")
+        (nested / "deep.txt").write_text("deep", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(tmp_path / "**" / "*.txt"))
+        result = op.execute(context=MagicMock())
+
+        texts = {doc["text"] for doc in result}
+        assert texts == {"top", "deep"}
+
+    def test_directory_source(self, tmp_path):
+        (tmp_path / "x.txt").write_text("hello", encoding="utf-8")
+        (tmp_path / "y.md").write_text("world", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(tmp_path))
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 2
+
+    def test_directory_mode_skips_dotfiles(self, tmp_path):
+        (tmp_path / "keep.txt").write_text("keep", encoding="utf-8")
+        (tmp_path / ".DS_Store").write_bytes(b"\x00\x00")
+        (tmp_path / ".hidden.txt").write_text("nope", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(tmp_path))
+        result = op.execute(context=MagicMock())
+
+        # Only the non-dotfile is parsed; .DS_Store and .hidden.txt are ignored.
+        assert len(result) == 1
+        assert result[0]["text"] == "keep"
+
+    def test_directory_mode_warns_and_skips_unknown_extensions(self, tmp_path, caplog):
+        (tmp_path / "keep.txt").write_text("keep", encoding="utf-8")
+        (tmp_path / "stray.xyz").write_text("ignored", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(tmp_path))
+        with caplog.at_level(logging.WARNING):
+            result = op.execute(context=MagicMock())
+
+        assert len(result) == 1
+        assert result[0]["text"] == "keep"
+        assert any(".xyz" in record.message for record in caplog.records)
+
+    def test_file_extensions_filter(self, tmp_path):
+        (tmp_path / "keep.txt").write_text("keep me", encoding="utf-8")
+        (tmp_path / "skip.md").write_text("skip me", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(tmp_path), file_extensions=[".txt"])
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 1
+        assert result[0]["text"] == "keep me"
+
+    def test_empty_directory_raises_file_not_found(self, tmp_path):
+        op = DocumentLoaderOperator(task_id="test", source_path=str(tmp_path))
+        with pytest.raises(FileNotFoundError, match="No files found"):
+            op.execute(context=MagicMock())
+
+    def test_unknown_extension_on_single_file_raises(self, tmp_path):
+        f = tmp_path / "data.xyz"
+        f.write_text("some data", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+        with pytest.raises(ValueError, match="No parser registered"):
+            op.execute(context=MagicMock())
+
+    def test_unknown_parser_on_source_bytes_raises(self):
+        op = DocumentLoaderOperator(task_id="test", source_bytes=b"a,b\n1,2", file_type=".csv", parser="cvs")
+        with pytest.raises(ValueError, match="No parser found"):
+            op.execute(context=MagicMock())
+
+    def test_nonexistent_glob_raises_file_not_found(self, tmp_path):
+        op = DocumentLoaderOperator(task_id="test", source_path=str(tmp_path / "*.nope"))
+        with pytest.raises(FileNotFoundError, match="No files found"):
+            op.execute(context=MagicMock())
+
+    def test_file_extensions_case_insensitive(self, tmp_path):
+        (tmp_path / "keep.txt").write_text("keep me", encoding="utf-8")
+        (tmp_path / "skip.md").write_text("skip me", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(tmp_path), file_extensions=[".TXT"])
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 1
+        assert result[0]["text"] == "keep me"
+
+
+class TestCloudUriDispatch:
+    """``source_path`` containing a URI scheme routes through ObjectStoragePath."""
+
+    @patch("airflow.providers.common.compat.sdk.ObjectStoragePath")
+    def test_single_object_uri_returns_one_document(self, mock_osp_cls):
+        # `str(mock_obj)` returns whatever MagicMock renders; we only assert
+        # the file_name field, not file_path, so leaving __str__ default is
+        # fine and avoids mypy's method-assign complaint.
+        mock_obj = MagicMock()
+        mock_obj.is_file.return_value = True
+        mock_obj.suffix = ".txt"
+        mock_obj.name = "report.txt"
+        mock_obj.read_bytes.return_value = b"cloud content"
+        mock_osp_cls.return_value = mock_obj
+
+        op = DocumentLoaderOperator(
+            task_id="test",
+            source_path="s3://bucket/dir/report.txt",
+            source_conn_id="aws_default",
+        )
+        result = op.execute(context=MagicMock())
+
+        mock_osp_cls.assert_called_once_with("s3://bucket/dir/report.txt", conn_id="aws_default")
+        assert len(result) == 1
+        assert result[0]["text"] == "cloud content"
+        assert result[0]["metadata"]["file_name"] == "report.txt"
+
+    @patch("airflow.providers.common.compat.sdk.ObjectStoragePath")
+    def test_directory_uri_iterates_children(self, mock_osp_cls):
+        # Root is a directory; iterdir yields two text files.
+        def _mock_child(name: str, content: bytes):
+            child = MagicMock()
+            child.is_file.return_value = True
+            child.name = name
+            child.suffix = "." + name.rsplit(".", 1)[-1]
+            child.read_bytes.return_value = content
+            return child
+
+        a = _mock_child("a.txt", b"alpha")
+        b = _mock_child("b.txt", b"beta")
+
+        root = MagicMock()
+        root.is_file.return_value = False
+        root.is_dir.return_value = True
+        root.iterdir.return_value = [a, b]
+        mock_osp_cls.return_value = root
+
+        op = DocumentLoaderOperator(task_id="test", source_path="s3://bucket/dir/")
+        result = op.execute(context=MagicMock())
+
+        assert {doc["text"] for doc in result} == {"alpha", "beta"}
+
+    @patch("airflow.providers.common.compat.sdk.ObjectStoragePath")
+    def test_neither_file_nor_dir_uri_raises(self, mock_osp_cls):
+        bad = MagicMock()
+        bad.is_file.return_value = False
+        bad.is_dir.return_value = False
+        mock_osp_cls.return_value = bad
+
+        op = DocumentLoaderOperator(task_id="test", source_path="s3://bucket/missing")
+        with pytest.raises(FileNotFoundError, match="neither a file nor a directory"):
+            op.execute(context=MagicMock())
+
+    @patch("airflow.providers.common.compat.sdk.ObjectStoragePath")
+    def test_glob_uri_matches_across_directories(self, mock_osp_cls):
+        def _mock_match(name: str, content: bytes):
+            match = MagicMock()
+            match.is_file.return_value = True
+            match.name = name
+            match.suffix = "." + name.rsplit(".", 1)[-1]
+            match.read_bytes.return_value = content
+            return match
+
+        root = MagicMock()
+        root.glob.return_value = [_mock_match("a.txt", b"alpha"), _mock_match("b.txt", b"beta")]
+        mock_osp_cls.return_value = root
+
+        op = DocumentLoaderOperator(
+            task_id="test",
+            source_path="s3://bucket/logs/**/*.txt",
+            source_conn_id="aws_default",
+        )
+        result = op.execute(context=MagicMock())
+
+        mock_osp_cls.assert_called_once_with("s3://bucket/logs", conn_id="aws_default")
+        root.glob.assert_called_once_with("**/*.txt")
+        assert {doc["text"] for doc in result} == {"alpha", "beta"}
+
+    @patch("airflow.providers.common.compat.sdk.ObjectStoragePath")
+    def test_glob_in_bucket_segment_raises(self, mock_osp_cls):
+        op = DocumentLoaderOperator(task_id="test", source_path="s3://bucket-*/dir/a.txt")
+        with pytest.raises(ValueError, match="scheme or bucket segment"):
+            op.execute(context=MagicMock())
+
+        mock_osp_cls.assert_not_called()
+
+
+class TestEncoding:
+    def test_strict_utf8_default_raises_with_path_context(self, tmp_path):
+        f = tmp_path / "latin1.csv"
+        # \xff is invalid in UTF-8; surface the file path in the error.
+        f.write_bytes(b"\xff\xfe header\nrow\n")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+        with pytest.raises(ValueError, match=str(f)):
+            op.execute(context=MagicMock())
+
+    def test_encoding_errors_replace_tolerates_garbage(self, tmp_path):
+        f = tmp_path / "mixed.txt"
+        f.write_bytes(b"hello \xff world")
+
+        op = DocumentLoaderOperator(
+            task_id="test",
+            source_path=str(f),
+            encoding_errors="replace",
+        )
+        result = op.execute(context=MagicMock())
+
+        assert "hello" in result[0]["text"]
+        assert "world" in result[0]["text"]
+
+    def test_alternative_encoding_succeeds(self, tmp_path):
+        f = tmp_path / "latin1.txt"
+        f.write_bytes("café".encode("latin-1"))
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f), encoding="latin-1")
+        result = op.execute(context=MagicMock())
+
+        assert "café" in result[0]["text"]
+
+
+class TestOutputShape:
+    def test_every_item_has_text_and_metadata(self, tmp_path):
+        (tmp_path / "a.txt").write_text("doc a", encoding="utf-8")
+        (tmp_path / "b.txt").write_text("doc b", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(tmp_path / "*.txt"))
+        result = op.execute(context=MagicMock())
+
+        for doc in result:
+            assert "text" in doc
+            assert "metadata" in doc
+            assert isinstance(doc["text"], str)
+            assert isinstance(doc["metadata"], dict)
+
+    def test_metadata_fields_appended(self, tmp_path):
+        f = tmp_path / "doc.txt"
+        f.write_text("content", encoding="utf-8")
+
+        op = DocumentLoaderOperator(
+            task_id="test",
+            source_path=str(f),
+            metadata_fields={"source": "test_suite", "version": 2},
+        )
+        result = op.execute(context=MagicMock())
+
+        assert result[0]["metadata"]["source"] == "test_suite"
+        assert result[0]["metadata"]["version"] == 2
+
+    def test_metadata_fields_do_not_override_auto_extracted(self, tmp_path):
+        """Auto-extracted file_name wins over a same-key entry in metadata_fields."""
+        f = tmp_path / "report.txt"
+        f.write_text("content", encoding="utf-8")
+
+        op = DocumentLoaderOperator(
+            task_id="test",
+            source_path=str(f),
+            metadata_fields={"file_name": "spoofed", "extra": "kept"},
+        )
+        result = op.execute(context=MagicMock())
+
+        assert result[0]["metadata"]["file_name"] == "report.txt"
+        assert result[0]["metadata"]["extra"] == "kept"
+
+    def test_file_metadata_included(self, tmp_path):
+        f = tmp_path / "report.txt"
+        f.write_text("content", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f))
+        result = op.execute(context=MagicMock())
+
+        assert result[0]["metadata"]["file_name"] == "report.txt"
+        assert "file_path" in result[0]["metadata"]
+
+    def test_source_bytes_no_file_metadata(self):
+        op = DocumentLoaderOperator(task_id="test", source_bytes=b"hello", file_type=".txt")
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 1
+        assert result[0]["text"] == "hello"
+        assert "file_name" not in result[0]["metadata"]
+
+    def test_explicit_parser_override(self, tmp_path):
+        f = tmp_path / "data.log"
+        f.write_text("log line", encoding="utf-8")
+
+        op = DocumentLoaderOperator(task_id="test", source_path=str(f), parser="text")
+        result = op.execute(context=MagicMock())
+
+        assert len(result) == 1
+        assert result[0]["text"] == "log line"

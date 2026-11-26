@@ -26,21 +26,34 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-git",
         "name": "GIT",
         "description": "`Distributed version control system (GIT) <https://git-scm.com/>`__\n",
-        "state": "not-ready",
-        "source-date-epoch": 1742823216,
-        "versions": ["0.0.1"],
         "integrations": [
             {
                 "integration-name": "GIT (Git)",
                 "external-doc-url": "https://git-scm.com/",
+                "logo": "/docs/integration-logos/GIT.svg",
                 "tags": ["software"],
             }
         ],
-        "hooks": [{"integration-name": "GIT", "python-modules": ["airflow.providers.git.hooks.git"]}],
-        "bundles": [{"integration-name": "GIT", "python-modules": ["airflow.providers.git.bundles.git"]}],
-        "connection-types": [
-            {"hook-class-name": "airflow.providers.git.hooks.git.GitHook", "connection-type": "git"}
+        "hooks": [{"integration-name": "GIT (Git)", "python-modules": ["airflow.providers.git.hooks.git"]}],
+        "bundles": [
+            {"integration-name": "GIT (Git)", "python-modules": ["airflow.providers.git.bundles.git"]}
         ],
-        "dependencies": ["apache-airflow>=3.0.0.dev0", "GitPython>=3.1.44"],
-        "devel-dependencies": [],
+        "connection-types": [
+            {
+                "hook-class-name": "airflow.providers.git.hooks.git.GitHook",
+                "hook-name": "GIT",
+                "connection-type": "git",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema"],
+                    "relabeling": {
+                        "login": "Username or Access Token name",
+                        "host": "Repository URL",
+                        "password": "Access Token (optional)",
+                    },
+                    "placeholders": {
+                        "extra": '{"key_file": "optional/path/to/keyfile", "private_key": "optional inline private key", "private_key_passphrase": "", "strict_host_key_checking": "accept-new", "known_hosts_file": "", "ssh_config_file": "", "host_proxy_cmd": "", "ssh_port": "", "github_app_id": "", "github_installation_id": ""}'
+                    },
+                },
+            }
+        ],
     }

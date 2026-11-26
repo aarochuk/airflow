@@ -16,50 +16,79 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Link } from "@chakra-ui/react";
-import { FiBookOpen } from "react-icons/fi";
+import { Box, Icon, Link } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
+import { FiBookOpen, FiExternalLink } from "react-icons/fi";
 
-import { Menu } from "src/components/ui";
+import { Menu } from "src/system-components";
+
 import { useConfig } from "src/queries/useConfig";
+import type { NavItemResponse } from "src/utils/types";
 
 import { NavButton } from "./NavButton";
+import { NavMenu } from "./NavMenu";
+import { PluginMenuItem } from "./PluginMenuItem";
 
 const baseUrl = document.querySelector("base")?.href ?? "http://localhost:8080/";
 
 const links = [
   {
     href: "https://airflow.apache.org/docs/",
-    title: "Documentation",
+    key: "documentation",
   },
   {
     href: "https://github.com/apache/airflow",
-    title: "GitHub Repo",
+    key: "githubRepo",
   },
   {
     href: new URL("docs", baseUrl).href,
-    title: "REST API Reference",
+    key: "restApiReference",
   },
 ];
 
-export const DocsButton = () => {
-  const showAPIDocs = Boolean(useConfig("enable_swagger_ui"));
+export const DocsButton = ({
+  externalViews,
+  showAPI,
+  version,
+}: {
+  readonly externalViews: Array<NavItemResponse>;
+  readonly showAPI?: boolean;
+  readonly version?: string;
+}) => {
+  const { t: translate } = useTranslation();
+  const showAPIDocs = Boolean(useConfig("enable_swagger_ui")) && showAPI;
+
+  const versionLink = `https://airflow.apache.org/docs/apache-airflow/${version}/index.html`;
 
   return (
-    <Menu.Root positioning={{ placement: "right" }}>
-      <Menu.Trigger asChild>
-        <NavButton icon={<FiBookOpen size="1.75rem" />} title="Docs" />
-      </Menu.Trigger>
-      <Menu.Content>
-        {links
-          .filter((link) => !(!showAPIDocs && link.href === "/docs"))
-          .map((link) => (
-            <Menu.Item asChild key={link.title} value={link.title}>
-              <Link aria-label={link.title} href={link.href} rel="noopener noreferrer" target="_blank">
-                {link.title}
-              </Link>
-            </Menu.Item>
-          ))}
-      </Menu.Content>
-    </Menu.Root>
+    <NavMenu trigger={<NavButton icon={FiBookOpen} title={translate("nav.docs")} />}>
+      {links
+        .filter((link) => !(!showAPIDocs && link.key === "restApiReference"))
+        .map((link) => (
+          <Menu.Item asChild key={link.key} value={translate(`docs.${link.key}`)}>
+            <Link
+              aria-label={translate(`docs.${link.key}`)}
+              href={link.href}
+              rel="noopener noreferrer"
+              target="_blank"
+              textDecoration="none"
+            >
+              <Box flex="1">{translate(`docs.${link.key}`)}</Box>
+              <Icon as={FiExternalLink} boxSize={4} color="fg.muted" />
+            </Link>
+          </Menu.Item>
+        ))}
+      {version === undefined ? undefined : (
+        <Menu.Item asChild key={version} value={version}>
+          <Link aria-label={version} href={versionLink} rel="noopener noreferrer" target="_blank">
+            <Box flex="1">{version}</Box>
+            <Icon as={FiExternalLink} boxSize={4} color="fg.muted" />
+          </Link>
+        </Menu.Item>
+      )}
+      {externalViews.map((view) => (
+        <PluginMenuItem {...view} key={view.name} />
+      ))}
+    </NavMenu>
   );
 };

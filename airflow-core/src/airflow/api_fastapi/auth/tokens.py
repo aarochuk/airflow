@@ -19,13 +19,14 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from base64 import urlsafe_b64encode
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import attrs
-import httpx
+import httpx2
 import jwt
 import structlog
 from asgiref.sync import async_to_sync
@@ -33,7 +34,8 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-from airflow.utils import timezone
+from airflow._shared.timezones import timezone
+from airflow.models.revoked_token import RevokedToken
 
 if TYPE_CHECKING:
     from jwt.algorithms import AllowedKeys, AllowedPrivateKeys
@@ -91,11 +93,10 @@ def _guess_best_algorithm(key: AllowedPrivateKeys):
     from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
     if isinstance(key, RSAPrivateKey):
-        return "RS512"
-    elif isinstance(key, Ed25519PrivateKey):
+        return "RS256"
+    if isinstance(key, Ed25519PrivateKey):
         return "EdDSA"
-    else:
-        raise ValueError(f"Unknown key object {type(key)}")
+    raise ValueError(f"Unknown key object {type(key)}")
 
 
 @attrs.define(repr=False)
@@ -106,7 +107,7 @@ class JWKS:
     fetched_at: float = 0
     last_fetch_attempt_at: float = 0
 
-    client: httpx.AsyncClient = attrs.field(factory=httpx.AsyncClient)
+    client: httpx2.AsyncClient = attrs.field(factory=httpx2.AsyncClient)
 
     _jwks: jwt.PyJWKSet | None = None
     refresh_jwks: bool = True
@@ -226,7 +227,7 @@ def _conf_factory(section, key, **kwargs):
     def factory() -> str:
         from airflow.configuration import conf
 
-        return conf.get(section, key, **kwargs, suppress_warnings=True)  # type: ignore[return-value]
+        return conf.get(section, key, **kwargs, suppress_warnings=True)
 
     return factory
 
@@ -242,13 +243,13 @@ def _conf_list_factory(
 
 
 def _conf_list_factory(section, key, first_only: bool = False, **kwargs):
-    def factory() -> list[str] | str:
+    def factory() -> list[str] | str | None:
         from airflow.configuration import conf
 
         val = conf.getlist(section, key, **kwargs, suppress_warnings=True)
 
-        if first_only and val:
-            return val[0]
+        if first_only:
+            return val[0] if val else None
         return val or []
 
     return factory
@@ -278,7 +279,8 @@ class JWTValidator:
     )
     # By default, we just validate these
     required_claims: frozenset[str] = frozenset({"exp", "iat", "nbf"})
-    audience: str | Sequence[str]
+    # ``None`` is passed straight to ``jwt.decode`` and accepts only tokens without an ``aud`` claim.
+    audience: str | Sequence[str] | None
     algorithm: list[str] = attrs.field(
         factory=_conf_list_factory("api_auth", "jwt_algorithm", fallback="GUESS"), converter=_to_list
     )
@@ -290,14 +292,7 @@ class JWTValidator:
             raise ValueError("Exactly one of private_key and secret_key must be specified")
 
         if self.algorithm == ["GUESS"]:
-            if self.jwks:
-                # TODO: We could probably populate this from the jwks document, but we don't have that at
-                # construction time.
-                raise ValueError(
-                    "Cannot guess the algorithm when using JWKS - please specify it in the config option "
-                    "[api_auth] jwt_algorithm"
-                )
-            else:
+            if not self.jwks:
                 self.algorithm = ["HS512"]
 
     def _get_kid_from_header(self, unvalidated: str) -> str:
@@ -325,14 +320,25 @@ class JWTValidator:
         self, unvalidated: str, required_claims: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         """Decode the JWT token, returning the validated claims or raising an exception."""
-        key = await self._get_validation_key(unvalidated)
+        try:
+            key = await self._get_validation_key(unvalidated)
+        except KeyError:
+            raise jwt.InvalidTokenError("Kid did not match any validation keys")
+        algorithms = self.algorithm
+        validation_key: str | jwt.PyJWK | Any = key
+        if algorithms == ["GUESS"] and isinstance(key, jwt.PyJWK):
+            if not key.algorithm_name:
+                raise jwt.InvalidTokenError("Missing algorithm in JWK")
+            algorithms = [key.algorithm_name]
+            validation_key = key.key
+
         claims = jwt.decode(
             unvalidated,
-            key,
+            validation_key,
             audience=self.audience,
             issuer=self.issuer,
-            options={"require": self.required_claims},
-            algorithms=self.algorithm,
+            options={"require": list(self.required_claims)},
+            algorithms=algorithms,
             leeway=self.leeway,
         )
 
@@ -345,6 +351,29 @@ class JWTValidator:
                     raise InvalidClaimError(claim)
 
         return claims
+
+    def revoke_token(self, token: str) -> None:
+        """
+        Validate the token, extract jti and exp, and revoke it in the database.
+
+        A token that does not validate is not revoked: it is already unusable, so this is logged as a
+        warning. A valid token whose revocation cannot be recorded is still usable until it expires,
+        so that failure is logged as an error rather than being reported the same way.
+        """
+        try:
+            claims = self.validated_claims(token)
+        except Exception:
+            log.warning("Not revoking a token that does not validate", exc_info=True)
+            return
+        if not ((jti := claims.get("jti")) and (exp := claims.get("exp"))):
+            log.warning("Not revoking a token that carries no jti or exp claim")
+            return
+        try:
+            RevokedToken.revoke(jti, datetime.fromtimestamp(exp, tz=timezone.utc))
+        except Exception:
+            log.exception(
+                "Failed to record the revocation of token %s; it remains valid until it expires", jti
+            )
 
     def status(self):
         if self.jwks:
@@ -372,6 +401,19 @@ def _load_key_from_configured_file() -> AllowedPrivateKeys | None:
         return _pem_to_key(fh.read())
 
 
+def _generate_kid(gen) -> str:
+    # Always check config first — both symmetric and asymmetric keys can have a configured kid
+    if kid := _conf_factory("api_auth", "jwt_kid", fallback=None)():
+        return kid
+
+    if not gen._private_key:
+        return "not-used"
+
+    # Generate it from the thumbprint of the private key
+    info = key_to_jwk_dict(gen._private_key)
+    return info["kid"]
+
+
 @attrs.define(repr=False, kw_only=True)
 class JWTGenerator:
     """Generate JWT tokens."""
@@ -392,7 +434,7 @@ class JWTGenerator:
     )
     """A pre-shared secret key to sign tokens with symmetric encryption"""
 
-    kid: str = attrs.field()
+    kid: str = attrs.field(default=attrs.Factory(_generate_kid, takes_self=True))
     valid_for: float
     audience: str
     issuer: str | list[str] | None = attrs.field(
@@ -401,18 +443,6 @@ class JWTGenerator:
     algorithm: str = attrs.field(
         factory=_conf_list_factory("api_auth", "jwt_algorithm", first_only=True, fallback="GUESS")
     )
-
-    @kid.default
-    def _generate_kid(self):
-        if not self._private_key:
-            return "not-used"
-
-        if kid := _conf_factory("api_auth", "jwt_kid", fallback=None)():
-            return kid
-
-        # Generate it from the thumbprint of the private key
-        info = key_to_jwk_dict(self._private_key)
-        return info["kid"]
 
     def __attrs_post_init__(self):
         if not (self._private_key is None) ^ (self._secret_key is None):
@@ -435,26 +465,36 @@ class JWTGenerator:
             assert self._secret_key
         return self._secret_key
 
-    def generate(self, extras: dict[str, Any] | None = None, headers: dict[str, Any] | None = None) -> str:
+    def generate(
+        self,
+        extras: dict[str, Any] | None = None,
+        headers: dict[str, Any] | None = None,
+        valid_for: float | None = None,
+    ) -> str:
         """Generate a signed JWT for the subject."""
         now = int(datetime.now(tz=timezone.utc).timestamp())
+        effective_valid_for = valid_for if valid_for is not None else self.valid_for
         claims = {
+            "jti": uuid.uuid4().hex,
             "iss": self.issuer,
             "aud": self.audience,
             "nbf": now,
-            "exp": int(now + self.valid_for),
+            "exp": int(now + effective_valid_for),
             "iat": now,
         }
-        if claims["iss"] is None:
+
+        # Remove iss and aud claims if they are falsy (None, [], "", etc.)
+        # Per RFC 7519, these are optional claims and should be omitted entirely
+        # rather than set to empty/invalid values: https://datatracker.ietf.org/doc/html/rfc7519#section-4.1.1
+        if not claims["iss"]:
             del claims["iss"]
-        if claims["aud"] is None:
+        if not claims["aud"]:
             del claims["aud"]
 
         if extras is not None:
             claims = extras | claims
         headers = {"alg": self.algorithm, **(headers or {})}
-        if self._private_key:
-            headers["kid"] = self.kid
+        headers["kid"] = self.kid
         return jwt.encode(claims, self.signing_arg, algorithm=self.algorithm, headers=headers)
 
 
@@ -475,7 +515,7 @@ def generate_private_key(key_type: str = "RSA", key_size: int = 2048):
         # Generate an RSA private key
 
         return rsa.generate_private_key(public_exponent=65537, key_size=key_size, backend=default_backend())
-    elif key_type == "Ed25519":
+    if key_type == "Ed25519":
         return ed25519.Ed25519PrivateKey.generate()
     raise ValueError(f"unsupported key type: {key_type}")
 
@@ -537,7 +577,7 @@ def get_signing_key(section: str, key: str, make_secret_key_if_needed: bool = Tr
             raise ValueError(f"The value {section}/{key} must be set!")
 
     # Mypy can't grock the `if not secret_key`
-    return secret_key  # type: ignore[return-value]
+    return secret_key
 
 
 def get_signing_args(make_secret_key_if_needed: bool = True) -> dict[str, Any]:

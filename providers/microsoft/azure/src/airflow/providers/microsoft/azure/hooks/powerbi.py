@@ -20,7 +20,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.microsoft.azure.hooks.msgraph import KiotaRequestAdapterHook
 
 if TYPE_CHECKING:
@@ -33,6 +33,7 @@ class PowerBIDatasetRefreshFields(Enum):
     REQUEST_ID = "request_id"
     STATUS = "status"
     ERROR = "error"
+    REFRESH_TYPE = "refresh_type"
 
 
 class PowerBIDatasetRefreshStatus:
@@ -42,26 +43,44 @@ class PowerBIDatasetRefreshStatus:
     FAILED = "Failed"
     COMPLETED = "Completed"
     DISABLED = "Disabled"
+    TIMED_OUT = "TimedOut"
+    CANCELLED = "Cancelled"
 
-    TERMINAL_STATUSES = {FAILED, COMPLETED}
-    FAILURE_STATUSES = {FAILED, DISABLED}
+    TERMINAL_STATUSES = {FAILED, COMPLETED, DISABLED, TIMED_OUT, CANCELLED}
+    FAILURE_STATUSES = TERMINAL_STATUSES - {COMPLETED}
+    ACTIVE_EXTENDED_STATUSES = {"NotStarted", "InProgress"}
 
 
 class PowerBIDatasetRefreshException(AirflowException):
     """An exception that indicates a dataset refresh failed to complete."""
 
 
+class PowerBIWorkspaceListException(AirflowException):
+    """An exception that indicates a failure in getting the list of groups (workspaces)."""
+
+
+class PowerBIDatasetListException(AirflowException):
+    """An exception that indicates a failure in getting the list of datasets."""
+
+
 class PowerBIHook(KiotaRequestAdapterHook):
     """
     A async hook to interact with Power BI.
 
-    :param conn_id: The Power BI connection id.
+    :param conn_id: The connection Id to connect to PowerBI.
+    :param timeout: The HTTP timeout being used by the `KiotaRequestAdapter` (default is None).
+        When no timeout is specified or set to None then there is no HTTP timeout on each request.
+    :param proxies: A dict defining the HTTP proxies to be used (default is None).
+    :param api_version: The API version of the Microsoft Graph API to be used (default is v1).
+        You can pass an enum named APIVersion which has 2 possible members v1 and beta,
+        or you can pass a string as `v1.0` or `beta`.
     """
 
     conn_type: str = "powerbi"
     conn_name_attr: str = "conn_id"
     default_conn_name: str = "powerbi_default"
     hook_name: str = "Power BI"
+    VIA_ENHANCED_API = "ViaEnhancedApi"
 
     def __init__(
         self,
@@ -134,16 +153,20 @@ class PowerBIHook(KiotaRequestAdapterHook):
         """
         Convert raw refresh details into a dictionary containing required fields.
 
+        Refresh history entries retain their type for execution-detail polling.
+
         :param refresh_details: Raw object of refresh details.
         """
         return {
             PowerBIDatasetRefreshFields.REQUEST_ID.value: str(refresh_details.get("requestId")),
             PowerBIDatasetRefreshFields.STATUS.value: (
-                "In Progress"
-                if str(refresh_details.get("status")) == "Unknown"
+                PowerBIDatasetRefreshStatus.IN_PROGRESS
+                if refresh_details.get("status")
+                in PowerBIDatasetRefreshStatus.ACTIVE_EXTENDED_STATUSES | {"Unknown"}
                 else str(refresh_details.get("status"))
             ),
             PowerBIDatasetRefreshFields.ERROR.value: str(refresh_details.get("serviceExceptionJson")),
+            PowerBIDatasetRefreshFields.REFRESH_TYPE.value: str(refresh_details.get("refreshType")),
         }
 
     async def get_refresh_details_by_refresh_id(
@@ -173,14 +196,58 @@ class PowerBIHook(KiotaRequestAdapterHook):
 
         refresh_details = refresh_histories[refresh_ids.index(refresh_id)]
 
+        if refresh_details.get(PowerBIDatasetRefreshFields.REFRESH_TYPE.value) == self.VIA_ENHANCED_API:
+            try:
+                execution_details = await self.run(
+                    url="myorg/groups/{group_id}/datasets/{dataset_id}/refreshes/{refresh_id}",
+                    path_parameters={
+                        "group_id": group_id,
+                        "dataset_id": dataset_id,
+                        "refresh_id": refresh_id,
+                    },
+                )
+            except AirflowException as error:
+                raise PowerBIDatasetRefreshException(
+                    "Failed to retrieve refresh execution details"
+                ) from error
+            status = execution_details.get("extendedStatus")
+            if status not in (
+                PowerBIDatasetRefreshStatus.TERMINAL_STATUSES
+                | PowerBIDatasetRefreshStatus.ACTIVE_EXTENDED_STATUSES
+            ):
+                status = execution_details.get("status")
+            errors = [
+                message["message"]
+                for message in execution_details.get("messages") or []
+                if message.get("message") and message.get("type") != "Warning"
+            ]
+            if execution_details.get("serviceExceptionJson"):
+                errors.append(execution_details["serviceExceptionJson"])
+            errors.extend(
+                attempt["serviceExceptionJson"]
+                for attempt in execution_details.get("refreshAttempts") or []
+                if attempt.get("serviceExceptionJson")
+            )
+            return self.raw_to_refresh_details(
+                {
+                    "requestId": refresh_id,
+                    "status": status,
+                    "refreshType": refresh_details[PowerBIDatasetRefreshFields.REFRESH_TYPE.value],
+                    "serviceExceptionJson": "; ".join(errors) if errors else None,
+                }
+            )
+
         return refresh_details
 
-    async def trigger_dataset_refresh(self, *, dataset_id: str, group_id: str) -> str:
+    async def trigger_dataset_refresh(
+        self, *, dataset_id: str, group_id: str, request_body: dict[str, Any] | None = None
+    ) -> str:
         """
         Triggers a refresh for the specified dataset from the given group id.
 
         :param dataset_id: The dataset id.
         :param group_id: The workspace id.
+        :param request_body: Additional arguments to pass to the request body, as described in https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/refresh-dataset-in-group#request-body.
 
         :return: Request id of the dataset refresh request.
         """
@@ -193,12 +260,47 @@ class PowerBIHook(KiotaRequestAdapterHook):
                     "group_id": group_id,
                     "dataset_id": dataset_id,
                 },
+                data=request_body,
             )
 
             request_id = response.get("requestid")
             return request_id
         except AirflowException:
             raise PowerBIDatasetRefreshException("Failed to trigger dataset refresh.")
+
+    async def get_workspace_list(self) -> list[str]:
+        """
+        Triggers a request to get all available workspaces for the service principal.
+
+        :return: List of workspace IDs.
+        """
+        try:
+            response = await self.run(url="myorg/groups", method="GET")
+
+            list_of_workspaces = response.get("value", [])
+
+            return [ws["id"] for ws in list_of_workspaces if "id" in ws]
+
+        except AirflowException:
+            raise PowerBIWorkspaceListException("Failed to get workspace ID list.")
+
+    async def get_dataset_list(self, *, group_id: str) -> list[str]:
+        """
+        Triggers a request to get all datasets within a group (workspace).
+
+        :param group_id: Workspace ID.
+
+        :return: List of dataset IDs.
+        """
+        try:
+            response = await self.run(url=f"myorg/groups/{group_id}/datasets", method="GET")
+
+            list_of_datasets = response.get("value", [])
+
+            return [ds["id"] for ds in list_of_datasets if "id" in ds]
+
+        except AirflowException:
+            raise PowerBIDatasetListException("Failed to get dataset ID list.")
 
     async def cancel_dataset_refresh(self, dataset_id: str, group_id: str, dataset_refresh_id: str) -> None:
         """

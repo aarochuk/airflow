@@ -26,30 +26,11 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-arangodb",
         "name": "ArangoDB",
         "description": "`ArangoDB <https://www.arangodb.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477788,
-        "versions": [
-            "2.7.3",
-            "2.7.2",
-            "2.7.0",
-            "2.6.0",
-            "2.5.1",
-            "2.5.0",
-            "2.4.1",
-            "2.4.0",
-            "2.3.0",
-            "2.2.2",
-            "2.2.1",
-            "2.2.0",
-            "2.1.1",
-            "2.1.0",
-            "2.0.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "ArangoDB",
                 "external-doc-url": "https://www.arangodb.com/",
+                "logo": "/docs/integration-logos/ArangoDB.svg",
                 "tags": ["software"],
             }
         ],
@@ -71,9 +52,23 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.arangodb.hooks.arangodb.ArangoDBHook",
+                "hook-name": "ArangoDB",
                 "connection-type": "arangodb",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["port", "extra"],
+                    "relabeling": {
+                        "host": "ArangoDB Host URL or comma separated list of URLs (coordinators in a cluster)",
+                        "schema": "ArangoDB Database",
+                        "login": "ArangoDB Username",
+                        "password": "ArangoDB Password",
+                    },
+                    "placeholders": {
+                        "host": 'eg."http://127.0.0.1:8529" or "http://127.0.0.1:8529,http://127.0.0.1:8530" (coordinators in a cluster)',
+                        "schema": "_system",
+                        "login": "root",
+                        "password": "password",
+                    },
+                },
             }
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "python-arango>=7.3.2"],
-        "devel-dependencies": [],
     }

@@ -22,7 +22,7 @@ from __future__ import annotations
 import contextlib
 import json
 import time
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, Sequence
 from typing import TYPE_CHECKING, Any
 
 from google.api_core.exceptions import NotFound
@@ -30,7 +30,7 @@ from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
 from google.auth.transport import requests as google_requests
 
 # not sure why but mypy complains on missing `container_v1` but it is clearly there and is importable
-from google.cloud import exceptions  # type: ignore[attr-defined]
+from google.cloud import exceptions
 from google.cloud.container_v1 import ClusterManagerAsyncClient, ClusterManagerClient
 from google.cloud.container_v1.types import Cluster, Operation
 from kubernetes import client
@@ -38,9 +38,9 @@ from kubernetes_asyncio import client as async_client
 from kubernetes_asyncio.config.kube_config import FileOrData
 
 from airflow import version
-from airflow.exceptions import AirflowException
 from airflow.providers.cncf.kubernetes.hooks.kubernetes import AsyncKubernetesHook, KubernetesHook
-from airflow.providers.cncf.kubernetes.kube_client import _enable_tcp_keepalive
+from airflow.providers.cncf.kubernetes.kube_client import configure_tcp_keepalive
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.common.consts import CLIENT_INFO
 from airflow.providers.google.common.hooks.base_google import (
     PROVIDE_PROJECT_ID,
@@ -74,19 +74,27 @@ class GKEClusterConnection:
 
     def get_conn(self) -> client.ApiClient:
         configuration = self._get_config()
-        configuration.refresh_api_key_hook = self._refresh_api_key_hook
+        # Kubernetes types this public callback as None.
+        configuration.refresh_api_key_hook = self._refresh_api_key_hook  # type: ignore[assignment]
         if self.enable_tcp_keepalive:
-            _enable_tcp_keepalive()
+            configure_tcp_keepalive(configuration)
         return client.ApiClient(configuration)
 
     def _refresh_api_key_hook(self, configuration: client.configuration.Configuration):
-        configuration.api_key = {"authorization": self._get_token(self._credentials)}
+        configuration.api_key = self._bearer_api_key(self._get_token(self._credentials))
+
+    @staticmethod
+    def _bearer_api_key(token: str) -> dict[str, str]:
+        # kubernetes-client 36.x renamed the bearer auth key 'authorization' -> 'BearerToken'
+        # (https://github.com/kubernetes-client/python/issues/2582). Register both so the 'Bearer'
+        # prefix is applied on client 35.x and 36.x alike; otherwise 36.x sends the raw token -> 401.
+        return {"authorization": token, "BearerToken": token}
 
     def _get_config(self) -> client.configuration.Configuration:
         configuration = client.Configuration(
             host=self._cluster_url,
-            api_key_prefix={"authorization": "Bearer"},
-            api_key={"authorization": self._get_token(self._credentials)},
+            api_key_prefix={"authorization": "Bearer", "BearerToken": "Bearer"},
+            api_key=self._bearer_api_key(self._get_token(self._credentials)),
         )
         if not self.use_dns_endpoint:
             configuration.ssl_ca_cert = FileOrData(
@@ -131,7 +139,11 @@ class GKEHook(GoogleBaseHook):
     def get_cluster_manager_client(self) -> ClusterManagerClient:
         """Create or get a ClusterManagerClient."""
         if self._client is None:
-            self._client = ClusterManagerClient(credentials=self.get_credentials(), client_info=CLIENT_INFO)
+            self._client = ClusterManagerClient(
+                credentials=self.get_credentials(),
+                client_info=CLIENT_INFO,
+                client_options=self.get_client_options(),
+            )
         return self._client
 
     def wait_for_operation(self, operation: Operation, project_id: str = PROVIDE_PROJECT_ID) -> Operation:
@@ -352,8 +364,7 @@ class GKEHook(GoogleBaseHook):
             or node_pools_autoscaled
         ):
             return True
-        else:
-            return False
+        return False
 
 
 class GKEAsyncHook(GoogleBaseAsyncHook):
@@ -378,9 +389,11 @@ class GKEAsyncHook(GoogleBaseAsyncHook):
 
     async def _get_client(self) -> ClusterManagerAsyncClient:
         if self._client is None:
+            sync_hook = await self.get_sync_hook()
             self._client = ClusterManagerAsyncClient(
-                credentials=(await self.get_sync_hook()).get_credentials(),
+                credentials=sync_hook.get_credentials(),
                 client_info=CLIENT_INFO,
+                client_options=sync_hook.get_client_options(),
             )
         return self._client
 
@@ -482,6 +495,7 @@ class GKEKubernetesAsyncHook(GoogleBaseAsyncHook, AsyncKubernetesHook):
         self,
         cluster_url: str,
         ssl_ca_cert: str,
+        use_dns_endpoint: bool = False,
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
         enable_tcp_keepalive: bool = True,
@@ -490,6 +504,7 @@ class GKEKubernetesAsyncHook(GoogleBaseAsyncHook, AsyncKubernetesHook):
         self._cluster_url = cluster_url
         self._ssl_ca_cert = ssl_ca_cert
         self.enable_tcp_keepalive = enable_tcp_keepalive
+        self.use_dns_endpoint = use_dns_endpoint
         super().__init__(
             cluster_url=cluster_url,
             ssl_ca_cert=ssl_ca_cert,
@@ -499,7 +514,7 @@ class GKEKubernetesAsyncHook(GoogleBaseAsyncHook, AsyncKubernetesHook):
         )
 
     @contextlib.asynccontextmanager
-    async def get_conn(self) -> async_client.ApiClient:  # type: ignore[override]
+    async def get_conn(self) -> AsyncGenerator[async_client.ApiClient, None]:  # type: ignore[override]
         kube_client = None
         try:
             kube_client = await self._load_config()
@@ -507,6 +522,26 @@ class GKEKubernetesAsyncHook(GoogleBaseAsyncHook, AsyncKubernetesHook):
         finally:
             if kube_client is not None:
                 await kube_client.close()
+
+    async def list_pods(
+        self,
+        namespace: str,
+        label_selector: str,
+    ) -> list:
+        """
+        List pods in the given namespace matching the label selector.
+
+        :param namespace: Kubernetes namespace.
+        :param label_selector: Label selector to filter pods (e.g. ``job-name=my-job``).
+        :return: List of V1Pod objects.
+        """
+        async with self.get_conn() as connection:
+            v1_api = async_client.CoreV1Api(connection)
+            response = await v1_api.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=label_selector,
+            )
+            return list(response.items) if response.items else []
 
     async def _load_config(self) -> async_client.ApiClient:
         configuration = self._get_config()
@@ -521,11 +556,12 @@ class GKEKubernetesAsyncHook(GoogleBaseAsyncHook, AsyncKubernetesHook):
     def _get_config(self) -> async_client.configuration.Configuration:
         configuration = async_client.Configuration(
             host=self._cluster_url,
-            ssl_ca_cert=FileOrData(
+        )
+        if not self.use_dns_endpoint:
+            configuration.ssl_ca_cert = FileOrData(
                 {
                     "certificate-authority-data": self._ssl_ca_cert,
                 },
                 file_key_name="certificate-authority",
-            ).as_file(),
-        )
+            ).as_file()
         return configuration

@@ -18,47 +18,102 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import Field
+from pydantic.json_schema import SkipJsonSchema
 
-from airflow.api_fastapi.core_api.datamodels.ui.structure import StructureDataResponse
-from airflow.utils.state import DagRunState, TaskInstanceState
-from airflow.utils.types import DagRunType
+from airflow.api_fastapi.common.region import _drop_null_default
+from airflow.api_fastapi.core_api.base import BaseModel
+from airflow.utils.state import TaskInstanceState
 
 
-class GridTaskInstanceSummary(BaseModel):
+class LightGridTaskInstanceSummary(BaseModel):
     """Task Instance Summary model for the Grid UI."""
 
     task_id: str
-    try_number: int
-    start_date: datetime | None
-    end_date: datetime | None
-    queued_dttm: datetime | None
-    child_states: dict[str, int] | None
-    task_count: int
+    task_display_name: str
     state: TaskInstanceState | None
-    note: str | None
+    child_states: dict[TaskInstanceState | Literal["none"], int] | None
+    min_start_date: datetime | None
+    max_end_date: datetime | None
+    dag_version_number: int | None = None
+    has_note: bool = False
+    loop_iterations_count: int | None = None
+    latest_region_id: UUID | None = None
+    latest_region_index: int | None = None
+    retry_at: datetime | None = None
 
 
-class GridDAGRunwithTIs(BaseModel):
+class GridTISummaries(BaseModel):
     """DAG Run model for the Grid UI."""
 
-    run_id: str = Field(serialization_alias="dag_run_id", validation_alias="run_id")
-    queued_at: datetime | None
-    start_date: datetime | None
-    end_date: datetime | None
+    run_id: str
+    dag_id: str
+    task_instances: list[LightGridTaskInstanceSummary]
+
+
+class LoopIterationSummary(BaseModel):
+    """Execution state for one existing iteration."""
+
+    index: int
+    task_count: int = 0
+    state: TaskInstanceState | None = None
+    start_date: datetime | None = None
+    end_date: datetime | None = None
+    decision_reason: Annotated[
+        SkipJsonSchema[None] | str,
+        Field(
+            description="Why the loop's gate continued or stopped the loop at this iteration, if its until callable said.",
+            exclude_if=lambda reason: reason is None,
+            json_schema_extra=_drop_null_default,
+        ),
+    ] = None
+
+
+class LoopInvocationResponse(BaseModel):
+    """One invocation of a loop in a Dag run."""
+
+    region_id: UUID
+
+
+class LoopSummaryResponse(BaseModel):
+    """Runtime state of one loop invocation."""
+
+    dag_id: str
+    run_id: str
+    group_id: str
+    max_iterations: int
+    iterations_ran: int
+    status: Literal["running", "stopped_early", "ran_to_cap", "failed", "skipped", "removed"]
+    stopped_at_iteration: int | None = None
+    failed_at_iteration: int | None = None
+    exit_criteria_doc: str | None = None
+    exit_criteria_name: str | None = None
+    reason: Literal["cap_reached", "iteration_failed"] | None = None
+    reason_task_id: str | None = None
+    loop_region_id: UUID | None = None
+    loop_regions: list[LoopInvocationResponse] = []
+    iterations: list[LoopIterationSummary]
+
+
+class LoopRunSummary(BaseModel):
+    """A loop invocation in a recent DAG run."""
+
+    run_id: str
     run_after: datetime
-    state: DagRunState
-    run_type: DagRunType
-    logical_date: datetime | None
-    data_interval_start: datetime | None
-    data_interval_end: datetime | None
-    note: str | None
-    task_instances: list[GridTaskInstanceSummary]
+    logical_date: datetime | None = None
+    max_iterations: int
+    iterations_ran: int
+    status: Literal["running", "stopped_early", "ran_to_cap", "failed", "skipped", "removed"]
+    reason: Literal["cap_reached", "iteration_failed"] | None = None
+    loop_region_id: UUID | None = None
 
 
-class GridResponse(BaseModel):
-    """Response model for the Grid UI."""
+class LoopHistoryResponse(BaseModel):
+    """Loop invocations across recent DAG runs."""
 
-    dag_runs: list[GridDAGRunwithTIs]
-    structure: StructureDataResponse
+    dag_id: str
+    group_id: str
+    runs: list[LoopRunSummary]

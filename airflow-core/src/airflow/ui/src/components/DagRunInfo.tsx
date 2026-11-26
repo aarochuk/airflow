@@ -17,12 +17,16 @@
  * under the License.
  */
 import { VStack, Text, Box } from "@chakra-ui/react";
-import dayjs from "dayjs";
+import { useTranslation } from "react-i18next";
 
 import type { DAGRunResponse } from "openapi/requests/types.gen";
+
+import { Tooltip } from "src/system-components";
+
 import { StateBadge } from "src/components/StateBadge";
 import Time from "src/components/Time";
-import { Tooltip } from "src/components/ui";
+
+import { useDurationFormat } from "src/utils";
 
 type Props = {
   readonly endDate?: string | null;
@@ -32,37 +36,54 @@ type Props = {
   readonly state?: DAGRunResponse["state"];
 };
 
-const DagRunInfo = ({ endDate, logicalDate, runAfter, startDate, state }: Props) => (
-  <Tooltip
-    content={
-      <VStack align="left" gap={0}>
-        {state === undefined ? undefined : <Text>State: {state}</Text>}
-        {Boolean(logicalDate) ? (
-          <Text>
-            Logical Date: <Time datetime={logicalDate} />
-          </Text>
-        ) : undefined}
-        {Boolean(startDate) ? (
-          <Text>
-            Start Date: <Time datetime={startDate} />
-          </Text>
-        ) : undefined}
-        {Boolean(endDate) ? (
-          <Text>
-            End Date: <Time datetime={endDate} />
-          </Text>
-        ) : undefined}
-        {Boolean(startDate) ? (
-          <Text>Duration: {dayjs.duration(dayjs(endDate).diff(startDate)).asSeconds()}s</Text>
-        ) : undefined}
-      </VStack>
-    }
-  >
-    <Box>
-      <Time datetime={runAfter} mr={2} showTooltip={false} />
-      {state === undefined ? undefined : <StateBadge state={state} />}
-    </Box>
-  </Tooltip>
-);
+const DagRunInfo = ({ endDate, logicalDate, runAfter, startDate, state }: Props) => {
+  const { t: translate } = useTranslation();
+  const { formatElapsed, formatRelative } = useDurationFormat();
+
+  return (
+    <Tooltip
+      content={
+        <VStack align="left" gap={0}>
+          {state === undefined ? (
+            <Text>
+              {translate("dagDetails.nextRun")}: {formatRelative(runAfter)}
+            </Text>
+          ) : (
+            <>
+              <Text>
+                {translate("state")}: {translate(`common:states.${state}`)}
+              </Text>
+              {Boolean(logicalDate) && (
+                <Text>
+                  {translate("logicalDate")}: <Time datetime={logicalDate} />
+                </Text>
+              )}
+              {Boolean(startDate) && (
+                <Text>
+                  {translate("startDate")}: <Time datetime={startDate} />
+                </Text>
+              )}
+              {Boolean(endDate) && (
+                <Text>
+                  {translate("endDate")}: <Time datetime={endDate} />
+                </Text>
+              )}
+              {Boolean(startDate) && (
+                <Text>
+                  {translate("duration")}: {formatElapsed(startDate, endDate)}
+                </Text>
+              )}
+            </>
+          )}
+        </VStack>
+      }
+    >
+      <Box>
+        <Time datetime={runAfter} mr={2} showTooltip={false} />
+        {state !== undefined && <StateBadge aria-label={state} data-testid="state-badge" state={state} />}
+      </Box>
+    </Tooltip>
+  );
+};
 
 export default DagRunInfo;

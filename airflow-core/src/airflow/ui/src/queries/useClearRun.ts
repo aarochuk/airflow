@@ -17,26 +17,20 @@
  * under the License.
  */
 import { useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 
 import {
   useDagRunServiceClearDagRun,
   UseDagRunServiceGetDagRunKeyFn,
   useDagRunServiceGetDagRunsKey,
-  UseDagServiceGetDagDetailsKeyFn,
-  UseGridServiceGridDataKeyFn,
+  UseGanttServiceGetGanttDataKeyFn,
   useTaskInstanceServiceGetTaskInstancesKey,
 } from "openapi/queries";
-import { toaster } from "src/components/ui";
 
+import { createErrorToaster } from "src/utils";
+
+import { dagListQueryKeys, gridQueryKeys, tiPerAttemptQueryKeys } from "./gridViewQueryKeys";
 import { useClearDagRunDryRunKey } from "./useClearDagRunDryRun";
-
-const onError = () => {
-  toaster.create({
-    description: "Clear Dag Run request failed",
-    title: "Failed to clear the Dag Run",
-    type: "error",
-  });
-};
 
 export const useClearDagRun = ({
   dagId,
@@ -48,18 +42,34 @@ export const useClearDagRun = ({
   onSuccessConfirm: () => void;
 }) => {
   const queryClient = useQueryClient();
+  const { t: translate } = useTranslation("dags");
+
+  const onError = (error: unknown) => {
+    createErrorToaster(
+      error,
+      {
+        params: { type: translate("dagRun_one") },
+        titleKey: "dags:runAndTaskActions.clear.error",
+      },
+      translate,
+    );
+  };
 
   const onSuccess = async () => {
     const queryKeys = [
       [useTaskInstanceServiceGetTaskInstancesKey],
-      UseDagServiceGetDagDetailsKeyFn({ dagId }),
       UseDagRunServiceGetDagRunKeyFn({ dagId, dagRunId }),
       [useDagRunServiceGetDagRunsKey],
       [useClearDagRunDryRunKey, dagId],
-      UseGridServiceGridDataKeyFn({ dagId }, [{ dagId }]),
+      UseGanttServiceGetGanttDataKeyFn({ dagId, runId: dagRunId }),
+      ...tiPerAttemptQueryKeys,
+      ...dagListQueryKeys,
     ];
 
-    await Promise.all(queryKeys.map((key) => queryClient.invalidateQueries({ queryKey: key })));
+    await Promise.all([
+      ...gridQueryKeys(dagId).map((key) => queryClient.invalidateQueries({ queryKey: key })),
+      ...queryKeys.map((key) => queryClient.invalidateQueries({ queryKey: key })),
+    ]);
 
     onSuccessConfirm();
   };

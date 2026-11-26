@@ -17,7 +17,8 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Callable, TypedDict
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import sqlparse
 from attrs import define
@@ -31,14 +32,13 @@ from airflow.providers.openlineage.utils.sql import (
     create_information_schema_query,
     get_table_schemas,
 )
-from airflow.providers.openlineage.utils.utils import should_use_external_connection
 from airflow.utils.log.logging_mixin import LoggingMixin
 
 if TYPE_CHECKING:
     from openlineage.client.facet_v2 import JobFacet, RunFacet
     from sqlalchemy.engine import Engine
 
-    from airflow.hooks.base import BaseHook
+    from airflow.providers.common.compat.sdk import BaseHook
     from airflow.providers.common.sql.hooks.sql import DbApiHook
 
 log = logging.getLogger(__name__)
@@ -231,8 +231,8 @@ class SQLParser(LoggingMixin):
             else None,
         )
 
+    @staticmethod
     def get_metadata_from_parser(
-        self,
         inputs: list[DbTableMeta],
         outputs: list[DbTableMeta],
         database_info: DatabaseInfo,
@@ -314,6 +314,7 @@ class SQLParser(LoggingMixin):
         :param database_info: database specific information
         :param database: when passed it takes precedence over parsed database name
         :param sqlalchemy_engine: when passed, engine's dialect is used to compile SQL queries
+        :param use_connection: if call to db should be performed to enrich datasets (e.g., with schema)
         """
         job_facets: dict[str, JobFacet] = {"sql": sql_job.SQLJobFacet(query=self.normalize_sql(sql))}
         parse_result = self.parse(sql=self.split_sql_string(sql))
@@ -337,17 +338,28 @@ class SQLParser(LoggingMixin):
             )
 
         namespace = self.create_namespace(database_info=database_info)
+        inputs: list[Dataset] = []
+        outputs: list[Dataset] = []
         if use_connection:
-            inputs, outputs = self.parse_table_schemas(
-                hook=hook,
-                inputs=parse_result.in_tables,
-                outputs=parse_result.out_tables,
-                namespace=namespace,
-                database=database,
-                database_info=database_info,
-                sqlalchemy_engine=sqlalchemy_engine,
-            )
-        else:
+            try:
+                inputs, outputs = self.parse_table_schemas(
+                    hook=hook,
+                    inputs=parse_result.in_tables,
+                    outputs=parse_result.out_tables,
+                    namespace=namespace,
+                    database=database,
+                    database_info=database_info,
+                    sqlalchemy_engine=sqlalchemy_engine,
+                )
+            except Exception as e:
+                self.log.warning(
+                    "OpenLineage method failed to enrich datasets using db metadata. Exception: `%s`",
+                    e,
+                )
+                self.log.debug("OpenLineage failure details:", exc_info=True)
+
+        # If call to db failed or was not performed, use datasets from sql parsing alone
+        if not inputs and not outputs:
             inputs, outputs = self.get_metadata_from_parser(
                 inputs=parse_result.in_tables,
                 outputs=parse_result.out_tables,
@@ -460,33 +472,62 @@ class SQLParser(LoggingMixin):
         return hierarchy
 
 
-def get_openlineage_facets_with_sql(
-    hook: DbApiHook, sql: str | list[str], conn_id: str, database: str | None
-) -> OperatorLineage | None:
-    connection = hook.get_connection(conn_id)
+def get_sql_parser_for_hook(hook: DbApiHook, connection: Any, conn_id: str | None) -> SQLParser | None:
+    get_dialect = getattr(hook, "get_openlineage_database_dialect", None)
+    get_default_schema = getattr(hook, "get_openlineage_default_schema", None)
+    if get_dialect is None or get_default_schema is None:
+        log.debug("%s has no database dialect or default schema provided", conn_id)
+        return None
     try:
-        database_info = hook.get_openlineage_database_info(connection)
-    except AttributeError:
-        database_info = None
+        return SQLParser(dialect=get_dialect(connection), default_schema=get_default_schema())
+    except Exception as e:
+        log.warning("Failed to get OpenLineage database dialect or default schema for %s: %s", conn_id, e)
+        log.debug("OpenLineage failure details:", exc_info=True)
+        return None
+
+
+def get_openlineage_facets_with_sql(
+    hook: DbApiHook,
+    sql: str | list[str],
+    conn_id: str,
+    database: str | None,
+    use_connection: bool = True,
+    *,
+    connection: Any | None = None,
+    database_info: Any | None = None,
+    sql_parser: SQLParser | None = None,
+) -> OperatorLineage | None:
+    # Accept pre-fetched connection, database_info and sql_parser to avoid redundant lookups
+    # when processing multiple SQL extras from the same hook. Each get_connection() call
+    # hits SecretsManager (miss) then the Airflow API server — passing these in avoids that cost.
+    # A failing dialect/default schema lookup is then also reported once per hook, not once per query.
+    if connection is None:
+        connection = hook.get_connection(conn_id)
 
     if database_info is None:
-        log.debug("%s has no database info provided", hook)
+        get_database_info = getattr(hook, "get_openlineage_database_info", None)
+        if get_database_info is not None:
+            try:
+                database_info = get_database_info(connection)
+            except Exception as e:
+                log.warning("Failed to get OpenLineage database info for %s: %s", conn_id, e)
+                log.debug("OpenLineage failure details:", exc_info=True)
+
+    if database_info is None:
+        log.debug("%s has no database info provided", conn_id)
         return None
 
-    try:
-        sql_parser = SQLParser(
-            dialect=hook.get_openlineage_database_dialect(connection),
-            default_schema=hook.get_openlineage_default_schema(),
-        )
-    except AttributeError:
-        log.debug("%s failed to get database dialect", hook)
-        return None
+    if sql_parser is None:
+        sql_parser = get_sql_parser_for_hook(hook, connection, conn_id)
+        if sql_parser is None:
+            return None
 
-    try:
-        sqlalchemy_engine = hook.get_sqlalchemy_engine()
-    except Exception as e:
-        log.debug("Failed to get sql alchemy engine: %s", e)
-        sqlalchemy_engine = None
+    sqlalchemy_engine = None
+    if use_connection:
+        try:
+            sqlalchemy_engine = hook.get_sqlalchemy_engine()
+        except Exception as e:
+            log.debug("Failed to get sql alchemy engine: %s", e)
 
     operator_lineage = sql_parser.generate_openlineage_metadata_from_sql(
         sql=sql,
@@ -494,7 +535,7 @@ def get_openlineage_facets_with_sql(
         database_info=database_info,
         database=database,
         sqlalchemy_engine=sqlalchemy_engine,
-        use_connection=should_use_external_connection(hook),
+        use_connection=use_connection,
     )
 
     return operator_lineage

@@ -20,6 +20,7 @@ from __future__ import annotations
 from unittest import mock
 
 import pytest
+from kubernetes.client import models as k8s
 
 from airflow.providers.cncf.kubernetes.triggers.job import KubernetesJobTrigger
 from airflow.triggers.base import TriggerEvent
@@ -45,7 +46,9 @@ def trigger():
     return KubernetesJobTrigger(
         job_name=JOB_NAME,
         job_namespace=NAMESPACE,
-        pod_name=POD_NAME,
+        pod_names=[
+            POD_NAME,
+        ],
         pod_namespace=NAMESPACE,
         base_container_name=CONTAINER_NAME,
         kubernetes_conn_id=CONN_ID,
@@ -66,7 +69,9 @@ class TestKubernetesJobTrigger:
         assert kwargs_dict == {
             "job_name": JOB_NAME,
             "job_namespace": NAMESPACE,
-            "pod_name": POD_NAME,
+            "pod_names": [
+                POD_NAME,
+            ],
             "pod_namespace": NAMESPACE,
             "base_container_name": CONTAINER_NAME,
             "kubernetes_conn_id": CONN_ID,
@@ -79,8 +84,10 @@ class TestKubernetesJobTrigger:
         }
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("poll_interval", [0.5, 60])
     @mock.patch(f"{TRIGGER_CLASS}.hook")
-    async def test_run_success(self, mock_hook, trigger):
+    async def test_run_success(self, mock_hook, trigger, poll_interval):
+        trigger.poll_interval = poll_interval
         mock_job = mock.MagicMock()
         mock_job.metadata.name = JOB_NAME
         mock_job.metadata.namespace = NAMESPACE
@@ -98,14 +105,18 @@ class TestKubernetesJobTrigger:
 
         event_actual = await trigger.run().asend(None)
 
-        mock_hook.wait_until_job_complete.assert_called_once_with(name=JOB_NAME, namespace=NAMESPACE)
+        mock_hook.wait_until_job_complete.assert_called_once_with(
+            name=JOB_NAME, namespace=NAMESPACE, poll_interval=poll_interval
+        )
         mock_job.to_dict.assert_called_once()
         mock_is_job_failed.assert_called_once_with(job=mock_job)
         assert event_actual == TriggerEvent(
             {
                 "name": JOB_NAME,
                 "namespace": NAMESPACE,
-                "pod_name": POD_NAME,
+                "pod_names": [
+                    POD_NAME,
+                ],
                 "pod_namespace": NAMESPACE,
                 "status": "success",
                 "message": "Job completed successfully",
@@ -113,6 +124,37 @@ class TestKubernetesJobTrigger:
                 "xcom_result": None,
             }
         )
+
+    @pytest.mark.asyncio
+    @mock.patch(f"{TRIGGER_CLASS}.hook")
+    async def test_run_success_emits_pod_info_when_get_logs_false(self, mock_hook):
+        """pod_names/pod_namespace must be in the event even with get_logs=False.
+
+        The operator's execute_complete needs them to clean up monitoring pods.
+        """
+        trigger_no_logs = KubernetesJobTrigger(
+            job_name=JOB_NAME,
+            job_namespace=NAMESPACE,
+            pod_names=[POD_NAME],
+            pod_namespace=NAMESPACE,
+            base_container_name=CONTAINER_NAME,
+            kubernetes_conn_id=CONN_ID,
+            poll_interval=POLL_INTERVAL,
+            cluster_context=CLUSTER_CONTEXT,
+            config_file=CONFIG_FILE,
+            in_cluster=IN_CLUSTER,
+            get_logs=False,
+            do_xcom_push=XCOM_PUSH,
+        )
+        mock_job = k8s.V1Job(metadata=k8s.V1ObjectMeta(name=JOB_NAME, namespace=NAMESPACE))
+        mock_hook.wait_until_job_complete.side_effect = mock.AsyncMock(return_value=mock_job)
+        mock_hook.is_job_failed.return_value = False
+
+        event_actual = await trigger_no_logs.run().asend(None)
+
+        assert event_actual.payload["pod_names"] == [POD_NAME]
+        assert event_actual.payload["pod_namespace"] == NAMESPACE
+        assert event_actual.payload["status"] == "success"
 
     @pytest.mark.asyncio
     @mock.patch(f"{TRIGGER_CLASS}.hook")
@@ -134,14 +176,18 @@ class TestKubernetesJobTrigger:
 
         event_actual = await trigger.run().asend(None)
 
-        mock_hook.wait_until_job_complete.assert_called_once_with(name=JOB_NAME, namespace=NAMESPACE)
+        mock_hook.wait_until_job_complete.assert_called_once_with(
+            name=JOB_NAME, namespace=NAMESPACE, poll_interval=POLL_INTERVAL
+        )
         mock_job.to_dict.assert_called_once()
         mock_is_job_failed.assert_called_once_with(job=mock_job)
         assert event_actual == TriggerEvent(
             {
                 "name": JOB_NAME,
                 "namespace": NAMESPACE,
-                "pod_name": POD_NAME,
+                "pod_names": [
+                    POD_NAME,
+                ],
                 "pod_namespace": NAMESPACE,
                 "status": "error",
                 "message": "Job failed with error: Error",
@@ -163,3 +209,10 @@ class TestKubernetesJobTrigger:
             cluster_context=CLUSTER_CONTEXT,
         )
         assert hook_actual == hook_expected
+
+    @pytest.mark.asyncio
+    @mock.patch(f"{HOOK_PATH}.close", autospec=True)
+    async def test_cleanup_closes_hook(self, mock_close, trigger):
+        await trigger.cleanup()
+
+        mock_close.assert_awaited_once_with(trigger.hook)

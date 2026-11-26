@@ -22,12 +22,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.imap.hooks.imap import ImapHook
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class ImapAttachmentToS3Operator(BaseOperator):
@@ -54,7 +54,13 @@ class ImapAttachmentToS3Operator(BaseOperator):
         maintained on each worker node).
     """
 
-    template_fields: Sequence[str] = ("imap_attachment_name", "s3_key", "imap_mail_filter")
+    template_fields: Sequence[str] = (
+        "imap_attachment_name",
+        "s3_key",
+        "imap_mail_filter",
+        "imap_conn_id",
+        "aws_conn_id",
+    )
 
     def __init__(
         self,

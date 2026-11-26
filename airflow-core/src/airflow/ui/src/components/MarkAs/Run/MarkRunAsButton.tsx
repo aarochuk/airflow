@@ -16,64 +16,107 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, useDisclosure } from "@chakra-ui/react";
 import { useState } from "react";
-import { MdArrowDropDown } from "react-icons/md";
 
-import type { DAGRunPatchStates, DAGRunResponse } from "openapi/requests/types.gen";
+import type { ButtonProps } from "@chakra-ui/react";
+import { HStack, useDisclosure } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
+import { FiX } from "react-icons/fi";
+import { LuCheck } from "react-icons/lu";
+
+import type { DagRunMutableStates, DAGRunResponse } from "openapi/requests/types.gen";
+
+import { IconButton, Menu, Tooltip } from "src/system-components";
+
 import { StateBadge } from "src/components/StateBadge";
-import { Menu } from "src/components/ui";
-import ActionButton from "src/components/ui/ActionButton";
+
+import { SHORTCUTS } from "src/context/keyboardShortcuts";
+import { useShortcut } from "src/hooks/useShortcut";
 
 import { allowedStates } from "../utils";
 import MarkRunAsDialog from "./MarkRunAsDialog";
 
 type Props = {
   readonly dagRun: DAGRunResponse;
-  readonly withText?: boolean;
-};
+  readonly isHotkeyEnabled?: boolean;
+} & ButtonProps;
 
-const MarkRunAsButton = ({ dagRun, withText = true }: Props) => {
+export const MarkRunAsButton = ({ dagRun, isHotkeyEnabled = false, ...rest }: Props) => {
   const { onClose, onOpen, open } = useDisclosure();
-  const [state, setState] = useState<DAGRunPatchStates>("success");
+  const [state, setState] = useState<DagRunMutableStates>("success");
+  const { t: translate } = useTranslation();
+
+  useShortcut({
+    ...SHORTCUTS.runActions.markRunFailed,
+    callback: () => {
+      setState("failed");
+      onOpen();
+    },
+    options: { enabled: isHotkeyEnabled },
+  });
+
+  useShortcut({
+    ...SHORTCUTS.runActions.markRunSuccess,
+    callback: () => {
+      setState("success");
+      onOpen();
+    },
+    options: { enabled: isHotkeyEnabled },
+  });
+
+  const label = translate("dags:runAndTaskActions.markAs.button", {
+    type: translate("dagRun_one"),
+  });
 
   return (
-    <Box>
-      <Menu.Root positioning={{ gutter: 0, placement: "bottom" }}>
+    <div>
+      <Menu.Root positioning={{ gutter: 0, placement: "bottom" }} tooltipLabel={label}>
         <Menu.Trigger asChild>
-          <ActionButton
-            actionName="Mark Dag Run as..."
-            flexDirection="row-reverse"
-            icon={<MdArrowDropDown />}
-            text="Mark Run as..."
-            withText={withText}
-          />
+          <IconButton {...rest} aria-label={label} data-testid="mark-run-as-button">
+            <HStack gap={1} mx={1}>
+              <LuCheck />
+              <span>/</span>
+              <FiX />
+            </HStack>
+          </IconButton>
         </Menu.Trigger>
         <Menu.Content>
-          {allowedStates.map((menuState) => (
-            <Menu.Item
-              asChild
-              disabled={dagRun.state === menuState}
-              key={menuState}
-              onClick={() => {
-                if (dagRun.state !== menuState) {
-                  setState(menuState);
-                  onOpen();
-                }
-              }}
-              value={menuState}
-            >
-              <StateBadge my={1} state={menuState}>
-                {menuState}
-              </StateBadge>
-            </Menu.Item>
-          ))}
+          {allowedStates.map((menuState) => {
+            const content = translate(
+              `dags:runAndTaskActions.markAs.buttonTooltip.${menuState === "success" ? "success" : "failed"}`,
+            );
+
+            return (
+              <Tooltip
+                closeDelay={100}
+                content={content}
+                disabled={!isHotkeyEnabled}
+                key={menuState}
+                openDelay={100}
+                portalled
+              >
+                {/* Not disabled when state matches: re-applying lets users also flip upstream/downstream tasks */}
+                <Menu.Item
+                  asChild
+                  data-testid={`mark-run-as-${menuState}`}
+                  key={menuState}
+                  onClick={() => {
+                    setState(menuState);
+                    onOpen();
+                  }}
+                  value={menuState}
+                >
+                  <StateBadge my={1} state={menuState}>
+                    {translate(`common:states.${menuState}`)}
+                  </StateBadge>
+                </Menu.Item>
+              </Tooltip>
+            );
+          })}
         </Menu.Content>
       </Menu.Root>
 
-      {open ? <MarkRunAsDialog dagRun={dagRun} onClose={onClose} open={open} state={state} /> : undefined}
-    </Box>
+      <MarkRunAsDialog dagRun={dagRun} onClose={onClose} open={open} state={state} />
+    </div>
   );
 };
-
-export default MarkRunAsButton;

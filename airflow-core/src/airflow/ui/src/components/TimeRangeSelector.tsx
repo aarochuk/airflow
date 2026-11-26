@@ -19,10 +19,12 @@
 import { HStack, Text, type SelectValueChangeDetails } from "@chakra-ui/react";
 import { createListCollection, type ListCollection } from "@chakra-ui/react/collection";
 import dayjs from "dayjs";
+import { useTranslation } from "react-i18next";
 import { FiCalendar } from "react-icons/fi";
 
+import { Select } from "src/system-components";
+
 import Time from "src/components/Time";
-import { Select } from "src/components/ui";
 
 type Props = {
   readonly defaultValue: string;
@@ -33,23 +35,27 @@ type Props = {
   readonly timeOptions?: ListCollection<{ label: string; value: string }>;
 };
 
-const defaultTimeOptions = createListCollection({
-  items: [
-    { label: "Last 1 hour", value: "1" },
-    { label: "Last 12 hours", value: "12" },
-    { label: "Last 24 hours", value: "24" },
-    { label: "Past week", value: "168" },
-  ],
-});
-
 const TimeRangeSelector = ({
   defaultValue,
   endDate,
   setEndDate,
   setStartDate,
   startDate,
-  timeOptions = defaultTimeOptions,
+  timeOptions: customTimeOptions,
 }: Props) => {
+  const { t: translate } = useTranslation();
+
+  const defaultTimeOptions = createListCollection({
+    items: [
+      { label: translate("timeRange.lastHour"), value: "1" },
+      { label: translate("timeRange.last12Hours"), value: "12" },
+      { label: translate("timeRange.last24Hours"), value: "24" },
+      { label: translate("timeRange.pastWeek"), value: "168" },
+    ],
+  });
+
+  const timeOptions = customTimeOptions ?? defaultTimeOptions;
+
   const handleTimeChange = ({ value }: SelectValueChangeDetails<Array<string>>) => {
     const cnow = dayjs();
 
@@ -68,7 +74,7 @@ const TimeRangeSelector = ({
         width="200px"
       >
         <Select.Trigger>
-          <Select.ValueText placeholder="Duration" />
+          <Select.ValueText placeholder={translate("timeRange.duration")} />
         </Select.Trigger>
         <Select.Content>
           {timeOptions.items.map((option) => (

@@ -27,6 +27,474 @@
 Changelog
 ---------
 
+7.0.0
+.....
+
+.. warning::
+  The ``no_host_key_check`` connection extra now defaults to ``false``. A connection to a host that has
+  no entry in the known hosts file is refused unless host key verification is disabled explicitly or a
+  ``host_key`` is supplied in the connection's extra field.
+
+  Deployments that relied on the previous default can keep the earlier behaviour by adding the host key
+  to the known hosts file, supplying ``host_key`` on the connection, setting the ``no_host_key_check``
+  connection extra to ``true``, or -- when building ``SSHHook``/``SFTPHook``/``SFTPHookAsync`` directly
+  rather than from a connection -- passing the new ``no_host_key_check=True`` constructor argument. The
+  constructor argument takes precedence over the connection extra, and a value set on the hook passed to
+  a deferrable ``SFTPOperator`` is carried into its trigger.
+
+  The previously undocumented ``ignore_hostkey_verification`` extra is now honoured as a deprecated alias
+  for ``no_host_key_check`` and emits a ``DeprecationWarning``. It had no effect before: connections that
+  set it were relying on the old permissive default rather than on the setting itself.
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+* ``Verify SSH host keys by default in SSH and SFTP hooks (#73419)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix concurrent SFTP directory transfers dropping parent hook's connection overrides (#73647)``
+
+Misc
+~~~~
+
+* ``Drop support for Python 3.10 (#74157)``
+
+Doc-only
+~~~~~~~~
+
+* ``Update provider READMEs for the Python 3.11 baseline (#74158)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Apply ruff Python 3.11 fixes to providers (#74155)``
+   * ``[main] Upgrade important CI environment (#73629)``
+
+6.1.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Template every connection id accepted by provider operators (#73286)``
+* ``Add deferrable mode to SFTPOperator (#72336)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Keep pooled SFTP connection on application-level SFTP errors (#73288)``
+* ``Fix SFTPHookAsync letting a connection's known_hosts extra override an explicit constructor path (#73593)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add missing tests for sftp exceptions (#72456)``
+   * ``Revert "[main] Upgrade important CI environment (#73308)" (#73621)``
+   * ``[main] Upgrade important CI environment (#73308)``
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+
+6.0.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix encrypted private keys in async SFTP hook (#70858)``
+
+Misc
+~~~~
+
+* ``Support Paramiko 5 (#69712)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Use common.compat.sdk for timezone imports in providers (#70492)``
+
+6.0.0
+.....
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+* ``Bump minimum paramiko to 4.0.0; DSA/DSS keys are no longer supported (#69669)``
+
+  This provider depends on paramiko 4.0+, which dropped ``DSS``/``DSA`` keys; see `paramiko changelog <https://www.paramiko.org/changelog.html>`__. To migrate: create a key pair that does not use ``DSA`` (Ed25519 or RSA are typical, e.g. ``ssh-keygen -t ed25519``), add the public key to the SFTP server, then update your Airflow SFTP (or shared SSH) connection so ``key_file`` or the ``private_key`` extra uses the new key, and ensure any ``host_key`` extra is not in ``ssh-dss`` form. If you are not ready to migrate keys, stay on a provider release that still pins ``paramiko<4`` until you can switch.
+
+Doc-only
+~~~~~~~~
+
+* ``Document each provider's optional extras in its docs index (#69478)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+
+5.8.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Validate downloaded paths stay within the destination directory in SFTPHook.retrieve_directory (#67985)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.8.1
+.....
+
+Misc
+~~~~
+
+* ``Use compat timezone helpers in sensor and trigger of SFTP provider (#65442)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+5.8.0
+.....
+
+Features
+~~~~~~~~
+
+* ``SFTP: add async retrieve_file / store_file / mkdir to SFTPHookAsync and introduce SFTPClientPool (#64465)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Some nits in asset normalization (#66710)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add uri sanitizers and asset factories for new schemes (#66426)``
+   * ``Fix SFTPHookAsync test fixture to return async context managers (#66678)``
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Providers wave 2026-04-21 (#65614)``
+   * ``Providers wave 2026-04-21``
+
+5.7.5
+.....
+
+Features
+~~~~~~~~
+
+* ``SFTP: add async retrieve_file / store_file / mkdir to SFTPHookAsync and introduce SFTPClientPool``
+
+5.7.4
+.....
+
+Misc
+~~~~
+
+* ``Bump paramiko lower bound to >=3.5.1 due to adding Vespa provider (#63988)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix stale system test documentation links (#65071)``
+
+5.7.3
+.....
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.7.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix an import in providers/sftp to be Airflow 2 compatible (#63822)``
+* ``Return a warning instead of an error when file is already absent (#62639)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+
+5.7.1
+.....
+
+Misc
+~~~~
+
+* ``Bump minimum cryptography to 44.0.3 and paramiko to 3.4.0 (#62723)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare documentation for next release of providers (2026-02-24) (#62495)``
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``[Part 2] Migrate connection UI metadata to YAML for more providers (#62109)``
+
+5.7.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add SSH/SFTP support for ObjectStoragePath (#60757)``
+
+Misc
+~~~~
+
+* ``Use common provider's get_async_connection in other providers (#56791)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.6.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Enhance SFTPSensor documentation and functionality (#60313)``
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+* ``Migrate sftp provider to use airflow.sdk.configuration.conf (#59970)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``TaskInstance unused method cleanup (#59835)``
+
+5.5.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``fix(sftp): add default port to SFTPHookAsync (#58945)``
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.5.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+
+5.4.2
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+* ``Migrate sftp provider to 'common.compat' (#57111)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to sftp Provider test (#57924)``
+   * ``Fix documentation/provider.yaml consistencies (#57283)``
+
+5.4.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Pass required remote_host arg to SSHHook (#55664)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Enable PT001 rule to prvoider tests (#55935)``
+
+5.4.0
+.....
+
+
+Features
+~~~~~~~~
+
+* ``Feature: add optional managed connection (#52700)``
+* ``Add file_pattern to template fields (#54562)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix sftp async hoook (#54763)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Switch pre-commit to prek (#54258)``
+   * ``Fix Airflow 2 reference in README/index of providers (#55240)``
+
+5.3.4
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix missing prefetch arg to SFTPOperator (#53906)``
+
+Misc
+~~~~
+
+* ``Limit paramiko to '< 4.0.0' till we remove DSS support (#54078)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.3.3
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Updating SSH dependency for SFTP provider (#53100)``
+* ``Fix BlobWriter (GCS)  support for SFTP Streaming (#52850)``
+
+Misc
+~~~~
+
+* ``Add Python 3.13 support for Airflow. (#46891)``
+* ``Cleanup type ignores in sftp provider where possible (#53266)``
+* ``Remove type ignore across codebase after mypy upgrade (#53243)``
+* ``Remove upper-binding for "python-requires" (#52980)``
+* ``Temporarily switch to use >=,< pattern instead of '~=' (#52967)``
+* ``Move all BaseHook usages to version_compat in SFTP (#52894)``
+
+Doc-only
+~~~~~~~~
+
+* ``docs: Correct TaskFlow capitalization in documentation (#51794)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Deprecate decorators from Core (#53629)``
+
+5.3.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``bugfix: removed cache for proxycommand in SFTPHook (#52641)``
+
+Misc
+~~~~
+
+* ``Move 'BaseHook' implementation to task SDK (#51873)``
+* ``Replace 'models.BaseOperator' to Task SDK one for SFTP (#52435)``
+* ``Drop support for Python 3.9 (#52072)``
+* ``Use BaseSensorOperator from task sdk in providers (#52296)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Separate out creation of default Connections for tests and non-tests (#52129)``
+
+5.3.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Updating SFTPSensor to properly handle scenario where file is missing (#51167)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.3.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.10+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Remove AIRFLOW_2_10_PLUS conditions (#49877)``
+* ``Bump min Airflow version in providers to 2.10 (#49843)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Update description of provider.yaml dependencies (#50231)``
+   * ``Avoid committing history for providers (#49907)``
+
+5.2.1
+.....
+
+Misc
+~~~~
+
+* ``remove superfluous else block (#49199)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.2.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Implement concurrent directory transfer in SFTPOperator (#47533)``
+
+Misc
+~~~~
+
+* ``Make '@task' import from airflow.sdk (#48896)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Remove unnecessary entries in get_provider_info and update the schema (#48849)``
+   * ``Remove fab from preinstalled providers (#48457)``
+   * ``Improve documentation building iteration (#48760)``
+
+5.1.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Checking modification timestamps only when newer_than parameter is present (#48063)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Simplify tooling by switching completely to uv (#48223)``
+   * ``Move 'BaseSensorOperator' to TaskSDK definitions (#48244)``
+   * ``Prepare docs for Mar 2nd wave of providers (#48383)``
+   * ``Upgrade providers flit build requirements to 3.12.0 (#48362)``
+   * ``Move airflow sources to airflow-core package (#47798)``
+   * ``Remove links to x/twitter.com (#47801)``
+
 5.1.1
 .....
 

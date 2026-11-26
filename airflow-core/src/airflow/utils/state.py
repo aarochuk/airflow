@@ -17,34 +17,31 @@
 # under the License.
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class JobState(str, Enum):
-    """All possible states that a Job can be in."""
+class CallbackState(StrEnum):
+    """All possible states of callbacks."""
 
+    SCHEDULED = "scheduled"
+    PENDING = "pending"
+    QUEUED = "queued"
     RUNNING = "running"
     SUCCESS = "success"
-    RESTARTING = "restarting"
     FAILED = "failed"
 
-    def __str__(self) -> str:
-        return self.value
 
-
-class TerminalTIState(str, Enum):
+class TerminalTIState(StrEnum):
     """States that a Task Instance can be in that indicate it has reached a terminal state."""
 
     SUCCESS = "success"
     FAILED = "failed"
     SKIPPED = "skipped"  # A user can raise a AirflowSkipException from a task & it will be marked as skipped
+    UPSTREAM_FAILED = "upstream_failed"
     REMOVED = "removed"
 
-    def __str__(self) -> str:
-        return self.value
 
-
-class IntermediateTIState(str, Enum):
+class IntermediateTIState(StrEnum):
     """States that a Task Instance can be in that indicate it is not yet in a terminal or running state."""
 
     SCHEDULED = "scheduled"
@@ -52,14 +49,11 @@ class IntermediateTIState(str, Enum):
     RESTARTING = "restarting"
     UP_FOR_RETRY = "up_for_retry"
     UP_FOR_RESCHEDULE = "up_for_reschedule"
-    UPSTREAM_FAILED = "upstream_failed"
     DEFERRED = "deferred"
-
-    def __str__(self) -> str:
-        return self.value
+    AWAITING_INPUT = "awaiting_input"
 
 
-class TaskInstanceState(str, Enum):
+class TaskInstanceState(StrEnum):
     """
     All possible states that a Task Instance can be in.
 
@@ -82,15 +76,13 @@ class TaskInstanceState(str, Enum):
     FAILED = TerminalTIState.FAILED  # Task errored out
     UP_FOR_RETRY = IntermediateTIState.UP_FOR_RETRY  # Task failed but has retries left
     UP_FOR_RESCHEDULE = IntermediateTIState.UP_FOR_RESCHEDULE  # A waiting `reschedule` sensor
-    UPSTREAM_FAILED = IntermediateTIState.UPSTREAM_FAILED  # One or more upstream deps failed
+    UPSTREAM_FAILED = TerminalTIState.UPSTREAM_FAILED  # One or more upstream deps failed
     SKIPPED = TerminalTIState.SKIPPED  # Skipped by branching or some other mechanism
     DEFERRED = IntermediateTIState.DEFERRED  # Deferrable operator waiting on a trigger
-
-    def __str__(self) -> str:
-        return self.value
+    AWAITING_INPUT = IntermediateTIState.AWAITING_INPUT  # Parked waiting for human input (HITL)
 
 
-class DagRunState(str, Enum):
+class DagRunState(StrEnum):
     """
     All possible states that a DagRun can be in.
 
@@ -104,8 +96,13 @@ class DagRunState(str, Enum):
     SUCCESS = "success"
     FAILED = "failed"
 
-    def __str__(self) -> str:
-        return self.value
+
+class DagSchedulingState(StrEnum):
+    """States controlling whether a Dag can create and schedule work."""
+
+    ACTIVE = "active"
+    DRAINING = "draining"
+    PAUSED = "paused"
 
 
 class State:
@@ -128,6 +125,7 @@ class State:
     UPSTREAM_FAILED = TaskInstanceState.UPSTREAM_FAILED
     SKIPPED = TaskInstanceState.SKIPPED
     DEFERRED = TaskInstanceState.DEFERRED
+    AWAITING_INPUT = TaskInstanceState.AWAITING_INPUT
 
     finished_dr_states: frozenset[DagRunState] = frozenset([DagRunState.SUCCESS, DagRunState.FAILED])
     unfinished_dr_states: frozenset[DagRunState] = frozenset([DagRunState.QUEUED, DagRunState.RUNNING])
@@ -155,6 +153,7 @@ class State:
         TaskInstanceState.REMOVED: "lightgrey",
         TaskInstanceState.SCHEDULED: "tan",
         TaskInstanceState.DEFERRED: "mediumpurple",
+        TaskInstanceState.AWAITING_INPUT: "darkorange",
     }
 
     @classmethod
@@ -198,6 +197,7 @@ class State:
             TaskInstanceState.UP_FOR_RETRY,
             TaskInstanceState.UP_FOR_RESCHEDULE,
             TaskInstanceState.DEFERRED,
+            TaskInstanceState.AWAITING_INPUT,
         ]
     )
     """
@@ -226,3 +226,21 @@ class State:
     A list of states indicating that a task can be adopted or reset by a scheduler job
     if it was queued by another scheduler job that is not running anymore.
     """
+
+
+def __getattr__(name: str):
+    """Provide backward compatibility for moved classes."""
+    if name == "JobState":
+        import warnings
+
+        from airflow.jobs.job import JobState
+
+        warnings.warn(
+            "The `airflow.utils.state.JobState` attribute is deprecated and will be removed in a future version. "
+            "Please use `airflow.jobs.job.JobState` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return JobState
+
+    raise AttributeError(f"module 'airflow.utils.state' has no attribute '{name}'")

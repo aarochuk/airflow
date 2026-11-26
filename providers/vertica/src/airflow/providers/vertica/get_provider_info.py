@@ -26,43 +26,11 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-vertica",
         "name": "Vertica",
         "description": "`Vertica <https://www.vertica.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477908,
-        "versions": [
-            "4.0.1",
-            "4.0.0",
-            "3.9.1",
-            "3.9.0",
-            "3.8.2",
-            "3.8.1",
-            "3.8.0",
-            "3.7.1",
-            "3.7.0",
-            "3.6.0",
-            "3.5.2",
-            "3.5.1",
-            "3.5.0",
-            "3.4.1",
-            "3.4.0",
-            "3.3.1",
-            "3.3.0",
-            "3.2.1",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.1.3",
-            "2.1.2",
-            "2.1.1",
-            "2.1.0",
-            "2.0.1",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Vertica",
                 "external-doc-url": "https://www.vertica.com/",
+                "how-to-guide": ["/docs/apache-airflow-providers-vertica/operators.rst"],
                 "logo": "/docs/integration-logos/Vertica.png",
                 "tags": ["software"],
             }
@@ -70,16 +38,27 @@ def get_provider_info():
         "hooks": [
             {"integration-name": "Vertica", "python-modules": ["airflow.providers.vertica.hooks.vertica"]}
         ],
+        "asset-uris": [
+            {
+                "schemes": ["vertica"],
+                "handler": "airflow.providers.vertica.assets.vertica.sanitize_uri",
+                "factory": "airflow.providers.vertica.assets.vertica.create_asset",
+                "to_openlineage_converter": "airflow.providers.vertica.assets.vertica.convert_asset_to_openlineage",
+            }
+        ],
+        "dataset-uris": [
+            {
+                "schemes": ["vertica"],
+                "handler": "airflow.providers.vertica.assets.vertica.sanitize_uri",
+                "factory": "airflow.providers.vertica.assets.vertica.create_asset",
+                "to_openlineage_converter": "airflow.providers.vertica.assets.vertica.convert_asset_to_openlineage",
+            }
+        ],
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.vertica.hooks.vertica.VerticaHook",
+                "hook-name": "Vertica",
                 "connection-type": "vertica",
             }
         ],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-common-sql>=1.20.0",
-            "vertica-python>=0.6.0",
-        ],
-        "devel-dependencies": [],
     }

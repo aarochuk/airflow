@@ -16,11 +16,13 @@
 # under the License.
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
+from tomllib import load as load_tomllib
 
-import httpx
+import httpx2
 from datamodel_code_generator import (
     DataModelType,
     DatetimeClassType,
@@ -29,13 +31,14 @@ from datamodel_code_generator import (
     PythonVersion,
     generate as generate_models,
 )
+from openapi_spec_validator import validate_spec
 
 os.environ["_AIRFLOW__AS_LIBRARY"] = "1"
 
 AIRFLOW_ROOT_PATH = Path(__file__).parents[2].resolve()
 AIRFLOW_TASK_SDK_ROOT_PATH = AIRFLOW_ROOT_PATH / "task-sdk"
 AIRFLOW_CORE_SOURCES_PATH = AIRFLOW_ROOT_PATH / "airflow-core" / "src"
-sys.path.insert(0, str(Path(__file__).parent.resolve()))  # make sure common_precommit_utils is imported
+sys.path.insert(0, str(Path(__file__).parent.resolve()))  # make sure common_prek_utils is imported
 
 sys.path.insert(0, AIRFLOW_CORE_SOURCES_PATH.as_posix())
 sys.path.insert(0, str(AIRFLOW_ROOT_PATH))  # make sure setup is imported from Airflow
@@ -45,11 +48,6 @@ task_sdk_root = Path(__file__).parents[1]
 
 
 def load_config():
-    try:
-        from tomllib import load as load_tomllib
-    except ImportError:
-        from tomli import load as load_tomllib
-
     pyproject = AIRFLOW_TASK_SDK_ROOT_PATH / "pyproject.toml"
     # Simulate what `datamodel-code-generator` does on the CLI
     with pyproject.open("rb") as fh:
@@ -79,10 +77,12 @@ def generate_file():
     app = InProcessExecutionAPI()
 
     latest_version = app.app.versions.version_values[0]
-    client = httpx.Client(transport=app.transport)
+    client = httpx2.Client(transport=app.transport)
     openapi_schema = (
         client.get(f"http://localhost/openapi.json?version={latest_version}").raise_for_status().text
     )
+
+    validate_spec(json.loads(openapi_schema))
 
     os.chdir(AIRFLOW_TASK_SDK_ROOT_PATH)
 

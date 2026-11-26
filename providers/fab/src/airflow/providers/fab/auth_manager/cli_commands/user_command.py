@@ -22,8 +22,8 @@ import functools
 import getpass
 import json
 import os
-import random
 import re
+import secrets
 import string
 from typing import Any
 
@@ -73,7 +73,7 @@ def users_create(args):
             raise SystemExit(f"{args.role} is not a valid role. Valid roles are: {valid_roles}")
         password = _create_password(args)
         if appbuilder.sm.find_user(args.username):
-            print(f"{args.username} already exist in the db")
+            print(f"{args.username} already exists in the db")
             return
         user = appbuilder.sm.add_user(
             args.username, args.firstname, args.lastname, args.email, role, password
@@ -101,7 +101,7 @@ def _find_user(args):
 @cli_utils.action_cli
 @providers_configuration_loaded
 def user_reset_password(args):
-    """Reset user password user from DB."""
+    """Reset user password from DB."""
     user = _find_user(args)
     password = _create_password(args)
     with get_application_builder() as appbuilder:
@@ -113,7 +113,8 @@ def user_reset_password(args):
 
 def _create_password(args):
     if args.use_random_password:
-        password = "".join(random.choices(string.printable, k=16))
+        characters = string.ascii_letters + string.digits + string.punctuation
+        password = "".join(secrets.choice(characters) for _ in range(16))
     elif args.password:
         password = args.password
     else:
@@ -143,10 +144,9 @@ def users_delete(args):
 @cli_utils.action_cli
 @providers_configuration_loaded
 def users_manage_role(args, remove=False):
-    """Delete or appends user roles."""
-    user = _find_user(args)
-
+    """Delete or append user roles."""
     with get_application_builder() as appbuilder:
+        user = _find_user(args)
         role = appbuilder.sm.find_role(args.role)
         if not role:
             valid_roles = appbuilder.sm.get_all_roles()
@@ -263,13 +263,14 @@ def _import_users(users_list: list[dict[str, Any]]):
                 users_updated.append(user["email"])
             else:
                 print(f"Creating new user with email '{user['email']}'")
-                appbuilder.sm.add_user(
+                if not appbuilder.sm.add_user(
                     username=user["username"],
                     first_name=user["firstname"],
                     last_name=user["lastname"],
                     email=user["email"],
                     role=roles,
-                )
+                ):
+                    raise SystemExit(f"Failed to create user with email {user['email']!r}")
 
                 users_created.append(user["email"])
 

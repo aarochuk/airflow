@@ -24,9 +24,9 @@ from flask_appbuilder.security.views import (
     UserDBModelView,
     UserLDAPModelView,
     UserOAuthModelView,
-    UserOIDModelView,
     UserRemoteUserModelView,
 )
+from wtforms.validators import DataRequired
 
 from airflow.providers.fab.www.security import permissions
 
@@ -73,13 +73,32 @@ class MultiResourceUserMixin:
     def class_permission_name(self, name):
         self._class_permission_name = name
 
+    # FAB calls these hooks only after the edit or delete is committed.
+    def post_update(self, item):
+        from airflow.providers.fab.auth_manager.fab_auth_manager import FabAuthManager
+
+        super().post_update(item)
+        FabAuthManager.evict_cached_user(item.id)
+
+    def post_delete(self, item):
+        from airflow.providers.fab.auth_manager.fab_auth_manager import FabAuthManager
+
+        super().post_delete(item)
+        FabAuthManager.evict_cached_user(item.id)
+
     @expose("/show/<pk>", methods=["GET"])
     @has_access
     def show(self, pk):
         pk = self._deserialize_pk_if_composite(pk)
         widgets = self._show(pk)
-        widgets["show"].template_args["actions"].pop("userinfoedit", None)
-        widgets["show"].template_args["actions"].pop("resetmypassword", None)
+        # ``template_args["actions"]`` is the view's shared ``self.actions`` dict, never mutate it.
+        # userinfo and the action endpoints read from it too.
+        show_args = widgets["show"].template_args
+        show_args["actions"] = {
+            name: action
+            for name, action in show_args["actions"].items()
+            if name not in ("userinfoedit", "resetmypassword")
+        }
         return self.render_template(
             self.show_template,
             pk=pk,
@@ -120,10 +139,6 @@ class CustomUserLDAPModelView(MultiResourceUserMixin, UserLDAPModelView):
 
 class CustomUserOAuthModelView(MultiResourceUserMixin, UserOAuthModelView):
     """Customize permission names for FAB's builtin UserOAuthModelView."""
-
-
-class CustomUserOIDModelView(MultiResourceUserMixin, UserOIDModelView):
-    """Customize permission names for FAB's builtin UserOIDModelView."""
 
 
 class CustomUserRemoteUserModelView(MultiResourceUserMixin, UserRemoteUserModelView):
@@ -180,9 +195,51 @@ class CustomUserDBModelView(MultiResourceUserMixin, UserDBModelView):
         "userinfoedit": "read",
     }
 
+    add_columns = [
+        "first_name",
+        "last_name",
+        "username",
+        "active",
+        "email",
+        "roles",
+        "password",
+        "conf_password",
+    ]
+
+    edit_columns = [
+        "first_name",
+        "last_name",
+        "username",
+        "active",
+        "email",
+        "roles",
+    ]
+
+    validators_columns = {"roles": [DataRequired()]}
+
     base_permissions = [
         permissions.ACTION_CAN_CREATE,
         permissions.ACTION_CAN_READ,
         permissions.ACTION_CAN_EDIT,
         permissions.ACTION_CAN_DELETE,
     ]
+
+    edit_template = "appbuilder/general/model/user_edit.html"
+
+    @expose("/edit/<pk>", methods=["GET", "POST"])
+    @has_access
+    def edit(self, pk):
+        pk = self._deserialize_pk_if_composite(pk)
+        widgets = self._edit(pk)
+        if not widgets:
+            return self.post_edit_redirect()
+        return self.render_template(
+            self.edit_template,
+            title=self.edit_title,
+            widgets=widgets,
+            related_views=self._related_views,
+            # Surface the same "Reset Password" action already available on the Show User view.
+            actions={"resetpasswords": self.actions.get("resetpasswords")},
+            pk=pk,
+            modelview_name=self.__class__.__name__,
+        )

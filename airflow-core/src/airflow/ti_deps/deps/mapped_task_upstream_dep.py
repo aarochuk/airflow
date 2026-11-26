@@ -15,6 +15,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -22,13 +23,15 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
-from airflow.models.taskinstance import TaskInstance
 from airflow.ti_deps.deps.base_ti_dep import BaseTIDep
 from airflow.utils.state import State, TaskInstanceState
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from sqlalchemy.orm import Session
 
+    from airflow.models.taskinstance import TaskInstance
     from airflow.ti_deps.dep_context import DepContext
     from airflow.ti_deps.deps.base_ti_dep import TIDepStatus
 
@@ -48,14 +51,18 @@ class MappedTaskUpstreamDep(BaseTIDep):
     def _get_dep_statuses(
         self,
         ti: TaskInstance,
-        session: Session,
         dep_context: DepContext,
+        *,
+        session: Session,
     ) -> Iterator[TIDepStatus]:
-        from airflow.sdk.definitions.mappedoperator import MappedOperator
+        from airflow.models.taskinstance import TaskInstance
+        from airflow.serialization.definitions.mappedoperator import is_mapped
 
-        if isinstance(ti.task, MappedOperator):
+        if ti.task is None:
+            return
+        elif is_mapped(ti.task):
             mapped_dependencies = ti.task.iter_mapped_dependencies()
-        elif ti.task is not None and (task_group := ti.task.get_closest_mapped_task_group()) is not None:
+        elif (task_group := ti.task.get_closest_mapped_task_group()) is not None:
             mapped_dependencies = task_group.iter_mapped_dependencies()
         else:
             return
@@ -64,18 +71,29 @@ class MappedTaskUpstreamDep(BaseTIDep):
         # only interested in it if it hasn't been expanded yet, i.e., we filter by map_index=-1. This is
         # because if it has been expanded, it did not fail and was not skipped outright which is all we need
         # to know for the purposes of this check.
-        mapped_dependency_tis = (
-            session.scalars(
-                select(TaskInstance).where(
-                    TaskInstance.task_id.in_(operator.task_id for operator in mapped_dependencies),
-                    TaskInstance.dag_id == ti.dag_id,
-                    TaskInstance.run_id == ti.run_id,
-                    TaskInstance.map_index == -1,
-                )
-            ).all()
-            if mapped_dependencies
-            else []
-        )
+        dependency_ids = {operator.task_id for operator in mapped_dependencies}
+        mapped_dependency_tis: Sequence[TaskInstance]
+        if dep_context.has_regions(ti, session=session):
+            resolver = dep_context.coordinate_resolver(ti, session=session)
+            mapped_dependency_tis = [
+                upstream
+                for task_id in dependency_ids
+                for upstream in dep_context.upstream_tis(ti, task_id, session=session)
+                if resolver.public_map_index(upstream) < 0
+            ]
+        else:
+            mapped_dependency_tis = (
+                session.scalars(
+                    select(TaskInstance).where(
+                        TaskInstance.task_id.in_(dependency_ids),
+                        TaskInstance.dag_id == ti.dag_id,
+                        TaskInstance.run_id == ti.run_id,
+                        TaskInstance.region_index == -1,
+                    )
+                ).all()
+                if dependency_ids
+                else []
+            )
         if not mapped_dependency_tis:
             yield self._passing_status(reason="There are no (unexpanded) mapped dependencies!")
             return
@@ -99,6 +117,6 @@ class MappedTaskUpstreamDep(BaseTIDep):
                 new_state = TaskInstanceState.UPSTREAM_FAILED
             elif TaskInstanceState.SKIPPED in finished_states:
                 new_state = TaskInstanceState.SKIPPED
-            if new_state is not None and ti.set_state(new_state, session):
+            if new_state is not None and ti.set_state(new_state, session=session):
                 dep_context.have_changed_ti_states = True
         yield self._failing_status(reason="At least one of task's mapped dependencies has not succeeded!")

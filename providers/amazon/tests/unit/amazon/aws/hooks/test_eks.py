@@ -17,7 +17,11 @@
 # under the License.
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 import sys
+from contextlib import AbstractContextManager
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,6 +32,8 @@ from urllib.parse import urlsplit
 import pytest
 import time_machine
 import yaml
+from boto3.session import Session
+from botocore.credentials import Credentials
 from botocore.exceptions import ClientError
 from moto import mock_aws
 from moto.core import DEFAULT_ACCOUNT_ID
@@ -53,6 +59,7 @@ from moto.eks.models import (
     NODEGROUP_NOT_FOUND_MSG,
 )
 
+from airflow.models.connection import Connection
 from airflow.providers.amazon.aws.hooks.eks import COMMAND, EksHook
 
 from unit.amazon.aws.utils.eks_test_constants import (
@@ -240,8 +247,9 @@ class TestEksHooks:
         assert isinstance(result, list)
         assert len(result) == 0
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_list_clusters_returns_sorted_cluster_names(
-        self, cluster_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, cluster_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = cluster_builder(count=initial_batch_size)
         expected_result: list = sorted(generated_test_data.cluster_names)
@@ -250,9 +258,8 @@ class TestEksHooks:
 
         assert_result_matches_expected_list(result, expected_result, initial_batch_size)
 
-    def test_list_clusters_returns_all_results(
-        self, cluster_builder, initial_batch_size: int = BatchCountSize.LARGE
-    ) -> None:
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.LARGE])
+    def test_list_clusters_returns_all_results(self, cluster_builder, initial_batch_size: int) -> None:
         eks_hook, generated_test_data = cluster_builder(count=initial_batch_size)
         expected_result: list = sorted(generated_test_data.cluster_names)
 
@@ -260,8 +267,9 @@ class TestEksHooks:
 
         assert_result_matches_expected_list(result, expected_result)
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_create_cluster_throws_exception_when_cluster_exists(
-        self, cluster_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, cluster_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = cluster_builder(count=initial_batch_size)
         expected_exception: type[AWSError] = ResourceInUseException
@@ -272,7 +280,7 @@ class TestEksHooks:
         with pytest.raises(ClientError) as raised_exception:
             eks_hook.create_cluster(
                 name=generated_test_data.existing_cluster_name,
-                **dict(ClusterInputs.REQUIRED),  # type: ignore
+                **dict(ClusterInputs.REQUIRED),
             )
 
         assert_client_error_exception_thrown(
@@ -329,8 +337,9 @@ class TestEksHooks:
         for key, expected_value in generated_test_data.attributes_to_test:
             assert generated_test_data.cluster_describe_output[key] == expected_value
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_describe_cluster_throws_exception_when_cluster_not_found(
-        self, cluster_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, cluster_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = cluster_builder(count=initial_batch_size)
         expected_exception: type[AWSError] = ResourceNotFoundException
@@ -347,9 +356,8 @@ class TestEksHooks:
             raised_exception=raised_exception,
         )
 
-    def test_delete_cluster_returns_deleted_cluster(
-        self, cluster_builder, initial_batch_size: int = BatchCountSize.SMALL
-    ) -> None:
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
+    def test_delete_cluster_returns_deleted_cluster(self, cluster_builder, initial_batch_size: int) -> None:
         eks_hook, generated_test_data = cluster_builder(count=initial_batch_size, minimal=False)
 
         result: dict = eks_hook.delete_cluster(name=generated_test_data.existing_cluster_name)[
@@ -359,9 +367,8 @@ class TestEksHooks:
         for key, expected_value in generated_test_data.attributes_to_test:
             assert result[key] == expected_value
 
-    def test_delete_cluster_removes_deleted_cluster(
-        self, cluster_builder, initial_batch_size: int = BatchCountSize.SMALL
-    ) -> None:
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
+    def test_delete_cluster_removes_deleted_cluster(self, cluster_builder, initial_batch_size: int) -> None:
         eks_hook, generated_test_data = cluster_builder(count=initial_batch_size, minimal=False)
 
         eks_hook.delete_cluster(name=generated_test_data.existing_cluster_name)
@@ -370,8 +377,9 @@ class TestEksHooks:
         assert len(result_cluster_list) == (initial_batch_size - 1)
         assert generated_test_data.existing_cluster_name not in result_cluster_list
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_delete_cluster_throws_exception_when_cluster_not_found(
-        self, cluster_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, cluster_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = cluster_builder(count=initial_batch_size)
         expected_exception: type[AWSError] = ResourceNotFoundException
@@ -399,8 +407,9 @@ class TestEksHooks:
         assert isinstance(result, list)
         assert len(result) == 0
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_list_nodegroups_returns_sorted_nodegroup_names(
-        self, nodegroup_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, nodegroup_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = nodegroup_builder(count=initial_batch_size)
         expected_result: list = sorted(generated_test_data.nodegroup_names)
@@ -409,9 +418,8 @@ class TestEksHooks:
 
         assert_result_matches_expected_list(result, expected_result, initial_batch_size)
 
-    def test_list_nodegroups_returns_all_results(
-        self, nodegroup_builder, initial_batch_size: int = BatchCountSize.LARGE
-    ) -> None:
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.LARGE])
+    def test_list_nodegroups_returns_all_results(self, nodegroup_builder, initial_batch_size: int) -> None:
         eks_hook, generated_test_data = nodegroup_builder(count=initial_batch_size)
         expected_result: list = sorted(generated_test_data.nodegroup_names)
 
@@ -433,7 +441,7 @@ class TestEksHooks:
             eks_hook.create_nodegroup(
                 clusterName=non_existent_cluster_name,
                 nodegroupName=non_existent_nodegroup_name,
-                **dict(NodegroupInputs.REQUIRED),  # type: ignore
+                **dict(NodegroupInputs.REQUIRED),
             )
 
         assert_client_error_exception_thrown(
@@ -442,8 +450,9 @@ class TestEksHooks:
             raised_exception=raised_exception,
         )
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_create_nodegroup_throws_exception_when_nodegroup_already_exists(
-        self, nodegroup_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, nodegroup_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = nodegroup_builder(count=initial_batch_size)
         expected_exception: type[AWSError] = ResourceInUseException
@@ -456,7 +465,7 @@ class TestEksHooks:
             eks_hook.create_nodegroup(
                 clusterName=generated_test_data.cluster_name,
                 nodegroupName=generated_test_data.existing_nodegroup_name,
-                **dict(NodegroupInputs.REQUIRED),  # type: ignore
+                **dict(NodegroupInputs.REQUIRED),
             )
 
         assert_client_error_exception_thrown(
@@ -470,8 +479,9 @@ class TestEksHooks:
         )
         assert nodegroup_count_after_test == initial_batch_size
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_create_nodegroup_throws_exception_when_cluster_not_active(
-        self, nodegroup_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, nodegroup_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = nodegroup_builder(count=initial_batch_size)
         non_existent_nodegroup_name: str = NON_EXISTING_NODEGROUP_NAME
@@ -485,7 +495,7 @@ class TestEksHooks:
                 eks_hook.create_nodegroup(
                     clusterName=generated_test_data.cluster_name,
                     nodegroupName=non_existent_nodegroup_name,
-                    **dict(NodegroupInputs.REQUIRED),  # type: ignore
+                    **dict(NodegroupInputs.REQUIRED),
                 )
 
         assert_client_error_exception_thrown(
@@ -637,8 +647,9 @@ class TestEksHooks:
         cluster_count_after_test: int = len(eks_hook.list_clusters())
         assert cluster_count_after_test == BatchCountSize.SINGLE
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_delete_nodegroup_removes_deleted_nodegroup(
-        self, nodegroup_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, nodegroup_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = nodegroup_builder(count=initial_batch_size)
 
@@ -651,8 +662,9 @@ class TestEksHooks:
         assert len(result_nodegroup_list) == (initial_batch_size - 1)
         assert generated_test_data.existing_nodegroup_name not in result_nodegroup_list
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_delete_nodegroup_returns_deleted_nodegroup(
-        self, nodegroup_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, nodegroup_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = nodegroup_builder(count=initial_batch_size, minimal=False)
 
@@ -683,8 +695,9 @@ class TestEksHooks:
             raised_exception=raised_exception,
         )
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_delete_nodegroup_throws_exception_when_nodegroup_not_found(
-        self, nodegroup_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, nodegroup_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = nodegroup_builder(count=initial_batch_size)
         expected_exception: type[AWSError] = ResourceNotFoundException
@@ -732,7 +745,7 @@ class TestEksHooks:
     ]
 
     @pytest.mark.parametrize(
-        "launch_template, instance_types, disk_size, remote_access, expected_result",
+        ("launch_template", "instance_types", "disk_size", "remote_access", "expected_result"),
         test_cases,
     )
     def test_create_nodegroup_handles_launch_template_combinations(
@@ -806,8 +819,9 @@ class TestEksHooks:
         assert isinstance(result, list)
         assert len(result) == 0
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_list_fargate_profiles_returns_sorted_profile_names(
-        self, fargate_profile_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, fargate_profile_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = fargate_profile_builder(count=initial_batch_size)
         expected_result: list = sorted(generated_test_data.fargate_profile_names)
@@ -816,8 +830,9 @@ class TestEksHooks:
 
         assert_result_matches_expected_list(result, expected_result, initial_batch_size)
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.LARGE])
     def test_list_fargate_profiles_returns_all_results(
-        self, fargate_profile_builder, initial_batch_size: int = BatchCountSize.LARGE
+        self, fargate_profile_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = fargate_profile_builder(count=initial_batch_size)
         expected_result: list = sorted(generated_test_data.fargate_profile_names)
@@ -838,7 +853,7 @@ class TestEksHooks:
             eks_hook.create_fargate_profile(
                 clusterName=non_existent_cluster_name,
                 fargateProfileName=non_existent_fargate_profile_name,
-                **dict(FargateProfileInputs.REQUIRED),  # type: ignore
+                **dict(FargateProfileInputs.REQUIRED),
             )
 
         assert_client_error_exception_thrown(
@@ -847,8 +862,9 @@ class TestEksHooks:
             raised_exception=raised_exception,
         )
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_create_fargate_profile_throws_exception_when_fargate_profile_already_exists(
-        self, fargate_profile_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, fargate_profile_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = fargate_profile_builder(count=initial_batch_size)
         expected_exception: type[AWSError] = ResourceInUseException
@@ -858,7 +874,7 @@ class TestEksHooks:
             eks_hook.create_fargate_profile(
                 clusterName=generated_test_data.cluster_name,
                 fargateProfileName=generated_test_data.existing_fargate_profile_name,
-                **dict(FargateProfileInputs.REQUIRED),  # type: ignore
+                **dict(FargateProfileInputs.REQUIRED),
             )
 
         assert_client_error_exception_thrown(
@@ -872,8 +888,9 @@ class TestEksHooks:
         )
         assert fargate_profile_count_after_test == initial_batch_size
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_create_fargate_profile_throws_exception_when_cluster_not_active(
-        self, fargate_profile_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, fargate_profile_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = fargate_profile_builder(count=initial_batch_size)
         non_existent_fargate_profile_name: str = NON_EXISTING_FARGATE_PROFILE_NAME
@@ -887,7 +904,7 @@ class TestEksHooks:
                 eks_hook.create_fargate_profile(
                     clusterName=generated_test_data.cluster_name,
                     fargateProfileName=non_existent_fargate_profile_name,
-                    **dict(FargateProfileInputs.REQUIRED),  # type: ignore
+                    **dict(FargateProfileInputs.REQUIRED),
                 )
 
         assert_client_error_exception_thrown(
@@ -976,8 +993,9 @@ class TestEksHooks:
             raised_exception=raised_exception,
         )
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_delete_fargate_profile_removes_deleted_fargate_profile(
-        self, fargate_profile_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, fargate_profile_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = fargate_profile_builder(initial_batch_size)
 
@@ -992,8 +1010,9 @@ class TestEksHooks:
         assert len(result_fargate_profile_list) == (initial_batch_size - 1)
         assert generated_test_data.existing_fargate_profile_name not in result_fargate_profile_list
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_delete_fargate_profile_returns_deleted_fargate_profile(
-        self, fargate_profile_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, fargate_profile_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = fargate_profile_builder(count=initial_batch_size, minimal=False)
 
@@ -1026,8 +1045,9 @@ class TestEksHooks:
             raised_exception=raised_exception,
         )
 
+    @pytest.mark.parametrize("initial_batch_size", [BatchCountSize.SMALL])
     def test_delete_fargate_profile_throws_exception_when_fargate_profile_not_found(
-        self, fargate_profile_builder, initial_batch_size: int = BatchCountSize.SMALL
+        self, fargate_profile_builder, initial_batch_size: int
     ) -> None:
         eks_hook, generated_test_data = fargate_profile_builder(count=initial_batch_size)
         expected_exception: type[AWSError] = ResourceNotFoundException
@@ -1155,7 +1175,7 @@ class TestEksHooks:
     ]
 
     @pytest.mark.parametrize(
-        "selectors, expected_message, expected_result",
+        ("selectors", "expected_message", "expected_result"),
         selector_formatting_test_cases,
     )
     @mock_aws
@@ -1197,49 +1217,97 @@ class TestEksHooks:
 class TestEksHook:
     python_executable = f"python{sys.version_info[0]}.{sys.version_info[1]}"
 
+    @mock.patch.object(EksHook, "generate_config_file", autospec=True)
+    @mock.patch.object(EksHook, "get_session", autospec=True)
+    def test_generate_config_file_with_credentials(self, get_session, generate_config):
+        hook = EksHook(aws_conn_id=None)
+        session = mock.create_autospec(Session, instance=True)
+        session.get_credentials.return_value = Credentials("access-key", "secret-key", "session-token")
+        get_session.return_value = session
+        config_context = mock.MagicMock(spec=AbstractContextManager)
+        config_context.__enter__.return_value = "/tmp/kubeconfig"
+        generate_config.return_value = config_context
+
+        with hook.generate_config_file_with_credentials("cluster", "namespace") as (config, credentials):
+            assert config == "/tmp/kubeconfig"
+            assert Path(credentials).read_text() == (
+                "export AWS_ACCESS_KEY_ID='access-key'\n"
+                "export AWS_SECRET_ACCESS_KEY='secret-key'\n"
+                "export AWS_SESSION_TOKEN='session-token'\n"
+            )
+            config_context.__exit__.assert_not_called()
+
+        credentials = generate_config.call_args.kwargs["credentials_file"]
+        generate_config.assert_called_once_with(
+            hook, eks_cluster_name="cluster", pod_namespace="namespace", credentials_file=credentials
+        )
+        assert not Path(credentials).exists()
+        config_context.__exit__.assert_called_once()
+
+    @mock.patch.object(EksHook, "generate_config_file", autospec=True)
+    @mock.patch.object(EksHook, "get_session", autospec=True)
+    def test_auth_context_cleans_up_after_caller_failure(self, get_session, generate_config):
+        hook = EksHook(aws_conn_id=None)
+        session = mock.create_autospec(Session, instance=True)
+        session.get_credentials.return_value = Credentials("access-key", "secret-key", "session-token")
+        get_session.return_value = session
+        config_context = mock.MagicMock(spec=AbstractContextManager)
+        config_context.__enter__.return_value = "/tmp/kubeconfig"
+        generate_config.return_value = config_context
+        error = ValueError("caller failed")
+
+        with pytest.raises(ValueError, match="caller failed") as raised:
+            with hook.generate_config_file_with_credentials("cluster", "namespace") as (_, credentials):
+                raise error
+
+        assert raised.value is error
+        assert not Path(credentials).exists()
+        config_context.__exit__.assert_called_once_with(ValueError, error, mock.ANY)
+
+    @mock.patch.object(EksHook, "generate_config_file", autospec=True)
+    @mock.patch.object(EksHook, "get_session", autospec=True)
+    def test_auth_context_cleans_up_after_kubeconfig_failure(self, get_session, generate_config):
+        hook = EksHook(aws_conn_id=None)
+        session = mock.create_autospec(Session, instance=True)
+        session.get_credentials.return_value = Credentials("access-key", "secret-key", "session-token")
+        get_session.return_value = session
+        config_context = mock.MagicMock(spec=AbstractContextManager)
+        error = ValueError("kubeconfig failed")
+        config_context.__enter__.side_effect = error
+        generate_config.return_value = config_context
+
+        with pytest.raises(ValueError, match="kubeconfig failed") as raised:
+            with hook.generate_config_file_with_credentials("cluster", "namespace"):
+                pytest.fail("Kubeconfig failure must prevent entering the auth context")
+
+        assert raised.value is error
+        credentials = generate_config.call_args.kwargs["credentials_file"]
+        assert not Path(credentials).exists()
+
+    @mock.patch.object(EksHook, "generate_config_file", autospec=True)
+    @mock.patch.object(EksHook, "get_session", autospec=True)
+    def test_generate_config_file_with_credentials_missing_credentials(self, get_session, generate_config):
+        hook = EksHook(aws_conn_id=None)
+        session = mock.create_autospec(Session, instance=True)
+        session.get_credentials.return_value = None
+        get_session.return_value = session
+
+        with pytest.raises(RuntimeError, match="Unable to retrieve AWS credentials"):
+            with hook.generate_config_file_with_credentials("cluster", "namespace"):
+                pytest.fail("Missing credentials must prevent kubeconfig creation")
+
+        generate_config.assert_not_called()
+
     @mock.patch("airflow.providers.amazon.aws.hooks.base_aws.AwsBaseHook.conn")
     @pytest.mark.parametrize(
-        "aws_conn_id, region_name, expected_args",
+        ("aws_conn_id", "region_name", "expected_region_args"),
         [
-            [
-                "test-id",
-                "test-region",
-                [
-                    "-c",
-                    COMMAND.format(
-                        python_executable=python_executable,
-                        eks_cluster_name="test-cluster",
-                        args=" --region-name test-region --aws-conn-id test-id",
-                    ),
-                ],
-            ],
-            [
-                None,
-                "test-region",
-                [
-                    "-c",
-                    COMMAND.format(
-                        python_executable=python_executable,
-                        eks_cluster_name="test-cluster",
-                        args=" --region-name test-region",
-                    ),
-                ],
-            ],
-            [
-                None,
-                None,
-                [
-                    "-c",
-                    COMMAND.format(
-                        python_executable=python_executable,
-                        eks_cluster_name="test-cluster",
-                        args="",
-                    ),
-                ],
-            ],
+            ["test-id", "test-region", " --region-name test-region"],
+            [None, "test-region", " --region-name test-region"],
+            [None, None, ""],
         ],
     )
-    def test_generate_config_file(self, mock_conn, aws_conn_id, region_name, expected_args):
+    def test_generate_config_file(self, mock_conn, aws_conn_id, region_name, expected_region_args):
         mock_conn.describe_cluster.return_value = {
             "cluster": {"certificateAuthority": {"data": "test-cert"}, "endpoint": "test-endpoint"}
         }
@@ -1247,73 +1315,169 @@ class TestEksHook:
         # We're mocking all actual AWS calls and don't need a connection. This
         # avoids an Airflow warning about connection cannot be found.
         hook.get_connection = lambda _: None
+
+        # Mock credentials file path
+        credentials_file = "/tmp/test_credentials.aws_creds"
+
         with hook.generate_config_file(
-            eks_cluster_name="test-cluster", pod_namespace="k8s-namespace"
+            eks_cluster_name="test-cluster", pod_namespace="k8s-namespace", credentials_file=credentials_file
         ) as config_file:
             config = yaml.safe_load(Path(config_file).read_text())
-            assert config == {
-                "apiVersion": "v1",
-                "kind": "Config",
-                "clusters": [
-                    {
-                        "cluster": {"server": "test-endpoint", "certificate-authority-data": "test-cert"},
-                        "name": "test-cluster",
-                    }
-                ],
-                "contexts": [
-                    {
-                        "context": {"cluster": "test-cluster", "namespace": "k8s-namespace", "user": "aws"},
-                        "name": "aws",
-                    }
-                ],
-                "current-context": "aws",
-                "preferences": {},
-                "users": [
-                    {
-                        "name": "aws",
-                        "user": {
-                            "exec": {
-                                "apiVersion": "client.authentication.k8s.io/v1alpha1",
-                                "args": expected_args,
-                                "command": "sh",
-                                "interactiveMode": "Never",
-                            }
-                        },
-                    }
-                ],
-            }
 
-    @mock.patch("airflow.providers.amazon.aws.hooks.eks.RequestSigner")
-    @mock.patch("airflow.providers.amazon.aws.hooks.eks.StsHook")
-    @mock.patch("airflow.providers.amazon.aws.hooks.base_aws.AwsBaseHook.conn")
-    @mock.patch("airflow.providers.amazon.aws.hooks.base_aws.AwsBaseHook.get_session")
-    def test_fetch_access_token_for_cluster(self, mock_get_session, mock_conn, mock_sts_hook, mock_signer):
-        mock_signer.return_value.generate_presigned_url.return_value = "http://example.com"
-        mock_sts_hook.return_value.conn_client_meta.endpoint_url = "https://sts.us-east-1.amazonaws.com"
-        mock_get_session.return_value.region_name = "us-east-1"
-        hook = EksHook()
-        token = hook.fetch_access_token_for_cluster(eks_cluster_name="test-cluster")
-        mock_signer.assert_called_once_with(
-            service_id=mock_conn.meta.service_model.service_id,
-            region_name="us-east-1",
-            signing_name="sts",
-            signature_version="v4",
-            credentials=mock_get_session.return_value.get_credentials.return_value,
-            event_emitter=mock_get_session.return_value.events,
+            # Verify basic kubeconfig structure
+            assert config["apiVersion"] == "v1"
+            assert config["kind"] == "Config"
+            assert config["current-context"] == "aws"
+
+            # Verify cluster config
+            assert len(config["clusters"]) == 1
+            cluster = config["clusters"][0]
+            assert cluster["name"] == "test-cluster"
+            assert cluster["cluster"]["server"] == "test-endpoint"
+            assert cluster["cluster"]["certificate-authority-data"] == "test-cert"
+
+            # Verify context config
+            assert len(config["contexts"]) == 1
+            context = config["contexts"][0]
+            assert context["name"] == "aws"
+            assert context["context"]["cluster"] == "test-cluster"
+            assert context["context"]["namespace"] == "k8s-namespace"
+            assert context["context"]["user"] == "aws"
+
+            # Verify user config uses secure credential approach
+            assert len(config["users"]) == 1
+            user = config["users"][0]
+            assert user["name"] == "aws"
+            exec_config = user["user"]["exec"]
+            assert exec_config["apiVersion"] == "client.authentication.k8s.io/v1"
+            assert exec_config["command"] == "sh"
+            assert exec_config["interactiveMode"] == "Never"
+
+            # Verify the command references a credential file (not inline creds)
+            command_arg = exec_config["args"][1]  # The -c argument content
+            assert f". {credentials_file}" in command_arg  # The dot operator is used for POSIX-compliance
+
+            # Verify region arguments are properly included
+            if expected_region_args:
+                assert expected_region_args in command_arg
+
+    @mock.patch.object(EksHook, "conn", new_callable=PropertyMock)
+    def test_generate_config_file_uses_regional_sts_and_keeps_environment(self, mock_conn, monkeypatch):
+        """The kubeconfig gets the regional STS endpoint even with "legacy", and the environment is unchanged."""
+        monkeypatch.setenv("AWS_STS_REGIONAL_ENDPOINTS", "legacy")
+        mock_conn.return_value.describe_cluster.return_value = {
+            "cluster": {"certificateAuthority": {"data": "test-cert"}, "endpoint": "test-endpoint"}
+        }
+        hook = EksHook(aws_conn_id=None, region_name="us-west-2")
+
+        with hook.generate_config_file(
+            eks_cluster_name="test-cluster",
+            pod_namespace="ns",
+            credentials_file="/tmp/test_credentials.aws_creds",
+        ) as config_file:
+            config = yaml.safe_load(Path(config_file).read_text())
+
+        command_arg = config["users"][0]["user"]["exec"]["args"][1]
+        regional_sts_url = "https://sts.us-west-2.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15"
+        assert f"--sts-url '{regional_sts_url}'" in command_arg
+        assert os.environ["AWS_STS_REGIONAL_ENDPOINTS"] == "legacy"
+
+    @pytest.mark.parametrize(
+        ("extra", "expected_sts_endpoint"),
+        [
+            pytest.param(
+                {"service_config": {"sts": {"endpoint_url": "https://sts-fips.us-west-2.amazonaws.com"}}},
+                "https://sts-fips.us-west-2.amazonaws.com",
+                id="sts-service-config",
+            ),
+            pytest.param(
+                {"endpoint_url": "https://fips.eks.us-west-2.amazonaws.com"},
+                "https://sts.us-west-2.amazonaws.com",
+                id="connection-wide-endpoint-url-is-not-used",
+            ),
+        ],
+    )
+    @mock.patch.object(EksHook, "get_connection")
+    @mock.patch.object(EksHook, "conn", new_callable=PropertyMock)
+    def test_generate_config_file_uses_sts_endpoint_of_hook_connection(
+        self, mock_conn, mock_get_connection, extra, expected_sts_endpoint
+    ):
+        mock_get_connection.return_value = Connection(conn_id="eks_conn", conn_type="aws", extra=extra)
+        mock_conn.return_value.describe_cluster.return_value = {
+            "cluster": {"certificateAuthority": {"data": "test-cert"}, "endpoint": "test-endpoint"}
+        }
+        hook = EksHook(aws_conn_id="eks_conn", region_name="us-west-2")
+
+        with hook.generate_config_file(
+            eks_cluster_name="test-cluster",
+            pod_namespace="ns",
+            credentials_file="/tmp/test_credentials.aws_creds",
+        ) as config_file:
+            config = yaml.safe_load(Path(config_file).read_text())
+
+        command_arg = config["users"][0]["user"]["exec"]["args"][1]
+        sts_url = f"{expected_sts_endpoint}/?Action=GetCallerIdentity&Version=2011-06-15"
+        assert f"--sts-url '{sts_url}'" in command_arg
+        mock_get_connection.assert_called_with("eks_conn")
+
+    def test_command_template_captures_stderr_separately(self):
+        """Verify COMMAND keeps stderr out of stdout while preserving errors."""
+        # Verify stderr is not merged with stdout (the core correctness requirement)
+        assert "2>&1" not in COMMAND, (
+            "COMMAND must not use 2>&1 — merging stderr with stdout breaks bash token parsing"
         )
-        mock_signer.return_value.generate_presigned_url.assert_called_once_with(
-            request_dict={
-                "method": "GET",
-                "url": "https://sts.us-east-1.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15",
-                "body": {},
-                "headers": {"x-k8s-aws-id": "test-cluster"},
-                "context": {},
-            },
-            region_name="us-east-1",
-            expires_in=60,
-            operation_name="",
+        assert "stderr_file=$(mktemp)" in COMMAND
+        assert '2>"$stderr_file"' in COMMAND
+        assert 'cat "$stderr_file" >&2' in COMMAND
+        assert "2>/dev/null" not in COMMAND
+
+    def test_command_template_uses_last_stdout_line_with_posix_shell(self, tmp_path):
+        credentials_file = tmp_path / "credentials"
+        credentials_file.write_text(
+            "export AWS_ACCESS_KEY_ID='test-access-key'\nexport AWS_SECRET_ACCESS_KEY='test-secret-key'\n"
         )
-        assert token == "k8s-aws-v1.aHR0cDovL2V4YW1wbGUuY29t"
+        token_helper = tmp_path / "token-helper"
+        token_helper.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' '2026-09-04T17:50:59Z [info] Found credentials in environment variables.'\n"
+            "printf '%s\\n' 'expirationTimestamp: 2026-09-04T18:04:59Z, token: test-token'\n"
+        )
+        token_helper.chmod(0o700)
+        command = COMMAND.format(
+            credentials_file=credentials_file,
+            sts_url="https://sts.us-east-1.amazonaws.com",
+            python_executable=token_helper,
+            eks_cluster_name="test-cluster",
+            args="",
+            authentication_api_version="client.authentication.k8s.io/v1",
+        )
+
+        result = subprocess.run(["sh", "-c", command], capture_output=True, text=True, check=True)
+
+        assert json.loads(result.stdout) == {
+            "kind": "ExecCredential",
+            "apiVersion": "client.authentication.k8s.io/v1",
+            "spec": {},
+            "status": {"expirationTimestamp": "2026-09-04T18:04:59Z", "token": "test-token"},
+        }
+
+    def test_command_template_does_not_print_token_output_on_error(self):
+        """Verify the error path does not echo stdout, which can contain a token."""
+        failure_block = COMMAND.split('if [ "$status" -ne 0 ]; then', 1)[1].split("fi", 1)[0]
+        assert '"$output"' not in failure_block
+
+    def test_command_template_validates_token(self):
+        """Verify COMMAND template validates that the token was successfully
+        extracted before producing the ExecCredential JSON. Without this check,
+        a malformed ExecCredential with an empty token is sent to the API server,
+        resulting in 401 Unauthorized with an empty user identity in audit logs.
+        """
+        # Verify token validation check exists
+        assert 'if [ -z "$token" ]' in COMMAND, (
+            "COMMAND must validate that token is non-empty before producing ExecCredential JSON"
+        )
+        # Verify the empty-token validation block exits with an error
+        assert "exit 1" in COMMAND, "COMMAND must exit with error when token extraction fails"
 
 
 # Helper methods for repeated assert combinations.

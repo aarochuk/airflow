@@ -25,19 +25,18 @@ from typing import TYPE_CHECKING, Any
 from google.api_core.exceptions import Conflict
 from google.cloud.bigquery import DEFAULT_RETRY, UnknownJob
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import AirflowException, conf
 from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook, BigQueryJob
 from airflow.providers.google.cloud.links.bigquery import BigQueryTableLink
 from airflow.providers.google.cloud.triggers.bigquery import BigQueryInsertJobTrigger
 from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID
+from airflow.providers.google.version_compat import BaseOperator
 from airflow.utils.helpers import merge_dicts
 
 if TYPE_CHECKING:
     from google.api_core.retry import Retry
 
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class BigQueryToGCSOperator(BaseOperator):
@@ -87,6 +86,11 @@ class BigQueryToGCSOperator(BaseOperator):
     :param reattach_states: Set of BigQuery job's states in case of which we should reattach
         to the job. Should be other than final states.
     :param deferrable: Run operator in the deferrable mode
+    :param cancel_on_kill: Flag which indicates whether cancel the hook's job or not, when on_kill is called.
+        With ``force_rerun=False``, a retry reuses the same job ID, and a cancelled job cannot be
+        reattached through ``reattach_states``. Set ``force_rerun=True`` for retries to start a new
+        job, or ``cancel_on_kill=False`` to keep reattaching to the running one.
+    :return: URIs for the objects created in Google Cloud Storage
     """
 
     template_fields: Sequence[str] = (
@@ -96,6 +100,7 @@ class BigQueryToGCSOperator(BaseOperator):
         "labels",
         "impersonation_chain",
         "job_id",
+        "gcp_conn_id",
     )
     template_ext: Sequence[str] = ()
     ui_color = "#e4e6f0"
@@ -121,6 +126,7 @@ class BigQueryToGCSOperator(BaseOperator):
         force_rerun: bool = False,
         reattach_states: set[str] | None = None,
         deferrable: bool = conf.getboolean("operators", "default_deferrable", fallback=False),
+        cancel_on_kill: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -142,6 +148,7 @@ class BigQueryToGCSOperator(BaseOperator):
         self.reattach_states: set[str] = reattach_states or set()
         self.hook: BigQueryHook | None = None
         self.deferrable = deferrable
+        self.cancel_on_kill = cancel_on_kill
 
     @staticmethod
     def _handle_job_error(job: BigQueryJob | UnknownJob) -> None:
@@ -215,8 +222,9 @@ class BigQueryToGCSOperator(BaseOperator):
             job_id=self.job_id,
             dag_id=self.dag_id,
             task_id=self.task_id,
-            logical_date=context["logical_date"],
+            logical_date=None,
             configuration=configuration,
+            run_after=hook.get_run_after_or_logical_date(context),
             force_rerun=self.force_rerun,
         )
 
@@ -241,21 +249,19 @@ class BigQueryToGCSOperator(BaseOperator):
                     f"want to force rerun it consider setting `force_rerun=True`."
                     f"Or, if you want to reattach in this scenario add {job.state} to `reattach_states`"
                 )
-            else:
-                # Job already reached state DONE
-                if job.state == "DONE":
-                    raise AirflowException("Job is already in state DONE. Can not reattach to this job.")
+            # Job already reached state DONE
+            if job.state == "DONE":
+                raise AirflowException("Job is already in state DONE. Can not reattach to this job.")
 
-                # We are reattaching to a job
-                self.log.info("Reattaching to existing Job in state %s", job.state)
-                self._handle_job_error(job)
+            # We are reattaching to a job
+            self.log.info("Reattaching to existing Job in state %s", job.state)
+            self._handle_job_error(job)
 
         self.job_id = job.job_id
         conf = job.to_api_repr()["configuration"]["extract"]["sourceTable"]
         dataset_id, project_id, table_id = conf["datasetId"], conf["projectId"], conf["tableId"]
         BigQueryTableLink.persist(
             context=context,
-            task_instance=self,
             dataset_id=dataset_id,
             project_id=project_id,
             table_id=table_id,
@@ -270,11 +276,14 @@ class BigQueryToGCSOperator(BaseOperator):
                     project_id=self.project_id or self.hook.project_id,
                     location=self.location or self.hook.location,
                     impersonation_chain=self.impersonation_chain,
+                    cancel_on_kill=self.cancel_on_kill,
                 ),
                 method_name="execute_complete",
             )
         else:
             job.result(timeout=self.result_timeout, retry=self.result_retry)
+
+            return self.destination_cloud_storage_uris
 
     def execute_complete(self, context: Context, event: dict[str, Any]):
         """
@@ -291,6 +300,14 @@ class BigQueryToGCSOperator(BaseOperator):
         )
         # Save job_id as an attribute to be later used by listeners
         self.job_id = event.get("job_id")
+
+        return self.destination_cloud_storage_uris
+
+    def on_kill(self) -> None:
+        if self.hook and self.job_id and self.cancel_on_kill:
+            self.hook.cancel_job(job_id=self.job_id, project_id=self.project_id, location=self.location)
+        else:
+            self.log.info("Skipping to cancel job: %s:%s.%s", self.project_id, self.location, self.job_id)
 
     def get_openlineage_facets_on_complete(self, task_instance):
         """Implement on_complete as we will include final BQ job id."""

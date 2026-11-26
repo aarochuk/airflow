@@ -28,13 +28,12 @@ from collections.abc import Sequence
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
-from airflow.exceptions import AirflowException
-from airflow.models import BaseOperator
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.apache.hive.hooks.hive import HiveCliHook
+from airflow.providers.common.compat.sdk import AirflowException, BaseOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class S3ToHiveOperator(BaseOperator):
@@ -91,7 +90,7 @@ class S3ToHiveOperator(BaseOperator):
     :param select_expression: S3 Select expression
     """
 
-    template_fields: Sequence[str] = ("s3_key", "partition", "hive_table")
+    template_fields: Sequence[str] = ("s3_key", "partition", "hive_table", "aws_conn_id", "hive_cli_conn_id")
     template_ext: Sequence[str] = ()
     ui_color = "#a0e08c"
 
@@ -253,13 +252,12 @@ class S3ToHiveOperator(BaseOperator):
         test_field_match = all(h1.lower() == h2.lower() for h1, h2 in zip(header_list, field_names))
         if test_field_match:
             return True
-        else:
-            self.log.warning(
-                "Headers do not match field names File headers:\n %s\nField names: \n %s\n",
-                header_list,
-                field_names,
-            )
-            return False
+        self.log.warning(
+            "Headers do not match field names File headers:\n %s\nField names: \n %s\n",
+            header_list,
+            field_names,
+        )
+        return False
 
     @staticmethod
     def _delete_top_row_and_compress(input_file_name, output_file_ext, dest_dir):

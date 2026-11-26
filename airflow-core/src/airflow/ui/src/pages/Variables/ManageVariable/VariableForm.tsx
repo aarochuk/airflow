@@ -16,17 +16,33 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Field, HStack, Input, Spacer, Textarea } from "@chakra-ui/react";
+import { Box, Button, Field, HStack, Input, Spacer, Textarea } from "@chakra-ui/react";
 import { Controller, useForm } from "react-hook-form";
+import { useTranslation } from "react-i18next";
 import { FiSave } from "react-icons/fi";
 
+import { Alert } from "src/system-components";
+
 import { ErrorAlert } from "src/components/ErrorAlert";
-import { Button } from "src/components/ui";
+import { TeamSelector } from "src/components/TeamSelector.tsx";
+
+import { useConfig } from "src/queries/useConfig.tsx";
 
 export type VariableBody = {
   description: string | undefined;
   key: string;
+  team_name: string;
   value: string;
+};
+
+const getJsonParseError = (string: string): string | undefined => {
+  try {
+    JSON.parse(string);
+
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 };
 
 type VariableFormProps = {
@@ -38,6 +54,7 @@ type VariableFormProps = {
 };
 
 const VariableForm = ({ error, initialVariable, isPending, manageMutate, setError }: VariableFormProps) => {
+  const { t: translate } = useTranslation(["admin", "common"]);
   const {
     control,
     formState: { isDirty, isValid },
@@ -47,6 +64,7 @@ const VariableForm = ({ error, initialVariable, isPending, manageMutate, setErro
     defaultValues: initialVariable,
     mode: "onChange",
   });
+  const multiTeamEnabled = Boolean(useConfig("multi_team"));
 
   const onSubmit = (data: VariableBody) => {
     manageMutate(data);
@@ -65,29 +83,45 @@ const VariableForm = ({ error, initialVariable, isPending, manageMutate, setErro
         render={({ field, fieldState }) => (
           <Field.Root invalid={Boolean(fieldState.error)} required>
             <Field.Label fontSize="md">
-              Key <Field.RequiredIndicator />
+              {translate("columns.key")} <Field.RequiredIndicator />
             </Field.Label>
             <Input {...field} disabled={Boolean(initialVariable.key)} required size="sm" />
             {fieldState.error ? <Field.ErrorText>{fieldState.error.message}</Field.ErrorText> : undefined}
           </Field.Root>
         )}
         rules={{
-          required: "Key is required",
-          validate: (_value) => _value.length <= 250 || "Key can contain a maximum of 250 characters",
+          required: translate("variables.form.keyRequired"),
+          validate: (_value) => _value.length <= 250 || translate("variables.form.keyMaxLength"),
         }}
       />
 
       <Controller
         control={control}
         name="value"
-        render={({ field }) => (
-          <Field.Root mt={4}>
-            <Field.Label fontSize="md">
-              Value <Field.RequiredIndicator />
-            </Field.Label>
-            <Textarea {...field} size="sm" />
-          </Field.Root>
-        )}
+        render={({ field, fieldState }) => {
+          const jsonParseError =
+            field.value.startsWith("{") || field.value.startsWith("[")
+              ? getJsonParseError(field.value)
+              : undefined;
+
+          return (
+            <Field.Root invalid={Boolean(fieldState.error)} mt={4} required>
+              <Field.Label fontSize="md">
+                {translate("columns.value")} <Field.RequiredIndicator />
+              </Field.Label>
+              <Textarea {...field} size="sm" />
+              {jsonParseError === undefined ? undefined : (
+                <Alert mt={2} status="warning">
+                  {translate("variables.form.invalidJson")}: {jsonParseError}
+                </Alert>
+              )}
+              {fieldState.error ? <Field.ErrorText>{fieldState.error.message}</Field.ErrorText> : undefined}
+            </Field.Root>
+          );
+        }}
+        rules={{
+          required: translate("variables.form.valueRequired"),
+        }}
       />
 
       <Controller
@@ -95,11 +129,13 @@ const VariableForm = ({ error, initialVariable, isPending, manageMutate, setErro
         name="description"
         render={({ field }) => (
           <Field.Root mb={4} mt={4}>
-            <Field.Label fontSize="md">Description</Field.Label>
+            <Field.Label fontSize="md">{translate("columns.description")}</Field.Label>
             <Textarea {...field} size="sm" />
           </Field.Root>
         )}
       />
+
+      {multiTeamEnabled ? <TeamSelector control={control} /> : undefined}
 
       <ErrorAlert error={error} />
 
@@ -107,16 +143,12 @@ const VariableForm = ({ error, initialVariable, isPending, manageMutate, setErro
         <HStack w="full">
           {isDirty ? (
             <Button onClick={handleReset} variant="outline">
-              Reset
+              {translate("common:reset")}
             </Button>
           ) : undefined}
           <Spacer />
-          <Button
-            colorPalette="blue"
-            disabled={!isValid || isPending}
-            onClick={() => void handleSubmit(onSubmit)()}
-          >
-            <FiSave /> Save
+          <Button disabled={!isValid || isPending} onClick={() => void handleSubmit(onSubmit)()}>
+            <FiSave /> {translate("formActions.save")}
           </Button>
         </HStack>
       </Box>

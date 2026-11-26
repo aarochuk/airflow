@@ -19,17 +19,16 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from google.api_core.exceptions import AlreadyExists
+from google.api_core.exceptions import AlreadyExists, NotFound
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
 from google.cloud.orchestration.airflow.service_v1 import ImageVersion
 from google.cloud.orchestration.airflow.service_v1.types import Environment, ExecuteAirflowCommandResponse
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, conf
 from airflow.providers.google.cloud.hooks.cloud_composer import CloudComposerHook
-from airflow.providers.google.cloud.links.base import BaseGoogleLink
+from airflow.providers.google.cloud.links.base import BASE_LINK, BaseGoogleLink
 from airflow.providers.google.cloud.operators.cloud_base import GoogleCloudBaseOperator
 from airflow.providers.google.cloud.triggers.cloud_composer import (
     CloudComposerAirflowCLICommandTrigger,
@@ -41,9 +40,9 @@ if TYPE_CHECKING:
     from google.api_core.retry import Retry
     from google.protobuf.field_mask_pb2 import FieldMask
 
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
-CLOUD_COMPOSER_BASE_LINK = "https://console.cloud.google.com/composer/environments"
+CLOUD_COMPOSER_BASE_LINK = BASE_LINK + "/composer/environments"
 CLOUD_COMPOSER_DETAILS_LINK = (
     CLOUD_COMPOSER_BASE_LINK + "/detail/{region}/{environment_id}/monitoring?project={project_id}"
 )
@@ -57,25 +56,6 @@ class CloudComposerEnvironmentLink(BaseGoogleLink):
     key = "composer_conf"
     format_str = CLOUD_COMPOSER_DETAILS_LINK
 
-    @staticmethod
-    def persist(
-        operator_instance: (
-            CloudComposerCreateEnvironmentOperator
-            | CloudComposerUpdateEnvironmentOperator
-            | CloudComposerGetEnvironmentOperator
-        ),
-        context: Context,
-    ) -> None:
-        operator_instance.xcom_push(
-            context,
-            key=CloudComposerEnvironmentLink.key,
-            value={
-                "project_id": operator_instance.project_id,
-                "region": operator_instance.region,
-                "environment_id": operator_instance.environment_id,
-            },
-        )
-
 
 class CloudComposerEnvironmentsLink(BaseGoogleLink):
     """Helper class for constructing Cloud Composer Environment Link."""
@@ -84,15 +64,9 @@ class CloudComposerEnvironmentsLink(BaseGoogleLink):
     key = "composer_conf"
     format_str = CLOUD_COMPOSER_ENVIRONMENTS_LINK
 
-    @staticmethod
-    def persist(operator_instance: CloudComposerListEnvironmentsOperator, context: Context) -> None:
-        operator_instance.xcom_push(
-            context,
-            key=CloudComposerEnvironmentsLink.key,
-            value={
-                "project_id": operator_instance.project_id,
-            },
-        )
+
+class ComposerEnvironmentNotRunningError(RuntimeError):
+    """Raised when a Composer environment is not in the RUNNING state."""
 
 
 class CloudComposerCreateEnvironmentOperator(GoogleCloudBaseOperator):
@@ -126,6 +100,7 @@ class CloudComposerCreateEnvironmentOperator(GoogleCloudBaseOperator):
         "environment_id",
         "environment",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     operator_extra_links = (CloudComposerEnvironmentLink(),)
@@ -159,6 +134,30 @@ class CloudComposerCreateEnvironmentOperator(GoogleCloudBaseOperator):
         self.deferrable = deferrable
         self.pooling_period_seconds = pooling_period_seconds
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "region": self.region,
+            "environment_id": self.environment_id,
+        }
+
+    def _raise_if_environment_not_running(self, environment: Environment) -> None:
+        env_state = Environment.State(environment.state)
+        self.log.info("Environment state: %s", env_state.name)
+
+        self.log.info(
+            "Composer environment final state: raw=%s, name=%s, value=%s",
+            environment.state,
+            env_state.name,
+            env_state.value,
+        )
+
+        if env_state != Environment.State.RUNNING:
+            raise ComposerEnvironmentNotRunningError(
+                f"Composer environment is not in RUNNING state. Current state: {env_state.name}"
+            )
+
     def execute(self, context: Context):
         hook = CloudComposerHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -171,7 +170,7 @@ class CloudComposerCreateEnvironmentOperator(GoogleCloudBaseOperator):
         else:
             self.environment["name"] = name
 
-        CloudComposerEnvironmentLink.persist(operator_instance=self, context=context)
+        CloudComposerEnvironmentLink.persist(context=context)
         try:
             result = hook.create_environment(
                 project_id=self.project_id,
@@ -184,20 +183,34 @@ class CloudComposerCreateEnvironmentOperator(GoogleCloudBaseOperator):
             context["ti"].xcom_push(key="operation_id", value=result.operation.name)
 
             if not self.deferrable:
-                environment = hook.wait_for_operation(timeout=self.timeout, operation=result)
-                return Environment.to_dict(environment)
-            else:
-                self.defer(
-                    trigger=CloudComposerExecutionTrigger(
-                        project_id=self.project_id,
-                        region=self.region,
-                        operation_name=result.operation.name,
-                        gcp_conn_id=self.gcp_conn_id,
-                        impersonation_chain=self.impersonation_chain,
-                        pooling_period_seconds=self.pooling_period_seconds,
-                    ),
-                    method_name=GOOGLE_DEFAULT_DEFERRABLE_METHOD_NAME,
+                self.log.info("Waiting for the create environment operation to complete...")
+                hook.wait_for_operation(timeout=self.timeout, operation=result)
+                self.log.info(
+                    "Create environment operation completed. Checking the state of the environment..."
                 )
+                environment = hook.get_environment(
+                    project_id=self.project_id,
+                    region=self.region,
+                    environment_id=self.environment_id,
+                    retry=self.retry,
+                    timeout=self.timeout,
+                    metadata=self.metadata,
+                )
+                self._raise_if_environment_not_running(environment)
+
+                self.log.info("Environment created and is in RUNNING state")
+                return Environment.to_dict(environment)
+            self.defer(
+                trigger=CloudComposerExecutionTrigger(
+                    project_id=self.project_id,
+                    region=self.region,
+                    operation_name=result.operation.name,
+                    gcp_conn_id=self.gcp_conn_id,
+                    impersonation_chain=self.impersonation_chain,
+                    pooling_period_seconds=self.pooling_period_seconds,
+                ),
+                method_name=GOOGLE_DEFAULT_DEFERRABLE_METHOD_NAME,
+            )
         except AlreadyExists:
             environment = hook.get_environment(
                 project_id=self.project_id,
@@ -207,6 +220,10 @@ class CloudComposerCreateEnvironmentOperator(GoogleCloudBaseOperator):
                 timeout=self.timeout,
                 metadata=self.metadata,
             )
+            self.log.info("Environment already exists. Checking its state...")
+            self._raise_if_environment_not_running(environment)
+
+            self.log.info("Environment already exists and is in RUNNING state")
             return Environment.to_dict(environment)
 
     def execute_complete(self, context: Context, event: dict):
@@ -224,9 +241,11 @@ class CloudComposerCreateEnvironmentOperator(GoogleCloudBaseOperator):
                 timeout=self.timeout,
                 metadata=self.metadata,
             )
+            self._raise_if_environment_not_running(env)
+
+            self.log.info("Environment created and is in RUNNING state")
             return Environment.to_dict(env)
-        else:
-            raise AirflowException(f"Unexpected error in the operation: {event['operation_name']}")
+        raise AirflowException(f"Unexpected error in the operation: {event['operation_name']}")
 
 
 class CloudComposerDeleteEnvironmentOperator(GoogleCloudBaseOperator):
@@ -258,6 +277,7 @@ class CloudComposerDeleteEnvironmentOperator(GoogleCloudBaseOperator):
         "region",
         "environment_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -345,6 +365,7 @@ class CloudComposerGetEnvironmentOperator(GoogleCloudBaseOperator):
         "region",
         "environment_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     operator_extra_links = (CloudComposerEnvironmentLink(),)
@@ -372,6 +393,14 @@ class CloudComposerGetEnvironmentOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "region": self.region,
+            "environment_id": self.environment_id,
+        }
+
     def execute(self, context: Context):
         hook = CloudComposerHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -386,8 +415,7 @@ class CloudComposerGetEnvironmentOperator(GoogleCloudBaseOperator):
             timeout=self.timeout,
             metadata=self.metadata,
         )
-
-        CloudComposerEnvironmentLink.persist(operator_instance=self, context=context)
+        CloudComposerEnvironmentLink.persist(context=context)
         return Environment.to_dict(result)
 
 
@@ -418,6 +446,7 @@ class CloudComposerListEnvironmentsOperator(GoogleCloudBaseOperator):
         "project_id",
         "region",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     operator_extra_links = (CloudComposerEnvironmentsLink(),)
@@ -447,12 +476,17 @@ class CloudComposerListEnvironmentsOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = CloudComposerHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
         )
-        CloudComposerEnvironmentsLink.persist(operator_instance=self, context=context)
         result = hook.list_environments(
             project_id=self.project_id,
             region=self.region,
@@ -499,6 +533,7 @@ class CloudComposerUpdateEnvironmentOperator(GoogleCloudBaseOperator):
         "region",
         "environment_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     operator_extra_links = (CloudComposerEnvironmentLink(),)
@@ -534,6 +569,14 @@ class CloudComposerUpdateEnvironmentOperator(GoogleCloudBaseOperator):
         self.deferrable = deferrable
         self.pooling_period_seconds = pooling_period_seconds
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+            "region": self.region,
+            "environment_id": self.environment_id,
+        }
+
     def execute(self, context: Context):
         hook = CloudComposerHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -551,22 +594,21 @@ class CloudComposerUpdateEnvironmentOperator(GoogleCloudBaseOperator):
             metadata=self.metadata,
         )
 
-        CloudComposerEnvironmentLink.persist(operator_instance=self, context=context)
+        CloudComposerEnvironmentLink.persist(context=context)
         if not self.deferrable:
             environment = hook.wait_for_operation(timeout=self.timeout, operation=result)
             return Environment.to_dict(environment)
-        else:
-            self.defer(
-                trigger=CloudComposerExecutionTrigger(
-                    project_id=self.project_id,
-                    region=self.region,
-                    operation_name=result.operation.name,
-                    gcp_conn_id=self.gcp_conn_id,
-                    impersonation_chain=self.impersonation_chain,
-                    pooling_period_seconds=self.pooling_period_seconds,
-                ),
-                method_name=GOOGLE_DEFAULT_DEFERRABLE_METHOD_NAME,
-            )
+        self.defer(
+            trigger=CloudComposerExecutionTrigger(
+                project_id=self.project_id,
+                region=self.region,
+                operation_name=result.operation.name,
+                gcp_conn_id=self.gcp_conn_id,
+                impersonation_chain=self.impersonation_chain,
+                pooling_period_seconds=self.pooling_period_seconds,
+            ),
+            method_name=GOOGLE_DEFAULT_DEFERRABLE_METHOD_NAME,
+        )
 
     def execute_complete(self, context: Context, event: dict):
         if event["operation_done"]:
@@ -584,8 +626,7 @@ class CloudComposerUpdateEnvironmentOperator(GoogleCloudBaseOperator):
                 metadata=self.metadata,
             )
             return Environment.to_dict(env)
-        else:
-            raise AirflowException(f"Unexpected error in the operation: {event['operation_name']}")
+        raise AirflowException(f"Unexpected error in the operation: {event['operation_name']}")
 
 
 class CloudComposerListImageVersionsOperator(GoogleCloudBaseOperator):
@@ -611,6 +652,7 @@ class CloudComposerListImageVersionsOperator(GoogleCloudBaseOperator):
         "project_id",
         "region",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -689,6 +731,7 @@ class CloudComposerRunAirflowCLICommandOperator(GoogleCloudBaseOperator):
         "environment_id",
         "command",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -769,9 +812,15 @@ class CloudComposerRunAirflowCLICommandOperator(GoogleCloudBaseOperator):
             metadata=self.metadata,
             poll_interval=self.poll_interval,
         )
-        result_str = self._merge_cmd_output_result(result)
-        self.log.info("Command execution result:\n%s", result_str)
-        return result
+        exit_code = result.get("exit_info", {}).get("exit_code")
+        if exit_code == 0:
+            result_str = self._merge_cmd_output_result(result)
+            self.log.info("Command execution result:\n%s", result_str)
+            return result
+
+        error_output = "".join(line["content"] for line in result.get("error", []))
+        message = f"Airflow CLI command failed with exit code {exit_code}.\nError output:\n{error_output}"
+        raise AirflowException(message)
 
     def execute_complete(self, context: Context, event: dict) -> dict:
         if event and event["status"] == "error":
@@ -797,3 +846,91 @@ class CloudComposerRunAirflowCLICommandOperator(GoogleCloudBaseOperator):
         """Merge output to one string."""
         result_str = "\n".join(line_dict["content"] for line_dict in result["output"])
         return result_str
+
+
+class CloudComposerTriggerDAGRunOperator(GoogleCloudBaseOperator):
+    """
+    Trigger Dag run for provided Composer environment.
+
+    :param project_id: The ID of the Google Cloud project that the service belongs to.
+    :param region: The ID of the Google Cloud region that the service belongs to.
+    :param environment_id: The ID of the Google Cloud environment that the service belongs to.
+    :param composer_dag_id: The ID of Dag which will be triggered.
+    :param composer_dag_conf: Configuration parameters for the Dag run.
+    :param timeout: The timeout for this request.
+    :param gcp_conn_id: The connection ID used to connect to Google Cloud Platform.
+    :param impersonation_chain: Optional service account to impersonate using short-term
+        credentials, or chained list of accounts required to get the access_token
+        of the last account in the list, which will be impersonated in the request.
+        If set as a string, the account must grant the originating account
+        the Service Account Token Creator IAM role.
+        If set as a sequence, the identities from the list must grant
+        Service Account Token Creator IAM role to the directly preceding identity, with first
+        account from the list granting this role to the originating account (templated).
+    """
+
+    template_fields = (
+        "project_id",
+        "region",
+        "environment_id",
+        "composer_dag_id",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
+
+    def __init__(
+        self,
+        *,
+        project_id: str,
+        region: str,
+        environment_id: str,
+        composer_dag_id: str,
+        composer_dag_conf: dict | None = None,
+        timeout: float | None = None,
+        gcp_conn_id: str = "google_cloud_default",
+        impersonation_chain: str | Sequence[str] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.project_id = project_id
+        self.region = region
+        self.environment_id = environment_id
+        self.composer_dag_id = composer_dag_id
+        self.composer_dag_conf = composer_dag_conf or {}
+        self.timeout = timeout
+        self.gcp_conn_id = gcp_conn_id
+        self.impersonation_chain = impersonation_chain
+
+    def execute(self, context: Context):
+        hook = CloudComposerHook(
+            gcp_conn_id=self.gcp_conn_id,
+            impersonation_chain=self.impersonation_chain,
+        )
+        try:
+            environment = hook.get_environment(
+                project_id=self.project_id,
+                region=self.region,
+                environment_id=self.environment_id,
+                timeout=self.timeout,
+            )
+        except NotFound as not_found_err:
+            self.log.info("The Composer environment %s does not exist.", self.environment_id)
+            raise AirflowException(not_found_err)
+        composer_airflow_uri = environment.config.airflow_uri
+        composer_airflow_version = int(
+            environment.config.software_config.image_version.split("airflow-")[1].split(".")[0]
+        )
+
+        self.log.info(
+            "Triggering the Dag %s on the %s environment...", self.composer_dag_id, self.environment_id
+        )
+        dag_run = hook.trigger_dag_run(
+            composer_airflow_uri=composer_airflow_uri,
+            composer_dag_id=self.composer_dag_id,
+            composer_dag_conf=self.composer_dag_conf,
+            composer_airflow_version=composer_airflow_version,
+            timeout=self.timeout,
+        )
+        self.log.info("The Dag %s was triggered with Run ID: %s", self.composer_dag_id, dag_run["dag_run_id"])
+
+        return dag_run

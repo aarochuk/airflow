@@ -21,19 +21,36 @@ import json
 import logging
 import os
 from datetime import datetime
+from typing import Any, cast
 
-from airflow.decorators import task
-from airflow.models import Connection
 from airflow.models.dag import DAG
+from airflow.models.xcom_arg import XComArg
+
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import task
+else:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
 from airflow.providers.google.cloud.operators.gcs import GCSCreateBucketOperator, GCSDeleteBucketOperator
 from airflow.providers.google.cloud.transfers.sheets_to_gcs import GoogleSheetsToGCSOperator
+from airflow.providers.google.common.utils.get_secret import get_secret
 from airflow.providers.google.suite.operators.sheets import GoogleSheetsCreateSpreadsheetOperator
-from airflow.settings import Session
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
+
+from system.google.gcp_api_client_helpers import create_airflow_connection, delete_airflow_connection
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT", "default")
 DAG_ID = "sheets_to_gcs"
+
+IS_COMPOSER = bool(os.environ.get("COMPOSER_ENVIRONMENT", ""))
 
 BUCKET_NAME = f"bucket_{DAG_ID}_{ENV_ID}"
 SPREADSHEET = {
@@ -41,10 +58,9 @@ SPREADSHEET = {
     "sheets": [{"properties": {"title": "Sheet1"}}],
 }
 CONNECTION_ID = f"connection_{DAG_ID}_{ENV_ID}"
-
+GDRIVE_SECRET_ID = "gdrive_shared_folder_id"
 
 log = logging.getLogger(__name__)
-
 
 with DAG(
     DAG_ID,
@@ -53,55 +69,53 @@ with DAG(
     catchup=False,
     tags=["example", "sheets"],
 ) as dag:
+
+    @task
+    def get_shared_drive_id() -> str:
+        return get_secret(secret_id=GDRIVE_SECRET_ID).strip()
+
+    get_shared_drive_id_task = get_shared_drive_id()
+
     create_bucket = GCSCreateBucketOperator(
         task_id="create_bucket", bucket_name=BUCKET_NAME, project_id=PROJECT_ID
     )
 
     @task
     def create_connection(connection_id: str):
-        conn = Connection(
-            conn_id=connection_id,
-            conn_type="google_cloud_platform",
-        )
         conn_extra = {
-            "scope": "https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/cloud-platform",
+            "scope": "https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/cloud-platform",
             "project": PROJECT_ID,
             "keyfile_dict": "",  # Override to match your needs
         }
         conn_extra_json = json.dumps(conn_extra)
-        conn.set_extra(conn_extra_json)
-
-        session = Session()
-        log.info("Removing connection %s if it exists", connection_id)
-        query = session.query(Connection).filter(Connection.conn_id == connection_id)
-        query.delete()
-
-        session.add(conn)
-        session.commit()
-        log.info("Connection %s created", connection_id)
+        connection: dict[str, Any] = {"conn_type": "google_cloud_platform", "extra": conn_extra_json}
+        create_airflow_connection(
+            connection_id=connection_id,
+            connection_conf=connection,
+            is_composer=IS_COMPOSER,
+        )
 
     create_connection_task = create_connection(connection_id=CONNECTION_ID)
 
     create_spreadsheet = GoogleSheetsCreateSpreadsheetOperator(
-        task_id="create_spreadsheet", spreadsheet=SPREADSHEET, gcp_conn_id=CONNECTION_ID
+        task_id="create_spreadsheet",
+        spreadsheet=SPREADSHEET,
+        gcp_conn_id=CONNECTION_ID,
+        drive_id=get_shared_drive_id_task,
     )
 
     # [START upload_sheet_to_gcs]
     upload_sheet_to_gcs = GoogleSheetsToGCSOperator(
         task_id="upload_sheet_to_gcs",
         destination_bucket=BUCKET_NAME,
-        spreadsheet_id="{{ task_instance.xcom_pull(task_ids='create_spreadsheet', key='spreadsheet_id') }}",
+        spreadsheet_id=cast("str", XComArg(create_spreadsheet, key="spreadsheet_id")),
         gcp_conn_id=CONNECTION_ID,
     )
     # [END upload_sheet_to_gcs]
 
     @task(task_id="delete_connection")
     def delete_connection(connection_id: str) -> None:
-        session = Session()
-        log.info("Removing connection %s", connection_id)
-        query = session.query(Connection).filter(Connection.conn_id == connection_id)
-        query.delete()
-        session.commit()
+        delete_airflow_connection(connection_id=connection_id, is_composer=IS_COMPOSER)
 
     delete_connection_task = delete_connection(connection_id=CONNECTION_ID)
 
@@ -111,7 +125,7 @@ with DAG(
 
     (
         # TEST SETUP
-        [create_bucket, create_connection_task]
+        [get_shared_drive_id_task, create_bucket, create_connection_task]
         >> create_spreadsheet
         # TEST BODY
         >> upload_sheet_to_gcs
@@ -127,5 +141,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

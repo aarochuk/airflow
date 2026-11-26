@@ -20,19 +20,27 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from functools import wraps
-from typing import Callable, TypeVar, cast
+from typing import TypeVar, cast
 
-import google
 import google.auth.transport.requests
 import google.oauth2.id_token
-from flask import Response, current_app, request as flask_request  # type: ignore
+
+try:
+    from flask import Response, current_app, request as flask_request
+except ImportError:
+    raise ImportError(
+        "Google requires FAB provider to be installed in order to use this auth backend. "
+        "Please install the FAB provider by running: "
+        "pip install apache-airflow-providers-google[fab]"
+    )
 from google.auth import exceptions
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2 import service_account
 
-from airflow.configuration import conf
 from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.providers.common.compat.sdk import conf
 from airflow.providers.google.common.deprecated import deprecated
 from airflow.providers.google.common.utils.id_token_credentials import get_default_id_token_credentials
 
@@ -113,7 +121,7 @@ def _lookup_user(user_email: str):
 
 
 def _set_current_user(user):
-    current_app.appbuilder.sm.lm._update_request_context_with_user(user=user)  # type: ignore[attr-defined]
+    current_app.appbuilder.sm.lm._update_request_context_with_user(user=user)
 
 
 T = TypeVar("T", bound=Callable)
@@ -127,12 +135,12 @@ def requires_authentication(function: T):
         access_token = _get_id_token_from_request(flask_request)
         if not access_token:
             log.debug("Missing ID Token")
-            return Response("Forbidden", 403)
+            return Response("Unauthorized", 401)
 
         userid = _verify_id_token(access_token)
         if not userid:
             log.debug("Invalid ID Token")
-            return Response("Forbidden", 403)
+            return Response("Unauthorized", 401)
 
         log.debug("Looking for user with e-mail: %s", userid)
 

@@ -23,15 +23,15 @@ from __future__ import annotations
 
 import pendulum
 
-from airflow.models.dag import DAG
 from airflow.providers.standard.operators.empty import EmptyOperator
-from airflow.utils.edgemodifier import Label
+from airflow.sdk import DAG, Label
 
 with DAG(
     "example_branch_labels",
     schedule="@daily",
     start_date=pendulum.datetime(2021, 1, 1, tz="UTC"),
     catchup=False,
+    tags=["example"],
 ) as dag:
     ingest = EmptyOperator(task_id="ingest")
     analyse = EmptyOperator(task_id="analyze")

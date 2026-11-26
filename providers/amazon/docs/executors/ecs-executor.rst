@@ -1,4 +1,4 @@
-.. Licensed to the Apache Software Foundation (ASF) under one
+ .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
     regarding copyright ownership.  The ASF licenses this file
@@ -74,7 +74,7 @@ In the case of conflicts, the order of precedence from lowest to highest is:
    provided.
 
 .. note::
-   ``exec_config`` is an optional parameter that can be provided to operators. It is a dictionary type and in the context of the ECS Executor it represents a ``run_task_kwargs`` configuration which is then updated over-top of the ``run_task_kwargs`` specified in Airflow config above (if present). It is a recursive update which essentially applies Python update to each nested dictionary in the configuration. Loosely approximated as: ``run_task_kwargs.update(exec_config)``
+   ``executor_config`` is an optional parameter that can be provided to operators. It is a dictionary type and in the context of the ECS Executor it represents a ``run_task_kwargs`` configuration which is then updated over-top of the ``run_task_kwargs`` specified in Airflow config above (if present). It is a recursive update which essentially applies Python update to each nested dictionary in the configuration. Loosely approximated as: ``run_task_kwargs.update(executor_config)``
 
 Required config options:
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -111,6 +111,10 @@ Optional config options:
    fails to start (i.e. ECS API failures, container failures etc.)
 -  CHECK_HEALTH_ON_STARTUP - Whether or not to check the ECS Executor
    health on startup
+-  RUN_TASK_CONCURRENCY - The maximum number of ECS ``run_task`` calls
+   the ECS Executor makes in parallel, in background threads. Defaults
+   to 1: tasks are launched one at a time, and the scheduler loop waits
+   for each call.
 
 For a more detailed description of available options, including type
 hints and examples, see the ``config_templates`` folder in the Amazon
@@ -134,8 +138,8 @@ ECS Executor, this role needs to have at least the
 ``AmazonECSTaskExecutionRolePolicy`` as well as the
 ``CloudWatchLogsFullAccess`` (or ``CloudWatchLogsFullAccessV2``) policies. The Task Role is the role that is
 used by the containers to make AWS API requests. This role needs to have
-permissions based on the tasks that are described in the DAG being run.
-If you are loading DAGs via an S3 bucket, this role needs to have
+permissions based on the tasks that are described in the Dag being run.
+If you are loading Dags via an S3 bucket, this role needs to have
 permission to read the S3 bucket.
 
 To create a new Task Role or Task Execution Role, follow the steps
@@ -161,6 +165,33 @@ newly created Task Role and Task Execution role for the Task Definition.
 .. include:: general.rst
   :start-after: .. BEGIN DOCKERFILE_AUTH_SECOND_METHOD
   :end-before: .. END DOCKERFILE_AUTH_SECOND_METHOD
+
+.. include:: general.rst
+  :start-after: .. BEGIN BASE_IMAGE
+  :end-before: .. END BASE_IMAGE
+
+.. include:: general.rst
+  :start-after: .. BEGIN LOADING_DAGS_OVERVIEW
+  :end-before: .. END LOADING_DAGS_OVERVIEW
+
+.. include:: general.rst
+  :start-after: .. BEGIN LOADING_DAGS_FROM_S3
+  :end-before: .. END LOADING_DAGS_FROM_S3
+
+.. include:: general.rst
+  :start-after: .. BEGIN LOADING_DAGS_FROM_LOCAL
+  :end-before: .. END LOADING_DAGS_FROM_LOCAL
+
+.. include:: general.rst
+  :start-after: .. BEGIN DEPENDENCIES
+  :end-before: .. END DEPENDENCIES
+
+Building Image for AWS ECS Executor
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Detailed instructions on how to use the Docker image, that you have
+created via this readme, with the ECS Executor can be found
+:ref:`here <setup_guide>`.
 
 .. _logging:
 
@@ -303,14 +334,14 @@ Create Task Definition
 
 - ``AIRFLOW__DATABASE__SQL_ALCHEMY_CONN``, with the value being the PostgreSQL connection string in the following format using the values set during the `Database section <#create-the-rds-db-instance>`_ above:
 
-.. code-block:: bash
+.. include:: general.rst
+  :start-after: .. BEGIN SQL_ALCHEMY_CONN
+  :end-before: .. END SQL_ALCHEMY_CONN
 
-   postgresql+psycopg2://<username>:<password>@<endpoint>/<database_name>
 
+- ``AIRFLOW__AWS_ECS_EXECUTOR__SECURITY_GROUPS``, with the value being a comma separated list of security group IDs associated with the VPC used for the RDS instance.
 
-- ``AIRFLOW__ECS_EXECUTOR__SECURITY_GROUPS``, with the value being a comma separated list of security group IDs associated with the VPC used for the RDS instance.
-
-- ``AIRFLOW__ECS_EXECUTOR__SUBNETS``, with the value being a comma separated list of subnet IDs of the subnets associated with the RDS instance.
+- ``AIRFLOW__AWS_ECS_EXECUTOR__SUBNETS``, with the value being a comma separated list of subnet IDs of the subnets associated with the RDS instance.
 
 1. Add other configuration as necessary for Airflow generally (see `here <https://airflow.apache.org/docs/apache-airflow/stable/configurations-ref.html>`__), the ECS executor (see :ref:`here <config-options>`) or for remote logging (see :ref:`here <logging>`). Note that any configuration changes should be made across the entire Airflow environment to keep configuration consistent.
 
@@ -362,3 +393,7 @@ To configure Airflow to utilize the ECS Executor and leverage the resources we'v
 .. include:: general.rst
   :start-after: .. BEGIN INIT_DB
   :end-before: .. END INIT_DB
+
+.. include:: general.rst
+  :start-after: .. BEGIN TASK_INSTANCE_IDENTITY
+  :end-before: .. END TASK_INSTANCE_IDENTITY

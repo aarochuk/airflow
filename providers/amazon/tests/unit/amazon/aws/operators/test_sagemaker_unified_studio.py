@@ -20,13 +20,15 @@ from unittest.mock import patch
 
 import pytest
 
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.operators.sagemaker_unified_studio import (
     SageMakerNotebookOperator,
 )
 from airflow.providers.amazon.aws.triggers.sagemaker_unified_studio import (
     SageMakerNotebookJobTrigger,
 )
+from airflow.providers.common.compat.sdk import AirflowException
+
+from unit.amazon.aws.utils.test_deferral import expect_deferral_warning
 
 
 class TestSageMakerNotebookOperator:
@@ -45,6 +47,29 @@ class TestSageMakerNotebookOperator:
         }
         assert operator.output_config == {"output_format": "ipynb"}
 
+    def test_init_with_domain_id_project_id_domain_region(self):
+        operator = SageMakerNotebookOperator(
+            task_id="test_id",
+            input_config={"input_path": "path/to/notebook.ipynb"},
+            domain_id="dzd-example123456",
+            project_id="proj-example123456",
+            domain_region="us-east-1",
+        )
+
+        assert operator.domain_id == "dzd-example123456"
+        assert operator.project_id == "proj-example123456"
+        assert operator.domain_region == "us-east-1"
+
+    def test_init_domain_params_default_to_none(self):
+        operator = SageMakerNotebookOperator(
+            task_id="test_id",
+            input_config={"input_path": "path/to/notebook.ipynb"},
+        )
+
+        assert operator.domain_id is None
+        assert operator.project_id is None
+        assert operator.domain_region is None
+
     def test_only_required_params_init(self):
         operator = SageMakerNotebookOperator(
             task_id="test_id",
@@ -53,6 +78,59 @@ class TestSageMakerNotebookOperator:
             },
         )
         assert isinstance(operator, SageMakerNotebookOperator)
+
+    @patch("airflow.providers.amazon.aws.operators.sagemaker_unified_studio.SageMakerNotebookHook")
+    def test_execute_passes_domain_id_project_id_domain_region_to_hook(self, mock_notebook_hook):
+        mock_hook_instance = mock_notebook_hook.return_value
+        mock_hook_instance.start_notebook_execution.return_value = {
+            "execution_id": "123456",
+            "executionType": "test",
+        }
+
+        operator = SageMakerNotebookOperator(
+            task_id="test_id",
+            input_config={"input_path": "path/to/notebook.ipynb"},
+            domain_id="dzd-example123456",
+            project_id="proj-example123456",
+            domain_region="us-west-2",
+        )
+
+        operator.execute({})
+
+        mock_notebook_hook.assert_called_once_with(
+            domain_id="dzd-example123456",
+            project_id="proj-example123456",
+            input_config={"input_path": "path/to/notebook.ipynb"},
+            output_config={"output_formats": ["NOTEBOOK"]},
+            execution_name="test_id",
+            domain_region="us-west-2",
+            compute={},
+            termination_condition={},
+            tags={},
+            waiter_delay=10,
+            waiter_max_attempts=1440,
+        )
+
+    @patch("airflow.providers.amazon.aws.operators.sagemaker_unified_studio.SageMakerNotebookHook")
+    def test_execute_passes_none_domain_params_to_hook(self, mock_notebook_hook):
+        """When domain_id/project_id/domain_region are omitted, None is forwarded so the SDK resolves them."""
+        mock_hook_instance = mock_notebook_hook.return_value
+        mock_hook_instance.start_notebook_execution.return_value = {
+            "execution_id": "123456",
+            "executionType": "test",
+        }
+
+        operator = SageMakerNotebookOperator(
+            task_id="test_id",
+            input_config={"input_path": "path/to/notebook.ipynb"},
+        )
+
+        operator.execute({})
+
+        call_kwargs = mock_notebook_hook.call_args[1]
+        assert call_kwargs["domain_id"] is None
+        assert call_kwargs["project_id"] is None
+        assert call_kwargs["domain_region"] is None
 
     @patch("airflow.providers.amazon.aws.operators.sagemaker_unified_studio.SageMakerNotebookHook")
     def test_execute_success(self, mock_notebook_hook):  # Mock the NotebookHook and its execute method
@@ -124,9 +202,10 @@ class TestSageMakerNotebookOperator:
         mock_hook_instance.start_notebook_execution.assert_called_once_with()
         mock_hook_instance.wait_for_execution_completion.assert_called_once_with("123456", {})
 
+    @pytest.mark.parametrize("wait_for_completion", [True, False])
     @patch("airflow.providers.amazon.aws.operators.sagemaker_unified_studio.SageMakerNotebookHook")
     @patch.object(SageMakerNotebookOperator, "defer")
-    def test_execute_with_deferrable(self, mock_defer, mock_notebook_hook):
+    def test_execute_with_deferrable(self, mock_defer, mock_notebook_hook, wait_for_completion):
         mock_hook_instance = mock_notebook_hook.return_value
         mock_hook_instance.start_notebook_execution.return_value = {
             "execution_id": "123456",
@@ -137,10 +216,12 @@ class TestSageMakerNotebookOperator:
             task_id="test_id",
             input_config={"input_path": "test_input_path"},
             output_config={"output_format": "ipynb"},
+            wait_for_completion=wait_for_completion,
             deferrable=True,
         )
 
-        operator.execute({})
+        with expect_deferral_warning(deferrable=True, wait_for_completion=wait_for_completion):
+            operator.execute({})
 
         mock_hook_instance.start_notebook_execution.assert_called_once_with()
         mock_defer.assert_called_once()

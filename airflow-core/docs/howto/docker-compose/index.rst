@@ -86,10 +86,10 @@ Fetching ``docker-compose.yaml``
 
 This file contains several service definitions:
 
-- ``airflow-scheduler`` - The :doc:`scheduler </administration-and-deployment/scheduler>` monitors all tasks and dags, then triggers the
+- ``airflow-scheduler`` - The :doc:`scheduler </administration-and-deployment/scheduler>` monitors all tasks and Dags, then triggers the
   task instances once their dependencies are complete.
-- ``airflow-dag-processor`` - The DAG processor parses DAG files.
-- ``airflow-webserver`` - The webserver is available at ``http://localhost:8080``.
+- ``airflow-dag-processor`` - The Dag processor parses Dag files.
+- ``airflow-api-server`` - The API server is available at ``http://localhost:8080``.
 - ``airflow-worker`` - The worker that executes the tasks given by the scheduler.
 - ``airflow-triggerer`` - The triggerer runs an event loop for deferrable tasks.
 - ``airflow-init`` - The initialization service.
@@ -104,7 +104,7 @@ All these services allow you to run Airflow with :doc:`CeleryExecutor <apache-ai
 
 Some directories in the container are mounted, which means that their contents are synchronized between your computer and the container.
 
-- ``./dags`` - you can put your DAG files here.
+- ``./dags`` - you can put your Dag files here.
 - ``./logs`` - contains logs from task execution and scheduler.
 - ``./config`` - you can add custom log parser or add ``airflow_local_settings.py`` to configure cluster policy.
 - ``./plugins`` - you can put your :doc:`custom plugins </administration-and-deployment/plugins>` here.
@@ -125,8 +125,8 @@ Setting the right Airflow user
 ------------------------------
 
 On **Linux**, the quick-start needs to know your host user id and needs to have group id set to ``0``.
-Otherwise the files created in ``dags``, ``logs`` and ``plugins`` will be created with ``root`` user ownership.
-You have to make sure to configure them for the docker-compose:
+Otherwise the files created in ``dags``, ``logs``, ``config`` and ``plugins`` will be created with
+``root`` user ownership. You have to make sure to configure them for the docker-compose:
 
 .. code-block:: bash
 
@@ -143,6 +143,35 @@ safely ignore it. You can also manually create an ``.env`` file in the same fold
 
   AIRFLOW_UID=50000
 
+Initialize airflow.cfg (Optional)
+---------------------------------
+
+If you want to initialize ``airflow.cfg`` with default values before launching the airflow service, run.
+
+.. code-block:: bash
+
+   docker compose run airflow-cli airflow config list
+
+This will seed ``airflow.cfg`` with default values in ``config`` folder.
+
+On systems with SELinux/AppArmor, you may run into permission issues. If this happens, edit your ``docker-compose.yaml`` file by added the suffix ``:z`` to all volumes:
+
+.. code-block:: yaml
+
+  volumes:
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags:z
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs:z
+    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config:z
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins:z
+
+If, after this change, you are still experiencing permission issues when creating the ``airflow.cfg`` file, you can apply a very permissive setting to the ``config/`` folder:
+
+.. code-block:: bash
+
+  sudo chmod -R 777 ./config
+
+Note that the above is a *work around* that should never be used in production.
+
 Initialize the database
 -----------------------
 
@@ -152,14 +181,11 @@ On **all operating systems**, you need to run database migrations and create the
 
     docker compose up airflow-init
 
-After initialization is complete, you should see a message like this:
+After initialization is complete, you should see output related to files, folders, and plug-ins and finally a message like this:
 
 .. parsed-literal::
 
-    airflow-init_1       | Upgrades done
-    airflow-init_1       | Admin user airflow created
-    airflow-init_1       | |version|
-    start_airflow-init_1 exited with code 0
+    airflow-init-1 exited with code 0
 
 The account created has the login ``airflow`` and the password ``airflow``.
 
@@ -199,8 +225,8 @@ In a second terminal you can check the condition of the containers and make sure
     CONTAINER ID   IMAGE            |version-spacepad| COMMAND                  CREATED          STATUS                    PORTS                              NAMES
     247ebe6cf87a   apache/airflow:|version|   "/usr/bin/dumb-init …"   3 minutes ago    Up 3 minutes (healthy)    8080/tcp                           compose_airflow-worker_1
     ed9b09fc84b1   apache/airflow:|version|   "/usr/bin/dumb-init …"   3 minutes ago    Up 3 minutes (healthy)    8080/tcp                           compose_airflow-scheduler_1
-    7cb1fb603a98   apache/airflow:|version|   "/usr/bin/dumb-init …"   3 minutes ago    Up 3 minutes (healthy)    0.0.0.0:8080->8080/tcp             compose_airflow-webserver_1
-    74f3bbe506eb   postgres:13      |version-spacepad| "docker-entrypoint.s…"   18 minutes ago   Up 17 minutes (healthy)   5432/tcp                           compose_postgres_1
+    7cb1fb603a98   apache/airflow:|version|   "/usr/bin/dumb-init …"   3 minutes ago    Up 3 minutes (healthy)    0.0.0.0:8080->8080/tcp             compose_airflow-api_server_1
+    74f3bbe506eb   postgres:16      |version-spacepad| "docker-entrypoint.s…"   18 minutes ago   Up 17 minutes (healthy)   5432/tcp                           compose_postgres_1
     0bd6576d23cb   redis:latest     |version-spacepad| "docker-entrypoint.s…"   10 hours ago     Up 17 minutes (healthy)   0.0.0.0:6379->6379/tcp             compose_redis_1
 
 Accessing the environment
@@ -221,7 +247,7 @@ You can also run :doc:`CLI commands <../usage-cli>`, but you have to do it in on
 
     docker compose run airflow-worker airflow info
 
-If you have Linux or Mac OS, you can make your work easier and download a optional wrapper scripts that will allow you to run commands with a simpler command.
+If you have Linux or Mac OS, you can make your work easier and download an optional wrapper script that will allow you to run commands with a simpler command.
 
 .. jinja:: quick_start_ctx
 
@@ -250,9 +276,9 @@ python container.
 Accessing the web interface
 ---------------------------
 
-Once the cluster has started up, you can log in to the web interface and begin experimenting with dags.
+Once the cluster has started up, you can log in to the web interface and begin experimenting with Dags.
 
-The webserver is available at: ``http://localhost:8080``.
+The webserver is available at: ``http://localhost:8080`` (or the port set in ``AIRFLOW_API_SERVER_PORT``).
 The default account has the login ``airflow`` and the password ``airflow``.
 
 Sending requests to the REST API
@@ -268,10 +294,15 @@ Here is a sample ``curl`` command, which sends a request to retrieve a pool list
 
 .. code-block:: bash
 
-    ENDPOINT_URL="http://localhost:8080/"
-    curl -X GET  \
-        --user "airflow:airflow" \
-        "${ENDPOINT_URL}/api/v1/pools"
+    ENDPOINT_URL="http://localhost:8080"
+    JWT_TOKEN=$(curl -s -X POST ${ENDPOINT_URL}/auth/token \
+                     -H "Content-Type: application/json" \
+                     -d '{"username": "airflow", "password": "airflow"}' |\
+                jq -r '.access_token' \
+              )
+    curl -X GET \
+        "${ENDPOINT_URL}/api/v2/pools" \
+        -H "Authorization: Bearer ${JWT_TOKEN}"
 
 Cleaning up
 ===========
@@ -293,14 +324,16 @@ to build your image (you need to do it only once). You can also add the ``--buil
 to rebuild the images on-the-fly when you run other ``docker compose`` commands.
 
 Examples of how you can extend the image with custom providers, python packages,
-apt packages and more can be found in :doc:`Building the image <docker-stack:build>`.
+apt packages and more can be found in :doc:`Building your image <docker-stack:build>`.
 
 .. note::
-   Creating custom images means that you need to maintain also a level of automation as you need to re-create the images
-   when either the packages you want to install or Airflow is upgraded. Please do not forget about keeping these scripts.
-   Also keep in mind, that in cases when you run pure Python tasks, you can use the
-   `Python Virtualenv functions <_howto/operator:PythonVirtualenvOperator>`_ which will
-   dynamically source and install python dependencies during runtime. With Airflow 2.8.0 Virtualenvs can also be cached.
+   Creating custom images means that you need to maintain also a level of
+   automation as you need to re-create the images when either the packages you
+   want to install or Airflow is upgraded. Please do not forget about keeping
+   these scripts. Also keep in mind, that in cases when you run pure Python
+   tasks, you can use :ref:`Python Virtualenv functions <howto/operator:PythonVirtualenvOperator>`,
+   which will dynamically source and install python dependencies during runtime.
+   With Airflow 2.8.0, virtualenvs can also be cached.
 
 Special case - adding dependencies via requirements.txt file
 ============================================================
@@ -346,18 +379,15 @@ Special case - Adding a custom config file
 
 If you have a custom config file and wish to use it in your Airflow instance, you need to perform the following steps:
 
-1) Remove comment from the ``AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'`` line
-   in the ``docker-compose.yaml`` file.
+1) Replace the auto-generated ``airflow.cfg`` file in the local config folder with your custom config file.
 
-2) Place your custom ``airflow.cfg`` file in the local config folder.
-
-3) If your config file has a different name than ``airflow.cfg``, adjust the filename in
+2) If your config file has a different name than ``airflow.cfg``, adjust the filename in
    ``AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'``
 
 Networking
 ==========
 
-In general, if you want to use Airflow locally, your dags may try to connect to servers which are running on the host. In order to achieve that, an extra configuration must be added in ``docker-compose.yaml``. For example, on Linux the configuration must be in the section ``services: airflow-worker`` adding ``extra_hosts: - "host.docker.internal:host-gateway"``; and use ``host.docker.internal`` instead of ``localhost``. This configuration vary in different platforms. Please check the Docker documentation for `Windows <https://docs.docker.com/desktop/windows/networking/#use-cases-and-workarounds>`_ and `Mac <https://docs.docker.com/desktop/mac/networking/#use-cases-and-workarounds>`_ for further information.
+In general, if you want to use Airflow locally, your Dags may try to connect to servers which are running on the host. In order to achieve that, an extra configuration must be added in ``docker-compose.yaml``. For example, on Linux the configuration must be in the section ``services: airflow-worker`` adding ``extra_hosts: - "host.docker.internal:host-gateway"``; and use ``host.docker.internal`` instead of ``localhost``. This configuration vary in different platforms. Please check the Docker documentation on `Docker Desktop networking <https://docs.docker.com/desktop/features/networking/networking-how-tos/>`_ for further information.
 
 Debug Airflow inside docker container using PyCharm
 ===================================================
@@ -436,13 +466,15 @@ runtime user id which is unknown at the time of building the image.
 +================================+=====================================================+==========================+
 | ``AIRFLOW_IMAGE_NAME``         | Airflow Image to use.                               | apache/airflow:|version| |
 +--------------------------------+-----------------------------------------------------+--------------------------+
+| ``AIRFLOW_API_SERVER_PORT``    | Host port the API server is published on.           | ``8080``                 |
++--------------------------------+-----------------------------------------------------+--------------------------+
 | ``AIRFLOW_UID``                | UID of the user to run Airflow containers as.       | ``50000``                |
 |                                | Override if you want to use non-default Airflow     |                          |
 |                                | UID (for example when you map folders from host,    |                          |
 |                                | it should be set to result of ``id -u`` call.       |                          |
 |                                | When it is changed, a user with the UID is          |                          |
 |                                | created with ``default`` name inside the container  |                          |
-|                                | and home of the use is set to ``/airflow/home/``    |                          |
+|                                | and home of the user is set to ``/airflow/home/``   |                          |
 |                                | in order to share Python libraries installed there. |                          |
 |                                | This is in order to achieve the  OpenShift          |                          |
 |                                | compatibility. See more in the                      |                          |

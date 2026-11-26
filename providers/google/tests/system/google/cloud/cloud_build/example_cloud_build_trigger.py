@@ -28,10 +28,16 @@ from typing import Any, cast
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from airflow.decorators import task
-from airflow.exceptions import AirflowException
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import task
+else:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
 from airflow.models.dag import DAG
 from airflow.models.xcom_arg import XComArg
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.operators.cloud_build import (
     CloudBuildCreateBuildTriggerOperator,
     CloudBuildDeleteBuildTriggerOperator,
@@ -40,7 +46,12 @@ from airflow.providers.google.cloud.operators.cloud_build import (
     CloudBuildRunBuildTriggerOperator,
     CloudBuildUpdateBuildTriggerOperator,
 )
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
@@ -106,8 +117,7 @@ def get_project_number():
                 "No project found with specified name, "
                 "or caller does not have permissions to read specified project"
             )
-        else:
-            raise exc
+        raise exc
 
 
 with DAG(
@@ -188,8 +198,7 @@ with DAG(
     # when "tearDown" task with trigger rule is part of the DAG
     list(dag.tasks) >> watcher()
 
-
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

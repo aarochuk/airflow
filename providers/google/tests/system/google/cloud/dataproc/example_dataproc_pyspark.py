@@ -37,7 +37,12 @@ from airflow.providers.google.cloud.operators.gcs import (
     GCSDeleteBucketOperator,
     GCSSynchronizeBucketsOperator,
 )
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
@@ -58,6 +63,9 @@ REGION = "europe-west1"
 
 # Cluster definition
 CLUSTER_CONFIG = {
+    "cluster_type": "STANDARD",
+    "cluster_tier": "CLUSTER_TIER_STANDARD",
+    "engine": "DEFAULT",
     "master_config": {
         "num_instances": 1,
         "machine_type_uri": "n1-standard-4",
@@ -85,7 +93,7 @@ with DAG(
     schedule="@once",
     start_date=datetime(2021, 1, 1),
     catchup=False,
-    tags=["example", "dataproc", "pyspark"],
+    tags=["example", "managed-spark", "pyspark"],
 ) as dag:
     create_bucket = GCSCreateBucketOperator(
         task_id="create_bucket", bucket_name=BUCKET_NAME, project_id=PROJECT_ID
@@ -149,5 +157,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

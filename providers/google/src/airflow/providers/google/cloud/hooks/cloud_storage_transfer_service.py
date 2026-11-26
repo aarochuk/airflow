@@ -36,17 +36,19 @@ from copy import deepcopy
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from google.api_core import protobuf_helpers
 from google.cloud.storage_transfer_v1 import (
     ListTransferJobsRequest,
+    RunTransferJobRequest,
     StorageTransferServiceAsyncClient,
     TransferJob,
     TransferOperation,
 )
+from google.protobuf.json_format import MessageToDict
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
-from airflow.exceptions import AirflowException, AirflowProviderDeprecationWarning
+from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.common.consts import CLIENT_INFO
 from airflow.providers.google.common.hooks.base_google import (
     PROVIDE_PROJECT_ID,
@@ -55,10 +57,11 @@ from airflow.providers.google.common.hooks.base_google import (
 )
 
 if TYPE_CHECKING:
+    from google.api_core import operation_async
     from google.cloud.storage_transfer_v1.services.storage_transfer_service.pagers import (
         ListTransferJobsAsyncPager,
     )
-    from google.longrunning import operations_pb2  # type: ignore[attr-defined]
+    from google.longrunning import operations_pb2
     from proto import Message
 
 log = logging.getLogger(__name__)
@@ -179,7 +182,11 @@ class CloudDataTransferServiceHook(GoogleBaseHook):
         if not self._conn:
             http_authorized = self._authorize()
             self._conn = build(
-                "storagetransfer", self.api_version, http=http_authorized, cache_discovery=False
+                "storagetransfer",
+                self.api_version,
+                http=http_authorized,
+                cache_discovery=False,
+                client_options=self.get_client_options(),
             )
         return self._conn
 
@@ -218,7 +225,7 @@ class CloudDataTransferServiceHook(GoogleBaseHook):
                     return (
                         self.get_conn().transferJobs().create(body=body).execute(num_retries=self.num_retries)
                     )
-                elif transfer_job.get(STATUS) == GcpTransferJobsStatus.DISABLED:
+                if transfer_job.get(STATUS) == GcpTransferJobsStatus.DISABLED:
                     return self.enable_transfer_job(job_name=job_name, project_id=body.get(PROJECT_ID))
             else:
                 raise e
@@ -564,10 +571,13 @@ class CloudDataTransferServiceAsyncHook(GoogleBaseAsyncHook):
         :return: Google Storage Transfer asynchronous client.
         """
         if not self._client:
-            credentials = (await self.get_sync_hook()).get_credentials()
+            sync_hook = await self.get_sync_hook()
+            credentials = sync_hook.get_credentials()
+            client_options = sync_hook.get_client_options()
             self._client = StorageTransferServiceAsyncClient(
                 credentials=credentials,
                 client_info=CLIENT_INFO,
+                client_options=client_options,
             )
         return self._client
 
@@ -603,7 +613,7 @@ class CloudDataTransferServiceAsyncHook(GoogleBaseAsyncHook):
         self,
         request_filter: dict | None = None,
         **kwargs,
-    ) -> list[TransferOperation]:
+    ) -> list[dict[str, Any]]:
         """
         Get a transfer operation in Google Storage Transfer Service.
 
@@ -660,7 +670,12 @@ class CloudDataTransferServiceAsyncHook(GoogleBaseAsyncHook):
             )
 
         transfer_operations = [
-            protobuf_helpers.from_any_pb(TransferOperation, op.metadata) for op in operations
+            MessageToDict(
+                getattr(op, "_pb", op),
+                preserving_proto_field_name=True,
+                use_integers_for_enums=True,
+            )
+            for op in operations
         ]
 
         return transfer_operations
@@ -677,7 +692,7 @@ class CloudDataTransferServiceAsyncHook(GoogleBaseAsyncHook):
 
     @staticmethod
     async def operations_contain_expected_statuses(
-        operations: list[TransferOperation], expected_statuses: set[str] | str
+        operations: list[dict[str, Any]], expected_statuses: set[str] | str
     ) -> bool:
         """
         Check whether an operation exists with the expected status.
@@ -696,7 +711,7 @@ class CloudDataTransferServiceAsyncHook(GoogleBaseAsyncHook):
         if not operations:
             return False
 
-        current_statuses = {operation.status.name for operation in operations}
+        current_statuses = {TransferOperation.Status(op["metadata"]["status"]).name for op in operations}
 
         if len(current_statuses - expected_statuses_set) != len(current_statuses):
             return True
@@ -707,3 +722,17 @@ class CloudDataTransferServiceAsyncHook(GoogleBaseAsyncHook):
                 f"Expected: {', '.join(expected_statuses_set)}"
             )
         return False
+
+    async def run_transfer_job(self, job_name: str) -> operation_async.AsyncOperation:
+        """
+        Run Google Storage Transfer Service job.
+
+        :param job_name: (Required) Name of the job to run.
+        """
+        client = await self.get_conn()
+        request = RunTransferJobRequest(
+            job_name=job_name,
+            project_id=self.project_id,
+        )
+        operation = await client.run_transfer_job(request=request)
+        return operation

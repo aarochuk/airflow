@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -36,6 +35,8 @@
 
     Connection types <connections/http>
     Operators <operators>
+    Deferrable HttpOperator <deferrable>
+    Triggers <triggers>
 
 .. toctree::
     :hidden:
@@ -56,7 +57,7 @@
     :maxdepth: 1
     :caption: Resources
 
-    Example DAGs <https://github.com/apache/airflow/tree/providers-http/|version|/providers/http/tests/system/http>
+    Example Dags <https://github.com/apache/airflow/tree/providers-http/|version|/providers/http/tests/system/http>
     PyPI Repository <https://pypi.org/project/apache-airflow-providers-http/>
     Installing from sources <installing-providers-from-sources>
 
@@ -77,7 +78,7 @@ apache-airflow-providers-http package
 `Hypertext Transfer Protocol (HTTP) <https://www.w3.org/Protocols/>`__
 
 
-Release: 5.2.1
+Release: 6.4.0
 
 Provider package
 ----------------
@@ -88,21 +89,50 @@ All classes for this package are included in the ``airflow.providers.http`` pyth
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-http``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-=====================  ====================
-PIP package            Version required
-=====================  ====================
-``apache-airflow``     ``>=2.9.0``
-``requests``           ``>=2.31.0,<3``
-``requests-toolbelt``  ``>=1.0.0``
-``aiohttp``            ``!=3.11.0,>=3.9.2``
-``asgiref``            ``>=2.3.0``
-=====================  ====================
+==========================================  ======================================
+PIP package                                 Version required
+==========================================  ======================================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.17.0``
+``requests``                                ``>=2.32.0,<3``
+``requests-toolbelt``                       ``>=1.0.0``
+``aiohttp``                                 ``>=3.14.0``
+``asgiref``                                 ``>=2.3.0; python_version < "3.14"``
+``asgiref``                                 ``>=3.11.1; python_version >= "3.14"``
+``pydantic``                                ``>=2.11.0``
+==========================================  ======================================
+
+Optional dependencies
+---------------------
+
+These extras install optional third-party libraries that enable additional features of the provider.
+Install them when installing from PyPI. For example:
+
+.. code-block:: bash
+
+    pip install apache-airflow-providers-http[srv]
+
+
+=======  ====================
+Extra    Dependencies
+=======  ====================
+``srv``  ``dnspython>=2.0.0``
+=======  ====================
+
+Downloading official packages
+-----------------------------
+
+You can download officially released packages and verify their checksums and signatures from the
+`Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
+
+* `The apache-airflow-providers-http 6.4.0 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_http-6.4.0.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_http-6.4.0.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_http-6.4.0.tar.gz.sha512>`__)
+* `The apache-airflow-providers-http 6.4.0 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_http-6.4.0-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_http-6.4.0-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_http-6.4.0-py3-none-any.whl.sha512>`__)

@@ -25,19 +25,28 @@ from __future__ import annotations
 
 import datetime
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 from inflection import camelize
 
 from airflow.providers.amazon.aws.executors.utils.base_config_keys import BaseConfigKeys
+from airflow.providers.amazon.version_compat import AIRFLOW_V_3_3_PLUS
 from airflow.utils.state import State
 
 if TYPE_CHECKING:
-    from airflow.models.taskinstance import TaskInstanceKey
+    if AIRFLOW_V_3_3_PLUS:
+        from airflow.executors.workloads.types import WorkloadKey
+    else:
+        from airflow.models.taskinstance import TaskInstanceKey as WorkloadKey  # type: ignore[assignment]
 
-CommandType = Sequence[str]
+if AIRFLOW_V_3_3_PLUS:
+    from airflow.executors.workloads import ExecuteCallback, ExecuteTask
+
+    CommandType: TypeAlias = Sequence[str] | Sequence[ExecuteTask] | Sequence[ExecuteCallback]
+else:
+    CommandType: TypeAlias = Sequence[str]  # type: ignore[no-redef, misc]
 ExecutorConfigFunctionType = Callable[[CommandType], dict]
 ExecutorConfigType = dict[str, Any]
 
@@ -52,19 +61,21 @@ CONFIG_DEFAULTS = {
     "assign_public_ip": "False",
     "platform_version": "LATEST",
     "check_health_on_startup": "True",
+    "run_task_concurrency": "1",
 }
 
 
 @dataclass
 class EcsQueuedTask:
-    """Represents an ECS task that is queued. The task will be run in the next heartbeat."""
+    """Represents a queued ECS workload (task or callback). The workload will be run in the next heartbeat."""
 
-    key: TaskInstanceKey
+    key: WorkloadKey
     command: CommandType
-    queue: str
+    queue: str | None
     executor_config: ExecutorConfigType
     attempt_number: int
     next_attempt_time: datetime.datetime
+    throttled_attempts: int = 0
 
 
 @dataclass
@@ -72,7 +83,7 @@ class EcsTaskInfo:
     """Contains information about a currently running ECS task."""
 
     cmd: CommandType
-    queue: str
+    queue: str | None
     config: ExecutorConfigType
 
 
@@ -97,6 +108,7 @@ class AllEcsConfigKeys(RunTaskKwargsConfigKeys):
     CHECK_HEALTH_ON_STARTUP = "check_health_on_startup"
     MAX_RUN_TASK_ATTEMPTS = "max_run_task_attempts"
     REGION_NAME = "region_name"
+    RUN_TASK_CONCURRENCY = "run_task_concurrency"
     RUN_TASK_KWARGS = "run_task_kwargs"
 
 
@@ -138,7 +150,7 @@ class EcsExecutorTask:
         """
         if self.last_status == "RUNNING":
             return State.RUNNING
-        elif self.desired_status == "RUNNING":
+        if self.desired_status == "RUNNING":
             return State.QUEUED
         is_finished = self.desired_status == "STOPPED"
         has_exit_codes = all(["exit_code" in x for x in self.containers])
@@ -156,20 +168,20 @@ class EcsExecutorTask:
 
 
 class EcsTaskCollection:
-    """A five-way dictionary between Airflow task ids, Airflow cmds, ECS ARNs, and ECS task objects."""
+    """A five-way dictionary between Airflow workload keys, commands, ECS ARNs, and ECS task objects."""
 
     def __init__(self):
-        self.key_to_arn: dict[TaskInstanceKey, str] = {}
-        self.arn_to_key: dict[str, TaskInstanceKey] = {}
+        self.key_to_arn: dict[WorkloadKey, str] = {}
+        self.arn_to_key: dict[str, WorkloadKey] = {}
         self.tasks: dict[str, EcsExecutorTask] = {}
-        self.key_to_failure_counts: dict[TaskInstanceKey, int] = defaultdict(int)
-        self.key_to_task_info: dict[TaskInstanceKey, EcsTaskInfo] = {}
+        self.key_to_failure_counts: dict[WorkloadKey, int] = defaultdict(int)
+        self.key_to_task_info: dict[WorkloadKey, EcsTaskInfo] = {}
 
     def add_task(
         self,
         task: EcsExecutorTask,
-        airflow_task_key: TaskInstanceKey,
-        queue: str,
+        airflow_task_key: WorkloadKey,
+        queue: str | None,
         airflow_cmd: CommandType,
         exec_config: ExecutorConfigType,
         attempt_number: int,
@@ -186,8 +198,8 @@ class EcsTaskCollection:
         """Update the state of the given task based on task ARN."""
         self.tasks[task.task_arn] = task
 
-    def task_by_key(self, task_key: TaskInstanceKey) -> EcsExecutorTask:
-        """Get a task by Airflow Instance Key."""
+    def task_by_key(self, task_key: WorkloadKey) -> EcsExecutorTask:
+        """Get a task by Airflow workload key."""
         arn = self.key_to_arn[task_key]
         return self.task_by_arn(arn)
 
@@ -195,8 +207,8 @@ class EcsTaskCollection:
         """Get a task by AWS ARN."""
         return self.tasks[arn]
 
-    def pop_by_key(self, task_key: TaskInstanceKey) -> EcsExecutorTask:
-        """Delete task from collection based off of Airflow Task Instance Key."""
+    def pop_by_key(self, task_key: WorkloadKey) -> EcsExecutorTask:
+        """Delete task from collection based off of Airflow workload key."""
         arn = self.key_to_arn[task_key]
         task = self.tasks[arn]
         del self.key_to_arn[task_key]
@@ -211,20 +223,20 @@ class EcsTaskCollection:
         """Get all AWS ARNs in collection."""
         return list(self.key_to_arn.values())
 
-    def get_all_task_keys(self) -> list[TaskInstanceKey]:
-        """Get all Airflow Task Keys in collection."""
+    def get_all_task_keys(self) -> list[WorkloadKey]:
+        """Get all Airflow workload keys in collection."""
         return list(self.key_to_arn.keys())
 
-    def failure_count_by_key(self, task_key: TaskInstanceKey) -> int:
-        """Get the number of times a task has failed given an Airflow Task Key."""
+    def failure_count_by_key(self, task_key: WorkloadKey) -> int:
+        """Get the number of times a workload has failed given an Airflow workload key."""
         return self.key_to_failure_counts[task_key]
 
-    def increment_failure_count(self, task_key: TaskInstanceKey):
-        """Increment the failure counter given an Airflow Task Key."""
+    def increment_failure_count(self, task_key: WorkloadKey):
+        """Increment the failure counter given an Airflow workload key."""
         self.key_to_failure_counts[task_key] += 1
 
-    def info_by_key(self, task_key: TaskInstanceKey) -> EcsTaskInfo:
-        """Get the Airflow Command given an Airflow task key."""
+    def info_by_key(self, task_key: WorkloadKey) -> EcsTaskInfo:
+        """Get the task info given an Airflow workload key."""
         return self.key_to_task_info[task_key]
 
     def __getitem__(self, value):

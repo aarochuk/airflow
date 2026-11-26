@@ -23,16 +23,17 @@ import sys
 from unittest.mock import ANY, Mock, patch
 
 import pytest
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import OperationalError
 
-from airflow.executors.local_executor import LocalExecutor
-from airflow.jobs.job import Job, most_recent_job, perform_heartbeat, run_job
-from airflow.listeners.listener import get_listener_manager
-from airflow.utils import timezone
+from airflow._shared.timezones import timezone
+from airflow.jobs.job import Job, health_check_threshold, most_recent_job, perform_heartbeat, run_job
+from airflow.models.team import JobTeam, Team
 from airflow.utils.session import create_session
 from airflow.utils.state import State
 
 from tests_common.test_utils.config import conf_vars
+from tests_common.test_utils.db import clear_db_jobs
 from unit.listeners import lifecycle_listener
 from unit.utils.test_helpers import MockJobRunner, SchedulerJobRunner, TriggererJobRunner
 
@@ -58,28 +59,18 @@ class TestJob:
         assert job.state == State.SUCCESS
         assert job.end_date is not None
 
-    def test_base_job_respects_plugin_hooks(self):
-        import sys
-
-        job = Job()
-        job_runner = MockJobRunner(job=job, func=lambda: sys.exit(0))
-        run_job(job=job, execute_callable=job_runner._execute)
-
-        assert job.state == State.SUCCESS
-        assert job.end_date is not None
-
-    def test_base_job_respects_plugin_lifecycle(self, dag_maker):
+    def test_base_job_respects_plugin_lifecycle(self, dag_maker, listener_manager):
         """
         Test if DagRun is successful, and if Success callbacks is defined, it is sent to DagFileProcessor.
         """
-        get_listener_manager().add_listener(lifecycle_listener)
+        listener_manager(lifecycle_listener)
 
         job = Job()
         job_runner = MockJobRunner(job=job, func=lambda: sys.exit(0))
         run_job(job=job, execute_callable=job_runner._execute)
 
-        assert lifecycle_listener.started_component is job
-        assert lifecycle_listener.stopped_component is job
+        assert lifecycle_listener.get_listener_state().started_component is job
+        assert lifecycle_listener.get_listener_state().stopped_component is job
 
     def test_state_failed(self):
         def abort():
@@ -94,7 +85,7 @@ class TestJob:
         assert job.end_date is not None
 
     @pytest.mark.parametrize(
-        "job_runner, job_type,job_heartbeat_sec",
+        ("job_runner", "job_type", "job_heartbeat_sec"),
         [(SchedulerJobRunner, "scheduler", "11"), (TriggererJobRunner, "triggerer", "9")],
     )
     def test_heart_rate_after_fetched_from_db(self, job_runner, job_type, job_heartbeat_sec):
@@ -116,7 +107,7 @@ class TestJob:
             session.rollback()
 
     @pytest.mark.parametrize(
-        "job_runner, job_type,job_heartbeat_sec",
+        ("job_runner", "job_type", "job_heartbeat_sec"),
         [(SchedulerJobRunner, "scheduler", "11"), (TriggererJobRunner, "triggerer", "9")],
     )
     def test_heart_rate_via_constructor_persists(self, job_runner, job_type, job_heartbeat_sec):
@@ -200,7 +191,7 @@ class TestJob:
         job.latest_heartbeat = timezone.utcnow() - datetime.timedelta(seconds=10)
         assert job.is_alive() is False, "Completed jobs even with recent heartbeat should not be alive"
 
-    @pytest.mark.parametrize("job_type", ["SchedulerJob", "TriggererJob"])
+    @pytest.mark.parametrize("job_type", ["SchedulerJob", "TriggererJob", "DagProcessorJob"])
     def test_is_alive_scheduler(self, job_type):
         job = Job(heartrate=10, state=State.RUNNING, job_type=job_type)
         assert job.is_alive() is True
@@ -224,6 +215,34 @@ class TestJob:
         job.latest_heartbeat = timezone.utcnow() - datetime.timedelta(seconds=10)
         assert job.is_alive() is False, "Completed jobs even with recent heartbeat should not be alive"
 
+    def test_is_alive_clause_matches_is_alive(self, session):
+        clear_db_jobs()
+        core_types = ("SchedulerJob", "TriggererJob", "DagProcessorJob")
+        now = timezone.utcnow()
+        for job_type in core_types:
+            threshold = health_check_threshold(job_type, 0)
+            for state in (State.RUNNING, State.SUCCESS, State.FAILED, State.RESTARTING):
+                for age in (None, 0, threshold - 1, threshold + 1, 86400):
+                    session.add(
+                        Job(
+                            job_type=job_type,
+                            state=state,
+                            hostname=f"{job_type}|{state}|{age}",
+                            latest_heartbeat=None if age is None else now - datetime.timedelta(seconds=age),
+                        )
+                    )
+        session.commit()
+
+        jobs = session.scalars(select(Job)).all()
+        alive_in_sql = {
+            job.hostname for job in session.scalars(select(Job).where(Job.is_alive_clause(core_types)))
+        }
+
+        assert alive_in_sql == {job.hostname for job in jobs if job.is_alive()}
+        assert alive_in_sql, "the scenarios must include live jobs"
+        assert len(alive_in_sql) < len(jobs)
+        clear_db_jobs()
+
     @patch("airflow.jobs.job.create_session")
     def test_heartbeat_failed(self, mock_create_session, caplog):
         when = timezone.utcnow() - datetime.timedelta(seconds=60)
@@ -244,16 +263,11 @@ class TestJob:
             ("scheduler", "max_tis_per_query"): "100",
         }
     )
-    @patch("airflow.jobs.job.ExecutorLoader.get_default_executor")
-    @patch("airflow.jobs.job.ExecutorLoader.init_executors")
     @patch("airflow.jobs.job.get_hostname")
     @patch("airflow.jobs.job.getuser")
-    def test_essential_attr(self, mock_getuser, mock_hostname, mock_init_executors, mock_default_executor):
-        mock_local_executor = LocalExecutor()
+    def test_essential_attr(self, mock_getuser, mock_hostname):
         mock_hostname.return_value = "test_hostname"
         mock_getuser.return_value = "testuser"
-        mock_default_executor.return_value = mock_local_executor
-        mock_init_executors.return_value = [mock_local_executor]
 
         test_job = Job(heartrate=10, dag_id="example_dag", state=State.RUNNING)
         MockJobRunner(job=test_job)
@@ -263,8 +277,6 @@ class TestJob:
         assert test_job.max_tis_per_query == 100
         assert test_job.unixname == "testuser"
         assert test_job.state == "running"
-        assert test_job.executor == mock_local_executor
-        assert test_job.executors == [mock_local_executor]
 
     def test_heartbeat(self, frozen_sleep, monkeypatch):
         monkeypatch.setattr("airflow.jobs.job.sleep", frozen_sleep)
@@ -277,8 +289,88 @@ class TestJob:
             hb_callback = Mock()
             job.heartbeat(heartbeat_callback=hb_callback)
 
-            hb_callback.assert_called_once_with(ANY)
+            hb_callback.assert_called_once_with(session=ANY)
 
             hb_callback.reset_mock()
             perform_heartbeat(job=job, heartbeat_callback=hb_callback, only_if_necessary=True)
             assert hb_callback.called is False
+
+    @pytest.mark.parametrize(
+        ("job_type", "config_section", "config_key", "threshold_value"),
+        [
+            ("DagProcessorJob", "dag_processor", "health_check_threshold", 120),
+            ("SchedulerJob", "scheduler", "scheduler_health_check_threshold", 180),
+            ("TriggererJob", "triggerer", "triggerer_health_check_threshold", 90),
+        ],
+    )
+    def test_health_check_threshold(self, job_type, config_section, config_key, threshold_value):
+        with conf_vars({(config_section, config_key): str(threshold_value)}):
+            assert health_check_threshold(job_type, 30) == threshold_value
+
+    def test_health_check_threshold_unknown_job_uses_heartrate_fallback(self):
+        assert health_check_threshold("UnknownJob", 30) == 30 * 2.1
+
+
+class TestJobTeams:
+    @pytest.fixture
+    def teams(self, session):
+        names = ["team-b", "team-a"]
+        session.add_all(Team(name=name) for name in names)
+        session.commit()
+        yield names
+        session.execute(delete(JobTeam))
+        session.execute(delete(Team).where(Team.name.in_(names)))
+        session.commit()
+
+    def test_no_teams_by_default(self, session):
+        job = Job()
+        session.add(job)
+        session.commit()
+
+        assert job.team_names == []
+
+    def test_multiple_teams_round_trip_sorted(self, session, teams):
+        job = Job(team_names=teams)
+        session.add(job)
+        session.commit()
+        session.expunge(job)
+
+        assert session.get(Job, job.id).team_names == ["team-a", "team-b"]
+
+    def test_repeated_team_name_is_stored_once(self, session, teams):
+        job = Job(team_names=["team-a", "team-a"])
+        session.add(job)
+        session.commit()
+
+        assert job.team_names == ["team-a"]
+        assert session.scalar(select(func.count()).select_from(JobTeam)) == 1
+
+    def test_reassigning_teams_replaces_the_previous_ones(self, session, teams):
+        job = Job(team_names=["team-a"])
+        session.add(job)
+        session.commit()
+
+        job.team_names = ["team-b"]
+        session.commit()
+
+        assert job.team_names == ["team-b"]
+        assert session.scalars(select(JobTeam.team_name)).all() == ["team-b"]
+
+    def test_teams_survive_the_heartbeat_merge(self, session, teams):
+        """``prepare_for_execution`` detaches the Job, so the heartbeat merge must not duplicate links."""
+        job = Job(team_names=teams)
+        job.prepare_for_execution()
+        job.heartbeat(heartbeat_callback=Mock())
+
+        assert session.scalar(select(func.count()).select_from(JobTeam)) == 2
+        assert session.get(Job, job.id).team_names == ["team-a", "team-b"]
+
+    def test_deleting_a_job_removes_its_team_links(self, session, teams):
+        job = Job(team_names=teams)
+        session.add(job)
+        session.commit()
+
+        session.delete(job)
+        session.commit()
+
+        assert session.scalar(select(func.count()).select_from(JobTeam)) == 0

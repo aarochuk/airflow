@@ -16,56 +16,136 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, HStack, Skeleton, Spacer } from "@chakra-ui/react";
 import { useState } from "react";
+
+import { Skeleton } from "@chakra-ui/react";
+import { createListCollection } from "@chakra-ui/react/collection";
+import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 
 import { usePoolServiceGetPools } from "openapi/queries";
+import type { PoolResponse } from "openapi/requests/types.gen";
+
+import { Select } from "src/system-components";
+
+import { DataTable } from "src/components/DataTable";
+import type { CardDef } from "src/components/DataTable/types";
+import { useTableURLState } from "src/components/DataTable/useTableUrlState";
 import { ErrorAlert } from "src/components/ErrorAlert";
 import { SearchBar } from "src/components/SearchBar";
-import { type SearchParamsKeysType, SearchParamsKeys } from "src/constants/searchParams";
+
+import type { SearchParamsKeysType } from "src/constants/searchParams";
+import { SearchParamsKeys } from "src/constants/searchParams";
+import { useAdvancedSearch } from "src/hooks/useAdvancedSearch";
+import { useDocumentTitle } from "src/utils";
 
 import AddPoolButton from "./AddPoolButton";
-import PoolBar from "./PoolBar";
+import PoolBarCard from "./PoolBarCard";
+
+const cardDef = (): CardDef<PoolResponse> => ({
+  card: ({ row }) => <PoolBarCard key={row.name} pool={row} />,
+  meta: {
+    customSkeleton: <Skeleton height="100px" width="100%" />,
+  },
+});
 
 export const Pools = () => {
+  const { t: translate } = useTranslation(["admin", "common"]);
+
+  useDocumentTitle(translate("common:admin.Pools"));
+
+  const poolSortOptions = createListCollection({
+    items: [
+      { label: translate("pools.sort.asc"), value: "name" },
+      { label: translate("pools.sort.desc"), value: "-name" },
+    ],
+  });
   const [searchParams, setSearchParams] = useSearchParams();
-  const { NAME_PATTERN: NAME_PATTERN_PARAM }: SearchParamsKeysType = SearchParamsKeys;
-  const [poolNamePattern, setPoolNamePattern] = useState(searchParams.get(NAME_PATTERN_PARAM) ?? undefined);
+  const { NAME_PATTERN, OFFSET }: SearchParamsKeysType = SearchParamsKeys;
+  const [poolNamePattern, setPoolNamePattern] = useState(searchParams.get(NAME_PATTERN) ?? undefined);
+  const advancedSearch = useAdvancedSearch("pools");
+
+  const { setTableURLState, tableURLState } = useTableURLState();
+  const { pagination, sorting } = tableURLState;
+  const [sort] = sorting;
+  const orderBy = sort ? [`${sort.desc ? "-" : ""}${sort.id}`] : ["name"];
+
   const { data, error, isLoading } = usePoolServiceGetPools({
-    poolNamePattern: poolNamePattern ?? undefined,
+    limit: pagination.pageSize,
+    offset: pagination.pageIndex * pagination.pageSize,
+    orderBy,
+    ...(advancedSearch.enabled
+      ? { poolNamePattern: poolNamePattern ?? undefined }
+      : { poolNamePrefixPattern: poolNamePattern ?? undefined }),
   });
 
   const handleSearchChange = (value: string) => {
     if (value) {
-      searchParams.set(NAME_PATTERN_PARAM, value);
+      searchParams.set(NAME_PATTERN, value);
     } else {
-      searchParams.delete(NAME_PATTERN_PARAM);
+      searchParams.delete(NAME_PATTERN);
     }
+    searchParams.delete(OFFSET);
     setSearchParams(searchParams);
     setPoolNamePattern(value);
+  };
+
+  const handleSortChange = (details: { value: Array<string> }) => {
+    const [firstValue] = details.value;
+
+    if (firstValue !== undefined && firstValue !== "") {
+      setTableURLState({
+        ...tableURLState,
+        sorting: [{ desc: firstValue.startsWith("-"), id: firstValue.replace("-", "") }],
+      });
+    }
   };
 
   return (
     <>
       <ErrorAlert error={error} />
-      <SearchBar
-        buttonProps={{ disabled: true }}
-        defaultValue={poolNamePattern ?? ""}
-        onChange={handleSearchChange}
-        placeHolder="Search Pools"
+      <DataTable
+        cardDef={cardDef()}
+        columns={[]}
+        data={data ? data.pools : []}
+        displayMode="card"
+        filterActions={
+          <SearchBar
+            advancedSearch={advancedSearch}
+            defaultValue={poolNamePattern ?? ""}
+            onChange={handleSearchChange}
+            placeholder={translate("pools.searchPlaceholder")}
+          />
+        }
+        initialState={tableURLState}
+        isLoading={isLoading}
+        modelName="admin:pools.pool"
+        noRowsMessage={translate("pools.noPoolsFound")}
+        onStateChange={setTableURLState}
+        presentationActions={
+          <Select.Root
+            borderWidth={0}
+            collection={poolSortOptions}
+            defaultValue={["name"]}
+            onValueChange={handleSortChange}
+            width={130}
+          >
+            <Select.Trigger>
+              <Select.ValueText placeholder={translate("pools.sort.placeholder")} />
+            </Select.Trigger>
+
+            <Select.Content>
+              {poolSortOptions.items.map((option) => (
+                <Select.Item item={option} key={option.value}>
+                  {option.label}
+                </Select.Item>
+              ))}
+            </Select.Content>
+          </Select.Root>
+        }
+        primaryActions={<AddPoolButton />}
+        total={data ? data.total_entries : 0}
       />
-      <HStack gap={4} mt={4}>
-        <Spacer />
-        <AddPoolButton />
-      </HStack>
-      <Box mt={4}>
-        {isLoading ? (
-          <Skeleton height="100px" />
-        ) : (
-          data?.pools.map((pool) => <PoolBar key={pool.name} pool={pool} />)
-        )}
-      </Box>
     </>
   );
 };

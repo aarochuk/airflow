@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-http``
 
-Release: ``5.2.1``
+Release: ``6.4.0``
 
 
 `Hypertext Transfer Protocol (HTTP) <https://www.w3.org/Protocols/>`__
@@ -36,29 +36,41 @@ This is a provider package for ``http`` provider. All classes for this provider 
 are in ``airflow.providers.http`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-http/5.2.1/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-http/6.4.0/>`_.
 
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation (see ``Requirements`` below
+You can install this package on top of an existing Airflow installation (see ``Requirements`` below
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-http``
 
-The package supports the following python versions: 3.9,3.10,3.11,3.12
+The package supports the following python versions: 3.11,3.12,3.13,3.14
 
 Requirements
 ------------
 
-=====================  ====================
-PIP package            Version required
-=====================  ====================
-``apache-airflow``     ``>=2.9.0``
-``requests``           ``>=2.31.0,<3``
-``requests-toolbelt``  ``>=1.0.0``
-``aiohttp``            ``!=3.11.0,>=3.9.2``
-``asgiref``            ``>=2.3.0``
-=====================  ====================
+==========================================  ======================================
+PIP package                                 Version required
+==========================================  ======================================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.17.0``
+``requests``                                ``>=2.32.0,<3``
+``requests-toolbelt``                       ``>=1.0.0``
+``aiohttp``                                 ``>=3.14.0``
+``asgiref``                                 ``>=2.3.0; python_version < "3.14"``
+``asgiref``                                 ``>=3.11.1; python_version >= "3.14"``
+``pydantic``                                ``>=2.11.0``
+==========================================  ======================================
+
+Optional dependencies
+----------------------
+
+=======  ====================
+Extra    Dependencies
+=======  ====================
+``srv``  ``dnspython>=2.0.0``
+=======  ====================
 
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-http/5.2.1/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-http/6.4.0/changelog.html>`_.

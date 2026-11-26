@@ -47,6 +47,8 @@ ALL_DEPENDENCIES = json.loads(GENERATED_PROVIDERS_DEPENDENCIES_FILE.read_text())
 USE_AIRFLOW_VERSION = os.environ.get("USE_AIRFLOW_VERSION") or ""
 IS_AIRFLOW_VERSION_PROVIDED = re.match(r"^(\d+)\.(\d+)\.(\d+)\S*$", USE_AIRFLOW_VERSION)
 
+SKIP_IMPORTING_PACKAGES: list[str] = []
+
 
 class EntityType(Enum):
     Operators = "Operators"
@@ -177,6 +179,12 @@ def import_all_classes(
                 if print_skips:
                     console.print(f"Skipping module: {modinfo.name}")
                 continue
+
+            if modinfo.name in SKIP_IMPORTING_PACKAGES:
+                if print_skips:
+                    console.print(f"Skipping module: {modinfo.name}")
+                continue
+
             if print_imports:
                 package_to_print = modinfo.name.rpartition(".")[0]
                 if package_to_print not in printed_packages:
@@ -352,8 +360,7 @@ def strip_package_from_class(base_package: str, class_name: str) -> str:
     """Strips base package name from the class (if it starts with the package name)."""
     if class_name.startswith(base_package):
         return class_name[len(base_package) + 1 :]
-    else:
-        return class_name
+    return class_name
 
 
 def convert_class_name_to_url(base_url: str, class_name) -> str:
@@ -463,8 +470,8 @@ def get_package_class_summary(
     :return: dictionary of objects usable as context for JINJA2 templates, or
         None if there are some errors
     """
-    from airflow.hooks.base import BaseHook
     from airflow.models.baseoperator import BaseOperator
+    from airflow.sdk import BaseHook
     from airflow.secrets import BaseSecretsBackend
     from airflow.sensors.base import BaseSensorOperator
     from airflow.triggers.base import BaseTrigger

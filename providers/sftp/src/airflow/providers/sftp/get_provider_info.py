@@ -26,57 +26,11 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-sftp",
         "name": "SFTP",
         "description": "`SSH File Transfer Protocol (SFTP) <https://tools.ietf.org/wg/secsh/draft-ietf-secsh-filexfer/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477886,
-        "versions": [
-            "5.1.1",
-            "5.1.0",
-            "5.0.0",
-            "4.11.1",
-            "4.11.0",
-            "4.10.3",
-            "4.10.2",
-            "4.10.1",
-            "4.10.0",
-            "4.9.1",
-            "4.9.0",
-            "4.8.1",
-            "4.8.0",
-            "4.7.0",
-            "4.6.1",
-            "4.6.0",
-            "4.5.0",
-            "4.4.0",
-            "4.3.1",
-            "4.3.0",
-            "4.2.4",
-            "4.2.3",
-            "4.2.2",
-            "4.2.1",
-            "4.2.0",
-            "4.1.0",
-            "4.0.0",
-            "3.0.0",
-            "2.6.0",
-            "2.5.2",
-            "2.5.1",
-            "2.5.0",
-            "2.4.1",
-            "2.4.0",
-            "2.3.0",
-            "2.2.0",
-            "2.1.1",
-            "2.1.0",
-            "2.0.0",
-            "1.2.0",
-            "1.1.1",
-            "1.1.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "SSH File Transfer Protocol (SFTP)",
                 "external-doc-url": "https://tools.ietf.org/wg/secsh/draft-ietf-secsh-filexfer/",
+                "how-to-guide": ["/docs/apache-airflow-providers-sftp/sensors/sftp_sensor.rst"],
                 "logo": "/docs/integration-logos/SFTP.png",
                 "tags": ["protocol"],
             }
@@ -96,6 +50,22 @@ def get_provider_info():
                 ],
             }
         ],
+        "asset-uris": [
+            {
+                "schemes": ["sftp"],
+                "handler": "airflow.providers.sftp.assets.sftp.sanitize_uri",
+                "factory": "airflow.providers.sftp.assets.sftp.create_asset",
+                "to_openlineage_converter": "airflow.providers.sftp.assets.sftp.convert_asset_to_openlineage",
+            }
+        ],
+        "dataset-uris": [
+            {
+                "schemes": ["sftp"],
+                "handler": "airflow.providers.sftp.assets.sftp.sanitize_uri",
+                "factory": "airflow.providers.sftp.assets.sftp.create_asset",
+                "to_openlineage_converter": "airflow.providers.sftp.assets.sftp.convert_asset_to_openlineage",
+            }
+        ],
         "hooks": [
             {
                 "integration-name": "SSH File Transfer Protocol (SFTP)",
@@ -103,7 +73,16 @@ def get_provider_info():
             }
         ],
         "connection-types": [
-            {"hook-class-name": "airflow.providers.sftp.hooks.sftp.SFTPHook", "connection-type": "sftp"}
+            {
+                "hook-class-name": "airflow.providers.sftp.hooks.sftp.SFTPHook",
+                "hook-name": "SFTP",
+                "connection-type": "sftp",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema"],
+                    "relabeling": {"login": "Username"},
+                    "placeholders": {},
+                },
+            }
         ],
         "task-decorators": [
             {
@@ -117,15 +96,5 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.sftp.triggers.sftp"],
             }
         ],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-ssh>=2.1.0",
-            "paramiko>=2.9.0",
-            "asyncssh>=2.12.0",
-        ],
-        "optional-dependencies": {
-            "common.compat": ["apache-airflow-providers-common-compat"],
-            "openlineage": ["apache-airflow-providers-openlineage"],
-        },
-        "devel-dependencies": [],
+        "filesystems": ["airflow.providers.sftp.fs.sftp"],
     }

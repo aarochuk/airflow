@@ -18,38 +18,55 @@
  */
 import { useState } from "react";
 
-import { useBackfillServiceCreateBackfill, useBackfillServiceListBackfillsKey } from "openapi/queries";
-import type { CreateBackfillData } from "openapi/requests/types.gen";
-import { toaster } from "src/components/ui";
-import { queryClient } from "src/queryClient";
+import { useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
+
+import {
+  UseDagServiceGetDagDetailsKeyFn,
+  UseDagServiceGetDagKeyFn,
+  useBackfillServiceCreateBackfill,
+  useBackfillServiceListBackfillsUiKey,
+} from "openapi/queries";
+import type { BackfillResponse, CreateBackfillData } from "openapi/requests/types.gen";
+
+import { toaster } from "src/system-components";
+
+import { dagListQueryKeys } from "src/queries/gridViewQueryKeys";
 
 export const useCreateBackfill = ({ onSuccessConfirm }: { onSuccessConfirm: () => void }) => {
   const [dateValidationError, setDateValidationError] = useState<unknown>(undefined);
-  const [error, setError] = useState<unknown>(undefined);
+  const queryClient = useQueryClient();
+  const { t: translate } = useTranslation("components");
 
-  const onSuccess = async () => {
-    await queryClient.invalidateQueries({
-      queryKey: [useBackfillServiceListBackfillsKey],
-    });
+  const onSuccess = async (backfill: BackfillResponse, variables: CreateBackfillData) => {
+    const { dag_id: dagId } = backfill;
+    const drainKeys = variables.requestBody.drain_dag
+      ? [
+          UseDagServiceGetDagKeyFn({ dagId }, [{ dagId }]),
+          UseDagServiceGetDagDetailsKeyFn({ dagId }, [{ dagId }]),
+        ]
+      : [];
+
+    await Promise.all(
+      [[useBackfillServiceListBackfillsUiKey], ...dagListQueryKeys, ...drainKeys].map((queryKey) =>
+        queryClient.invalidateQueries({ queryKey }),
+      ),
+    );
     toaster.create({
-      description: "Backfill jobs have been successfully triggered.",
-      title: "Backfill generated",
+      description: translate("backfill.toaster.success.description"),
+      title: translate("backfill.toaster.success.title"),
       type: "success",
     });
     onSuccessConfirm();
   };
 
-  const onError = (_error: unknown) => {
-    setError(_error);
-  };
-
-  const { isPending, mutate } = useBackfillServiceCreateBackfill({ onError, onSuccess });
+  const { error, isPending, mutate, reset: resetError } = useBackfillServiceCreateBackfill({ onSuccess });
 
   const createBackfill = (data: CreateBackfillData) => {
     if (data.requestBody.from_date === "" || data.requestBody.to_date === "") {
       setDateValidationError({
         body: {
-          detail: "Both Data Interval Start Date and End Date must be provided.",
+          detail: translate("backfill.validation.datesRequired"),
         },
       });
 
@@ -63,7 +80,7 @@ export const useCreateBackfill = ({ onSuccessConfirm }: { onSuccessConfirm: () =
     if (dataIntervalStart > dataIntervalEnd) {
       setDateValidationError({
         body: {
-          detail: "Data Interval Start Date must be less than or equal to Data Interval End Date.",
+          detail: translate("backfill.validation.startBeforeEnd"),
         },
       });
 
@@ -76,15 +93,17 @@ export const useCreateBackfill = ({ onSuccessConfirm }: { onSuccessConfirm: () =
     mutate({
       requestBody: {
         dag_id: dagId,
-        dag_run_conf: {},
+        dag_run_conf: data.requestBody.dag_run_conf,
+        drain_dag: data.requestBody.drain_dag,
         from_date: formattedDataIntervalStart,
         max_active_runs: data.requestBody.max_active_runs,
         reprocess_behavior: data.requestBody.reprocess_behavior,
-        run_backwards: false,
+        run_backwards: data.requestBody.run_backwards,
+        run_on_latest_version: data.requestBody.run_on_latest_version,
         to_date: formattedDataIntervalEnd,
       },
     });
   };
 
-  return { createBackfill, dateValidationError, error, isPending };
+  return { createBackfill, dateValidationError, error, isPending, resetError };
 };

@@ -23,36 +23,35 @@ Released packages
 
 .. jinja:: official_download_page
 
-    This page describes downloading and verifying Airflow® version
-    ``{{ airflow_version }}`` using officially released packages.
+    This page describes downloading and verifying Airflow® version ``|version|`` using officially released packages.
     You can also install ``Apache Airflow`` - as most Python packages - via :doc:`PyPI <installing-from-pypi>`.
-    You can choose different version of Airflow by selecting different version from the drop-down at
+    You can choose different version of Airflow by selecting a different version from the drop-down at
     the top-left of the page.
 
-The ``source``, ``sdist`` and ``whl`` packages released are the "official" sources of installation that you
-can use if you want to verify the origin of the packages and want to verify checksums and signatures of
-the packages. The packages are available via the
-`Official Apache Software Foundations Downloads <https://dlcdn.apache.org/>`_
+The Source packages are official packages of the Apache Software Foundation - and the ones that you can
+use if you want to build the packages yourself from the source code and be sure that the provenance of
+the packages is verified and matches the source code from the repository and you can verify the
+checksums and signatures of the packages.
 
-As of version 2.8 Airflow follows PEP 517/518 and uses ``pyproject.toml`` file to define build dependencies
-and build process and it requires relatively modern versions of packaging tools to get airflow built from
-local sources or ``sdist`` packages, as PEP 517 compliant build hooks are used to determine dynamic build
-dependencies. In case of ``pip`` it means that at least version 22.1.0 is needed (released at the beginning of
-2022) to build or install Airflow from sources. This does not affect the ability of installing Airflow from
-released wheel packages.
+The ``sdist`` and ``whl`` packages released are the convenience packages - for installation, also built from
+the same sources and you can still verify the origin of the packages and want to verify checksums and
+signatures of the packages. The packages are available via the
+`Official Apache Software Foundation Downloads <https://dlcdn.apache.org/>`_
 
-The |version| downloads of Airflow® are available at:
+The ``|version|`` downloads of Airflow® are available at:
 
 .. jinja:: official_download_page
 
-    * `Sources package for airflow <{{ closer_lua_url }}/apache-airflow-{{ airflow_version }}-source.tar.gz>`__ (`asc <{{ base_url }}/apache-airflow-{{ airflow_version }}-source.tar.gz.asc>`__, `sha512 <{{ base_url }}/apache-airflow-{{ airflow_version }}-source.tar.gz.sha512>`__)
-    * `Sdist package for airflow meta package <{{ closer_lua_url }}/apache-airflow-{{ airflow_version }}.tar.gz>`__ (`asc <{{ base_url }}/apache-airflow-{{ airflow_version }}.tar.gz.asc>`__, `sha512 <{{ base_url }}/apache-airflow-{{ airflow_version }}.tar.gz.sha512>`__)
-    * `Whl package for airflow meta package <{{ closer_lua_url }}/apache_airflow-{{ airflow_version }}-py3-none-any.whl>`__ (`asc <{{ base_url }}/apache_airflow-{{ airflow_version }}-py3-none-any.whl.asc>`__, `sha512 <{{ base_url }}/apache_airflow-{{ airflow_version }}-py3-none-any.whl.sha512>`__)
-    * `Sdist package for airflow core package <{{ closer_lua_url }}/apache-airflow_core-{{ airflow_version }}.tar.gz>`__ (`asc <{{ base_url }}/apache-airflow_core-{{ airflow_version }}.tar.gz.asc>`__, `sha512 <{{ base_url }}/apache-airflow_core-{{ airflow_version }}.tar.gz.sha512>`__)
-    * `Whl package for airflow core package <{{ closer_lua_url }}/apache_airflow_core-{{ airflow_version }}-py3-none-any.whl>`__ (`asc <{{ base_url }}/apache_airflow_core-{{ airflow_version }}-py3-none-any.whl.asc>`__, `sha512 <{{ base_url }}/apache_airflow_core-{{ airflow_version }}-py3-none-any.whl.sha512>`__)
+    * `Sources package for airflow <{{ closer_lua_url }}/apache_airflow-{{ airflow_version }}-source.tar.gz>`__ (`asc <{{ base_url }}/apache_airflow-{{ airflow_version }}-source.tar.gz.asc>`__, `sha512 <{{ base_url }}/apache_airflow-{{ airflow_version }}-source.tar.gz.sha512>`__)
+    * `Sdist package for airflow meta distribution <{{ closer_lua_url }}/apache_airflow-{{ airflow_version }}.tar.gz>`__ (`asc <{{ base_url }}/apache_airflow-{{ airflow_version }}.tar.gz.asc>`__, `sha512 <{{ base_url }}/apache_airflow-{{ airflow_version }}.tar.gz.sha512>`__)
+    * `Whl package for airflow meta distribution <{{ closer_lua_url }}/apache_airflow-{{ airflow_version }}-py3-none-any.whl>`__ (`asc <{{ base_url }}/apache_airflow-{{ airflow_version }}-py3-none-any.whl.asc>`__, `sha512 <{{ base_url }}/apache_airflow-{{ airflow_version }}-py3-none-any.whl.sha512>`__)
+    * `Sdist package for airflow core distribution <{{ closer_lua_url }}/apache_airflow_core-{{ airflow_version }}.tar.gz>`__ (`asc <{{ base_url }}/apache_airflow_core-{{ airflow_version }}.tar.gz.asc>`__, `sha512 <{{ base_url }}/apache_airflow_core-{{ airflow_version }}.tar.gz.sha512>`__)
+    * `Whl package for airflow core distribution <{{ closer_lua_url }}/apache_airflow_core-{{ airflow_version }}-py3-none-any.whl>`__ (`asc <{{ base_url }}/apache_airflow_core-{{ airflow_version }}-py3-none-any.whl.asc>`__, `sha512 <{{ base_url }}/apache_airflow_core-{{ airflow_version }}-py3-none-any.whl.sha512>`__)
+    * `Sdist package for airflow task-sdk distribution <{{ closer_lua_url_task_sdk }}/apache_airflow_task_sdk-{{ task_sdk_version }}.tar.gz>`__ (`asc <{{ base_url_task_sdk }}/apache_airflow_task_sdk-{{ task_sdk_version }}.tar.gz.asc>`__, `sha512 <{{ base_url_task_sdk }}/apache_airflow_task_sdk-{{ task_sdk_version }}.tar.gz.sha512>`__)
+    * `Whl package for airflow task-sdk distribution <{{ closer_lua_url_task_sdk }}/apache_airflow_task_sdk-{{ task_sdk_version }}-py3-none-any.whl>`__ (`asc <{{ base_url_task_sdk }}/apache_airflow_task_sdk-{{ task_sdk_version }}-py3-none-any.whl.asc>`__, `sha512 <{{ base_url_task_sdk }}/apache_airflow_task_sdk-{{ task_sdk_version }}-py3-none-any.whl.sha512>`__)
 
 If you want to install from the source code, you can download from the sources link above, it will contain
-a ``INSTALL`` file containing details on how you can build and install Airflow.
+an ``INSTALL`` file containing details on how you can build and install Airflow.
 
 Release integrity
 '''''''''''''''''
@@ -116,7 +115,7 @@ Example:
 
 The "Good signature from ..." is indication that the signatures are correct.
 Do not worry about the "not certified with a trusted signature" warning. Most of the certificates used
-by release managers are self signed, that's why you get this warning. By importing the server in the
+by release managers are self-signed, that's why you get this warning. By importing the server in the
 previous step and importing it via ID from ``KEYS`` page, you know that this is a valid Key already.
 
 For SHA512 sum check, download the relevant ``sha512`` and run the following:
@@ -159,5 +158,5 @@ and SHA sum files with the script below:
         ls -la "${airflow_download_dir}"
         echo
 
-Once you verify the files following the instructions from previous chapter you can remove the temporary
+Once you verify the files following the instructions from previous section, you can remove the temporary
 folder created.

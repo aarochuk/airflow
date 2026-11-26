@@ -19,24 +19,24 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from pydantic import AwareDatetime, Field, NonNegativeInt, model_validator
+from pydantic import AliasPath, AwareDatetime, Field, NonNegativeInt, field_validator, model_validator
 
+from airflow._shared.timezones import timezone
 from airflow.api_fastapi.core_api.base import BaseModel, StrictBaseModel
+from airflow.api_fastapi.core_api.datamodels.common import check_conf_reserved_keys
 from airflow.api_fastapi.core_api.datamodels.dag_versions import DagVersionResponse
-from airflow.models import DagRun
 from airflow.timetables.base import DataInterval
-from airflow.utils import timezone
 from airflow.utils.state import DagRunState
 from airflow.utils.types import DagRunTriggeredByType, DagRunType
 
 if TYPE_CHECKING:
-    from airflow.models import DAG
+    from airflow.serialization.definitions.dag import SerializedDAG
 
 
-class DAGRunPatchStates(str, Enum):
-    """Enum for DAG Run states when updating a DAG Run."""
+class DagRunMutableStates(str, Enum):
+    """Dag Run states from which the run may be mutated (patched, deleted)."""
 
     QUEUED = DagRunState.QUEUED
     SUCCESS = DagRunState.SUCCESS
@@ -44,21 +44,128 @@ class DAGRunPatchStates(str, Enum):
 
 
 class DAGRunPatchBody(StrictBaseModel):
-    """DAG Run Serializer for PATCH requests."""
+    """Dag Run Serializer for PATCH requests."""
 
-    state: DAGRunPatchStates | None = None
+    state: DagRunMutableStates | None = None
     note: str | None = Field(None, max_length=1000)
 
 
-class DAGRunClearBody(StrictBaseModel):
-    """DAG Run serializer for clear endpoint body."""
+class BulkDAGRunBody(StrictBaseModel):
+    """Request body for bulk operations on Dag Runs."""
+
+    dag_run_id: str
+    dag_id: str | None = None
+    state: DagRunMutableStates | None = None
+    note: str | None = Field(None, max_length=1000)
+
+
+class PartitionSelectorMixin(StrictBaseModel):
+    """Partition filter fields shared by bulk-clear and clearPartitions bodies."""
+
+    partition_key: str | None = Field(
+        default=None,
+        description="Select runs by exact partition key match. Mutually exclusive with the other partition selectors.",
+    )
+    partition_date_start: datetime | None = Field(
+        default=None,
+        description=(
+            "Inclusive start of the partition date window. "
+            "The value is interpreted in the Dag's timetable timezone. "
+            "Mutually exclusive with the other partition selectors."
+        ),
+    )
+    partition_date_end: datetime | None = Field(
+        default=None,
+        description=(
+            "Inclusive end of the partition date window. "
+            "The value is interpreted in the Dag's timetable timezone. "
+            "Mutually exclusive with the other partition selectors."
+        ),
+    )
+
+    @property
+    def has_partition_selectors(self) -> bool:
+        return (
+            self.partition_key is not None
+            or self.partition_date_start is not None
+            or self.partition_date_end is not None
+        )
+
+    def _validate_partition_date_window_order(self) -> None:
+        if (
+            self.partition_date_start is not None
+            and self.partition_date_end is not None
+            and self.partition_date_start > self.partition_date_end
+        ):
+            raise ValueError("partition_date_start must be on or before partition_date_end.")
+
+    def _check_exactly_one_selection_mode(
+        self, *, extra_selector_active: bool, extra_selector_name: str
+    ) -> None:
+        has_partition_key = self.partition_key is not None
+        has_partition_date_window = (
+            self.partition_date_start is not None or self.partition_date_end is not None
+        )
+        modes_active = sum([extra_selector_active, has_partition_key, has_partition_date_window])
+        if modes_active != 1:
+            raise ValueError(
+                f"Exactly one of {extra_selector_name}, partition_key, or a partition date window "
+                "(partition_date_start / partition_date_end) must be provided."
+            )
+        self._validate_partition_date_window_order()
+
+
+class BaseDAGRunClear(StrictBaseModel):
+    """Shared options for the single-run and bulk Dag Run clear endpoints."""
 
     dry_run: bool = True
     only_failed: bool = False
+    only_new: bool = Field(
+        default=False,
+        description="Only queue newly added tasks in the latest Dag version without clearing existing tasks.",
+    )
+    run_on_latest_version: bool | None = Field(
+        default=None,
+        description="(Experimental) Run on the latest bundle version of the Dag after clearing. "
+        "If not specified, falls back to the DAG-level ``rerun_with_latest_version`` parameter, "
+        "then the ``[core] rerun_with_latest_version`` config option, "
+        "and finally ``False``.",
+    )
+    keep_task_state: bool = Field(
+        default=False,
+        description="Keep the task state store entries of the cleared task instances so the next "
+        "attempt resumes from them. By default they are discarded, so the task starts over.",
+    )
+    note: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_only_new_only_failed_mutually_exclusive(cls, data: Any) -> Any:
+        if data.get("only_new") and data.get("only_failed"):
+            raise ValueError("only_new and only_failed are mutually exclusive")
+        return data
+
+
+class DAGRunClearBody(BaseDAGRunClear):
+    """Dag Run serializer for clear endpoint body."""
+
+
+class BulkDAGRunClearBody(BaseDAGRunClear, PartitionSelectorMixin):
+    """Request body for the bulk clear Dag Runs endpoint."""
+
+    dag_runs: list[BulkDAGRunBody] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_exactly_one_selection_mode(self) -> BulkDAGRunClearBody:
+        self._check_exactly_one_selection_mode(
+            extra_selector_active=bool(self.dag_runs),
+            extra_selector_name="dag_runs (non-empty)",
+        )
+        return self
 
 
 class DAGRunResponse(BaseModel):
-    """DAG Run serializer for responses."""
+    """Dag Run serializer for responses."""
 
     dag_run_id: str = Field(validation_alias="run_id")
     dag_id: str
@@ -66,6 +173,7 @@ class DAGRunResponse(BaseModel):
     queued_at: datetime | None
     start_date: datetime | None
     end_date: datetime | None
+    duration: float | None
     data_interval_start: datetime | None
     data_interval_end: datetime | None
     run_after: datetime
@@ -73,20 +181,55 @@ class DAGRunResponse(BaseModel):
     run_type: DagRunType
     state: DagRunState
     triggered_by: DagRunTriggeredByType | None
-    conf: dict
+    triggering_user_name: str | None
+    conf: dict | None
     note: str | None
     dag_versions: list[DagVersionResponse]
+    bundle_version: str | None
+    dag_display_name: str = Field(validation_alias=AliasPath("dag_model", "dag_display_name"))
+    partition_key: str | None
+    partition_date: datetime | None
+    team_name: str | None = None
 
 
 class DAGRunCollectionResponse(BaseModel):
-    """DAG Run Collection serializer for responses."""
+    """
+    Dag Run collection response supporting both offset and cursor pagination.
+
+    A single flat model is used instead of a discriminated union
+    (``Annotated[Offset | Cursor, Field(discriminator=...)]``) because
+    the OpenAPI ``oneOf`` + ``discriminator`` construct is not handled
+    correctly by ``@hey-api/openapi-ts`` / ``@7nohe/openapi-react-query-codegen``:
+    return types degrade to ``unknown`` in JSDoc and can produce
+    incorrect TypeScript types (see hey-api/openapi-ts#1613, #3270).
+    """
 
     dag_runs: list[DAGRunResponse]
-    total_entries: int
+    total_entries: int | None = Field(
+        default=None,
+        description="Number of matching items. For offset pagination this is the exact total. "
+        "For cursor pagination it is capped at ``total_entries_limit``; a value equal to that "
+        "limit means at least that many items match.",
+    )
+    total_entries_limit: int | None = Field(
+        default=None,
+        description="Cap applied to ``total_entries`` under cursor pagination. ``null`` for offset "
+        "pagination, where ``total_entries`` is exact.",
+    )
+    next_cursor: str | None = Field(
+        default=None,
+        description="Token pointing to the next page. Populated for cursor pagination, "
+        "``null`` when using offset pagination or when there is no next page.",
+    )
+    previous_cursor: str | None = Field(
+        default=None,
+        description="Token pointing to the previous page. Populated for cursor pagination, "
+        "``null`` when using offset pagination or when on the first page.",
+    )
 
 
 class TriggerDAGRunPostBody(StrictBaseModel):
-    """Trigger DAG Run Serializer for POST body."""
+    """Trigger Dag Run Serializer for POST body."""
 
     dag_run_id: str | None = None
     data_interval_start: AwareDatetime | None = None
@@ -94,18 +237,33 @@ class TriggerDAGRunPostBody(StrictBaseModel):
     logical_date: AwareDatetime | None
     run_after: datetime | None = Field(default_factory=timezone.utcnow)
 
-    conf: dict = Field(default_factory=dict)
+    conf: dict | None = Field(default_factory=dict)
     note: str | None = None
+    partition_key: str | None = None
+    bundle_version: str | None = None
+    drain_dag: bool = Field(
+        default=False,
+        description="Drain the Dag together with this run. Draining changes the whole Dag: unfinished "
+        "runs can start or resume except those held by paused backfills. No scheduled runs are created, "
+        "and the Dag pauses once all unfinished runs finish. Paused backfills must be resumed for draining "
+        "to complete. Requires the same permission as pausing the Dag.",
+    )
+
+    @field_validator("conf")
+    @classmethod
+    def _check_reserved_keys(cls, conf: dict | None) -> dict | None:
+        return check_conf_reserved_keys(conf, root="conf")
 
     @model_validator(mode="after")
-    def check_data_intervals(cls, values):
-        if (values.data_interval_start is None) != (values.data_interval_end is None):
+    def check_data_intervals(self):
+        if (self.data_interval_start is None) != (self.data_interval_end is None):
             raise ValueError(
                 "Either both data_interval_start and data_interval_end must be provided or both must be None"
             )
-        return values
+        return self
 
-    def validate_context(self, dag: DAG) -> dict:
+    def validate_context(self, dag: SerializedDAG) -> dict:
+        dag.validate_partition_key(self.partition_key)
         coerced_logical_date = timezone.coerce_datetime(self.logical_date)
         run_after = self.run_after or timezone.utcnow()
         data_interval = None
@@ -116,16 +274,16 @@ class TriggerDAGRunPostBody(StrictBaseModel):
                     end=timezone.coerce_datetime(self.data_interval_end),
                 )
             else:
-                data_interval = dag.timetable.infer_manual_data_interval(
-                    run_after=coerced_logical_date or timezone.coerce_datetime(run_after)
-                )
-                run_after = data_interval.end
+                data_interval = dag.timetable.infer_manual_data_interval(run_after=coerced_logical_date)
 
-        run_id = self.dag_run_id or DagRun.generate_run_id(
-            run_type=DagRunType.SCHEDULED,
-            logical_date=coerced_logical_date,
-            run_after=run_after,
+        run_id = self.dag_run_id or dag.timetable.generate_run_id(
+            run_type=DagRunType.MANUAL,
+            run_after=timezone.coerce_datetime(run_after),
+            data_interval=data_interval,
         )
+
+        partition_date = dag.timetable.resolve_partition_date(self.partition_key)
+
         return {
             "run_id": run_id,
             "logical_date": coerced_logical_date,
@@ -133,30 +291,76 @@ class TriggerDAGRunPostBody(StrictBaseModel):
             "run_after": run_after,
             "conf": self.conf,
             "note": self.note,
+            "partition_key": self.partition_key,
+            "partition_date": partition_date,
         }
-
-    @model_validator(mode="after")
-    def validate_dag_run_id(self):
-        if not self.dag_run_id:
-            self.dag_run_id = DagRun.generate_run_id(
-                run_type=DagRunType.MANUAL, logical_date=self.logical_date, run_after=self.run_after
-            )
-        return self
 
 
 class DAGRunsBatchBody(StrictBaseModel):
-    """List DAG Runs body for batch endpoint."""
+    """List Dag Runs body for batch endpoint."""
 
     order_by: str | None = None
     page_offset: NonNegativeInt = 0
     page_limit: NonNegativeInt = 100
     dag_ids: list[str] | None = None
     states: list[DagRunState | None] | None = None
+
     run_after_gte: AwareDatetime | None = None
+    run_after_gt: AwareDatetime | None = None
     run_after_lte: AwareDatetime | None = None
+    run_after_lt: AwareDatetime | None = None
+
     logical_date_gte: AwareDatetime | None = None
+    logical_date_gt: AwareDatetime | None = None
     logical_date_lte: AwareDatetime | None = None
+    logical_date_lt: AwareDatetime | None = None
+
     start_date_gte: AwareDatetime | None = None
+    start_date_gt: AwareDatetime | None = None
     start_date_lte: AwareDatetime | None = None
+    start_date_lt: AwareDatetime | None = None
+
     end_date_gte: AwareDatetime | None = None
+    end_date_gt: AwareDatetime | None = None
     end_date_lte: AwareDatetime | None = None
+    end_date_lt: AwareDatetime | None = None
+
+    duration_gte: float | None = None
+    duration_gt: float | None = None
+    duration_lte: float | None = None
+    duration_lt: float | None = None
+
+    conf_contains: str | None = None
+
+
+class ClearPartitionsBody(PartitionSelectorMixin):
+    """Request body for the clearPartitions endpoint (column-reset: set partition fields to None)."""
+
+    run_id: str | None = Field(
+        default=None,
+        description="Select runs by exact run_id. Mutually exclusive with ``partition_key`` and partition date window.",
+    )
+    clear_task_instances: bool = Field(
+        default=False,
+        description="Also clear task instances on the matched runs.",
+    )
+    dry_run: bool = Field(
+        default=True,
+        description="If True, compute counts without writing any changes.",
+    )
+
+    @model_validator(mode="after")
+    def validate_exactly_one_selector(self) -> ClearPartitionsBody:
+        self._check_exactly_one_selection_mode(
+            extra_selector_active=self.run_id is not None,
+            extra_selector_name="run_id",
+        )
+        return self
+
+
+class ClearPartitionsResponse(BaseModel):
+    """Response for the clearPartitions endpoint."""
+
+    dag_runs_cleared: int
+    task_instances_cleared: int
+    dry_run: bool

@@ -37,8 +37,8 @@ from google.cloud.dataflow_v1beta3 import (
 )
 from google.cloud.dataflow_v1beta3.types import JobMessageImportance
 
-from airflow.exceptions import AirflowException
 from airflow.providers.apache.beam.hooks.beam import run_beam_command
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks.dataflow import (
     DEFAULT_DATAFLOW_LOCATION,
     AsyncDataflowHook,
@@ -196,17 +196,22 @@ class TestDataflowHook:
         self.dataflow_hook = DataflowHook(gcp_conn_id="google_cloud_default")
         self.dataflow_hook.beam_hook = MagicMock()
 
+    @mock.patch("airflow.providers.google.cloud.hooks.dataflow.DataflowHook.get_client_options")
     @mock.patch("airflow.providers.google.cloud.hooks.dataflow.DataflowHook._authorize")
     @mock.patch("airflow.providers.google.cloud.hooks.dataflow.build")
-    def test_dataflow_client_creation(self, mock_build, mock_authorize):
+    def test_dataflow_client_creation(self, mock_build, mock_authorize, mock_get_client_options):
         result = self.dataflow_hook.get_conn()
         mock_build.assert_called_once_with(
-            "dataflow", "v1b3", http=mock_authorize.return_value, cache_discovery=False
+            "dataflow",
+            "v1b3",
+            http=mock_authorize.return_value,
+            cache_discovery=False,
+            client_options=mock_get_client_options.return_value,
         )
         assert mock_build.return_value == result
 
     @pytest.mark.parametrize(
-        "expected_result, job_name, append_job_name",
+        ("expected_result", "job_name", "append_job_name"),
         [
             (JOB_NAME, JOB_NAME, False),
             ("test-example", "test_example", False),
@@ -663,79 +668,29 @@ class TestDataflowTemplateHook:
         )
         jobs_controller.cancel()
 
-    @mock.patch(DATAFLOW_STRING.format("_DataflowJobsController"))
-    @mock.patch(DATAFLOW_STRING.format("DataflowHook.provide_authorized_gcloud"))
-    @mock.patch(DATAFLOW_STRING.format("DataflowHook.get_conn"))
-    @mock.patch(DATAFLOW_STRING.format("subprocess.run"))
-    def test_start_sql_job_failed_to_run(
-        self, mock_run, mock_get_conn, mock_provide_authorized_gcloud, mock_controller
-    ):
-        test_job = {"id": "TEST_JOB_ID"}
-        mock_controller.return_value.get_jobs.return_value = [test_job]
-        mock_run.return_value = mock.MagicMock(
-            stdout=f"{TEST_JOB_ID}\n".encode(), stderr=f"{TEST_JOB_ID}\n".encode(), returncode=0
-        )
-        on_new_job_callback = mock.MagicMock()
-
-        result = self.dataflow_hook.start_sql_job(
-            job_name=TEST_SQL_JOB_NAME,
-            query=TEST_SQL_QUERY,
-            options=TEST_SQL_OPTIONS,
-            location=TEST_LOCATION,
-            project_id=TEST_PROJECT,
-            on_new_job_callback=on_new_job_callback,
-        )
-        mock_run.assert_called_once_with(
-            [
-                "gcloud",
-                "dataflow",
-                "sql",
-                "query",
-                TEST_SQL_QUERY,
-                "--project=test-project",
-                "--format=value(job.id)",
-                "--job-name=test-sql-job-name",
-                "--region=custom-location",
-                "--bigquery-project=test-project",
-                "--bigquery-dataset=test-dataset",
-                "--bigquery-table=beam_output",
-                "--bigquery-write-disposition=write-truncate",
-            ],
-            capture_output=True,
-        )
-        mock_controller.assert_called_once_with(
-            dataflow=mock_get_conn.return_value,
-            job_id=TEST_JOB_ID,
-            location=TEST_LOCATION,
-            poll_sleep=10,
-            project_number=TEST_PROJECT,
-            num_retries=5,
-            drain_pipeline=False,
-            wait_until_finished=None,
-        )
-        mock_controller.return_value.wait_for_done.assert_called_once()
-        assert result == test_job
-
-    @mock.patch(DATAFLOW_STRING.format("DataflowHook.get_conn"))
-    @mock.patch(DATAFLOW_STRING.format("DataflowHook.provide_authorized_gcloud"))
-    @mock.patch(DATAFLOW_STRING.format("subprocess.run"))
-    def test_start_sql_job(self, mock_run, mock_provide_authorized_gcloud, mock_get_conn):
-        mock_run.return_value = mock.MagicMock(
-            stdout=f"{TEST_JOB_ID}\n".encode(), stderr=f"{TEST_JOB_ID}\n".encode(), returncode=1
-        )
-        with pytest.raises(AirflowException):
-            self.dataflow_hook.start_sql_job(
-                job_name=TEST_SQL_JOB_NAME,
-                query=TEST_SQL_QUERY,
-                options=TEST_SQL_OPTIONS,
-                location=TEST_LOCATION,
-                project_id=TEST_PROJECT,
-                on_new_job_callback=mock.MagicMock(),
-            )
-
     def test_extract_job_id_raises_exception(self):
         with pytest.raises(AirflowException):
             self.dataflow_hook.extract_job_id({"not_id": True})
+
+    @mock.patch(DATAFLOW_STRING.format("_DataflowJobsController"))
+    @mock.patch(DATAFLOW_STRING.format("DataflowHook.get_conn"))
+    def test_get_job_id_of_running_job(self, mock_get_conn, jobs_controller):
+        jobs_controller.return_value.fetch_job_id.return_value = TEST_JOB_ID
+
+        result = self.dataflow_hook.get_job_id_of_running_job(
+            job_name=UNIQUE_JOB_NAME,
+            project_id=TEST_PROJECT,
+            location=TEST_LOCATION,
+        )
+
+        jobs_controller.assert_called_once_with(
+            dataflow=mock_get_conn.return_value,
+            name=UNIQUE_JOB_NAME,
+            project_number=TEST_PROJECT,
+            location=TEST_LOCATION,
+        )
+        jobs_controller.return_value.fetch_job_id.assert_called_once_with()
+        assert result == TEST_JOB_ID
 
 
 class TestDataflowJob:
@@ -806,7 +761,7 @@ class TestDataflowJob:
         assert dataflow_job.get_jobs() == [job, job]
 
     @pytest.mark.parametrize(
-        "state, exception_regex",
+        ("state", "exception_regex"),
         [
             (DataflowJobStatus.JOB_STATE_FAILED, "unexpected terminal state: JOB_STATE_FAILED"),
             (DataflowJobStatus.JOB_STATE_CANCELLED, "unexpected terminal state: JOB_STATE_CANCELLED"),
@@ -948,7 +903,7 @@ class TestDataflowJob:
         assert result is False
 
     @pytest.mark.parametrize(
-        "job_type, job_state, wait_until_finished, expected_result",
+        ("job_type", "job_state", "wait_until_finished", "expected_result"),
         [
             # RUNNING
             (DataflowJobType.JOB_TYPE_BATCH, DataflowJobStatus.JOB_STATE_RUNNING, None, False),
@@ -981,11 +936,11 @@ class TestDataflowJob:
             multiple_jobs=True,
             wait_until_finished=wait_until_finished,
         )
-        result = dataflow_job._check_dataflow_job_state(job)
+        result = dataflow_job.job_reached_terminal_state(job, wait_until_finished)
         assert result == expected_result
 
     @pytest.mark.parametrize(
-        "jobs, wait_until_finished, expected_result",
+        ("jobs", "wait_until_finished", "expected_result"),
         [
             # STREAMING
             (
@@ -1053,11 +1008,11 @@ class TestDataflowJob:
         result = False
         for current_job in jobs:
             job = {"id": "id-2", "name": "name-2", "type": current_job[0], "currentState": current_job[1]}
-            result = dataflow_job._check_dataflow_job_state(job)
+            result = dataflow_job.job_reached_terminal_state(job, wait_until_finished)
         assert result == expected_result
 
     @pytest.mark.parametrize(
-        "job_state, wait_until_finished, expected_result",
+        ("job_state", "wait_until_finished", "expected_result"),
         [
             # DONE
             (DataflowJobStatus.JOB_STATE_DONE, None, True),
@@ -1086,11 +1041,11 @@ class TestDataflowJob:
             multiple_jobs=True,
             wait_until_finished=wait_until_finished,
         )
-        result = dataflow_job._check_dataflow_job_state(job)
+        result = dataflow_job.job_reached_terminal_state(job, wait_until_finished)
         assert result == expected_result
 
     @pytest.mark.parametrize(
-        "job_type, job_state, exception_regex",
+        ("job_type", "job_state", "exception_regex"),
         [
             (
                 DataflowJobType.JOB_TYPE_BATCH,
@@ -1157,10 +1112,10 @@ class TestDataflowJob:
             multiple_jobs=True,
         )
         with pytest.raises(AirflowException, match=exception_regex):
-            dataflow_job._check_dataflow_job_state(job)
+            dataflow_job.job_reached_terminal_state(job)
 
     @pytest.mark.parametrize(
-        "job_type, expected_terminal_state, match",
+        ("job_type", "expected_terminal_state", "match"),
         [
             (
                 DataflowJobType.JOB_TYPE_BATCH,
@@ -1198,7 +1153,7 @@ class TestDataflowJob:
             expected_terminal_state=expected_terminal_state,
         )
         with pytest.raises(AirflowException, match=match):
-            dataflow_job._check_dataflow_job_state(job)
+            dataflow_job.job_reached_terminal_state(job, custom_terminal_state=expected_terminal_state)
 
     def test_dataflow_job_cancel_job(self):
         mock_jobs = self.mock_dataflow.projects.return_value.locations.return_value.jobs
@@ -1283,7 +1238,7 @@ class TestDataflowJob:
         )
 
     @pytest.mark.parametrize(
-        "drain_pipeline, job_type, requested_state",
+        ("drain_pipeline", "job_type", "requested_state"),
         [
             (False, "JOB_TYPE_BATCH", "JOB_STATE_CANCELLED"),
             (False, "JOB_TYPE_STREAMING", "JOB_STATE_CANCELLED"),
@@ -1433,22 +1388,118 @@ class TestDataflowJob:
         mock_fetch_responses.assert_called_once_with(job_id=TEST_JOB_ID)
         assert result == ["event_1", "event_2"]
 
+    @pytest.mark.parametrize(
+        ("jobs", "expected_job_id"),
+        [
+            (
+                [
+                    {
+                        "id": "job-done-id",
+                        "name": "test-job",
+                        "currentState": DataflowJobStatus.JOB_STATE_DONE,
+                        "createTime": "2026-06-25T16:00:00Z",
+                    },
+                    {
+                        "id": "job-prefix-only-id",
+                        "name": "test-job-other",
+                        "currentState": DataflowJobStatus.JOB_STATE_RUNNING,
+                        "createTime": "2026-06-25T16:10:00Z",
+                    },
+                    {
+                        "id": "job-active-older-id",
+                        "name": "test-job",
+                        "currentState": DataflowJobStatus.JOB_STATE_PENDING,
+                        "createTime": "2026-06-25T15:00:00Z",
+                    },
+                    {
+                        "id": "job-active-newer-id",
+                        "name": "test-job",
+                        "currentState": DataflowJobStatus.JOB_STATE_RUNNING,
+                        "createTime": "2026-06-25T15:30:00Z",
+                    },
+                ],
+                "job-active-newer-id",
+            ),
+            (
+                [
+                    {
+                        "id": "job-done-id",
+                        "name": "test-job",
+                        "currentState": DataflowJobStatus.JOB_STATE_DONE,
+                        "createTime": "2026-06-25T15:00:00Z",
+                    }
+                ],
+                None,
+            ),
+            (
+                [
+                    {
+                        "id": "job-prefix-only-id",
+                        "name": "test-job-suffix",
+                        "currentState": DataflowJobStatus.JOB_STATE_RUNNING,
+                        "createTime": "2026-06-25T15:00:00Z",
+                    }
+                ],
+                None,
+            ),
+        ],
+    )
+    def test_fetch_job_id(self, jobs, expected_job_id):
+        mock_jobs = self.mock_dataflow.projects.return_value.locations.return_value.jobs.return_value
+        mock_jobs.list.return_value.execute.return_value = {"jobs": jobs}
+        mock_jobs.list_next.return_value = None
+
+        jobs_controller = _DataflowJobsController(
+            dataflow=self.mock_dataflow,
+            project_number=TEST_PROJECT,
+            name="Test-Job",
+            location=TEST_LOCATION,
+            multiple_jobs=False,
+        )
+
+        result = jobs_controller.fetch_job_id()
+
+        mock_jobs.list.assert_called_once_with(
+            projectId=TEST_PROJECT,
+            location=TEST_LOCATION,
+            filter="ACTIVE",
+        )
+        assert result == expected_job_id
+        assert jobs_controller._job_id == expected_job_id
+
+    def test_fetch_job_id_without_job_name_returns_existing_job_id(self):
+        jobs_controller = _DataflowJobsController(
+            dataflow=self.mock_dataflow,
+            project_number=TEST_PROJECT,
+            name=None,
+            location=TEST_LOCATION,
+            job_id=TEST_JOB_ID,
+        )
+
+        assert jobs_controller.fetch_job_id() == TEST_JOB_ID
+        self.mock_dataflow.projects.assert_not_called()
+
 
 @pytest.mark.db_test
 class TestDataflowPipelineHook:
     def setup_method(self):
         self.dataflow_hook = DataflowHook(gcp_conn_id="google_cloud_default")
 
+    @mock.patch("airflow.providers.google.cloud.hooks.dataflow.DataflowHook.get_client_options")
     @mock.patch("airflow.providers.google.cloud.hooks.dataflow.DataflowHook._authorize")
     @mock.patch("airflow.providers.google.cloud.hooks.dataflow.build")
-    def test_get_conn(self, mock_build, mock_authorize):
+    def test_get_conn(self, mock_build, mock_authorize, mock_get_client_options):
         """
         Test that get_conn is called with the correct params and
         returns the correct API address
         """
         connection = self.dataflow_hook.get_pipelines_conn()
         mock_build.assert_called_once_with(
-            "datapipelines", "v1", http=mock_authorize.return_value, cache_discovery=False
+            "datapipelines",
+            "v1",
+            http=mock_authorize.return_value,
+            cache_discovery=False,
+            client_options=mock_get_client_options.return_value,
         )
         assert mock_build.return_value == connection
 
@@ -1693,7 +1744,6 @@ class TestDataflow:
         )
         assert found_job_id is None
 
-    @pytest.mark.db_test
     @mock.patch("subprocess.Popen")
     @mock.patch("select.select")
     def test_dataflow_wait_for_done_logging(self, mock_select, mock_popen, caplog):

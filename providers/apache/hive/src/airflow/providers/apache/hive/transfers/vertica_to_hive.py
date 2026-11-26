@@ -24,12 +24,12 @@ from collections.abc import Sequence
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Any
 
-from airflow.models import BaseOperator
 from airflow.providers.apache.hive.hooks.hive import HiveCliHook
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.vertica.hooks.vertica import VerticaHook
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class VerticaToHiveOperator(BaseOperator):
@@ -62,7 +62,7 @@ class VerticaToHiveOperator(BaseOperator):
     :param hive_auth: optional authentication option passed for the Hive connection
     """
 
-    template_fields: Sequence[str] = ("sql", "partition", "hive_table")
+    template_fields: Sequence[str] = ("sql", "partition", "hive_table", "vertica_conn_id", "hive_cli_conn_id")
     template_ext: Sequence[str] = (".sql",)
     template_fields_renderers = {"sql": "sql"}
     ui_color = "#b4e0ff"

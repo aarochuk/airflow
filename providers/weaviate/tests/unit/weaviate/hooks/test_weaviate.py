@@ -14,6 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
 from __future__ import annotations
 
 from unittest import mock
@@ -21,7 +22,7 @@ from unittest.mock import MagicMock, Mock
 
 import pandas as pd
 import pytest
-import requests
+from packaging.version import Version
 
 weaviate = pytest.importorskip("weaviate")
 from weaviate import ObjectAlreadyExistsException  # noqa: E402
@@ -30,6 +31,17 @@ from airflow.models import Connection  # noqa: E402
 from airflow.providers.weaviate.hooks.weaviate import WeaviateHook  # noqa: E402
 
 TEST_CONN_ID = "test_weaviate_conn"
+
+
+# Weaviate 4.10.0 uses HTTPX internal, so we need to mock httpx rather than requests.
+USE_HTTPX = Version(weaviate.__version__) >= Version("4.10.0")
+
+if USE_HTTPX:
+    import httpx
+else:
+    import requests
+
+NON_RETRIABLE_UNEXPECTED_STATUS_CODE = 501
 
 
 @pytest.fixture
@@ -87,6 +99,9 @@ class MockObject:
         if not isinstance(other, MockObject):
             return False
         return self.properties == other.properties and self.uuid == other.uuid
+
+    def __hash__(self):
+        return hash((self.properties, self.uuid))
 
 
 class TestWeaviateHook:
@@ -169,7 +184,7 @@ class TestWeaviateHook:
         mock_auth_api_key.assert_called_once_with(api_key=self.api_key)
         mock_connect_to_custom.assert_called_once_with(
             http_host=self.host,
-            http_port=80,
+            http_port=8000,
             http_secure=False,
             grpc_host="localhost",
             grpc_port=50051,
@@ -186,7 +201,7 @@ class TestWeaviateHook:
         mock_auth_api_key.assert_called_once_with(api_key=self.api_key)
         mock_connect_to_custom.assert_called_once_with(
             http_host=self.host,
-            http_port=80,
+            http_port=8000,
             http_secure=False,
             grpc_host="localhost",
             grpc_port=50051,
@@ -204,7 +219,7 @@ class TestWeaviateHook:
         )
         mock_connect_to_custom.assert_called_once_with(
             http_host=self.host,
-            http_port=80,
+            http_port=8000,
             http_secure=False,
             grpc_host="localhost",
             grpc_port=50051,
@@ -224,7 +239,7 @@ class TestWeaviateHook:
         )
         mock_connect_to_custom.assert_called_once_with(
             http_host=self.host,
-            http_port=80,
+            http_port=8000,
             http_secure=False,
             grpc_host="localhost",
             grpc_port=50051,
@@ -240,7 +255,7 @@ class TestWeaviateHook:
         mock_auth_client_password.assert_called_once_with(username="login", password="password", scope=None)
         mock_connect_to_custom.assert_called_once_with(
             http_host=self.host,
-            http_port=80,
+            http_port=8000,
             http_secure=False,
             grpc_host="localhost",
             grpc_port=50051,
@@ -330,9 +345,13 @@ class TestWeaviateHook:
 
         weaviate_hook.create_object = mock_create_object
 
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError, match="data_object and collection are required to create a new object"
+        ):
             weaviate_hook.get_or_create_object(data_object=None, collection_name="TestCollection")
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError, match="data_object and collection are required to create a new object"
+        ):
             weaviate_hook.get_or_create_object(data_object={"name": "Test"}, collection_name=None)
 
     def test_get_all_objects(self, weaviate_hook):
@@ -463,7 +482,101 @@ def test_create_collection(weaviate_hook):
 
 
 @pytest.mark.parametrize(
-    argnames=["data", "expected_length"],
+    argnames=("data", "expected_length"),
+    argvalues=[
+        (
+            [
+                {
+                    "from_uuid": "0fe86eae-45f7-456c-b19f-04fc59e9ce41",
+                    "to_uuid": "360b6f5b-ed23-413c-a6e8-cb864a52e712",
+                    "from_property": "hasCategory",
+                },
+                {
+                    "from_uuid": "34ccb2e1-1cfc-46e5-94d2-48c335e52c29",
+                    "to_uuid": "a775ef49-a8ab-480d-ac85-b70197654072",
+                    "from_property": "hasCategory",
+                },
+            ],
+            2,
+        ),
+        (
+            pd.DataFrame.from_dict(
+                {
+                    "from_uuid": [
+                        "0fe86eae-45f7-456c-b19f-04fc59e9ce41",
+                        "34ccb2e1-1cfc-46e5-94d2-48c335e52c29",
+                    ],
+                    "to_uuid": [
+                        "360b6f5b-ed23-413c-a6e8-cb864a52e712",
+                        "a775ef49-a8ab-480d-ac85-b70197654072",
+                    ],
+                    "from_property": ["hasCategory", "hasCategory"],
+                }
+            ),
+            2,
+        ),
+    ],
+    ids=("batch create link data as list of dicts", "batch create link data as dataframe"),
+)
+def test_batch_create_links(data, expected_length, weaviate_hook):
+    """
+    Test the batch_create_links method of WeaviateHook.
+    """
+    # Mock the Weaviate Collection
+    mock_collection = MagicMock()
+    weaviate_hook.get_collection = MagicMock(return_value=mock_collection)
+
+    # Define test data
+    test_collection_name = "TestCollection"
+
+    # Test the batch_data method
+    weaviate_hook.batch_create_links(test_collection_name, data, to_uuid_col="to_uuid")
+
+    mock_batch_context = mock_collection.batch.dynamic.return_value.__enter__.return_value
+    assert mock_batch_context.add_reference.call_count == expected_length
+
+
+def test_batch_create_links_retry(weaviate_hook):
+    """Test to ensure retrying working as expected"""
+    # Mock the Weaviate Collection
+    mock_collection = MagicMock()
+    weaviate_hook.get_collection = MagicMock(return_value=mock_collection)
+
+    data = [
+        {
+            "from_uuid": "0fe86eae-45f7-456c-b19f-04fc59e9ce41",
+            "to": "360b6f5b-ed23-413c-a6e8-cb864a52e712",
+            "from_property": "hasCategory",
+        },
+        {
+            "from_uuid": "34ccb2e1-1cfc-46e5-94d2-48c335e52c29",
+            "to": "a775ef49-a8ab-480d-ac85-b70197654072",
+            "from_property": "hasCategory",
+        },
+    ]
+    if USE_HTTPX:
+        response = httpx.Response(status_code=429)
+        too_many_requests_error = weaviate.UnexpectedStatusCodeException(
+            "Weaviate returned an unexpected status code",
+            response=response,
+        )
+    else:
+        response = requests.Response()
+        response.status_code = 429
+        too_many_requests_error = requests.exceptions.HTTPError(response=response)
+    side_effect = [None, too_many_requests_error, too_many_requests_error, None]
+
+    mock_collection.batch.dynamic.return_value.__enter__.return_value.add_reference.side_effect = side_effect
+
+    weaviate_hook.batch_create_links("TestCollection", data)
+
+    assert mock_collection.batch.dynamic.return_value.__enter__.return_value.add_reference.call_count == len(
+        side_effect
+    )
+
+
+@pytest.mark.parametrize(
+    argnames=("data", "expected_length"),
     argvalues=[
         ([{"name": "John"}, {"name": "Jane"}], 2),
         (pd.DataFrame.from_dict({"name": ["John", "Jane"]}), 2),
@@ -488,6 +601,24 @@ def test_batch_data(data, expected_length, weaviate_hook):
     assert mock_batch_context.add_object.call_count == expected_length
 
 
+def test_batch_data_uses_tenant_collection(weaviate_hook):
+    mock_collection = MagicMock()
+    mock_tenant_collection = MagicMock()
+    mock_collection.with_tenant.return_value = mock_tenant_collection
+    weaviate_hook.get_collection = MagicMock(return_value=mock_collection)
+
+    weaviate_hook.batch_data("TestCollection", [{"name": "John"}], tenant="tenant-a")
+
+    mock_collection.with_tenant.assert_called_once_with("tenant-a")
+    mock_collection.batch.dynamic.assert_not_called()
+    mock_tenant_collection.batch.dynamic.return_value.__enter__.return_value.add_object.assert_called_once_with(
+        properties={"name": "John"},
+        references=None,
+        uuid=None,
+        vector=None,
+    )
+
+
 def test_batch_data_retry(weaviate_hook):
     """Test to ensure retrying working as expected"""
     # Mock the Weaviate Collection
@@ -495,11 +626,17 @@ def test_batch_data_retry(weaviate_hook):
     weaviate_hook.get_collection = MagicMock(return_value=mock_collection)
 
     data = [{"name": "chandler"}, {"name": "joey"}, {"name": "ross"}]
-    response = requests.Response()
-    response.status_code = 429
-    error = requests.exceptions.HTTPError()
-    error.response = response
-    side_effect = [None, error, None, error, None]
+    if USE_HTTPX:
+        response = httpx.Response(status_code=429)
+        too_many_requests_error = weaviate.UnexpectedStatusCodeException(
+            "Weaviate returned an unexpected status code",
+            response=response,
+        )
+    else:
+        response = requests.Response()
+        response.status_code = 429
+        too_many_requests_error = requests.exceptions.HTTPError(response=response)
+    side_effect = [None, too_many_requests_error, None, too_many_requests_error, None]
 
     mock_collection.batch.dynamic.return_value.__enter__.return_value.add_object.side_effect = side_effect
 
@@ -511,17 +648,112 @@ def test_batch_data_retry(weaviate_hook):
 
 
 @mock.patch("airflow.providers.weaviate.hooks.weaviate.WeaviateHook.get_conn")
+def test_delete_by_property_retry(get_conn, weaviate_hook):
+    from weaviate.classes.query import Filter
+
+    mock_collection = MagicMock()
+    weaviate_hook.get_collection = MagicMock(return_value=mock_collection)
+
+    get_conn.return_value.collections.get.return_value = mock_collection
+
+    if USE_HTTPX:
+        response = httpx.Response(status_code=429)
+        too_many_requests_error = weaviate.UnexpectedStatusCodeException(
+            "Weaviate returned an unexpected status code",
+            response=response,
+        )
+    else:
+        response = requests.Response()
+        response.status_code = 429
+        too_many_requests_error = requests.exceptions.HTTPError(response=response)
+    side_effect = [too_many_requests_error, too_many_requests_error, None]
+
+    mock_collection.data.delete_many.side_effect = side_effect
+
+    weaviate_hook.delete_by_property(
+        collection_names="collection_a",
+        filter_criteria=Filter.by_property("name").equal("John"),
+        if_error="continue",
+    )
+
+    assert mock_collection.data.delete_many.call_count == len(side_effect)
+
+
+@mock.patch("airflow.providers.weaviate.hooks.weaviate.WeaviateHook.get_collection")
+def test_delete_by_property_get_exception(mock_get_collection, weaviate_hook):
+    from weaviate.classes.query import Filter
+    from weaviate.exceptions import WeaviateDeleteManyError
+
+    collection_names = ["collection_a", "collection_b", "collection_c"]
+
+    mock_collection_b = MagicMock()
+    mock_collection_b.data.delete_many.return_value = None
+
+    mock_collection_c = MagicMock()
+    mock_collection_c.data.delete_many.return_value = None
+    mock_collection_c.data.delete_many.side_effect = WeaviateDeleteManyError(
+        "A delete many request to Weaviate fails in any way"
+    )
+
+    mock_get_collection.side_effect = [
+        weaviate.UnexpectedStatusCodeException(
+            "something failed",
+            requests.Response()
+            if not USE_HTTPX
+            else httpx.Response(status_code=NON_RETRIABLE_UNEXPECTED_STATUS_CODE),
+        ),
+        mock_collection_b,
+        mock_collection_c,
+    ]
+
+    # Test when if_error='continue' – expect failed collections list
+    error_list = weaviate_hook.delete_by_property(
+        collection_names=collection_names,
+        filter_criteria=Filter.by_property("name").equal("John"),
+        if_error="continue",
+    )
+    assert error_list == ["collection_a", "collection_c"]
+
+    mock_get_collection.reset_mock()
+    mock_get_collection.side_effect = weaviate.UnexpectedStatusCodeException(
+        "something failed",
+        requests.Response()
+        if not USE_HTTPX
+        else httpx.Response(status_code=NON_RETRIABLE_UNEXPECTED_STATUS_CODE),
+    )
+
+    with pytest.raises(weaviate.UnexpectedStatusCodeException):
+        weaviate_hook.delete_by_property(
+            collection_names="collection_a",
+            filter_criteria=Filter.by_property("name").equal("John"),
+            if_error="stop",
+        )
+
+
+@mock.patch("airflow.providers.weaviate.hooks.weaviate.WeaviateHook.get_conn")
 def test_delete_collections(get_conn, weaviate_hook):
     collection_names = ["collection_a", "collection_b"]
     get_conn.return_value.collections.delete.side_effect = [
-        weaviate.UnexpectedStatusCodeException("something failed", requests.Response()),
+        weaviate.UnexpectedStatusCodeException(
+            "something failed",
+            httpx.Response(status_code=NON_RETRIABLE_UNEXPECTED_STATUS_CODE)
+            if USE_HTTPX
+            else requests.Response()
+            if not USE_HTTPX
+            else httpx.Response(status_code=NON_RETRIABLE_UNEXPECTED_STATUS_CODE),
+        ),
         None,
     ]
     error_list = weaviate_hook.delete_collections(collection_names, if_error="continue")
     assert error_list == ["collection_a"]
 
     get_conn.return_value.collections.delete.side_effect = weaviate.UnexpectedStatusCodeException(
-        "something failed", requests.Response()
+        "something failed",
+        httpx.Response(status_code=NON_RETRIABLE_UNEXPECTED_STATUS_CODE)
+        if USE_HTTPX
+        else requests.Response()
+        if not USE_HTTPX
+        else httpx.Response(status_code=NON_RETRIABLE_UNEXPECTED_STATUS_CODE),
     )
     with pytest.raises(weaviate.UnexpectedStatusCodeException):
         weaviate_hook.delete_collections("class_a", if_error="stop")
@@ -530,12 +762,22 @@ def test_delete_collections(get_conn, weaviate_hook):
 @mock.patch("airflow.providers.weaviate.hooks.weaviate.WeaviateHook.get_conn")
 def test_http_errors_of_delete_collections(get_conn, weaviate_hook):
     collection_names = ["collection_a", "collection_b"]
-    resp = requests.Response()
-    resp.status_code = 429
+    if USE_HTTPX:
+        resp = httpx.Response(status_code=429)
+        too_many_requests_error = weaviate.UnexpectedStatusCodeException(
+            "Weaviate returned an unexpected status code",
+            response=resp,
+        )
+        connection_error = httpx.ConnectError("Connection error")
+    else:
+        resp = requests.Response()
+        resp.status_code = 429
+        too_many_requests_error = requests.exceptions.HTTPError(response=resp)
+        connection_error = requests.exceptions.ConnectionError
     get_conn.return_value.collections.delete.side_effect = [
-        requests.exceptions.HTTPError(response=resp),
+        too_many_requests_error,
         None,
-        requests.exceptions.ConnectionError,
+        connection_error,
         None,
     ]
     error_list = weaviate_hook.delete_collections(collection_names, if_error="continue")
@@ -570,20 +812,55 @@ def test___generate_uuids(generate_uuid5, weaviate_hook):
 
 @mock.patch("airflow.providers.weaviate.hooks.weaviate.WeaviateHook.delete_object")
 def test__delete_objects(delete_object, weaviate_hook):
-    resp = requests.Response()
-    resp.status_code = 429
-    requests.exceptions.HTTPError(response=resp)
-    http_429_exception = requests.exceptions.HTTPError(response=resp)
+    if USE_HTTPX:
+        resp_429 = httpx.Response(status_code=429)
+        http_429_exception = weaviate.UnexpectedStatusCodeException(
+            "Weaviate returned an unexpected status code",
+            response=resp_429,
+        )
+        resp_404 = httpx.Response(status_code=404)
+        http_404_exception = weaviate.UnexpectedStatusCodeException(
+            message="object not found", response=resp_404
+        )
+    else:
+        resp_429 = requests.Response()
+        resp_429.status_code = 429
+        http_429_exception = requests.exceptions.HTTPError(response=resp_429)
+        resp_404 = requests.Response()
+        resp_404.status_code = 404
+        http_404_exception = weaviate.exceptions.UnexpectedStatusCodeException(
+            message="object not found", response=resp_404
+        )
 
-    resp = requests.Response()
-    resp.status_code = 404
-    not_found_exception = weaviate.exceptions.UnexpectedStatusCodeException(
-        message="object not found", response=resp
-    )
-
-    delete_object.side_effect = [not_found_exception, None, http_429_exception, http_429_exception, None]
+    delete_object.side_effect = [http_404_exception, None, http_429_exception, http_429_exception, None]
     weaviate_hook._delete_objects(uuids=["1", "2", "3"], collection_name="test")
     assert delete_object.call_count == 5
+
+
+def test_delete_object_uses_tenant_collection(weaviate_hook):
+    mock_collection = MagicMock()
+    mock_tenant_collection = MagicMock()
+    mock_collection.with_tenant.return_value = mock_tenant_collection
+    weaviate_hook.get_collection = MagicMock(return_value=mock_collection)
+
+    weaviate_hook.delete_object(collection_name="test", uuid="1", tenant="tenant-a")
+
+    mock_collection.with_tenant.assert_called_once_with("tenant-a")
+    mock_tenant_collection.data.delete_by_id.assert_called_once_with(uuid="1")
+    mock_collection.data.delete_by_id.assert_not_called()
+
+
+def test__delete_objects_passes_tenant_to_delete_object(weaviate_hook):
+    weaviate_hook.delete_object = MagicMock()
+
+    weaviate_hook._delete_objects(uuids=["1", "2"], collection_name="test", tenant="tenant-a")
+
+    weaviate_hook.delete_object.assert_has_calls(
+        [
+            mock.call(uuid="1", collection_name="test", tenant="tenant-a"),
+            mock.call(uuid="2", collection_name="test", tenant="tenant-a"),
+        ]
+    )
 
 
 def test__prepare_document_to_uuid_map(weaviate_hook):
@@ -625,6 +902,46 @@ def test___get_segregated_documents(_get_documents_to_uuid_map, _prepare_documen
     assert changed_documents == {"abc.doc"}
     assert unchanged_docs == {"xyz.doc"}
     assert new_documents == {"hjk.doc"}
+
+
+def test__get_documents_to_uuid_map_uses_tenant_collection(weaviate_hook):
+    mock_collection = MagicMock()
+    mock_tenant_collection = MagicMock()
+    mock_collection.with_tenant.return_value = mock_tenant_collection
+    mock_tenant_collection.query.fetch_objects.return_value.objects = []
+    weaviate_hook.get_collection = MagicMock(return_value=mock_collection)
+
+    weaviate_hook._get_documents_to_uuid_map(
+        data=pd.DataFrame.from_dict({"doc": ["abc.xml"]}),
+        document_column="doc",
+        uuid_column="id",
+        collection_name="test",
+        tenant="tenant-a",
+    )
+
+    mock_collection.with_tenant.assert_called_once_with("tenant-a")
+    mock_tenant_collection.query.fetch_objects.assert_called_once()
+    mock_collection.query.fetch_objects.assert_not_called()
+
+
+def test__delete_all_documents_objects_uses_tenant_collection(weaviate_hook):
+    mock_collection = MagicMock()
+    mock_tenant_collection = MagicMock()
+    mock_collection.with_tenant.return_value = mock_tenant_collection
+    mock_tenant_collection.data.delete_many.return_value.matches = 1
+    mock_tenant_collection.data.delete_many.return_value.failed = 0
+    weaviate_hook.get_collection = MagicMock(return_value=mock_collection)
+
+    weaviate_hook._delete_all_documents_objects(
+        document_keys=["abc.xml"],
+        document_column="doc",
+        collection_name="test",
+        tenant="tenant-a",
+    )
+
+    mock_collection.with_tenant.assert_called_once_with("tenant-a")
+    mock_tenant_collection.data.delete_many.assert_called_once()
+    mock_collection.data.delete_many.assert_not_called()
 
 
 @mock.patch("airflow.providers.weaviate.hooks.weaviate.WeaviateHook._get_segregated_documents")
@@ -689,6 +1006,7 @@ def test_skip_option_of_create_or_replace_document_objects(
     pd.testing.assert_frame_equal(
         batch_data.call_args_list[0].kwargs["data"], df[df["doc"].isin(new_documents)]
     )
+    assert batch_data.call_args_list[0].kwargs["tenant"] is None
 
 
 @mock.patch("airflow.providers.weaviate.hooks.weaviate.WeaviateHook._delete_all_documents_objects")
@@ -733,8 +1051,83 @@ def test_replace_option_of_create_or_replace_document_objects(
         collection_name="test",
         batch_delete_error=[],
         verbose=False,
+        tenant=None,
     )
     pd.testing.assert_frame_equal(
         batch_data.call_args_list[0].kwargs["data"],
         df[df["doc"].isin(changed_documents.union(new_documents))],
     )
+    assert batch_data.call_args_list[0].kwargs["tenant"] is None
+
+
+@mock.patch("airflow.providers.weaviate.hooks.weaviate.WeaviateHook._delete_all_documents_objects")
+@mock.patch("airflow.providers.weaviate.hooks.weaviate.WeaviateHook.batch_data")
+@mock.patch("airflow.providers.weaviate.hooks.weaviate.WeaviateHook._get_segregated_documents")
+@mock.patch("airflow.providers.weaviate.hooks.weaviate.WeaviateHook._generate_uuids")
+def test_create_or_replace_document_objects_passes_tenant_to_helpers(
+    _generate_uuids, _get_segregated_documents, batch_data, _delete_all_documents_objects, weaviate_hook
+):
+    df = pd.DataFrame.from_dict(
+        {
+            "id": ["1", "2", "3"],
+            "name": ["ross", "bob", "joy"],
+            "doc": ["abc.xml", "zyx.html", "zyx.html"],
+        }
+    )
+    documents_to_uuid_map, changed_documents, unchanged_documents, new_documents = (
+        {"abc.xml": {"uuid"}},
+        {"abc.xml"},
+        {},
+        {"zyx.html"},
+    )
+    _generate_uuids.return_value = (df, "id")
+    _get_segregated_documents.return_value = (
+        documents_to_uuid_map,
+        changed_documents,
+        unchanged_documents,
+        new_documents,
+    )
+
+    weaviate_hook.create_or_replace_document_objects(
+        data=df,
+        collection_name="test",
+        existing="replace",
+        document_column="doc",
+        tenant="tenant-a",
+    )
+
+    assert _get_segregated_documents.call_args_list[0].kwargs["tenant"] == "tenant-a"
+    assert _delete_all_documents_objects.call_args_list[0].kwargs["tenant"] == "tenant-a"
+    assert batch_data.call_args_list[0].kwargs["tenant"] == "tenant-a"
+
+
+@mock.patch("airflow.providers.weaviate.hooks.weaviate.weaviate.connect_to_custom")
+@pytest.mark.parametrize(
+    ("http_secure", "port", "expected"),
+    [
+        (False, None, 80),
+        (True, None, 443),
+        (False, 8000, 8000),
+        (True, 8000, 8000),
+    ],
+)
+def test_get_conn_http_port_logic(connect_to_custom, http_secure, port, expected):
+    from airflow.models import Connection
+
+    conn = Connection(
+        conn_id="weaviate_http_port_logic",
+        conn_type="weaviate",
+        host="localhost",
+        port=port,
+        extra={"http_secure": http_secure},
+    )
+
+    with mock.patch.object(WeaviateHook, "get_connection", return_value=conn):
+        hook = WeaviateHook(conn_id="weaviate_http_port_logic")
+        hook.get_conn()
+
+    # Assert: http_port honors provided port, otherwise 80/443 depending on http_secure
+    kwargs = connect_to_custom.call_args.kwargs
+    assert kwargs["http_host"] == "localhost"
+    assert kwargs["http_port"] == expected
+    assert kwargs["http_secure"] == http_secure

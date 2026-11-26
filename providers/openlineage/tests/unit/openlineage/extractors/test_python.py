@@ -21,9 +21,7 @@ import inspect
 import os
 import warnings
 from datetime import datetime
-from unittest.mock import patch
 
-import pytest
 from openlineage.client.facet_v2 import source_code_job
 
 from airflow import DAG
@@ -31,8 +29,6 @@ from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.providers.openlineage.extractors.python import PythonExtractor
 
 from tests_common.test_utils.compat import BashOperator, PythonOperator
-
-pytestmark = pytest.mark.db_test
 
 dag = DAG(
     dag_id="test_dummy_dag",
@@ -63,13 +59,11 @@ def test_extract_source_code():
     assert code == CODE
 
 
-@patch("airflow.providers.openlineage.conf.is_source_enabled")
-def test_extract_operator_code_disabled(mocked_source_enabled):
-    mocked_source_enabled.return_value = False
+def test_extract_operator_code_disabled():
     operator = PythonOperator(task_id="taskid", python_callable=callable, op_args=(1, 2), op_kwargs={"a": 1})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", AirflowProviderDeprecationWarning)
-        result = PythonExtractor(operator).extract()
+        result = PythonExtractor(operator, source_code_enabled=False).extract()
     assert "sourceCode" not in result.job_facets
     assert "unknownSourceAttribute" in result.run_facets
     unknown_items = result.run_facets["unknownSourceAttribute"]["unknownItems"]
@@ -81,13 +75,11 @@ def test_extract_operator_code_disabled(mocked_source_enabled):
     assert "task_id" in unknown_items[0]["properties"]
 
 
-@patch("airflow.providers.openlineage.conf.is_source_enabled")
-def test_extract_operator_code_enabled(mocked_source_enabled):
-    mocked_source_enabled.return_value = True
+def test_extract_operator_code_enabled():
     operator = PythonOperator(task_id="taskid", python_callable=callable, op_args=(1, 2), op_kwargs={"a": 1})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", AirflowProviderDeprecationWarning)
-        result = PythonExtractor(operator).extract()
+        result = PythonExtractor(operator, source_code_enabled=True).extract()
     assert result.job_facets["sourceCode"] == source_code_job.SourceCodeJobFacet("python", CODE)
     assert "unknownSourceAttribute" in result.run_facets
     unknown_items = result.run_facets["unknownSourceAttribute"]["unknownItems"]

@@ -16,35 +16,51 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, useDisclosure } from "@chakra-ui/react";
+import type { ButtonProps } from "@chakra-ui/react";
+import { useDisclosure } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 import { CgRedo } from "react-icons/cg";
 
 import type { DAGRunResponse } from "openapi/requests/types.gen";
-import ActionButton from "src/components/ui/ActionButton";
+
+import { IconButton } from "src/system-components";
+
+import { SHORTCUTS } from "src/context/keyboardShortcuts";
+import { useShortcut } from "src/hooks/useShortcut";
 
 import ClearRunDialog from "./ClearRunDialog";
 
 type Props = {
   readonly dagRun: DAGRunResponse;
-  readonly withText?: boolean;
-};
+  readonly isHotkeyEnabled?: boolean;
+} & ButtonProps;
 
-const ClearRunButton = ({ dagRun, withText = true }: Props) => {
+export const ClearRunButton = ({ dagRun, isHotkeyEnabled = false, ...rest }: Props) => {
   const { onClose, onOpen, open } = useDisclosure();
+  const { t: translate } = useTranslation();
+
+  useShortcut({
+    ...SHORTCUTS.runActions.clearRun,
+    callback: () => {
+      onOpen();
+    },
+    options: { enabled: isHotkeyEnabled },
+  });
 
   return (
-    <Box>
-      <ActionButton
-        actionName="Clear Dag Run"
-        icon={<CgRedo />}
+    <>
+      <IconButton
+        {...rest}
+        label={
+          isHotkeyEnabled
+            ? translate("dags:runAndTaskActions.clear.buttonTooltip")
+            : translate("dags:runAndTaskActions.clear.button", { type: translate("dagRun_one") })
+        }
         onClick={onOpen}
-        text="Clear Run"
-        withText={withText}
-      />
-
+      >
+        <CgRedo />
+      </IconButton>
       {open ? <ClearRunDialog dagRun={dagRun} onClose={onClose} open={open} /> : undefined}
-    </Box>
+    </>
   );
 };
-
-export default ClearRunButton;

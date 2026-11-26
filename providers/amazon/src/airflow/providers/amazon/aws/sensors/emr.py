@@ -19,28 +19,26 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from datetime import timedelta
-from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from airflow.configuration import conf
-from airflow.exceptions import (
-    AirflowException,
-)
 from airflow.providers.amazon.aws.hooks.emr import EmrContainerHook, EmrHook, EmrServerlessHook
 from airflow.providers.amazon.aws.links.emr import EmrClusterLink, EmrLogsLink, get_log_uri
+from airflow.providers.amazon.aws.sensors.base_aws import AwsBaseSensor
 from airflow.providers.amazon.aws.triggers.emr import (
     EmrContainerTrigger,
+    EmrServerlessJobSensorTrigger,
     EmrStepSensorTrigger,
     EmrTerminateJobFlowTrigger,
 )
 from airflow.providers.amazon.aws.utils import validate_execute_complete_event
-from airflow.sensors.base import BaseSensorOperator
+from airflow.providers.amazon.aws.utils.mixins import aws_template_fields
+from airflow.providers.common.compat.sdk import AirflowException, conf
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
-class EmrBaseSensor(BaseSensorOperator):
+class EmrBaseSensor(AwsBaseSensor[EmrHook]):
     """
     Contains general sensor behavior for EMR.
 
@@ -52,23 +50,22 @@ class EmrBaseSensor(BaseSensorOperator):
     Subclasses should set ``target_states`` and ``failed_states`` fields.
 
     :param aws_conn_id: The Airflow connection used for AWS credentials.
-        If this is None or empty then the default boto3 behaviour is used. If
+        If this is ``None`` or empty then the default boto3 behaviour is used. If
         running Airflow in a distributed manner and aws_conn_id is None or
         empty, then default boto3 configuration would be used (and must be
         maintained on each worker node).
+    :param region_name: AWS region_name. If not specified then the default boto3 behaviour is used.
+    :param verify: Whether or not to verify SSL certificates. See:
+        https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.h
     """
 
+    aws_hook_class = EmrHook
     ui_color = "#66c3ff"
 
-    def __init__(self, *, aws_conn_id: str | None = "aws_default", **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.aws_conn_id = aws_conn_id
         self.target_states: Iterable[str] = []  # will be set in subclasses
         self.failed_states: Iterable[str] = []  # will be set in subclasses
-
-    @cached_property
-    def hook(self) -> EmrHook:
-        return EmrHook(aws_conn_id=self.aws_conn_id)
 
     def poke(self, context: Context):
         response = self.get_emr_response(context=context)
@@ -117,9 +114,9 @@ class EmrBaseSensor(BaseSensorOperator):
         raise NotImplementedError("Please implement failure_message_from_response() in subclass")
 
 
-class EmrServerlessJobSensor(BaseSensorOperator):
+class EmrServerlessJobSensor(AwsBaseSensor[EmrServerlessHook]):
     """
-    Poll the state of the job run until it reaches a terminal state; fails if the job run fails.
+    Poll the state of the job run until it reaches one of the target states; fails if the job run fails.
 
     .. seealso::
         For more information on how to use this sensor, take a look at the guide:
@@ -127,15 +124,20 @@ class EmrServerlessJobSensor(BaseSensorOperator):
 
     :param application_id: application_id to check the state of
     :param job_run_id: job_run_id to check the state of
-    :param target_states: a set of states to wait for, defaults to 'SUCCESS'
-    :param aws_conn_id: aws connection to use, defaults to 'aws_default'
-        If this is None or empty then the default boto3 behaviour is used. If
+    :param target_states: a set of states to wait for, defaults to ``SUCCESS``.
+    :param deferrable: Run sensor in the deferrable mode.
+    :param aws_conn_id: The Airflow connection used for AWS credentials.
+        If this is ``None`` or empty then the default boto3 behaviour is used. If
         running Airflow in a distributed manner and aws_conn_id is None or
         empty, then default boto3 configuration would be used (and must be
         maintained on each worker node).
+    :param region_name: AWS region_name. If not specified then the default boto3 behaviour is used.
+    :param verify: Whether or not to verify SSL certificates. See:
+        https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.h
     """
 
-    template_fields: Sequence[str] = (
+    aws_hook_class = EmrServerlessHook
+    template_fields: Sequence[str] = aws_template_fields(
         "application_id",
         "job_run_id",
     )
@@ -146,14 +148,41 @@ class EmrServerlessJobSensor(BaseSensorOperator):
         application_id: str,
         job_run_id: str,
         target_states: set | frozenset = frozenset(EmrServerlessHook.JOB_SUCCESS_STATES),
-        aws_conn_id: str | None = "aws_default",
+        deferrable: bool = conf.getboolean("operators", "default_deferrable", fallback=False),
         **kwargs: Any,
     ) -> None:
-        self.aws_conn_id = aws_conn_id
         self.target_states = target_states
         self.application_id = application_id
         self.job_run_id = job_run_id
+        self.deferrable = deferrable
         super().__init__(**kwargs)
+
+    def execute(self, context: Context) -> None:
+        if not self.deferrable:
+            super().execute(context=context)
+        elif not self.poke(context):
+            self.defer(
+                timeout=timedelta(seconds=self.timeout),
+                trigger=EmrServerlessJobSensorTrigger(
+                    application_id=self.application_id,
+                    job_run_id=self.job_run_id,
+                    target_states=self.target_states,
+                    waiter_delay=int(self.poke_interval),
+                    aws_conn_id=self.aws_conn_id,
+                    region_name=self.region_name,
+                    verify=self.verify,
+                    botocore_config=self.botocore_config,
+                ),
+                method_name="execute_complete",
+            )
+
+    def execute_complete(self, context: Context, event: dict[str, Any] | None = None) -> None:
+        validated_event = validate_execute_complete_event(event)
+
+        if validated_event["status"] != "success":
+            raise RuntimeError(f"Error while running job: {validated_event}")
+
+        self.log.info("EMR Serverless job %s reached a target state.", self.job_run_id)
 
     def poke(self, context: Context) -> bool:
         response = self.hook.conn.get_job_run(applicationId=self.application_id, jobRunId=self.job_run_id)
@@ -167,11 +196,6 @@ class EmrServerlessJobSensor(BaseSensorOperator):
 
         return state in self.target_states
 
-    @cached_property
-    def hook(self) -> EmrServerlessHook:
-        """Create and return an EmrServerlessHook."""
-        return EmrServerlessHook(aws_conn_id=self.aws_conn_id)
-
     @staticmethod
     def failure_message_from_response(response: dict[str, Any]) -> str | None:
         """
@@ -183,7 +207,7 @@ class EmrServerlessJobSensor(BaseSensorOperator):
         return response["jobRun"]["stateDetails"]
 
 
-class EmrServerlessApplicationSensor(BaseSensorOperator):
+class EmrServerlessApplicationSensor(AwsBaseSensor[EmrServerlessHook]):
     """
     Poll the state of the application until it reaches a terminal state; fails if the application fails.
 
@@ -193,24 +217,28 @@ class EmrServerlessApplicationSensor(BaseSensorOperator):
 
     :param application_id: application_id to check the state of
     :param target_states: a set of states to wait for, defaults to {'CREATED', 'STARTED'}
-    :param aws_conn_id: aws connection to use, defaults to 'aws_default'
-        If this is None or empty then the default boto3 behaviour is used. If
+    :param aws_conn_id: The Airflow connection used for AWS credentials.
+        If this is ``None`` or empty then the default boto3 behaviour is used. If
         running Airflow in a distributed manner and aws_conn_id is None or
         empty, then default boto3 configuration would be used (and must be
         maintained on each worker node).
+    :param region_name: AWS region_name. If not specified then the default boto3 behaviour is used.
+    :param verify: Whether or not to verify SSL certificates. See:
+        https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.h
     """
 
-    template_fields: Sequence[str] = ("application_id",)
+    aws_hook_class = EmrServerlessHook
+    template_fields: Sequence[str] = aws_template_fields(
+        "application_id",
+    )
 
     def __init__(
         self,
         *,
         application_id: str,
         target_states: set | frozenset = frozenset(EmrServerlessHook.APPLICATION_SUCCESS_STATES),
-        aws_conn_id: str | None = "aws_default",
         **kwargs: Any,
     ) -> None:
-        self.aws_conn_id = aws_conn_id
         self.target_states = target_states
         self.application_id = application_id
         super().__init__(**kwargs)
@@ -227,11 +255,6 @@ class EmrServerlessApplicationSensor(BaseSensorOperator):
 
         return state in self.target_states
 
-    @cached_property
-    def hook(self) -> EmrServerlessHook:
-        """Create and return an EmrServerlessHook."""
-        return EmrServerlessHook(aws_conn_id=self.aws_conn_id)
-
     @staticmethod
     def failure_message_from_response(response: dict[str, Any]) -> str | None:
         """
@@ -243,7 +266,7 @@ class EmrServerlessApplicationSensor(BaseSensorOperator):
         return response["application"]["stateDetails"]
 
 
-class EmrContainerSensor(BaseSensorOperator):
+class EmrContainerSensor(AwsBaseSensor[EmrContainerHook]):
     """
     Poll the state of the job run until it reaches a terminal state; fail if the job run fails.
 
@@ -254,11 +277,14 @@ class EmrContainerSensor(BaseSensorOperator):
     :param job_id: job_id to check the state of
     :param max_retries: Number of times to poll for query state before
         returning the current state, defaults to None
-    :param aws_conn_id: aws connection to use, defaults to 'aws_default'
-        If this is None or empty then the default boto3 behaviour is used. If
+    :param aws_conn_id: The Airflow connection used for AWS credentials.
+        If this is ``None`` or empty then the default boto3 behaviour is used. If
         running Airflow in a distributed manner and aws_conn_id is None or
         empty, then default boto3 configuration would be used (and must be
         maintained on each worker node).
+    :param region_name: AWS region_name. If not specified then the default boto3 behaviour is used.
+    :param verify: Whether or not to verify SSL certificates. See:
+        https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.h
     :param poll_interval: Time in seconds to wait between two consecutive call to
         check query status on athena, defaults to 10
     :param deferrable: Run sensor in the deferrable mode.
@@ -276,7 +302,8 @@ class EmrContainerSensor(BaseSensorOperator):
     )
     SUCCESS_STATES = ("COMPLETED",)
 
-    template_fields: Sequence[str] = ("virtual_cluster_id", "job_id")
+    aws_hook_class = EmrContainerHook
+    template_fields: Sequence[str] = aws_template_fields("virtual_cluster_id", "job_id")
     template_ext: Sequence[str] = ()
     ui_color = "#66c3ff"
 
@@ -286,22 +313,20 @@ class EmrContainerSensor(BaseSensorOperator):
         virtual_cluster_id: str,
         job_id: str,
         max_retries: int | None = None,
-        aws_conn_id: str | None = "aws_default",
         poll_interval: int = 10,
         deferrable: bool = conf.getboolean("operators", "default_deferrable", fallback=False),
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self.aws_conn_id = aws_conn_id
         self.virtual_cluster_id = virtual_cluster_id
         self.job_id = job_id
         self.poll_interval = poll_interval
         self.max_retries = max_retries
         self.deferrable = deferrable
 
-    @cached_property
-    def hook(self) -> EmrContainerHook:
-        return EmrContainerHook(self.aws_conn_id, virtual_cluster_id=self.virtual_cluster_id)
+    @property
+    def _hook_parameters(self):
+        return {**super()._hook_parameters, "virtual_cluster_id": self.virtual_cluster_id}
 
     def poke(self, context: Context) -> bool:
         state = self.hook.poll_query_status(
@@ -315,7 +340,7 @@ class EmrContainerSensor(BaseSensorOperator):
 
         if state in self.INTERMEDIATE_STATES:
             return False
-        return True
+        return state in self.SUCCESS_STATES
 
     def execute(self, context: Context):
         if not self.deferrable:
@@ -332,6 +357,9 @@ class EmrContainerSensor(BaseSensorOperator):
                     virtual_cluster_id=self.virtual_cluster_id,
                     job_id=self.job_id,
                     aws_conn_id=self.aws_conn_id,
+                    region_name=self.region_name,
+                    verify=self.verify,
+                    botocore_config=self.botocore_config,
                     waiter_delay=self.poll_interval,
                     waiter_max_attempts=self.max_retries,
                 )
@@ -340,6 +368,9 @@ class EmrContainerSensor(BaseSensorOperator):
                     virtual_cluster_id=self.virtual_cluster_id,
                     job_id=self.job_id,
                     aws_conn_id=self.aws_conn_id,
+                    region_name=self.region_name,
+                    verify=self.verify,
+                    botocore_config=self.botocore_config,
                     waiter_delay=self.poll_interval,
                 ),
                 method_name="execute_complete",
@@ -369,7 +400,9 @@ class EmrNotebookExecutionSensor(EmrBaseSensor):
         Default failed_states is ``FAILED``.
     """
 
-    template_fields: Sequence[str] = ("notebook_execution_id",)
+    template_fields: Sequence[str] = aws_template_fields(
+        "notebook_execution_id",
+    )
 
     FAILURE_STATES = {"FAILED"}
     COMPLETED_STATES = {"FINISHED"}
@@ -387,10 +420,9 @@ class EmrNotebookExecutionSensor(EmrBaseSensor):
         self.failed_states = failed_states or self.FAILURE_STATES
 
     def get_emr_response(self, context: Context) -> dict[str, Any]:
-        emr_client = self.hook.conn
         self.log.info("Poking notebook %s", self.notebook_execution_id)
 
-        return emr_client.describe_notebook_execution(NotebookExecutionId=self.notebook_execution_id)
+        return self.hook.conn.describe_notebook_execution(NotebookExecutionId=self.notebook_execution_id)
 
     @staticmethod
     def state_from_response(response: dict[str, Any]) -> str:
@@ -438,7 +470,7 @@ class EmrJobFlowSensor(EmrBaseSensor):
     :param deferrable: Run sensor in the deferrable mode.
     """
 
-    template_fields: Sequence[str] = ("job_flow_id", "target_states", "failed_states")
+    template_fields: Sequence[str] = aws_template_fields("job_flow_id", "target_states", "failed_states")
     template_ext: Sequence[str] = ()
     operator_extra_links = (
         EmrClusterLink(),
@@ -471,9 +503,8 @@ class EmrJobFlowSensor(EmrBaseSensor):
 
         :return: response
         """
-        emr_client = self.hook.conn
         self.log.info("Poking cluster %s", self.job_flow_id)
-        response = emr_client.describe_cluster(ClusterId=self.job_flow_id)
+        response = self.hook.conn.describe_cluster(ClusterId=self.job_flow_id)
 
         EmrClusterLink.persist(
             context=context,
@@ -529,6 +560,9 @@ class EmrJobFlowSensor(EmrBaseSensor):
                     job_flow_id=self.job_flow_id,
                     waiter_max_attempts=self.max_attempts,
                     aws_conn_id=self.aws_conn_id,
+                    region_name=self.region_name,
+                    verify=self.verify,
+                    botocore_config=self.botocore_config,
                     waiter_delay=int(self.poke_interval),
                 ),
                 method_name="execute_complete",
@@ -563,7 +597,9 @@ class EmrStepSensor(EmrBaseSensor):
     :param deferrable: Run sensor in the deferrable mode.
     """
 
-    template_fields: Sequence[str] = ("job_flow_id", "step_id", "target_states", "failed_states")
+    template_fields: Sequence[str] = aws_template_fields(
+        "job_flow_id", "step_id", "target_states", "failed_states"
+    )
     template_ext: Sequence[str] = ()
     operator_extra_links = (
         EmrClusterLink(),
@@ -598,10 +634,8 @@ class EmrStepSensor(EmrBaseSensor):
 
         :return: response
         """
-        emr_client = self.hook.conn
-
         self.log.info("Poking step %s on cluster %s", self.step_id, self.job_flow_id)
-        response = emr_client.describe_step(ClusterId=self.job_flow_id, StepId=self.step_id)
+        response = self.hook.conn.describe_step(ClusterId=self.job_flow_id, StepId=self.step_id)
 
         EmrClusterLink.persist(
             context=context,
@@ -616,7 +650,7 @@ class EmrStepSensor(EmrBaseSensor):
             region_name=self.hook.conn_region_name,
             aws_partition=self.hook.conn_partition,
             job_flow_id=self.job_flow_id,
-            log_uri=get_log_uri(emr_client=emr_client, job_flow_id=self.job_flow_id),
+            log_uri=get_log_uri(emr_client=self.hook.conn, job_flow_id=self.job_flow_id),
         )
 
         return response
@@ -659,6 +693,9 @@ class EmrStepSensor(EmrBaseSensor):
                     waiter_delay=int(self.poke_interval),
                     waiter_max_attempts=self.max_attempts,
                     aws_conn_id=self.aws_conn_id,
+                    region_name=self.region_name,
+                    verify=self.verify,
+                    botocore_config=self.botocore_config,
                 ),
                 method_name="execute_complete",
             )

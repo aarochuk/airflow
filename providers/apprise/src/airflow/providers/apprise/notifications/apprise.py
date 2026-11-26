@@ -17,12 +17,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from functools import cached_property
 
 from apprise import AppriseConfig, NotifyFormat, NotifyType
 
 from airflow.providers.apprise.hooks.apprise import AppriseHook
+from airflow.providers.apprise.version_compat import AIRFLOW_V_3_1_PLUS
 from airflow.providers.common.compat.notifier import BaseNotifier
 
 
@@ -44,7 +45,7 @@ class AppriseNotifier(BaseNotifier):
     :param apprise_conn_id: connection that has Apprise configs setup
     """
 
-    template_fields = ("body", "title", "tag", "attach")
+    template_fields: Sequence[str] = ("body", "title", "tag", "attach", "apprise_conn_id")
 
     def __init__(
         self,
@@ -58,8 +59,13 @@ class AppriseNotifier(BaseNotifier):
         interpret_escapes: bool | None = None,
         config: AppriseConfig | None = None,
         apprise_conn_id: str = AppriseHook.default_conn_name,
+        **kwargs,
     ):
-        super().__init__()
+        if AIRFLOW_V_3_1_PLUS:
+            #  Support for passing context was added in 3.1.0
+            super().__init__(**kwargs)
+        else:
+            super().__init__()
         self.apprise_conn_id = apprise_conn_id
         self.body = body
         self.title = title
@@ -78,6 +84,19 @@ class AppriseNotifier(BaseNotifier):
     def notify(self, context):
         """Send a alert to a apprise configured service."""
         self.hook.notify(
+            body=self.body,
+            title=self.title,
+            notify_type=self.notify_type,
+            body_format=self.body_format,
+            tag=self.tag,
+            attach=self.attach,
+            interpret_escapes=self.interpret_escapes,
+            config=self.config,
+        )
+
+    async def async_notify(self, context):
+        """Send a alert to a apprise configured service."""
+        await self.hook.async_notify(
             body=self.body,
             title=self.title,
             notify_type=self.notify_type,

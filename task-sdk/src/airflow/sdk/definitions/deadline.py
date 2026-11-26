@@ -1,0 +1,614 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+from __future__ import annotations
+
+import logging
+import warnings
+from abc import ABC
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any, overload
+
+import attrs
+
+from airflow.sdk._shared.module_loading import qualname
+from airflow.sdk.definitions.callback import DEADLINE_CALLBACK_TYPES, AsyncCallback, SyncCallback
+from airflow.sdk.definitions.variable import Variable
+from airflow.sdk.exceptions import AirflowRuntimeError, RemovedInAirflow4Warning
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import TypeAlias
+
+logger = logging.getLogger(__name__)
+
+# Field name used in serialization - must be in sync with SerializedReferenceModels.REFERENCE_TYPE_FIELD
+REFERENCE_TYPE_FIELD = "reference_type"
+
+# Field name holding the evaluation timing of a reference in its serialized form.
+EVALUATION_TIMING_FIELD = "evaluation_timing"
+
+# Values stored under EVALUATION_TIMING_FIELD; they mirror the DeadlineReference.TYPES names.
+DAGRUN_CREATED_TIMING = "DAGRUN_CREATED"
+DAGRUN_QUEUED_TIMING = "DAGRUN_QUEUED"
+
+
+class BaseDeadlineReference(ABC):
+    """
+    Base class for all Deadline Reference implementations.
+
+    This is a lightweight SDK class for Dag authoring. It only handles serialization.
+    The actual evaluation logic (``_evaluate_with``) is in Core's ``SerializedReferenceModels``.
+
+    For custom deadline references, users should inherit from this class and implement
+    ``_evaluate_with()`` with deferred Core imports (imports inside the method body). Its
+    keyword-only ``dagrun`` parameter receives the DagRun being evaluated. A custom
+    reference must be decorated with ``@deadline_reference`` and listed in the ``deadline_references``
+    attribute of an ``AirflowPlugin``; see :external:doc:`howto/deadline-alerts`.
+    """
+
+    # Set by ``_add_custom_reference_to_namespace`` and persisted by the serializer, because the
+    # in-memory ``DeadlineReference.TYPES`` registry only exists in the process that ran the Dag file.
+    evaluation_timing: str = DAGRUN_CREATED_TIMING
+
+    @property
+    def reference_name(self) -> str:
+        """Return the class name as the reference identifier."""
+        return self.__class__.__name__
+
+    def serialize_reference(self) -> dict[str, Any]:
+        """
+        Serialize this reference type into a dictionary representation.
+
+        Override this method in subclasses if additional data is needed for serialization.
+        """
+        return {REFERENCE_TYPE_FIELD: self.reference_name}
+
+    @classmethod
+    def deserialize_reference(cls, reference_data: dict[str, Any]) -> BaseDeadlineReference:
+        """
+        Deserialize a reference type from its dictionary representation.
+
+        :param reference_data: Dictionary containing serialized reference data.
+        """
+        return cls()
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, BaseDeadlineReference):
+            return NotImplemented
+        return self.serialize_reference() == other.serialize_reference()
+
+    def __hash__(self) -> int:
+        return hash(frozenset(self.serialize_reference().items()))
+
+
+class DagRunLogicalDateDeadline(BaseDeadlineReference):
+    """A deadline that returns a DagRun's logical date."""
+
+
+class DagRunQueuedAtDeadline(BaseDeadlineReference):
+    """A deadline that returns when a DagRun was queued."""
+
+    evaluation_timing: str = DAGRUN_QUEUED_TIMING
+
+
+@dataclass
+class FixedDatetimeDeadline(BaseDeadlineReference):
+    """A deadline that always returns a fixed datetime."""
+
+    _datetime: datetime
+
+    def serialize_reference(self) -> dict[str, Any]:
+        return {
+            REFERENCE_TYPE_FIELD: self.reference_name,
+            "datetime": self._datetime.timestamp(),
+        }
+
+    @classmethod
+    def deserialize_reference(cls, reference_data: dict[str, Any]) -> FixedDatetimeDeadline:
+        from airflow.sdk._shared.timezones import timezone
+
+        return cls(_datetime=timezone.from_timestamp(reference_data["datetime"]))
+
+
+@dataclass
+class AverageRuntimeDeadline(BaseDeadlineReference):
+    """A deadline that calculates the average runtime from past DAG runs."""
+
+    DEFAULT_LIMIT = 10
+    max_runs: int
+    min_runs: int | None = None
+
+    def __post_init__(self):
+        if self.min_runs is None:
+            self.min_runs = self.max_runs
+        if self.min_runs < 1:
+            raise ValueError("min_runs must be at least 1")
+
+    def serialize_reference(self) -> dict[str, Any]:
+        return {
+            REFERENCE_TYPE_FIELD: self.reference_name,
+            "max_runs": self.max_runs,
+            "min_runs": self.min_runs,
+        }
+
+    @classmethod
+    def deserialize_reference(cls, reference_data: dict[str, Any]) -> AverageRuntimeDeadline:
+        max_runs = reference_data.get("max_runs", cls.DEFAULT_LIMIT)
+        min_runs = reference_data.get("min_runs", max_runs)
+        if min_runs < 1:
+            raise ValueError("min_runs must be at least 1")
+        return cls(max_runs=max_runs, min_runs=min_runs)
+
+
+DeadlineReferenceType: TypeAlias = BaseDeadlineReference
+DeadlineReferenceTypes: TypeAlias = tuple[type[BaseDeadlineReference], ...]
+
+
+class _ClassifiedReferenceTypes(tuple[type[BaseDeadlineReference], ...]):
+    """A ``DeadlineReference.TYPES`` tuple that carries the name of its classification."""
+
+    classification: str
+
+    def __new__(cls, references, classification: str):
+        self = super().__new__(cls, references)
+        self.classification = classification
+        return self
+
+
+class _ContestedReferenceName:
+    """Stands in for a contested ``DeadlineReference`` shorthand, so using it explains why it is missing."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def __get__(self, instance: object, owner: type | None = None) -> Any:
+        # Read the claimants on access, because later claimants are recorded without touching this.
+        claimants = ", ".join(sorted(DeadlineReference._contested_reference_names[self.name]))
+        raise AttributeError(
+            f"DeadlineReference.{self.name} is claimed by more than one class ({claimants}), so it is "
+            "not available as a shorthand.  Import the class you want directly instead."
+        )
+
+
+class DeadlineAlert:
+    """Store Deadline values needed to calculate the need-by timestamp and the callback information."""
+
+    def __init__(
+        self,
+        reference: DeadlineReferenceType,
+        interval: timedelta | VariableInterval,
+        callback: AsyncCallback | SyncCallback,
+        name: str | None = None,
+    ):
+        if isinstance(interval, (int, float)) and not isinstance(interval, bool):
+            # A bare number was never documented or type-hinted, but it parses today because this
+            # check did not exist, and the decoder still reads legacy rows stored as total_seconds().
+            # Normalize so Dags that parse today keep parsing, and warn so the accident does not
+            # become contract.  bool is excluded: it is an int subclass, so True would mean 1 second.
+            warnings.warn(
+                f"Passing a number as a deadline interval is deprecated and will be removed in a "
+                f"future release. Pass timedelta(seconds={interval}) instead.",
+                RemovedInAirflow4Warning,
+                stacklevel=2,
+            )
+            interval = timedelta(seconds=interval)
+        elif isinstance(interval, timedelta):
+            # serde dispatches on qualified class name and registers only datetime.timedelta, so a
+            # subclass such as pendulum.duration() would pass the check below and then fail there.
+            # Rebuilding timedelta subclasses into a timedelta keeps this to one path.
+            interval = timedelta(seconds=interval.total_seconds())
+
+        if not isinstance(interval, (timedelta, VariableInterval)):
+            raise ValueError(
+                f"Interval must be a `timedelta` or a `VariableInterval`, received {type(interval).__name__}."
+            )
+
+        # Serializing blocks subclasses for security reasons, so isinstance is too loose.
+        if type(callback) not in DEADLINE_CALLBACK_TYPES:
+            raise ValueError(
+                f"Callbacks must be `AsyncCallback` or `SyncCallback`, received {type(callback).__name__}."
+            )
+
+        self.callback = callback
+        self.reference = reference
+        self.interval = interval
+        self.name = name
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, DeadlineAlert):
+            return NotImplemented
+        return (
+            isinstance(self.reference, type(other.reference))
+            and self.interval == other.interval
+            and self.callback == other.callback
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                type(self.reference).__name__,
+                self.interval,
+                self.callback,
+            )
+        )
+
+
+class DeadlineReference:
+    """
+    The public interface class for all DeadlineReference options.
+
+    This class provides a unified interface for working with Deadlines, supporting both
+    calculated deadlines, including references to the DagRun being evaluated and
+    historical runtime data, and fixed deadlines (which return a predefined datetime).
+
+    ------
+    Usage:
+    ------
+
+    1. Example deadline references:
+
+    .. code-block:: python
+
+       fixed = DeadlineReference.FIXED_DATETIME(datetime(2025, 5, 4))
+       logical = DeadlineReference.DAGRUN_LOGICAL_DATE
+       queued = DeadlineReference.DAGRUN_QUEUED_AT
+
+    2. Using in a DAG:
+
+    .. code-block:: python
+
+       DAG(
+           dag_id="dag_with_deadline",
+           deadline=DeadlineAlert(
+               reference=DeadlineReference.DAGRUN_LOGICAL_DATE,
+               interval=timedelta(hours=1),
+               callback=hello_callback,
+           ),
+       )
+
+    3. Custom references receive the DagRun being evaluated:
+
+    .. code-block:: python
+
+       class MyDeadlineReference(BaseDeadlineReference):
+           def _evaluate_with(self, *, session, dagrun):
+               # Add your business logic here; dagrun.logical_date is available to use.
+               my_datetime = my_business_logic(dagrun.logical_date)
+               return my_datetime
+    """
+
+    class TYPES:
+        """Collection of DeadlineReference types for type checking."""
+
+        # Deadlines that should be created when the DagRun is created.
+        DAGRUN_CREATED: DeadlineReferenceTypes = _ClassifiedReferenceTypes(
+            (DagRunLogicalDateDeadline, FixedDatetimeDeadline, AverageRuntimeDeadline),
+            DAGRUN_CREATED_TIMING,
+        )
+
+        # Deadlines that should be created when the DagRun is queued.
+        DAGRUN_QUEUED: DeadlineReferenceTypes = _ClassifiedReferenceTypes(
+            (DagRunQueuedAtDeadline,), DAGRUN_QUEUED_TIMING
+        )
+
+        # All DagRun-related deadline types.
+        DAGRUN: DeadlineReferenceTypes = DAGRUN_CREATED + DAGRUN_QUEUED
+
+        # The attributes above that a custom reference can be classified under.  DAGRUN is their
+        # union rather than a classification of its own, so it is deliberately absent.  Each name
+        # is also the evaluation_timing value stored for references classified under it.
+        _CLASSIFICATIONS = (DAGRUN_CREATED_TIMING, DAGRUN_QUEUED_TIMING)
+
+    DAGRUN_LOGICAL_DATE: DeadlineReferenceType = DagRunLogicalDateDeadline()
+    DAGRUN_QUEUED_AT: DeadlineReferenceType = DagRunQueuedAtDeadline()
+
+    # These map short class name to qualname(s); used to handle custom reference name collisions.
+    _custom_reference_name_map: dict[str, str] = {}
+    _contested_reference_names: dict[str, list[str]] = {}
+
+    @classmethod
+    def AVERAGE_RUNTIME(cls, max_runs: int = 0, min_runs: int | None = None) -> DeadlineReferenceType:
+        if max_runs == 0:
+            max_runs = AverageRuntimeDeadline.DEFAULT_LIMIT
+        if min_runs is None:
+            min_runs = max_runs
+        return AverageRuntimeDeadline(max_runs, min_runs)
+
+    @classmethod
+    def FIXED_DATETIME(cls, dt: datetime) -> DeadlineReferenceType:
+        return FixedDatetimeDeadline(dt)
+
+    # TODO: Remove this once other deadline types exist.
+    #   This is a temporary reference type used only in tests to verify that
+    #   dag.has_dagrun_deadline() returns false if the dag has a non-dagrun deadline type.
+    #   It should be replaced with a real non-dagrun deadline type when one is available.
+    _TEMPORARY_TEST_REFERENCE = type(
+        "TemporaryTestDeadlineForTypeChecking",
+        (BaseDeadlineReference,),
+        {"serialize_reference": lambda self: {REFERENCE_TYPE_FIELD: "TemporaryTestDeadlineForTypeChecking"}},
+    )()
+
+    @classmethod
+    def _add_custom_reference_to_namespace(
+        cls,
+        reference_class: type[BaseDeadlineReference],
+        deadline_reference_type: DeadlineReferenceTypes | None = None,
+    ) -> type[BaseDeadlineReference]:
+        """
+        Add a custom deadline reference class to the DeadlineReference namespace for use in Dag files.
+
+        This makes the reference available to Dag authors as ``DeadlineReference.<ClassName>`` and
+        records when it should be evaluated.
+
+        .. note::
+
+            Adding the reference to this namespace is **not** the same as registering the plugin.
+            This only affects the process that runs the Dag file; it does not make the class
+            resolvable when the scheduler deserializes the Dag.  The class must *also* be listed in
+            the ``deadline_references`` attribute of an ``AirflowPlugin``, or deserialization raises
+            ``DeadlineReferenceNotRegistered``.  See :external:doc:`howto/deadline-alerts`.
+
+        If two classes share the same name but have different module paths, the shorthand is
+        withheld from both and a warning names the competing classes.  In that case, users can
+        still import the class directly; the classes themselves remain valid references either way.
+
+        :param reference_class: The custom reference class inheriting from BaseDeadlineReference
+        :param deadline_reference_type: A DeadlineReference.TYPES for when the deadline should be
+            evaluated ("DAGRUN_CREATED", "DAGRUN_QUEUED", etc.);
+            defaults to DeadlineReference.TYPES.DAGRUN_CREATED
+        """
+        # Default to DAGRUN_CREATED if no deadline_reference_type specified
+        if deadline_reference_type is None:
+            deadline_reference_type = cls.TYPES.DAGRUN_CREATED
+
+        # Validate the reference class inherits from BaseDeadlineReference
+        # Accept both sdk and core base classes for backward compatibility for now
+        from airflow.models.deadline import ReferenceModels
+
+        if not issubclass(reference_class, (BaseDeadlineReference, ReferenceModels.BaseDeadlineReference)):
+            raise ValueError(f"{reference_class.__name__} must inherit from BaseDeadlineReference")
+
+        # Register the new reference with DeadlineReference for discoverability
+        try:
+            reference_instance = reference_class()
+        except TypeError as e:
+            raise TypeError(
+                f"{reference_class.__name__} must be constructible with no arguments in order to be "
+                f"registered as a deadline reference. If it takes parameters, decorate it with "
+                f"@dataclass and give every field a default value. Original error: {e}"
+            ) from e
+        name = reference_class.__name__
+        key = qualname(reference_class)
+
+        classification = getattr(deadline_reference_type, "classification", None)
+        if classification not in cls.TYPES._CLASSIFICATIONS:
+            raise ValueError(
+                f"Invalid deadline reference type {deadline_reference_type}; "
+                "must be a valid DeadlineReference.TYPES option."
+            )
+
+        if name in cls._contested_reference_names:
+            claimed_names = cls._contested_reference_names[name]
+            if key not in claimed_names:
+                claimed_names.append(key)
+            logger.warning(
+                "DeadlineReference.%s is claimed by more than one class (%s), so it is not available "
+                "as a shorthand.  Import the class you want directly instead.",
+                name,
+                ", ".join(sorted(claimed_names)),
+            )
+        elif (previous := cls._custom_reference_name_map.get(name)) is not None:
+            if previous == key:
+                # Class was registered in a previous parse, refresh the value in case user code changed.
+                setattr(cls, name, reference_instance)
+            else:
+                # Two different classes want the same shorthand, reject BOTH.
+                # Without this, the import order arbitrarily decides which gets the
+                # name and potentially breaks a Dag file which uses the short name.
+                setattr(cls, name, _ContestedReferenceName(name))
+                cls._contested_reference_names[name] = [cls._custom_reference_name_map.pop(name), key]
+                logger.warning(
+                    "DeadlineReference.%s is claimed by more than one class (%s), so it is no longer "
+                    "available as a shorthand.  Import the class you want directly instead.",
+                    name,
+                    ", ".join(sorted((previous, key))),
+                )
+        elif hasattr(cls, name):
+            # Raise rather than contest the name: contesting replaces the attribute, which would
+            # unbind a built-in for every Dag that uses it.
+            raise ValueError(
+                f"{key} cannot be added to the DeadlineReference namespace as {name!r}, because "
+                f"DeadlineReference.{name} already exists.  Rename the class."
+            )
+        else:
+            setattr(cls, name, reference_instance)
+            cls._custom_reference_name_map[name] = key
+
+        if cls._custom_reference_name_map.get(name) == key:
+            logger.info("Added DeadlineReference.%s (%s)", name, key)
+
+        # A contested class is still a valid reference: it serializes under its own qualname and
+        # resolves through the plugin registry, so only the shorthand is withheld.  Drop any earlier
+        # registration of the same qualname rather than appending beside it, because a re-parse
+        # produces a new class object for the same reference.  Both tuples are filtered so a reference
+        # whose classification changes gets pruned from the old one.
+        for attr in cls.TYPES._CLASSIFICATIONS:
+            kept = tuple(existing for existing in getattr(cls.TYPES, attr) if qualname(existing) != key)
+            if attr == classification:
+                kept += (reference_class,)
+            setattr(cls.TYPES, attr, _ClassifiedReferenceTypes(kept, attr))
+
+        # Set on contested classes too, so the serializer records the right timing for them.
+        reference_class.evaluation_timing = classification
+
+        # Refresh the combined DAGRUN tuple
+        cls.TYPES.DAGRUN = cls.TYPES.DAGRUN_CREATED + cls.TYPES.DAGRUN_QUEUED
+
+        return reference_class
+
+    @classmethod
+    def register_custom_reference(
+        cls,
+        reference_class: type[BaseDeadlineReference],
+        deadline_reference_type: DeadlineReferenceTypes | None = None,
+    ) -> type[BaseDeadlineReference]:
+        """
+        Add a custom deadline reference to the DeadlineReference namespace.
+
+        .. deprecated:: 3.5.0
+            Use the ``@deadline_reference`` decorator instead.  Despite its name this method never
+            registered anything with the scheduler; see
+            :meth:`_add_custom_reference_to_namespace`.
+        """
+        warnings.warn(
+            "DeadlineReference.register_custom_reference is deprecated and will be removed in "
+            "Airflow 4.  It does not register anything with the scheduler; use the "
+            "@deadline_reference decorator, and list the class in an AirflowPlugin's "
+            "deadline_references to make it resolvable.",
+            RemovedInAirflow4Warning,
+            stacklevel=2,
+        )
+        return cls._add_custom_reference_to_namespace(reference_class, deadline_reference_type)
+
+
+@overload
+def deadline_reference(
+    deadline_reference_type: type[BaseDeadlineReference],
+) -> type[BaseDeadlineReference]: ...
+
+
+@overload
+def deadline_reference(
+    deadline_reference_type: DeadlineReferenceTypes | None = None,
+) -> Callable[[type[BaseDeadlineReference]], type[BaseDeadlineReference]]: ...
+
+
+def deadline_reference(deadline_reference_type=None):
+    """
+    Decorate a class to register a custom deadline reference.
+
+    May be used with or without parentheses. Without parentheses the reference is evaluated when a
+    new dagrun is created; pass a ``DeadlineReference.TYPES`` value to choose a different time.
+
+    The decorated class must also be registered in the ``deadline_references`` list of an
+    ``AirflowPlugin`` so that it can be resolved when the Dag is deserialized.  An unregistered
+    reference raises ``DeadlineReferenceNotRegistered``.  See also
+    :external:doc:`howto/deadline-alerts`.
+
+    .. code-block:: python
+
+        @deadline_reference
+        class MyBareReference(BaseDeadlineReference):
+            # Equivalent to @deadline_reference(); evaluated when a new dagrun is created.
+            def _evaluate_with(self, *, session: Session, **kwargs) -> datetime:
+                return some_datetime
+
+
+        @deadline_reference()
+        class MyCustomReference(BaseDeadlineReference):
+            # By default, evaluate_with will be called when a new dagrun is created.
+            def _evaluate_with(self, *, session: Session, dagrun) -> datetime:
+                # Add your business logic here; dagrun.logical_date is available to use.
+                my_datetime = my_business_logic(dagrun.logical_date)
+                return my_datetime
+
+            def serialize_reference(self) -> dict:
+                return {"reference_type": self.reference_name}
+
+
+        # Optionally, specify when it is calculated by providing a DeadlineReference.TYPES value.
+        @deadline_reference(DeadlineReference.TYPES.DAGRUN_QUEUED)
+        class MyQueuedRef(BaseDeadlineReference):
+            def _evaluate_with(self, *, session: Session, dagrun) -> datetime:
+                # Add your business logic here; dagrun.queued_at is available to use.
+                my_datetime = my_business_logic(dagrun.queued_at)
+                return my_datetime
+
+            def serialize_reference(self) -> dict:
+                return {"reference_type": self.reference_name}
+    """
+    # Used bare, without parentheses: the decorated class is passed in directly.
+    if isinstance(deadline_reference_type, type):
+        return DeadlineReference._add_custom_reference_to_namespace(deadline_reference_type)
+
+    def decorator(
+        reference_class: type[BaseDeadlineReference],
+    ) -> type[BaseDeadlineReference]:
+        DeadlineReference._add_custom_reference_to_namespace(reference_class, deadline_reference_type)
+        return reference_class
+
+    return decorator
+
+
+@attrs.define(frozen=True)
+class VariableInterval:
+    """
+    Interval backed by an Airflow Variable.
+
+    This allows DeadlineAlert intervals to be configured dynamically using
+    Airflow Variables. The variable value is interpreted as seconds and
+    converted into a ``timedelta`` object.
+
+    ------
+    Usage:
+    ------
+
+    .. code-block:: python
+
+    from airflow.sdk import DAG, DeadlineAlert, DeadlineReference, AsyncCallback
+
+    DAG(
+        dag_id="dag_with_variable_interval",
+        deadline=DeadlineAlert(
+            reference=DeadlineReference.DAGRUN_QUEUED_AT,
+            interval=VariableInterval("deadline_seconds"),
+            callback=AsyncCallback(my_callback),
+        ),
+    )
+
+    ------
+    Notes:
+    ------
+    * Resolution occurs when deadlines are evaluated (during DagRun creation).
+    * Changes to the Variable affect only newly parsed DAGs and future DagRuns.
+    * Existing deadlines are not retroactively updated.
+    """
+
+    key: str
+
+    def resolve(self) -> timedelta:
+        warnings.warn(
+            "VariableInterval.resolve() is deprecated and will be removed in a future release. "
+            "Deadline interval resolution is handled internally during deadline evaluation.",
+            RemovedInAirflow4Warning,
+            stacklevel=2,
+        )
+
+        try:
+            value = Variable.get(self.key)
+        except AirflowRuntimeError as e:
+            raise ValueError(f"VariableInterval '{self.key}' not found") from e
+
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"VariableInterval '{self.key}' must be an integer (seconds), got: {value!r}"
+            ) from e
+
+        return timedelta(seconds=seconds)

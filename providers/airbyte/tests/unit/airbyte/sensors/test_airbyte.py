@@ -22,13 +22,11 @@ import pytest
 from airbyte_api.api import GetJobRequest
 from airbyte_api.models import JobResponse, JobStatusEnum, JobTypeEnum
 
-from airflow.exceptions import AirflowException
 from airflow.models import Connection
 from airflow.providers.airbyte.sensors.airbyte import AirbyteJobSensor
-from airflow.utils import db
+from airflow.providers.common.compat.sdk import AirflowException
 
 
-@pytest.mark.db_test
 class TestAirbyteJobSensor:
     task_id = "task-id"
     airbyte_conn_id = "airbyte-conn-test"
@@ -46,8 +44,9 @@ class TestAirbyteJobSensor:
         )
         return response
 
-    def setup_method(self):
-        db.merge_conn(
+    @pytest.fixture(autouse=True)
+    def setup_connections(self, create_connection_without_db):
+        create_connection_without_db(
             Connection(conn_id=self.airbyte_conn_id, conn_type="airbyte", host="http://test-airbyte")
         )
 
@@ -118,3 +117,37 @@ class TestAirbyteJobSensor:
         )
         assert sensor.poke_interval == 10
         assert sensor.timeout == 3600
+
+    @pytest.mark.parametrize(
+        ("status", "message"),
+        [
+            pytest.param("error", "Job run 1 has failed.", id="error"),
+            pytest.param("cancelled", "Job run 1 has been cancelled.", id="cancelled"),
+            pytest.param("unmapped_status", "Job run 1 did something unexpected.", id="fail-closed"),
+        ],
+    )
+    def test_execute_complete_fails_when_job_did_not_succeed(self, status, message):
+        """A deferred sensor must fail on a non-success event, matching the poke() behavior."""
+        sensor = AirbyteJobSensor(
+            task_id=self.task_id,
+            airbyte_job_id=self.job_id,
+            airbyte_conn_id=self.airbyte_conn_id,
+            deferrable=True,
+        )
+        with pytest.raises(RuntimeError, match=message):
+            sensor.execute_complete(context={}, event={"status": status, "message": message, "job_id": 1})
+
+    def test_execute_complete_succeeds_on_success_event(self):
+        sensor = AirbyteJobSensor(
+            task_id=self.task_id,
+            airbyte_job_id=self.job_id,
+            airbyte_conn_id=self.airbyte_conn_id,
+            deferrable=True,
+        )
+        assert (
+            sensor.execute_complete(
+                context={},
+                event={"status": "success", "message": "Job run 1 has completed successfully.", "job_id": 1},
+            )
+            is None
+        )

@@ -20,24 +20,47 @@
 from __future__ import annotations
 
 import os
+import selectors
+import warnings
 from base64 import decodebytes
 from collections.abc import Sequence
 from functools import cached_property
 from io import StringIO
-from select import select
 from typing import Any
 
 import paramiko
 from paramiko.config import SSH_PORT
-from sshtunnel import SSHTunnelForwarder
 from tenacity import Retrying, stop_after_attempt, wait_fixed, wait_random
 
-from airflow.exceptions import AirflowException
-from airflow.hooks.base import BaseHook
+from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.providers.common.compat.connection import get_async_connection, get_async_extra_dejson
+from airflow.providers.common.compat.sdk import AirflowException, BaseHook
+from airflow.providers.ssh.tunnel import AsyncSSHTunnel, SSHTunnel
 from airflow.utils.platform import getuser
-from airflow.utils.types import NOTSET, ArgNotSet
+
+try:
+    from airflow.sdk.definitions._internal.types import NOTSET, ArgNotSet
+except ImportError:
+    from airflow.utils.types import NOTSET, ArgNotSet  # type: ignore[attr-defined,no-redef]
+try:
+    from airflow.sdk.definitions._internal.types import is_arg_set
+except ImportError:
+
+    def is_arg_set(value):  # type: ignore[misc,no-redef]
+        return value is not NOTSET
+
 
 CMD_TIMEOUT = 10
+
+_HostKeyConstructor = type[paramiko.RSAKey] | type[paramiko.ECDSAKey] | type[paramiko.Ed25519Key]
+_SUPPORTED_HOST_KEY_TYPES = (
+    "ssh-rsa",
+    "ssh-ecdsa",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "ssh-ed25519",
+)
 
 
 class SSHHook(BaseHook):
@@ -71,21 +94,29 @@ class SSHHook(BaseHook):
         lifetime of the transport
     :param ciphers: list of ciphers to use in order of preference
     :param auth_timeout: timeout (in seconds) for the attempt to authenticate with the remote_host
+    :param no_host_key_check: Set to ``True`` to skip host key verification. Overrides the
+        connection's ``no_host_key_check`` extra. Defaults to ``None``, meaning the value is
+        taken from the connection, or ``False`` when the connection does not set it.
+    :param conn_retry_attempts: number of times to attempt the initial SSH connection before
+        giving up (default 3). Raising this helps when many tasks target the same SSH server at
+        once and some connections are transiently refused (e.g. ``sshd`` ``MaxStartups`` throttling).
     """
 
-    # List of classes to try loading private keys as, ordered (roughly) by most common to least common
+    # List of classes to try loading private keys as, ordered (roughly) by most common to least common.
+    # DSA/DSS keys are not supported (removed in paramiko 4.0).
     _pkey_loaders: Sequence[type[paramiko.PKey]] = (
         paramiko.RSAKey,
         paramiko.ECDSAKey,
         paramiko.Ed25519Key,
-        paramiko.DSSKey,
     )
 
-    _host_key_mappings = {
-        "rsa": paramiko.RSAKey,
-        "dss": paramiko.DSSKey,
-        "ecdsa": paramiko.ECDSAKey,
-        "ed25519": paramiko.Ed25519Key,
+    _host_key_mappings: dict[str, _HostKeyConstructor] = {
+        "ssh-rsa": paramiko.RSAKey,
+        "ssh-ecdsa": paramiko.ECDSAKey,
+        "ecdsa-sha2-nistp256": paramiko.ECDSAKey,
+        "ecdsa-sha2-nistp384": paramiko.ECDSAKey,
+        "ecdsa-sha2-nistp521": paramiko.ECDSAKey,
+        "ssh-ed25519": paramiko.Ed25519Key,
     }
 
     conn_name_attr = "ssh_conn_id"
@@ -119,9 +150,12 @@ class SSHHook(BaseHook):
         ciphers: list[str] | None = None,
         auth_timeout: int | None = None,
         host_proxy_cmd: str | None = None,
+        conn_retry_attempts: int = 3,
+        no_host_key_check: bool | None = None,
     ) -> None:
         super().__init__()
         self.ssh_conn_id = ssh_conn_id
+        self.conn_retry_attempts = max(1, conn_retry_attempts)
         self.remote_host = remote_host
         self.username = username
         self.password = password
@@ -139,10 +173,19 @@ class SSHHook(BaseHook):
 
         # Default values, overridable from Connection
         self.compress = True
-        self.no_host_key_check = True
+        self.no_host_key_check = False
         self.allow_host_key_change = False
         self.host_key = None
         self.look_for_keys = True
+
+        # Captured before parsing the connection extras, which rebind the `no_host_key_check`
+        # name below. Without a separate binding the caller's value is silently discarded
+        # whenever the connection has extras that do not mention host key checking.
+        constructor_no_host_key_check = no_host_key_check
+
+        # Parsing a `host_key` extra forces `self.no_host_key_check` to False, so what the
+        # connection actually asked for is kept here and re-applied once parsing is done.
+        extra_no_host_key_check: bool | None = None
 
         # Placeholder for future cached connection
         self.client: paramiko.SSHClient | None = None
@@ -155,7 +198,8 @@ class SSHHook(BaseHook):
             if self.password is None:
                 self.password = conn.password
             if not self.remote_host:
-                self.remote_host = conn.host
+                if conn.host:
+                    self.remote_host = conn.host
             if self.port is None:
                 self.port = conn.port
 
@@ -184,12 +228,18 @@ class SSHHook(BaseHook):
                 host_key = extra_options.get("host_key")
                 no_host_key_check = extra_options.get("no_host_key_check")
 
-                if no_host_key_check is not None:
-                    no_host_key_check = str(no_host_key_check).lower() == "true"
-                    if host_key is not None and no_host_key_check:
-                        raise ValueError("Must check host key when provided")
+                if no_host_key_check is None and "ignore_hostkey_verification" in extra_options:
+                    warnings.warn(
+                        "The `ignore_hostkey_verification` connection extra is deprecated; "
+                        "use `no_host_key_check` instead.",
+                        AirflowProviderDeprecationWarning,
+                        stacklevel=2,
+                    )
+                    no_host_key_check = extra_options["ignore_hostkey_verification"]
 
-                    self.no_host_key_check = no_host_key_check
+                if no_host_key_check is not None:
+                    extra_no_host_key_check = str(no_host_key_check).lower() == "true"
+                    self.no_host_key_check = extra_no_host_key_check
 
                 if (
                     "allow_host_key_change" in extra_options
@@ -210,14 +260,43 @@ class SSHHook(BaseHook):
                     self.ciphers = extra_options.get("ciphers")
 
                 if host_key is not None:
-                    if host_key.startswith("ssh-"):
-                        key_type, host_key = host_key.split(None)[:2]
-                        key_constructor = self._host_key_mappings[key_type[4:]]
-                    else:
-                        key_constructor = paramiko.RSAKey
+                    host_key = host_key.strip()
+                    host_key_parts = host_key.split()
+                    key_constructor: _HostKeyConstructor = paramiko.RSAKey
+                    if len(host_key_parts) >= 2:
+                        key_type, host_key = host_key_parts[:2]
+                        if key_type == "ssh-dss":
+                            raise ValueError(
+                                "DSA/DSS host keys are not supported. Paramiko 4.0 removed DSS support; "
+                                "use an RSA, ECDSA, or Ed25519 host key and update the connection `host_key`."
+                            )
+                        key_constructor_for_type = self._host_key_mappings.get(key_type)
+                        if key_constructor_for_type is None:
+                            raise ValueError(
+                                f"Unsupported SSH host key algorithm {key_type!r}. "
+                                f"Supported types are: {', '.join(_SUPPORTED_HOST_KEY_TYPES)}."
+                            )
+                        key_constructor = key_constructor_for_type
+                    elif host_key in self._host_key_mappings or host_key == "ssh-dss":
+                        raise ValueError(f"SSH host key {host_key!r} is missing key data.")
                     decoded_host_key = decodebytes(host_key.encode("utf-8"))
                     self.host_key = key_constructor(data=decoded_host_key)
                     self.no_host_key_check = False
+
+        # An explicit constructor argument wins over the connection extra and the default.
+        # Without this there is no way to opt out of host key verification when the hook is
+        # built directly rather than from a Connection.
+        if constructor_no_host_key_check is not None:
+            self.no_host_key_check = constructor_no_host_key_check
+        elif extra_no_host_key_check is not None:
+            self.no_host_key_check = extra_no_host_key_check
+
+        # Validated on the effective value rather than on the extras alone, so that an explicit
+        # constructor argument can resolve a connection that sets both `host_key` and
+        # `no_host_key_check`, and so that skipping the check while a host key is configured is
+        # rejected whichever source asked for it.
+        if self.host_key is not None and self.no_host_key_check:
+            raise ValueError("Must check host key when provided")
 
         if self.cmd_timeout is NOTSET:
             self.cmd_timeout = CMD_TIMEOUT
@@ -332,7 +411,7 @@ class SSHHook(BaseHook):
         for attempt in Retrying(
             reraise=True,
             wait=wait_fixed(3) + wait_random(0, 2),
-            stop=stop_after_attempt(3),
+            stop=stop_after_attempt(self.conn_retry_attempts),
             before_sleep=log_before_sleep,
         ):
             with attempt:
@@ -353,46 +432,37 @@ class SSHHook(BaseHook):
 
     def get_tunnel(
         self, remote_port: int, remote_host: str = "localhost", local_port: int | None = None
-    ) -> SSHTunnelForwarder:
+    ) -> SSHTunnel:
         """
-        Create a tunnel between two hosts.
+        Create a local port-forwarding tunnel through the SSH connection.
 
-        This is conceptually similar to ``ssh -L <LOCAL_PORT>:host:<REMOTE_PORT>``.
+        This is conceptually similar to ``ssh -L <LOCAL_PORT>:<remote_host>:<REMOTE_PORT>``.
+
+        The returned ``SSHTunnel`` should be used as a context manager::
+
+            with hook.get_tunnel(remote_port=5432) as tunnel:
+                connect_to("localhost", tunnel.local_bind_port)
+
+        The ``.start()`` / ``.stop()`` methods still work but are deprecated.
+
+        .. versionchanged:: 4.4.0
+            Returns ``SSHTunnel`` instead of ``sshtunnel.SSHTunnelForwarder``.
+            The tunnel now reuses the hook's SSH connection (``get_conn()``)
+            instead of establishing a separate one.
 
         :param remote_port: The remote port to create a tunnel to
         :param remote_host: The remote host to create a tunnel to (default localhost)
-        :param local_port:  The local port to attach the tunnel to
-
-        :return: sshtunnel.SSHTunnelForwarder object
+        :param local_port: The local port to attach the tunnel to (None for ephemeral)
+        :return: SSHTunnel instance
         """
-        if local_port:
-            local_bind_address: tuple[str, int] | tuple[str] = ("localhost", local_port)
-        else:
-            local_bind_address = ("localhost",)
-
-        tunnel_kwargs = {
-            "ssh_port": self.port,
-            "ssh_username": self.username,
-            "ssh_pkey": self.key_file or self.pkey,
-            "ssh_proxy": self.host_proxy,
-            "local_bind_address": local_bind_address,
-            "remote_bind_address": (remote_host, remote_port),
-            "logger": self.log,
-        }
-
-        if self.password:
-            password = self.password.strip()
-            tunnel_kwargs.update(
-                ssh_password=password,
-            )
-        else:
-            tunnel_kwargs.update(
-                host_pkey_directories=None,
-            )
-
-        client = SSHTunnelForwarder(self.remote_host, **tunnel_kwargs)
-
-        return client
+        ssh_client = self.get_conn()
+        return SSHTunnel(
+            ssh_client=ssh_client,
+            remote_host=remote_host,
+            remote_port=remote_port,
+            local_port=local_port,
+            logger=self.log,
+        )
 
     def _pkey_from_private_key(self, private_key: str, passphrase: str | None = None) -> paramiko.PKey:
         """
@@ -410,14 +480,17 @@ class SSHHook(BaseHook):
                 key = pkey_class.from_private_key(StringIO(private_key), password=passphrase)
                 # Test it actually works. If Paramiko loads an openssh generated key, sometimes it will
                 # happily load it as the wrong type, only to fail when actually used.
-                key.sign_ssh_data(b"")
+                if key.get_name() == "ssh-rsa":
+                    key.sign_ssh_data(b"", algorithm="rsa-sha2-512")
+                else:
+                    key.sign_ssh_data(b"")
                 return key
             except (paramiko.ssh_exception.SSHException, ValueError):
                 continue
         raise AirflowException(
-            "Private key provided cannot be read by paramiko."
-            "Ensure key provided is valid for one of the following"
-            "key formats: RSA, DSS, ECDSA, or Ed25519"
+            "Private key provided cannot be read by paramiko. "
+            "Ensure key provided is valid for one of the following "
+            "key formats: RSA, ECDSA, or Ed25519."
         )
 
     def exec_ssh_client_command(
@@ -431,9 +504,9 @@ class SSHHook(BaseHook):
         self.log.info("Running command: %s", command)
 
         cmd_timeout: float | None
-        if not isinstance(timeout, ArgNotSet):
+        if is_arg_set(timeout):
             cmd_timeout = timeout
-        elif not isinstance(self.cmd_timeout, ArgNotSet):
+        elif is_arg_set(self.cmd_timeout):
             cmd_timeout = self.cmd_timeout
         else:
             cmd_timeout = CMD_TIMEOUT
@@ -464,36 +537,42 @@ class SSHHook(BaseHook):
 
         timedout = False
 
-        # read from both stdout and stderr
-        while not channel.closed or channel.recv_ready() or channel.recv_stderr_ready():
-            readq, _, _ = select([channel], [], [], cmd_timeout)
-            if cmd_timeout is not None:
-                timedout = not readq
-            for recv in readq:
-                if recv.recv_ready():
-                    output = stdout.channel.recv(len(recv.in_buffer))
-                    agg_stdout += output
-                    for line in output.decode("utf-8", "replace").strip("\n").splitlines():
-                        self.log.info(line)
-                if recv.recv_stderr_ready():
-                    output = stderr.channel.recv_stderr(len(recv.in_stderr_buffer))
-                    agg_stderr += output
-                    for line in output.decode("utf-8", "replace").strip("\n").splitlines():
-                        self.log.warning(line)
-            if (
-                stdout.channel.exit_status_ready()
-                and not stderr.channel.recv_stderr_ready()
-                and not stdout.channel.recv_ready()
-            ) or timedout:
-                stdout.channel.shutdown_read()
-                try:
-                    stdout.channel.close()
-                except Exception:
-                    # there is a race that when shutdown_read has been called and when
-                    # you try to close the connection, the socket is already closed
-                    # We should ignore such errors (but we should log them with warning)
-                    self.log.warning("Ignoring exception on close", exc_info=True)
-                break
+        # select.select() rejects descriptors numbered FD_SETSIZE (1024) or above, which a task
+        # process can reach; DefaultSelector uses epoll/kqueue/poll where available.
+        with selectors.DefaultSelector() as selector:
+            selector.register(channel, selectors.EVENT_READ, data=channel)
+
+            # read from both stdout and stderr
+            while not channel.closed or channel.recv_ready() or channel.recv_stderr_ready():
+                events = selector.select(cmd_timeout)
+                if cmd_timeout is not None:
+                    timedout = not events
+                for key, _ in events:
+                    recv = key.data
+                    if recv.recv_ready():
+                        output = stdout.channel.recv(len(recv.in_buffer))
+                        agg_stdout += output
+                        for line in output.decode("utf-8", "replace").strip("\n").splitlines():
+                            self.log.info(line)
+                    if recv.recv_stderr_ready():
+                        output = stderr.channel.recv_stderr(len(recv.in_stderr_buffer))
+                        agg_stderr += output
+                        for line in output.decode("utf-8", "replace").strip("\n").splitlines():
+                            self.log.warning(line)
+                if (
+                    stdout.channel.exit_status_ready()
+                    and not stderr.channel.recv_stderr_ready()
+                    and not stdout.channel.recv_ready()
+                ) or timedout:
+                    stdout.channel.shutdown_read()
+                    try:
+                        stdout.channel.close()
+                    except Exception:
+                        # there is a race that when shutdown_read has been called and when
+                        # you try to close the connection, the socket is already closed
+                        # We should ignore such errors (but we should log them with warning)
+                        self.log.warning("Ignoring exception on close", exc_info=True)
+                    break
 
         stdout.close()
         stderr.close()
@@ -513,3 +592,224 @@ class SSHHook(BaseHook):
             return True, "Connection successfully tested"
         except Exception as e:
             return False, str(e)
+
+
+class SSHHookAsync(BaseHook):
+    """
+    Asynchronous SSH hook using asyncssh for use in triggers.
+
+    This hook provides async SSH connectivity for deferrable operators
+    and their triggers.
+
+    :param ssh_conn_id: SSH connection ID from Airflow Connections
+    :param host: hostname of the SSH server (overrides connection)
+    :param port: port of the SSH server (overrides connection)
+    :param username: username for authentication (overrides connection)
+    :param password: password for authentication (overrides connection)
+    :param known_hosts: path to known_hosts file. Defaults to ``~/.ssh/known_hosts``.
+    :param key_file: path to private key file for authentication
+    :param passphrase: passphrase for the private key
+    :param private_key: private key content as string
+    """
+
+    conn_name_attr = "ssh_conn_id"
+    default_conn_name = "ssh_default"
+    conn_type = "ssh"
+    hook_name = "SSH"
+    default_known_hosts = "~/.ssh/known_hosts"
+
+    def __init__(
+        self,
+        ssh_conn_id: str = default_conn_name,
+        host: str | None = None,
+        port: int | None = None,
+        username: str | None = None,
+        password: str | None = None,
+        known_hosts: str = default_known_hosts,
+        key_file: str = "",
+        passphrase: str = "",
+        private_key: str = "",
+        keepalive_interval: int = 30,
+    ) -> None:
+        super().__init__()
+        self.ssh_conn_id = ssh_conn_id
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.known_hosts: bytes | str = os.path.expanduser(known_hosts)
+        self.key_file = key_file
+        self.passphrase = passphrase
+        self.private_key = private_key
+        self.keepalive_interval = keepalive_interval
+        # Default value, overridable from Connection, as on SSHHook
+        self.compress = True
+
+    def _parse_extras(self, conn: Any, extra_options: dict[str, Any]) -> None:
+        """
+        Parse the connection's extra fields into instance fields.
+
+        :param conn: the connection, for its host
+        :param extra_options: the connection's extra, already read without a synchronous SDK call
+        """
+        if "key_file" in extra_options and self.key_file == "":
+            self.key_file = extra_options["key_file"]
+        if "known_hosts" in extra_options:
+            expanded_default = os.path.expanduser(self.default_known_hosts)
+            if self.known_hosts == expanded_default:
+                self.known_hosts = extra_options["known_hosts"]
+        if "passphrase" in extra_options or "private_key_passphrase" in extra_options:
+            self.passphrase = extra_options.get("passphrase") or extra_options.get(
+                "private_key_passphrase", ""
+            )
+        if "private_key" in extra_options:
+            self.private_key = extra_options["private_key"]
+        if "compress" in extra_options and str(extra_options["compress"]).lower() == "false":
+            self.compress = False
+
+        host_key = extra_options.get("host_key")
+        nhkc_raw = extra_options.get("no_host_key_check")
+        if nhkc_raw is None and "ignore_hostkey_verification" in extra_options:
+            warnings.warn(
+                "The `ignore_hostkey_verification` connection extra is deprecated; "
+                "use `no_host_key_check` instead.",
+                AirflowProviderDeprecationWarning,
+                stacklevel=2,
+            )
+            nhkc_raw = extra_options["ignore_hostkey_verification"]
+        no_host_key_check = str(nhkc_raw).lower() == "true" if nhkc_raw is not None else False
+
+        if host_key is not None and no_host_key_check:
+            raise ValueError("Host key check was skipped, but `host_key` value was given")
+
+        if no_host_key_check:
+            self.log.warning("No Host Key Verification. This won't protect against Man-In-The-Middle attacks")
+            self.known_hosts = "none"
+        elif host_key is not None:
+            host_key = host_key.strip()
+            host_key_parts = host_key.split()
+            if host_key_parts and host_key_parts[0] == "ssh-dss":
+                raise ValueError(
+                    "DSA/DSS host keys are not supported. Paramiko 4.0 removed DSS support; "
+                    "use an RSA, ECDSA, or Ed25519 host key and update the connection `host_key`."
+                )
+            if len(host_key_parts) >= 2:
+                host_key = " ".join(host_key_parts[:2])
+            else:
+                # A bare key is RSA, as on the sync hook; asyncssh needs the type spelled out.
+                host_key = f"ssh-rsa {host_key}"
+            self.known_hosts = f"{self.host or conn.host} {host_key}".encode()
+
+    def _should_use_known_hosts(self) -> bool:
+        """Leave a missing default file unset so AsyncSSH reports an untrusted host."""
+        if self.known_hosts == os.path.expanduser(self.default_known_hosts):
+            return os.path.isfile(self.known_hosts)
+        return True
+
+    async def _get_conn(self):
+        """
+        Asynchronously connect to the SSH server.
+
+        Returns an asyncssh SSHClientConnection that can be used to run commands.
+        """
+        import asyncssh
+
+        conn = await get_async_connection(self.ssh_conn_id)
+        if conn.extra is not None:
+            # extra_dejson masks the secrets with a synchronous SDK call, which raises
+            # DeadlockImminentError in an async task; read the extra asynchronously.
+            self._parse_extras(conn, await get_async_extra_dejson(conn))
+
+        def _get_value(self_val, conn_val, default=None):
+            if self_val is not None:
+                return self_val
+            if conn_val is not None:
+                return conn_val
+            return default
+
+        conn_config: dict = {
+            "host": _get_value(self.host, conn.host),
+            "port": _get_value(self.port, conn.port, SSH_PORT),
+            "username": _get_value(self.username, conn.login),
+            "password": _get_value(self.password, conn.password),
+            # asyncssh offers "none" first by default; offer zlib first, as paramiko does for SSHHook.
+            "compression_algs": ["zlib@openssh.com", "zlib", "none"] if self.compress else ["none"],
+        }
+        if self.key_file:
+            conn_config["client_keys"] = self.key_file
+        if self.known_hosts:
+            if isinstance(self.known_hosts, str) and self.known_hosts.lower() == "none":
+                conn_config["known_hosts"] = None
+            elif self._should_use_known_hosts():
+                conn_config["known_hosts"] = self.known_hosts
+        if self.private_key:
+            _private_key = asyncssh.import_private_key(self.private_key, self.passphrase)
+            conn_config["client_keys"] = [_private_key]
+        if self.passphrase:
+            conn_config["passphrase"] = self.passphrase
+        if self.keepalive_interval:
+            # The trigger holds one connection for the whole job; a keepalive stops idle
+            # NAT/firewall timeouts from silently dropping it between long poll intervals.
+            conn_config["keepalive_interval"] = self.keepalive_interval
+
+        ssh_client_conn = await asyncssh.connect(**conn_config)
+        return ssh_client_conn
+
+    async def get_conn(self):
+        """
+        Open an asyncssh connection that can be reused for multiple commands.
+
+        Unlike :meth:`run_command`, the returned connection is **not** closed
+        automatically; the caller owns its lifecycle (e.g.
+        ``async with await hook.get_conn() as conn: ...`` or an explicit
+        ``conn.close()``). Reusing one connection avoids a new TCP/SSH handshake
+        per command, which matters when many tasks poll the same SSH server.
+        """
+        return await self._get_conn()
+
+    async def run_command(self, command: str, timeout: float | None = None) -> tuple[int, str, str]:
+        """
+        Execute a command on the remote host asynchronously.
+
+        :param command: The command to execute
+        :param timeout: Optional timeout in seconds
+        :return: Tuple of (exit_code, stdout, stderr)
+        """
+        async with await self._get_conn() as ssh_conn:
+            result = await ssh_conn.run(command, timeout=timeout, check=False)
+            return result.exit_status or 0, result.stdout or "", result.stderr or ""
+
+    async def get_tunnel(
+        self, remote_port: int, remote_host: str = "localhost", local_port: int | None = None
+    ) -> AsyncSSHTunnel:
+        """
+        Create an async local port-forwarding tunnel through the SSH connection.
+
+        Usage::
+
+            async with await hook.get_tunnel(remote_port=5432) as tunnel:
+                connect_to("localhost", tunnel.local_bind_port)
+
+        :param remote_port: The remote port to create a tunnel to
+        :param remote_host: The remote host to create a tunnel to (default localhost)
+        :param local_port: The local port to attach the tunnel to (None for ephemeral)
+        :return: AsyncSSHTunnel instance
+        """
+        ssh_conn = await self._get_conn()
+        return AsyncSSHTunnel(
+            ssh_conn=ssh_conn,
+            remote_host=remote_host,
+            remote_port=remote_port,
+            local_port=local_port,
+        )
+
+    async def run_command_output(self, command: str, timeout: float | None = None) -> str:
+        """
+        Execute a command and return stdout.
+
+        :param command: The command to execute
+        :param timeout: Optional timeout in seconds
+        :return: stdout as string
+        """
+        _, stdout, _ = await self.run_command(command, timeout=timeout)
+        return stdout

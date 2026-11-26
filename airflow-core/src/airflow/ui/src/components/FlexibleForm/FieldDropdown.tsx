@@ -16,67 +16,75 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { createListCollection } from "@chakra-ui/react/collection";
-import { useRef } from "react";
+import { type SingleValue, Select as ReactSelect } from "chakra-react-select";
+import { useTranslation } from "react-i18next";
 
-import { Select } from "src/components/ui";
+import type { ParamValue } from "src/queries/useDagParams";
 import { paramPlaceholder, useParamStore } from "src/queries/useParamStore";
 
 import type { FlexibleFormElementProps } from ".";
+import { getEnumValueKey, lookupValuesDisplay } from "./getEnumValueKey";
 
-const labelLookup = (key: string, valuesDisplay: Record<string, string> | undefined): string => {
-  if (valuesDisplay && typeof valuesDisplay === "object") {
-    return valuesDisplay[key] ?? key;
-  }
+const NULL_STRING_VALUE = "__null__";
 
-  return key;
+const toOptionValue = (value: ParamValue): string =>
+  value === null ? NULL_STRING_VALUE : getEnumValueKey(value);
+
+const labelLookup = (key: ParamValue, valuesDisplay: Record<string, string> | undefined): string => {
+  const stringKey = key === null ? "null" : getEnumValueKey(key);
+
+  return (
+    lookupValuesDisplay(stringKey, valuesDisplay) ?? lookupValuesDisplay("None", valuesDisplay) ?? stringKey
+  );
 };
-const enumTypes = ["string", "number", "integer"];
 
-export const FieldDropdown = ({ name }: FlexibleFormElementProps) => {
-  const { paramsDict, setParamsDict } = useParamStore();
+export const FieldDropdown = ({ name, namespace = "default", onUpdate }: FlexibleFormElementProps) => {
+  const { t: translate } = useTranslation("components");
+  const { disabled, paramsDict, setParamsDict } = useParamStore(namespace);
   const param = paramsDict[name] ?? paramPlaceholder;
 
-  const selectOptions = createListCollection({
-    items:
-      param.schema.enum?.map((value) => ({
-        label: labelLookup(value, param.schema.values_display),
-        value,
-      })) ?? [],
-  });
+  const options =
+    param.schema.enum?.map((value) => ({
+      label: labelLookup(value, param.schema.values_display),
+      value: toOptionValue(value),
+    })) ?? [];
 
-  const contentRef = useRef<HTMLDivElement>(null);
+  const currentValue = options.find((opt) => opt.value === toOptionValue(param.value)) ?? null;
 
-  const handleChange = ([value]: Array<string>) => {
+  const handleChange = (
+    selected: SingleValue<{
+      label: string;
+      value: string;
+    }>,
+  ) => {
     if (paramsDict[name]) {
-      // "undefined" values are removed from params, so we set it to null to avoid falling back to DAG defaults.
-      // eslint-disable-next-line unicorn/no-null
-      paramsDict[name].value = value ?? null;
+      if (!selected || selected.value === NULL_STRING_VALUE) {
+        paramsDict[name].value = null;
+      } else {
+        // Map the string value back to the original typed enum value (e.g. number, object)
+        // so that backend validation receives the correct type.
+        const originalValue = param.schema.enum?.find((enumVal) => toOptionValue(enumVal) === selected.value);
+
+        paramsDict[name].value = originalValue ?? selected.value;
+      }
     }
 
     setParamsDict(paramsDict);
+    onUpdate(selected?.value ?? "");
   };
 
   return (
-    <Select.Root
-      collection={selectOptions}
+    <ReactSelect
       id={`element_${name}`}
+      isClearable
+      isDisabled={disabled}
+      menuPosition="fixed"
       name={`element_${name}`}
-      onValueChange={(event) => handleChange(event.value)}
-      ref={contentRef}
+      onChange={handleChange}
+      options={options}
+      placeholder={translate("flexibleForm.placeholder")}
       size="sm"
-      value={enumTypes.includes(typeof param.value) ? [param.value as string] : undefined}
-    >
-      <Select.Trigger clearable>
-        <Select.ValueText placeholder="Select Value" />
-      </Select.Trigger>
-      <Select.Content portalRef={contentRef}>
-        {selectOptions.items.map((option) => (
-          <Select.Item item={option} key={option.value}>
-            {option.label}
-          </Select.Item>
-        ))}
-      </Select.Content>
-    </Select.Root>
+      value={currentValue}
+    />
   );
 };

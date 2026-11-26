@@ -20,15 +20,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator
 from airflow.providers.google.cloud.hooks.dataproc_metastore import DataprocMetastoreHook
 from airflow.providers.google.cloud.hooks.gcs import parse_json_from_gcs
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
     from google.api_core.operation import Operation
 
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class MetastoreHivePartitionSensor(BaseSensorOperator):
@@ -61,6 +60,7 @@ class MetastoreHivePartitionSensor(BaseSensorOperator):
         "table",
         "partitions",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -112,7 +112,7 @@ class MetastoreHivePartitionSensor(BaseSensorOperator):
 
         # Extract actual query results
         result_base_uri = result_manifest_uri.rsplit("/", 1)[0]
-        results = (f"{result_base_uri}//{filename}" for filename in manifest.get("filenames", []))
+        results = (f"{result_base_uri}/{filename}" for filename in manifest.get("filenames", []))
         found_partitions = sum(
             len(
                 parse_json_from_gcs(

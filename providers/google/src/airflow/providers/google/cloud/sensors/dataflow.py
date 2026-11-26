@@ -19,12 +19,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator, PokeReturnValue, conf
 from airflow.providers.google.cloud.hooks.dataflow import (
     DEFAULT_DATAFLOW_LOCATION,
     DataflowHook,
@@ -37,10 +36,9 @@ from airflow.providers.google.cloud.triggers.dataflow import (
     DataflowJobStatusTrigger,
 )
 from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class DataflowJobStatusSensor(BaseSensorOperator):
@@ -72,7 +70,10 @@ class DataflowJobStatusSensor(BaseSensorOperator):
     :param poll_interval: Time (seconds) to wait between two consecutive calls to check the job.
     """
 
-    template_fields: Sequence[str] = ("job_id",)
+    template_fields: Sequence[str] = (
+        "job_id",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,
@@ -117,7 +118,7 @@ class DataflowJobStatusSensor(BaseSensorOperator):
 
         if job_status in self.expected_statuses:
             return True
-        elif job_status in DataflowJobStatus.TERMINAL_STATES:
+        if job_status in DataflowJobStatus.TERMINAL_STATES:
             message = f"Job with id '{self.job_id}' is already in terminal state: {job_status}"
             raise AirflowException(message)
 
@@ -194,7 +195,10 @@ class DataflowJobMetricsSensor(BaseSensorOperator):
 
     """
 
-    template_fields: Sequence[str] = ("job_id",)
+    template_fields: Sequence[str] = (
+        "job_id",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,
@@ -221,7 +225,7 @@ class DataflowJobMetricsSensor(BaseSensorOperator):
         self.deferrable = deferrable
         self.poll_interval = poll_interval
 
-    def poke(self, context: Context) -> bool:
+    def poke(self, context: Context) -> PokeReturnValue | bool:
         if self.fail_on_terminal_state:
             job = self.hook.get_job(
                 job_id=self.job_id,
@@ -238,26 +242,35 @@ class DataflowJobMetricsSensor(BaseSensorOperator):
             project_id=self.project_id,
             location=self.location,
         )
-        return result["metrics"] if self.callback is None else self.callback(result["metrics"])
+        result = result["metrics"] if self.callback is None else self.callback(result["metrics"])
+
+        if isinstance(result, PokeReturnValue):
+            return result
+
+        if bool(result):
+            return PokeReturnValue(
+                is_done=True,
+                xcom_value=result,
+            )
+        return False
 
     def execute(self, context: Context) -> Any:
         """Airflow runs this method on the worker and defers using the trigger."""
         if not self.deferrable:
-            super().execute(context)
-        else:
-            self.defer(
-                timeout=self.execution_timeout,
-                trigger=DataflowJobMetricsTrigger(
-                    job_id=self.job_id,
-                    project_id=self.project_id,
-                    location=self.location,
-                    gcp_conn_id=self.gcp_conn_id,
-                    poll_sleep=self.poll_interval,
-                    impersonation_chain=self.impersonation_chain,
-                    fail_on_terminal_state=self.fail_on_terminal_state,
-                ),
-                method_name="execute_complete",
-            )
+            return super().execute(context)
+        self.defer(
+            timeout=self.execution_timeout,
+            trigger=DataflowJobMetricsTrigger(
+                job_id=self.job_id,
+                project_id=self.project_id,
+                location=self.location,
+                gcp_conn_id=self.gcp_conn_id,
+                poll_sleep=self.poll_interval,
+                impersonation_chain=self.impersonation_chain,
+                fail_on_terminal_state=self.fail_on_terminal_state,
+            ),
+            method_name="execute_complete",
+        )
 
     def execute_complete(self, context: Context, event: dict[str, str | list]) -> Any:
         """
@@ -315,7 +328,10 @@ class DataflowJobMessagesSensor(BaseSensorOperator):
     :param poll_interval: Time (seconds) to wait between two consecutive calls to check the job.
     """
 
-    template_fields: Sequence[str] = ("job_id",)
+    template_fields: Sequence[str] = (
+        "job_id",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,
@@ -342,7 +358,7 @@ class DataflowJobMessagesSensor(BaseSensorOperator):
         self.deferrable = deferrable
         self.poll_interval = poll_interval
 
-    def poke(self, context: Context) -> bool:
+    def poke(self, context: Context) -> PokeReturnValue | bool:
         if self.fail_on_terminal_state:
             job = self.hook.get_job(
                 job_id=self.job_id,
@@ -359,27 +375,35 @@ class DataflowJobMessagesSensor(BaseSensorOperator):
             project_id=self.project_id,
             location=self.location,
         )
+        result = result if self.callback is None else self.callback(result)
 
-        return result if self.callback is None else self.callback(result)
+        if isinstance(result, PokeReturnValue):
+            return result
+
+        if bool(result):
+            return PokeReturnValue(
+                is_done=True,
+                xcom_value=result,
+            )
+        return False
 
     def execute(self, context: Context) -> Any:
         """Airflow runs this method on the worker and defers using the trigger."""
         if not self.deferrable:
-            super().execute(context)
-        else:
-            self.defer(
-                timeout=self.execution_timeout,
-                trigger=DataflowJobMessagesTrigger(
-                    job_id=self.job_id,
-                    project_id=self.project_id,
-                    location=self.location,
-                    gcp_conn_id=self.gcp_conn_id,
-                    poll_sleep=self.poll_interval,
-                    impersonation_chain=self.impersonation_chain,
-                    fail_on_terminal_state=self.fail_on_terminal_state,
-                ),
-                method_name="execute_complete",
-            )
+            return super().execute(context)
+        self.defer(
+            timeout=self.execution_timeout,
+            trigger=DataflowJobMessagesTrigger(
+                job_id=self.job_id,
+                project_id=self.project_id,
+                location=self.location,
+                gcp_conn_id=self.gcp_conn_id,
+                poll_sleep=self.poll_interval,
+                impersonation_chain=self.impersonation_chain,
+                fail_on_terminal_state=self.fail_on_terminal_state,
+            ),
+            method_name="execute_complete",
+        )
 
     def execute_complete(self, context: Context, event: dict[str, str | list]) -> Any:
         """
@@ -437,7 +461,10 @@ class DataflowJobAutoScalingEventsSensor(BaseSensorOperator):
     :param poll_interval: Time (seconds) to wait between two consecutive calls to check the job.
     """
 
-    template_fields: Sequence[str] = ("job_id",)
+    template_fields: Sequence[str] = (
+        "job_id",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,
@@ -464,7 +491,7 @@ class DataflowJobAutoScalingEventsSensor(BaseSensorOperator):
         self.deferrable = deferrable
         self.poll_interval = poll_interval
 
-    def poke(self, context: Context) -> bool:
+    def poke(self, context: Context) -> PokeReturnValue | bool:
         if self.fail_on_terminal_state:
             job = self.hook.get_job(
                 job_id=self.job_id,
@@ -481,26 +508,33 @@ class DataflowJobAutoScalingEventsSensor(BaseSensorOperator):
             project_id=self.project_id,
             location=self.location,
         )
+        result = result if self.callback is None else self.callback(result)
+        if isinstance(result, PokeReturnValue):
+            return result
 
-        return result if self.callback is None else self.callback(result)
+        if bool(result):
+            return PokeReturnValue(
+                is_done=True,
+                xcom_value=result,
+            )
+        return False
 
     def execute(self, context: Context) -> Any:
         """Airflow runs this method on the worker and defers using the trigger."""
         if not self.deferrable:
-            super().execute(context)
-        else:
-            self.defer(
-                trigger=DataflowJobAutoScalingEventTrigger(
-                    job_id=self.job_id,
-                    project_id=self.project_id,
-                    location=self.location,
-                    gcp_conn_id=self.gcp_conn_id,
-                    poll_sleep=self.poll_interval,
-                    impersonation_chain=self.impersonation_chain,
-                    fail_on_terminal_state=self.fail_on_terminal_state,
-                ),
-                method_name="execute_complete",
-            )
+            return super().execute(context)
+        self.defer(
+            trigger=DataflowJobAutoScalingEventTrigger(
+                job_id=self.job_id,
+                project_id=self.project_id,
+                location=self.location,
+                gcp_conn_id=self.gcp_conn_id,
+                poll_sleep=self.poll_interval,
+                impersonation_chain=self.impersonation_chain,
+                fail_on_terminal_state=self.fail_on_terminal_state,
+            ),
+            method_name="execute_complete",
+        )
 
     def execute_complete(self, context: Context, event: dict[str, str | list]) -> Any:
         """

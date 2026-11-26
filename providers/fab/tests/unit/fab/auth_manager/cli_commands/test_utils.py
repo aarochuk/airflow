@@ -17,30 +17,26 @@
 from __future__ import annotations
 
 import os
+from unittest import mock
 
 import pytest
 
 import airflow
-from airflow.configuration import conf
+from airflow import settings
 from airflow.exceptions import AirflowConfigException
+from airflow.providers.common.compat.sdk import conf
+from airflow.providers.fab.auth_manager.cli_commands.utils import get_application_builder
 from airflow.providers.fab.www.extensions.init_appbuilder import AirflowAppBuilder
 from airflow.providers.fab.www.session import AirflowDatabaseSessionInterface
 
-from tests_common.test_utils.compat import ignore_provider_compatibility_error
 from tests_common.test_utils.config import conf_vars
-
-with ignore_provider_compatibility_error("2.9.0+", __file__):
-    from airflow.providers.fab.auth_manager.cli_commands.utils import get_application_builder
-
-pytestmark = pytest.mark.db_test
 
 
 @pytest.fixture
 def flask_app():
     """Fixture to set up the Flask app with the necessary configuration."""
     # Get the webserver config file path
-    webserver_config = conf.get_mandatory_value("webserver", "config_file")
-
+    webserver_config = conf.get_mandatory_value("fab", "config_file")
     with get_application_builder() as appbuilder:
         flask_app = appbuilder.app
 
@@ -50,6 +46,7 @@ def flask_app():
         yield flask_app
 
 
+@pytest.mark.db_test
 class TestCliUtils:
     def test_get_application_builder(self):
         """Test that get_application_builder returns an AirflowAppBuilder instance."""
@@ -78,7 +75,21 @@ class TestCliUtils:
 
     def test_database_auth_backend_in_session(self, flask_app):
         """Test that the database is used for session management when AUTH_BACKEND is set to 'database'."""
+
         with get_application_builder() as appbuilder:
             flask_app = appbuilder.app
             # Ensure that the correct session interface is set (for 'database' auth backend)
             assert isinstance(flask_app.session_interface, AirflowDatabaseSessionInterface)
+
+    def test_flask_app_binds_to_the_metadata_engine(self):
+        """A second engine would bypass a ``create_metadata_engine`` override in local settings."""
+        with get_application_builder() as appbuilder:
+            db = appbuilder.app.extensions["sqlalchemy"]
+            assert db.engine is settings.engine
+
+    @mock.patch("airflow.settings.engine.dispose", autospec=True)
+    def test_metadata_engine_is_not_disposed(self, mock_dispose):
+        with get_application_builder():
+            pass
+
+        mock_dispose.assert_not_called()

@@ -16,15 +16,21 @@
 # under the License.
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+import time_machine
+from sqlalchemy import delete
+from sqlalchemy.orm import Session
 
-from airflow.jobs.job import Job
+from airflow.jobs.job import EXECUTOR_JOB_TYPE, Job, JobState
 from airflow.jobs.scheduler_job_runner import SchedulerJobRunner
-from airflow.utils.session import provide_session
-from airflow.utils.state import JobState, State
+from airflow.models.team import JobTeam, Team
+from airflow.utils.session import NEW_SESSION, provide_session
+from airflow.utils.state import State
 
+from tests_common.test_utils.asserts import assert_queries_count
 from tests_common.test_utils.db import clear_db_jobs
 from tests_common.test_utils.format_datetime import from_datetime_to_zulu
 
@@ -52,10 +58,10 @@ TESTCASE_MULTIPLE_RUNNER = "should_report_success_for_multiple_runners"
 class TestJobEndpoint:
     """Common class for /jobs related unit tests."""
 
-    scheduler_jobs: list[Job] | None = None
-    job_runners: list[SchedulerJobRunner] | None = None
+    scheduler_jobs: list[Job]
+    job_runners: list[SchedulerJobRunner]
 
-    def _setup_should_report_success_for_one_working_scheduler(self, session=None):
+    def _setup_should_report_success_for_one_working_scheduler(self, session: Session):
         scheduler_job = Job()
         job_runner = SchedulerJobRunner(job=scheduler_job)
         scheduler_job.state = State.RUNNING
@@ -65,7 +71,7 @@ class TestJobEndpoint:
         self.job_runners.append(job_runner)
         scheduler_job.heartbeat(heartbeat_callback=job_runner.heartbeat_callback)
 
-    def _setup_should_report_success_for_one_working_scheduler_with_hostname(self, session=None):
+    def _setup_should_report_success_for_one_working_scheduler_with_hostname(self, session: Session):
         scheduler_job = Job()
         job_runner = SchedulerJobRunner(job=scheduler_job)
         scheduler_job.state = State.RUNNING
@@ -76,7 +82,7 @@ class TestJobEndpoint:
         session.commit()
         scheduler_job.heartbeat(heartbeat_callback=job_runner.heartbeat_callback)
 
-    def _setup_should_report_success_for_ha_schedulers(self, session=None):
+    def _setup_should_report_success_for_ha_schedulers(self, session: Session):
         for _ in range(3):
             scheduler_job = Job()
             job_runner = SchedulerJobRunner(job=scheduler_job)
@@ -87,7 +93,7 @@ class TestJobEndpoint:
         session.commit()
         scheduler_job.heartbeat(heartbeat_callback=job_runner.heartbeat_callback)
 
-    def _setup_should_ignore_not_running_jobs(self, session=None):
+    def _setup_should_ignore_not_running_jobs(self, session: Session):
         for _ in range(3):
             scheduler_job = Job()
             job_runner = SchedulerJobRunner(job=scheduler_job)
@@ -97,7 +103,7 @@ class TestJobEndpoint:
             self.job_runners.append(job_runner)
         session.commit()
 
-    def _setup_should_raise_exception_for_multiple_scheduler_on_one_host(self, session=None):
+    def _setup_should_raise_exception_for_multiple_scheduler_on_one_host(self, session: Session):
         for _ in range(3):
             scheduler_job = Job()
             job_runner = SchedulerJobRunner(job=scheduler_job)
@@ -111,7 +117,7 @@ class TestJobEndpoint:
         scheduler_job.heartbeat(heartbeat_callback=job_runner.heartbeat_callback)
 
     @provide_session
-    def setup(self, testcase: TestCase, session=None) -> None:
+    def setup(self, testcase: TestCase, *, session: Session = NEW_SESSION) -> None:
         """
         Setup testcase at runtime based on the `testcase` provided by `pytest.mark.parametrize`.
         """
@@ -127,13 +133,13 @@ class TestJobEndpoint:
 
 class TestGetJobs(TestJobEndpoint):
     @pytest.mark.parametrize(
-        "testcase, query_params, expected_status_code, expected_total_entries",
+        ("testcase", "query_params", "expected_status_code", "expected_total_entries"),
         [
             # original testcases refactor from tests/cli/commands/test_jobs_command.py
             (TESTCASE_ONE_SCHEDULER, {}, 200, 1),
             (TESTCASE_ONE_SCHEDULER_WITH_HOSTNAME, {"hostname": "HOSTNAME"}, 200, 1),
             (TESTCASE_HA_SCHEDULERS, {"limit": 100}, 200, 3),
-            (TESTCASE_IGNORE_NOT_RUNNING, {}, 200, 0),
+            (TESTCASE_IGNORE_NOT_RUNNING, {}, 200, 3),
             (TESTCASE_MULTIPLE_SCHEDULERS_ON_ONE_HOST, {"limit": 100}, 200, 3),
         ],
     )
@@ -142,27 +148,149 @@ class TestGetJobs(TestJobEndpoint):
     ):
         # setup testcase at runtime based on the `testcase` parameter
         self.setup(testcase)
-        response = test_client.get("/jobs", params=query_params)
+        with assert_queries_count(3):
+            response = test_client.get("/jobs", params=query_params)
         assert response.status_code == expected_status_code
         if expected_status_code != 200:
             return
         response_json = response.json()
         assert response_json["total_entries"] == expected_total_entries
 
-        for idx, resp_job in enumerate(response_json["jobs"]):
+        for resp_job in response_json["jobs"]:
+            matched = [j for j in self.scheduler_jobs if j.id == resp_job["id"]]
+            assert len(matched) == 1
             expected_job = {
-                "id": self.scheduler_jobs[idx].id,
+                "id": matched[0].id,
+                "bundle_names": None,
+                "dag_display_name": None,
                 "dag_id": None,
-                "state": "running",
+                "state": matched[0].state,
                 "job_type": "SchedulerJob",
-                "start_date": from_datetime_to_zulu(self.scheduler_jobs[idx].start_date),
+                "start_date": from_datetime_to_zulu(matched[0].start_date),
                 "end_date": None,
-                "latest_heartbeat": from_datetime_to_zulu(self.scheduler_jobs[idx].latest_heartbeat),
+                "latest_heartbeat": from_datetime_to_zulu(matched[0].latest_heartbeat),
                 "executor_class": None,
-                "hostname": self.scheduler_jobs[idx].hostname,
-                "unixname": self.scheduler_jobs[idx].unixname,
+                "hostname": matched[0].hostname,
+                "team_names": [],
+                "unixname": matched[0].unixname,
             }
             assert resp_job == expected_job
+
+    def test_get_jobs_filters_by_dag_id(self, test_client, session: Session):
+        clear_db_jobs()
+        session.add_all(
+            [
+                Job(dag_id="target_dag", state=JobState.RUNNING, job_type="SchedulerJob"),
+                Job(dag_id="other_dag", state=JobState.SUCCESS, job_type="SchedulerJob"),
+            ]
+        )
+        session.commit()
+
+        response = test_client.get("/jobs", params={"dag_id": "target_dag"})
+
+        assert response.status_code == 200
+        response_json = response.json()
+        assert response_json["total_entries"] == 1
+        assert response_json["jobs"][0]["dag_id"] == "target_dag"
+
+    @pytest.fixture
+    def extra_team(self, session: Session):
+        team = Team(name="other-team")
+        session.add(team)
+        session.commit()
+        yield team
+        session.execute(delete(JobTeam).where(JobTeam.team_name == team.name))
+        session.delete(team)
+        session.commit()
+
+    def test_get_jobs_includes_team_names_and_bundle_names(
+        self, test_client, session: Session, testing_team, extra_team
+    ):
+        clear_db_jobs()
+        job = Job(
+            state=JobState.RUNNING,
+            job_type="DagProcessorJob",
+            team_names=[extra_team.name, testing_team.name],
+            bundle_names=["bundle-a", "bundle-b"],
+        )
+        session.add(job)
+        session.commit()
+
+        response = test_client.get("/jobs")
+
+        assert response.status_code == 200
+        response_json = response.json()
+        assert response_json["total_entries"] == 1
+        assert response_json["jobs"][0]["team_names"] == sorted([testing_team.name, extra_team.name])
+        assert response_json["jobs"][0]["bundle_names"] == ["bundle-a", "bundle-b"]
+
+    def test_get_jobs_filters_by_teams(self, test_client, session: Session, testing_team):
+        clear_db_jobs()
+        session.add_all(
+            [
+                Job(state=JobState.RUNNING, job_type="SchedulerJob", team_names=[testing_team.name]),
+                Job(state=JobState.RUNNING, job_type="SchedulerJob"),
+            ]
+        )
+        session.commit()
+
+        response = test_client.get("/jobs", params={"teams": [testing_team.name]})
+
+        assert response.status_code == 200
+        response_json = response.json()
+        assert response_json["total_entries"] == 1
+        assert response_json["jobs"][0]["team_names"] == [testing_team.name]
+
+    @time_machine.travel(datetime(2024, 1, 1, tzinfo=UTC), tick=False)
+    def test_get_jobs_is_alive_filter_is_consistent_with_pagination(self, test_client, session: Session):
+        clear_db_jobs()
+        now = datetime(2024, 1, 1, tzinfo=UTC)
+        jobs = [
+            Job(state=JobState.RUNNING, job_type="SchedulerJob", latest_heartbeat=now),
+            Job(state=JobState.RUNNING, job_type="SchedulerJob", latest_heartbeat=now),
+            # RUNNING but the heartbeat is older than the health-check threshold -> not alive.
+            Job(
+                state=JobState.RUNNING,
+                job_type="SchedulerJob",
+                latest_heartbeat=now - timedelta(days=1),
+            ),
+            # Not RUNNING -> not alive.
+            Job(state=JobState.FAILED, job_type="SchedulerJob", latest_heartbeat=now),
+        ]
+        session.add_all(jobs)
+        session.commit()
+
+        alive = test_client.get("/jobs", params={"is_alive": True}).json()
+        assert alive["total_entries"] == 2
+        assert {job["id"] for job in alive["jobs"]} == {jobs[0].id, jobs[1].id}
+
+        not_alive = test_client.get("/jobs", params={"is_alive": False}).json()
+        assert not_alive["total_entries"] == 2
+        assert {job["id"] for job in not_alive["jobs"]} == {jobs[2].id, jobs[3].id}
+
+        # total_entries counts the filtered set in SQL, so it stays correct once a page limit applies.
+        paged = test_client.get("/jobs", params={"is_alive": True, "limit": 1}).json()
+        assert paged["total_entries"] == 2
+        assert len(paged["jobs"]) == 1
+
+    @time_machine.travel(datetime(2024, 1, 1, tzinfo=UTC), tick=False)
+    def test_get_jobs_is_alive_filter_recognizes_executor_job_type(self, test_client, session: Session):
+        clear_db_jobs()
+        now = datetime(2024, 1, 1, tzinfo=UTC)
+        fresh = Job(state=JobState.RUNNING, job_type=EXECUTOR_JOB_TYPE, latest_heartbeat=now)
+        stale = Job(
+            state=JobState.RUNNING,
+            job_type=EXECUTOR_JOB_TYPE,
+            latest_heartbeat=now - timedelta(days=1),
+        )
+        session.add_all([fresh, stale])
+        session.commit()
+
+        alive = test_client.get("/jobs", params={"is_alive": True}).json()
+        assert {job["id"] for job in alive["jobs"]} == {fresh.id}
+
+        not_alive = test_client.get("/jobs", params={"is_alive": False}).json()
+        assert {job["id"] for job in not_alive["jobs"]} == {stale.id}
 
     def test_should_raises_401_unauthenticated(self, unauthenticated_test_client):
         response = unauthenticated_test_client.get("/jobs")

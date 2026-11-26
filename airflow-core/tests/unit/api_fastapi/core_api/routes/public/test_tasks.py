@@ -16,19 +16,25 @@
 # under the License.
 from __future__ import annotations
 
-import os
-import unittest
 from datetime import datetime
 
 import pytest
 
-from airflow.models.dag import DAG
-from airflow.models.dagbag import DagBag
-from airflow.models.expandinput import EXPAND_INPUT_EMPTY
-from airflow.models.serialized_dag import SerializedDagModel
+from airflow.api_fastapi.common.dagbag import dag_bag_from_app
+from airflow.models.dag_version import DagVersion
+from airflow.models.dagbag import DBDagBag
 from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.sdk import DAG
+from airflow.sdk.definitions._internal.expandinput import EXPAND_INPUT_EMPTY
 
-from tests_common.test_utils.db import clear_db_dags, clear_db_runs, clear_db_serialized_dags
+from tests_common.test_utils.asserts import assert_queries_count
+from tests_common.test_utils.dag import sync_dag_to_db, sync_dags_to_db
+from tests_common.test_utils.db import (
+    clear_db_dag_bundles,
+    clear_db_dags,
+    clear_db_runs,
+    clear_db_serialized_dags,
+)
 
 pytestmark = pytest.mark.db_test
 
@@ -51,6 +57,7 @@ class TestTaskEndpoint:
         with DAG(self.dag_id, schedule=None, start_date=self.task1_start_date, doc_md="details") as dag:
             task1 = EmptyOperator(task_id=self.task_id, params={"foo": "bar"})
             task2 = EmptyOperator(task_id=self.task_id2, start_date=self.task2_start_date)
+            task1 >> task2
 
         with DAG(self.mapped_dag_id, schedule=None, start_date=self.task1_start_date) as mapped_dag:
             EmptyOperator(task_id=self.task_id3)
@@ -61,26 +68,20 @@ class TestTaskEndpoint:
         with DAG(self.unscheduled_dag_id, start_date=None, schedule=None) as unscheduled_dag:
             task4 = EmptyOperator(task_id=self.unscheduled_task_id1, params={"is_unscheduled": True})
             task5 = EmptyOperator(task_id=self.unscheduled_task_id2, params={"is_unscheduled": True})
+            task4 >> task5
 
-        task1 >> task2
-        task4 >> task5
-        dag_bag = DagBag(os.devnull, include_examples=False)
-        dag_bag.dags = {
-            dag.dag_id: dag,
-            mapped_dag.dag_id: mapped_dag,
-            unscheduled_dag.dag_id: unscheduled_dag,
-        }
-        test_client.app.state.dag_bag = dag_bag
+        sync_dags_to_db([dag, mapped_dag, unscheduled_dag])
+        test_client.app.dependency_overrides[dag_bag_from_app] = DBDagBag
 
     @staticmethod
     def clear_db():
         clear_db_runs()
         clear_db_dags()
         clear_db_serialized_dags()
+        clear_db_dag_bundles()
 
     @pytest.fixture(autouse=True)
     def setup(self, test_client) -> None:
-        self.clear_db()
         self.create_dags(test_client)
 
     def teardown_method(self) -> None:
@@ -101,21 +102,14 @@ class TestGetTask(TestTaskEndpoint):
             "extra_links": [],
             "operator_name": "EmptyOperator",
             "owner": "airflow",
-            "params": {
-                "foo": {
-                    "__class": "airflow.sdk.definitions.param.Param",
-                    "value": "bar",
-                    "description": None,
-                    "schema": {},
-                }
-            },
+            "params": {"foo": {"value": "bar", "schema": {}, "description": None, "source": "task"}},
             "pool": "default_pool",
             "pool_slots": 1.0,
             "priority_weight": 1.0,
             "queue": "default",
             "retries": 0.0,
             "retry_delay": {"__type": "TimeDelta", "days": 0, "seconds": 300, "microseconds": 0},
-            "retry_exponential_backoff": False,
+            "retry_exponential_backoff": 0,
             "start_date": "2020-06-15T00:00:00Z",
             "task_id": "op1",
             "task_display_name": "op1",
@@ -155,7 +149,7 @@ class TestGetTask(TestTaskEndpoint):
             "queue": "default",
             "retries": 0.0,
             "retry_delay": {"__type": "TimeDelta", "days": 0, "microseconds": 0, "seconds": 300},
-            "retry_exponential_backoff": False,
+            "retry_exponential_backoff": 0,
             "start_date": "2020-06-15T00:00:00Z",
             "task_id": "mapped_task",
             "task_display_name": "mapped_task",
@@ -188,10 +182,10 @@ class TestGetTask(TestTaskEndpoint):
             "owner": "airflow",
             "params": {
                 "is_unscheduled": {
-                    "__class": "airflow.sdk.definitions.param.Param",
                     "value": True,
-                    "description": None,
                     "schema": {},
+                    "description": None,
+                    "source": "task",
                 }
             },
             "pool": "default_pool",
@@ -200,7 +194,7 @@ class TestGetTask(TestTaskEndpoint):
             "queue": "default",
             "retries": 0.0,
             "retry_delay": {"__type": "TimeDelta", "days": 0, "seconds": 300, "microseconds": 0},
-            "retry_exponential_backoff": False,
+            "retry_exponential_backoff": 0,
             "start_date": None,
             "task_id": None,
             "task_display_name": None,
@@ -229,13 +223,16 @@ class TestGetTask(TestTaskEndpoint):
 
     def test_should_respond_200_serialized(self, test_client, testing_dag_bundle):
         # Get the dag out of the dagbag before we patch it to an empty one
-        dag = test_client.app.state.dag_bag.get_dag(self.dag_id)
-        dag.sync_to_db()
-        SerializedDagModel.write_dag(dag, bundle_name="test_bundle")
 
-        dag_bag = DagBag(os.devnull, include_examples=False, read_dags_from_db=True)
-        patcher = unittest.mock.patch.object(test_client.app.state, "dag_bag", dag_bag)
-        patcher.start()
+        with DAG(self.dag_id, schedule=None, start_date=self.task1_start_date, doc_md="details") as dag:
+            task1 = EmptyOperator(task_id=self.task_id, params={"foo": "bar"})
+            task2 = EmptyOperator(task_id=self.task_id2, start_date=self.task2_start_date)
+            task1 >> task2
+
+        sync_dag_to_db(dag)
+
+        dag_bag = DBDagBag()
+        test_client.app.dependency_overrides[dag_bag_from_app] = lambda: dag_bag
 
         expected = {
             "class_ref": {
@@ -251,10 +248,10 @@ class TestGetTask(TestTaskEndpoint):
             "owner": "airflow",
             "params": {
                 "foo": {
-                    "__class": "airflow.sdk.definitions.param.Param",
                     "value": "bar",
-                    "description": None,
                     "schema": {},
+                    "description": None,
+                    "source": "task",
                 }
             },
             "pool": "default_pool",
@@ -263,7 +260,7 @@ class TestGetTask(TestTaskEndpoint):
             "queue": "default",
             "retries": 0.0,
             "retry_delay": {"__type": "TimeDelta", "days": 0, "seconds": 300, "microseconds": 0},
-            "retry_exponential_backoff": False,
+            "retry_exponential_backoff": 0,
             "start_date": "2020-06-15T00:00:00Z",
             "task_id": "op1",
             "task_display_name": "op1",
@@ -281,7 +278,40 @@ class TestGetTask(TestTaskEndpoint):
         )
         assert response.status_code == 200
         assert response.json() == expected
-        patcher.stop()
+
+    def test_version_number_describes_the_task_as_it_was(self, test_client, dag_maker, session):
+        """A later edit must not change how an earlier version's task is reported."""
+        dag_id = "test_versioned_task_dag"
+
+        with dag_maker(dag_id, session=session, bundle_version="commit-one"):
+            EmptyOperator(task_id=self.task_id, retries=4)
+        session.commit()
+        first_version_number = DagVersion.get_version(dag_id, session=session).version_number
+
+        with dag_maker(dag_id, session=session, bundle_version="commit-two"):
+            EmptyOperator(task_id=self.task_id, retries=0)
+        session.commit()
+
+        assert DagVersion.get_version(dag_id, session=session).version_number != first_version_number
+
+        url = f"{self.api_prefix}/{dag_id}/tasks/{self.task_id}"
+
+        latest = test_client.get(url)
+        assert latest.status_code == 200
+        assert latest.json()["retries"] == 0
+
+        pinned = test_client.get(url, params={"version_number": first_version_number})
+        assert pinned.status_code == 200
+        assert pinned.json()["retries"] == 4
+
+    @pytest.mark.parametrize("version_number", [0, 99], ids=["zero", "never-written"])
+    def test_unknown_version_number_is_not_found(self, test_client, version_number):
+        """Without this, an unresolvable version would reach ``get_task`` and raise a 500."""
+        response = test_client.get(
+            f"{self.api_prefix}/{self.dag_id}/tasks/{self.task_id}",
+            params={"version_number": version_number},
+        )
+        assert response.status_code == 404
 
     def test_should_respond_404(self, test_client):
         task_id = "xxxx_not_existing"
@@ -324,10 +354,10 @@ class TestGetTasks(TestTaskEndpoint):
                     "owner": "airflow",
                     "params": {
                         "foo": {
-                            "__class": "airflow.sdk.definitions.param.Param",
                             "value": "bar",
-                            "description": None,
                             "schema": {},
+                            "description": None,
+                            "source": "task",
                         }
                     },
                     "pool": "default_pool",
@@ -336,7 +366,7 @@ class TestGetTasks(TestTaskEndpoint):
                     "queue": "default",
                     "retries": 0.0,
                     "retry_delay": {"__type": "TimeDelta", "days": 0, "seconds": 300, "microseconds": 0},
-                    "retry_exponential_backoff": False,
+                    "retry_exponential_backoff": 0,
                     "start_date": "2020-06-15T00:00:00Z",
                     "task_id": "op1",
                     "task_display_name": "op1",
@@ -368,7 +398,7 @@ class TestGetTasks(TestTaskEndpoint):
                     "queue": "default",
                     "retries": 0.0,
                     "retry_delay": {"__type": "TimeDelta", "days": 0, "seconds": 300, "microseconds": 0},
-                    "retry_exponential_backoff": False,
+                    "retry_exponential_backoff": 0,
                     "start_date": "2020-06-16T00:00:00Z",
                     "task_id": self.task_id2,
                     "task_display_name": self.task_id2,
@@ -384,7 +414,8 @@ class TestGetTasks(TestTaskEndpoint):
             ],
             "total_entries": 2,
         }
-        response = test_client.get(f"{self.api_prefix}/{self.dag_id}/tasks")
+        with assert_queries_count(2):
+            response = test_client.get(f"{self.api_prefix}/{self.dag_id}/tasks")
         assert response.status_code == 200
         assert response.json() == expected
 
@@ -411,7 +442,7 @@ class TestGetTasks(TestTaskEndpoint):
                     "queue": "default",
                     "retries": 0.0,
                     "retry_delay": {"__type": "TimeDelta", "days": 0, "microseconds": 0, "seconds": 300},
-                    "retry_exponential_backoff": False,
+                    "retry_exponential_backoff": 0,
                     "start_date": "2020-06-15T00:00:00Z",
                     "task_id": "mapped_task",
                     "task_display_name": "mapped_task",
@@ -442,7 +473,7 @@ class TestGetTasks(TestTaskEndpoint):
                     "queue": "default",
                     "retries": 0.0,
                     "retry_delay": {"__type": "TimeDelta", "days": 0, "seconds": 300, "microseconds": 0},
-                    "retry_exponential_backoff": False,
+                    "retry_exponential_backoff": 0,
                     "start_date": "2020-06-15T00:00:00Z",
                     "task_id": self.task_id3,
                     "task_display_name": self.task_id3,
@@ -458,7 +489,9 @@ class TestGetTasks(TestTaskEndpoint):
             ],
             "total_entries": 2,
         }
-        response = test_client.get(f"{self.api_prefix}/{self.mapped_dag_id}/tasks")
+
+        with assert_queries_count(2):
+            response = test_client.get(f"{self.api_prefix}/{self.mapped_dag_id}/tasks")
         assert response.status_code == 200
         assert response.json() == expected
 
@@ -483,10 +516,10 @@ class TestGetTasks(TestTaskEndpoint):
                     "owner": "airflow",
                     "params": {
                         "is_unscheduled": {
-                            "__class": "airflow.sdk.definitions.param.Param",
                             "value": True,
-                            "description": None,
                             "schema": {},
+                            "description": None,
+                            "source": "task",
                         }
                     },
                     "pool": "default_pool",
@@ -495,7 +528,7 @@ class TestGetTasks(TestTaskEndpoint):
                     "queue": "default",
                     "retries": 0.0,
                     "retry_delay": {"__type": "TimeDelta", "days": 0, "seconds": 300, "microseconds": 0},
-                    "retry_exponential_backoff": False,
+                    "retry_exponential_backoff": 0,
                     "start_date": None,
                     "task_id": task_id,
                     "task_display_name": task_id,
@@ -512,23 +545,27 @@ class TestGetTasks(TestTaskEndpoint):
             ],
             "total_entries": len(downstream_dict),
         }
-        response = test_client.get(f"{self.api_prefix}/{self.unscheduled_dag_id}/tasks")
+
+        with assert_queries_count(2):
+            response = test_client.get(f"{self.api_prefix}/{self.unscheduled_dag_id}/tasks")
         assert response.status_code == 200
         assert response.json() == expected
 
     def test_should_respond_200_ascending_order_by_start_date(self, test_client):
-        response = test_client.get(
-            f"{self.api_prefix}/{self.dag_id}/tasks?order_by=start_date",
-        )
+        with assert_queries_count(2):
+            response = test_client.get(
+                f"{self.api_prefix}/{self.dag_id}/tasks?order_by=start_date",
+            )
         assert response.status_code == 200
         assert self.task1_start_date < self.task2_start_date
         assert response.json()["tasks"][0]["task_id"] == self.task_id
         assert response.json()["tasks"][1]["task_id"] == self.task_id2
 
     def test_should_respond_200_descending_order_by_start_date(self, test_client):
-        response = test_client.get(
-            f"{self.api_prefix}/{self.dag_id}/tasks?order_by=-start_date",
-        )
+        with assert_queries_count(2):
+            response = test_client.get(
+                f"{self.api_prefix}/{self.dag_id}/tasks?order_by=-start_date",
+            )
         assert response.status_code == 200
         # - means is descending
         assert self.task1_start_date < self.task2_start_date
@@ -540,9 +577,21 @@ class TestGetTasks(TestTaskEndpoint):
             f"{self.api_prefix}/{self.dag_id}/tasks?order_by=invalid_task_colume_name",
         )
         assert response.status_code == 400
-        assert (
-            response.json()["detail"] == "'EmptyOperator' object has no attribute 'invalid_task_colume_name'"
+        assert response.json()["detail"] == (
+            "Ordering with 'invalid_task_colume_name' is disallowed or "
+            "the attribute does not exist on the model"
         )
+
+    def test_should_respond_200_order_by_start_date_with_none(self, test_client):
+        """Sorting by a nullable field should not raise TypeError (issue #63927)."""
+        response = test_client.get(
+            f"{self.api_prefix}/{self.unscheduled_dag_id}/tasks?order_by=start_date",
+        )
+        assert response.status_code == 200
+        tasks = response.json()["tasks"]
+        assert len(tasks) == 2
+        # All start_dates are None for unscheduled tasks; verify they sort without error
+        assert all(t["start_date"] is None for t in tasks)
 
     def test_should_respond_404(self, test_client):
         dag_id = "xxxx_not_existing"

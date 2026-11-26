@@ -16,11 +16,13 @@
 # under the License.
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 
-from pydantic import Field
+from pydantic import Field, computed_field
 
 from airflow.api_fastapi.core_api.base import BaseModel
+from airflow.api_fastapi.core_api.datamodels.dags import _get_file_token_serializer
 
 
 class ImportErrorResponse(BaseModel):
@@ -29,12 +31,21 @@ class ImportErrorResponse(BaseModel):
     id: int = Field(alias="import_error_id")
     timestamp: datetime
     filename: str
-    bundle_name: str
+    source_reference: str | None
+    bundle_name: str | None
     stacktrace: str = Field(alias="stack_trace")
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def file_token(self) -> str:
+        """Return a signed token identifying the file, used to request its reparse."""
+        return _get_file_token_serializer().dumps(
+            {"bundle_name": self.bundle_name, "relative_fileloc": self.filename}
+        )
 
 
 class ImportErrorCollectionResponse(BaseModel):
     """Import Error Collection Response."""
 
-    import_errors: list[ImportErrorResponse]
+    import_errors: Iterable[ImportErrorResponse]
     total_entries: int

@@ -30,14 +30,15 @@ from __future__ import annotations
 import itertools
 import random
 import time
-from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import botocore.client
 import botocore.exceptions
 import botocore.waiter
 
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.hooks.base_aws import AwsBaseHook
+from airflow.providers.common.compat.sdk import AirflowException
 
 if TYPE_CHECKING:
     from airflow.providers.amazon.aws.utils.task_log_fetcher import AwsTaskLogFetcher
@@ -139,6 +140,17 @@ class BatchProtocol(Protocol):
         :param reason: a reason to terminate job ID
 
         :return: an API response
+        """
+        ...
+
+    def create_compute_environment(self, **kwargs) -> dict:
+        """
+        Create an AWS Batch compute environment.
+
+        :param kwargs: Arguments for boto3 create_compute_environment
+
+        .. seealso::
+            - https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/batch/client/create_compute_environment.html
         """
         ...
 
@@ -374,8 +386,7 @@ class BatchClientHook(AwsBaseHook):
             )
             if job_status in match_status:
                 return True
-        else:
-            raise AirflowException(f"AWS Batch job ({job_id}) status checks exceed max_retries")
+        raise AirflowException(f"AWS Batch job ({job_id}) status checks exceed max_retries")
 
     def get_job_description(self, job_id: str) -> dict:
         """
@@ -414,10 +425,9 @@ class BatchClientHook(AwsBaseHook):
                     "check Amazon Provider AWS Connection documentation for more details.",
                     str(err),
                 )
-        else:
-            raise AirflowException(
-                f"AWS Batch job ({job_id}) description error: exceeded status_retries ({self.status_retries})"
-            )
+        raise AirflowException(
+            f"AWS Batch job ({job_id}) description error: exceeded status_retries ({self.status_retries})"
+        )
 
     @staticmethod
     def parse_job_description(job_id: str, response: dict) -> dict:
@@ -466,8 +476,20 @@ class BatchClientHook(AwsBaseHook):
                 p.get("container", {}).get("logConfiguration", {})
                 for p in job_node_properties.get("nodeRangeProperties", {})
             ]
-            # one stream name per attempt
-            stream_names = [a.get("container", {}).get("logStreamName") for a in job_desc.get("attempts", [])]
+            # one stream name per attempt — handles both single-node and multi-node schemas
+            stream_names = []
+            for attempt in job_desc.get("attempts", []):
+                # Single-node: attempts[].container.logStreamName
+                container_stream = attempt.get("container", {}).get("logStreamName")
+                if container_stream:
+                    stream_names.append(container_stream)
+                    continue
+                # Multi-node: attempts[].taskProperties[].containers[].logStreamName
+                for task_prop in attempt.get("taskProperties", []):
+                    for container in task_prop.get("containers", []):
+                        task_stream = container.get("logStreamName")
+                        if task_stream:
+                            stream_names.append(task_stream)
         elif job_container_desc:
             log_configs = [job_container_desc.get("logConfiguration", {})]
             stream_name = job_container_desc.get("logStreamName")

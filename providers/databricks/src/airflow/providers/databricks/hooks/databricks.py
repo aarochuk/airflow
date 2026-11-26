@@ -20,9 +20,9 @@ Databricks hook.
 
 This hook enable the submitting and running of jobs to the Databricks platform. Internally the
 operators talk to the
-``api/2.1/jobs/run-now``
+``api/2.2/jobs/run-now``
 `endpoint <https://docs.databricks.com/dev-tools/api/latest/jobs.html#operation/JobsRunNow>_`
-or the ``api/2.1/jobs/runs/submit``
+or the ``api/2.2/jobs/runs/submit``
 `endpoint <https://docs.databricks.com/dev-tools/api/latest/jobs.html#operation/JobsRunsSubmit>`_.
 """
 
@@ -34,36 +34,55 @@ from typing import Any
 
 from requests import exceptions as requests_exceptions
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
+from airflow.providers.common.sql.hooks.lineage import send_sql_hook_lineage
 from airflow.providers.databricks.hooks.databricks_base import BaseDatabricksHook
 
-GET_CLUSTER_ENDPOINT = ("GET", "api/2.0/clusters/get")
-RESTART_CLUSTER_ENDPOINT = ("POST", "api/2.0/clusters/restart")
-START_CLUSTER_ENDPOINT = ("POST", "api/2.0/clusters/start")
-TERMINATE_CLUSTER_ENDPOINT = ("POST", "api/2.0/clusters/delete")
+GET_CLUSTER_ENDPOINT = ("GET", "2.1/clusters/get")
+RESTART_CLUSTER_ENDPOINT = ("POST", "2.1/clusters/restart")
+START_CLUSTER_ENDPOINT = ("POST", "2.1/clusters/start")
+TERMINATE_CLUSTER_ENDPOINT = ("POST", "2.1/clusters/delete")
 
-CREATE_ENDPOINT = ("POST", "api/2.1/jobs/create")
-RESET_ENDPOINT = ("POST", "api/2.1/jobs/reset")
-UPDATE_ENDPOINT = ("POST", "api/2.1/jobs/update")
-RUN_NOW_ENDPOINT = ("POST", "api/2.1/jobs/run-now")
-SUBMIT_RUN_ENDPOINT = ("POST", "api/2.1/jobs/runs/submit")
-GET_RUN_ENDPOINT = ("GET", "api/2.1/jobs/runs/get")
-CANCEL_RUN_ENDPOINT = ("POST", "api/2.1/jobs/runs/cancel")
-DELETE_RUN_ENDPOINT = ("POST", "api/2.1/jobs/runs/delete")
-REPAIR_RUN_ENDPOINT = ("POST", "api/2.1/jobs/runs/repair")
-OUTPUT_RUNS_JOB_ENDPOINT = ("GET", "api/2.1/jobs/runs/get-output")
-CANCEL_ALL_RUNS_ENDPOINT = ("POST", "api/2.1/jobs/runs/cancel-all")
+CREATE_ENDPOINT = ("POST", "2.2/jobs/create")
+RESET_ENDPOINT = ("POST", "2.2/jobs/reset")
+UPDATE_ENDPOINT = ("POST", "2.2/jobs/update")
+RUN_NOW_ENDPOINT = ("POST", "2.2/jobs/run-now")
+SUBMIT_RUN_ENDPOINT = ("POST", "2.2/jobs/runs/submit")
+GET_RUN_ENDPOINT = ("GET", "2.2/jobs/runs/get")
+CANCEL_RUN_ENDPOINT = ("POST", "2.2/jobs/runs/cancel")
+DELETE_RUN_ENDPOINT = ("POST", "2.2/jobs/runs/delete")
+REPAIR_RUN_ENDPOINT = ("POST", "2.2/jobs/runs/repair")
+OUTPUT_RUNS_JOB_ENDPOINT = ("GET", "2.2/jobs/runs/get-output")
+CANCEL_ALL_RUNS_ENDPOINT = ("POST", "2.2/jobs/runs/cancel-all")
 
-INSTALL_LIBS_ENDPOINT = ("POST", "api/2.0/libraries/install")
-UNINSTALL_LIBS_ENDPOINT = ("POST", "api/2.0/libraries/uninstall")
+INSTALL_LIBS_ENDPOINT = ("POST", "2.0/libraries/install")
+UNINSTALL_LIBS_ENDPOINT = ("POST", "2.0/libraries/uninstall")
+UPDATE_REPO_ENDPOINT = ("PATCH", "2.0/repos/")
+DELETE_REPO_ENDPOINT = ("DELETE", "2.0/repos/")
+CREATE_REPO_ENDPOINT = ("POST", "2.0/repos")
 
-LIST_JOBS_ENDPOINT = ("GET", "api/2.1/jobs/list")
-LIST_PIPELINES_ENDPOINT = ("GET", "api/2.0/pipelines")
+LIST_JOBS_ENDPOINT = ("GET", "2.2/jobs/list")
+LIST_PIPELINES_ENDPOINT = ("GET", "2.0/pipelines")
+LIST_SQL_ENDPOINTS_ENDPOINT = ("GET", "2.0/sql/warehouses")
 
-WORKSPACE_GET_STATUS_ENDPOINT = ("GET", "api/2.0/workspace/get-status")
+WORKSPACE_GET_STATUS_ENDPOINT = ("GET", "2.0/workspace/get-status")
 
-SPARK_VERSIONS_ENDPOINT = ("GET", "api/2.0/clusters/spark-versions")
-SQL_STATEMENTS_ENDPOINT = "api/2.0/sql/statements"
+SPARK_VERSIONS_ENDPOINT = ("GET", "2.1/clusters/spark-versions")
+SQL_STATEMENTS_ENDPOINT = "2.0/sql/statements"
+SQL_WAREHOUSES_ENDPOINT = "2.0/sql/warehouses"
+
+# ``2.2/jobs/runs/get`` returns at most 100 entries of these nested arrays per page and hands back a
+# ``next_page_token`` for the rest, while repeating every other field on each page. The order of the
+# entries is not the order they were declared in, so a truncated response drops an arbitrary subset.
+PAGINATED_RUN_FIELDS = ("tasks", "job_clusters")
+
+
+def _merge_run_page(run: dict[str, Any], page: dict[str, Any]) -> None:
+    """Append the paginated arrays of ``page`` to those already collected in ``run``."""
+    for field in PAGINATED_RUN_FIELDS:
+        entries = page.get(field)
+        if entries:
+            run[field] = [*run.get(field, []), *entries]
 
 
 class RunLifeCycleState(Enum):
@@ -94,6 +113,8 @@ class RunState:
         "TERMINATED",
         "SKIPPED",
         "INTERNAL_ERROR",
+        "BLOCKED",
+        "WAITING_FOR_RETRY",
         "QUEUED",
     ]
 
@@ -129,6 +150,9 @@ class RunState:
             and self.result_state == other.result_state
             and self.state_message == other.state_message
         )
+
+    def __hash__(self):
+        return hash((self.life_cycle_state, self.result_state, self.state_message))
 
     def __repr__(self) -> str:
         return str(self.__dict__)
@@ -178,6 +202,9 @@ class ClusterState:
 
     def __eq__(self, other) -> bool:
         return self.state == other.state and self.state_message == other.state_message
+
+    def __hash__(self):
+        return hash((self.state, self.state_message))
 
     def __repr__(self) -> str:
         return str(self.__dict__)
@@ -240,6 +267,9 @@ class SQLStatementState:
             and self.error_message == other.error_message
         )
 
+    def __hash__(self):
+        return hash((self.state, self.error_code, self.error_message))
+
     def __repr__(self) -> str:
         return str(self.__dict__)
 
@@ -251,6 +281,53 @@ class SQLStatementState:
         return SQLStatementState(**json.loads(data))
 
 
+class WarehouseState:
+    """Utility class for the state of a Databricks SQL warehouse."""
+
+    WAREHOUSE_STATES = ["STARTING", "RUNNING", "STOPPING", "STOPPED", "DELETING", "DELETED"]
+
+    def __init__(self, state: str = "", *args, **kwargs) -> None:
+        if state not in self.WAREHOUSE_STATES:
+            raise ValueError(
+                f"Unexpected warehouse state: {state}: If the state has been introduced recently, "
+                "please check the Databricks user guide for troubleshooting information"
+            )
+        self.state = state
+
+    @property
+    def is_running(self) -> bool:
+        """Return whether the warehouse is running."""
+        return self.state == "RUNNING"
+
+    @property
+    def is_stopped(self) -> bool:
+        """Return whether the warehouse is stopped."""
+        return self.state == "STOPPED"
+
+    @property
+    def is_deleted(self) -> bool:
+        """Return whether the warehouse is deleting or deleted."""
+        return self.state in ("DELETING", "DELETED")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, WarehouseState):
+            return NotImplemented
+        return self.state == other.state
+
+    def __hash__(self):
+        return hash(self.state)
+
+    def __repr__(self) -> str:
+        return str(self.__dict__)
+
+    def to_json(self) -> str:
+        return json.dumps(self.__dict__)
+
+    @classmethod
+    def from_json(cls, data: str) -> WarehouseState:
+        return WarehouseState(**json.loads(data))
+
+
 class DatabricksHook(BaseDatabricksHook):
     """
     Interact with Databricks.
@@ -260,8 +337,9 @@ class DatabricksHook(BaseDatabricksHook):
         will wait before timing-out.
     :param retry_limit: The number of times to retry the connection in case of
         service outages.
-    :param retry_delay: The number of seconds to wait between retries (it
-        might be a floating point number).
+    :param retry_delay: Minimum wait in seconds between retryable attempts when using the
+        default retry strategy. The wait uses exponential backoff (doubling after each
+        failure, capped at ``2 ** retry_limit`` seconds). May be a floating point number.
     :param retry_args: An optional dictionary with arguments passed to ``tenacity.Retrying`` class.
     """
 
@@ -280,7 +358,7 @@ class DatabricksHook(BaseDatabricksHook):
 
     def create_job(self, json: dict) -> int:
         """
-        Call the ``api/2.1/jobs/create`` endpoint.
+        Call the ``api/2.2/jobs/create`` endpoint.
 
         :param json: The data used in the body of the request to the ``create`` endpoint.
         :return: the job_id as an int
@@ -290,15 +368,25 @@ class DatabricksHook(BaseDatabricksHook):
 
     def reset_job(self, job_id: str, json: dict) -> None:
         """
-        Call the ``api/2.1/jobs/reset`` endpoint.
+        Call the ``api/2.2/jobs/reset`` endpoint.
 
         :param json: The data used in the new_settings of the request to the ``reset`` endpoint.
         """
+        access_control_list = json.get("access_control_list", None)
+        if access_control_list:
+            self.log.info(
+                "Updating job permission for Databricks workflow job id %s with access_control_list %s",
+                job_id,
+                access_control_list,
+            )
+            acl_json = {"access_control_list": access_control_list}
+            self.update_job_permission(job_id=int(job_id), json=acl_json)
+
         self._do_api_call(RESET_ENDPOINT, {"job_id": job_id, "new_settings": json})
 
     def update_job(self, job_id: str, json: dict) -> None:
         """
-        Call the ``api/2.1/jobs/update`` endpoint.
+        Call the ``api/2.2/jobs/update`` endpoint.
 
         :param job_id: The id of the job to update.
         :param json: The data used in the new_settings of the request to the ``update`` endpoint.
@@ -307,7 +395,7 @@ class DatabricksHook(BaseDatabricksHook):
 
     def run_now(self, json: dict) -> int:
         """
-        Call the ``api/2.1/jobs/run-now`` endpoint.
+        Call the ``api/2.2/jobs/run-now`` endpoint.
 
         :param json: The data used in the body of the request to the ``run-now`` endpoint.
         :return: the run_id as an int
@@ -317,7 +405,7 @@ class DatabricksHook(BaseDatabricksHook):
 
     def submit_run(self, json: dict) -> int:
         """
-        Call the ``api/2.1/jobs/runs/submit`` endpoint.
+        Call the ``api/2.2/jobs/runs/submit`` endpoint.
 
         :param json: The data used in the body of the request to the ``submit`` endpoint.
         :return: the run_id as an int
@@ -362,9 +450,9 @@ class DatabricksHook(BaseDatabricksHook):
                 all_jobs += [j for j in jobs if j["settings"]["name"] == job_name]
             else:
                 all_jobs += jobs
-            has_more = response.get("has_more", False)
-            if has_more:
-                page_token = response.get("next_page_token", "")
+            # issue-59189: API v2.2 removes "has_more" field
+            page_token = response.get("next_page_token", "")
+            has_more = bool(page_token)
 
         return all_jobs
 
@@ -384,8 +472,7 @@ class DatabricksHook(BaseDatabricksHook):
 
         if not matching_jobs:
             return None
-        else:
-            return matching_jobs[0]["job_id"]
+        return matching_jobs[0]["job_id"]
 
     def list_pipelines(
         self, batch_size: int = 25, pipeline_name: str | None = None, notebook_path: str | None = None
@@ -445,8 +532,7 @@ class DatabricksHook(BaseDatabricksHook):
 
         if not pipeline_name or len(matching_pipelines) == 0:
             return None
-        else:
-            return matching_pipelines[0]["pipeline_id"]
+        return matching_pipelines[0]["pipeline_id"]
 
     def get_run_page_url(self, run_id: int) -> str:
         """
@@ -513,27 +599,46 @@ class DatabricksHook(BaseDatabricksHook):
         state = response["state"]
         return RunState(**state)
 
+    def get_run_tasks(self, run_id: int) -> list[dict[str, Any]]:
+        """
+        Retrieve list of tasks performed by the run.
+
+        :param run_id: id of the run
+        :return: A list of tasks
+        """
+        return self.get_run(run_id).get("tasks", [])
+
     def get_run(self, run_id: int) -> dict[str, Any]:
         """
         Retrieve run information.
 
         :param run_id: id of the run
-        :return: state of the run
+        :return: state of the run, with every page of the paginated arrays collected
         """
-        json = {"run_id": run_id}
-        response = self._do_api_call(GET_RUN_ENDPOINT, json)
-        return response
+        json: dict[str, Any] = {"run_id": run_id}
+        run = self._do_api_call(GET_RUN_ENDPOINT, json)
+        page_token = run.pop("next_page_token", None)
+        while page_token:
+            page = self._do_api_call(GET_RUN_ENDPOINT, {**json, "page_token": page_token})
+            _merge_run_page(run, page)
+            page_token = page.get("next_page_token")
+        return run
 
     async def a_get_run(self, run_id: int) -> dict[str, Any]:
         """
         Async version of `get_run`.
 
         :param run_id: id of the run
-        :return: state of the run
+        :return: state of the run, with every page of the paginated arrays collected
         """
-        json = {"run_id": run_id}
-        response = await self._a_do_api_call(GET_RUN_ENDPOINT, json)
-        return response
+        json: dict[str, Any] = {"run_id": run_id}
+        run = await self._a_do_api_call(GET_RUN_ENDPOINT, json)
+        page_token = run.pop("next_page_token", None)
+        while page_token:
+            page = await self._a_do_api_call(GET_RUN_ENDPOINT, {**json, "page_token": page_token})
+            _merge_run_page(run, page)
+            page_token = page.get("next_page_token")
+        return run
 
     def get_run_state_str(self, run_id: int) -> str:
         """
@@ -640,8 +745,7 @@ class DatabricksHook(BaseDatabricksHook):
         repair_history = response["repair_history"]
         if len(repair_history) == 1:
             return None
-        else:
-            return repair_history[-1]["id"]
+        return repair_history[-1]["id"]
 
     def get_cluster_state(self, cluster_id: str) -> ClusterState:
         """
@@ -693,6 +797,67 @@ class DatabricksHook(BaseDatabricksHook):
         """
         self._do_api_call(TERMINATE_CLUSTER_ENDPOINT, json)
 
+    def get_warehouse(self, warehouse_id: str) -> dict[str, Any]:
+        """
+        Retrieve a Databricks SQL warehouse.
+
+        :param warehouse_id: ID of the SQL warehouse.
+        """
+        return self._do_api_call(("GET", f"{SQL_WAREHOUSES_ENDPOINT}/{warehouse_id}"))
+
+    async def a_get_warehouse(self, warehouse_id: str) -> dict[str, Any]:
+        """
+        Async version of `get_warehouse`.
+
+        :param warehouse_id: ID of the SQL warehouse.
+        """
+        return await self._a_do_api_call(("GET", f"{SQL_WAREHOUSES_ENDPOINT}/{warehouse_id}"))
+
+    def get_warehouse_state(self, warehouse_id: str) -> WarehouseState:
+        """
+        Retrieve the state of a Databricks SQL warehouse.
+
+        :param warehouse_id: ID of the SQL warehouse.
+        """
+        return WarehouseState(self.get_warehouse(warehouse_id)["state"])
+
+    async def a_get_warehouse_state(self, warehouse_id: str) -> WarehouseState:
+        """
+        Async version of `get_warehouse_state`.
+
+        :param warehouse_id: ID of the SQL warehouse.
+        """
+        return WarehouseState((await self.a_get_warehouse(warehouse_id))["state"])
+
+    def start_warehouse(self, warehouse_id: str) -> None:
+        """
+        Start a Databricks SQL warehouse.
+
+        :param warehouse_id: ID of the SQL warehouse.
+        """
+        self._do_api_call(("POST", f"{SQL_WAREHOUSES_ENDPOINT}/{warehouse_id}/start"))
+
+    def stop_warehouse(self, warehouse_id: str) -> None:
+        """
+        Stop a Databricks SQL warehouse.
+
+        :param warehouse_id: ID of the SQL warehouse.
+        """
+        self._do_api_call(("POST", f"{SQL_WAREHOUSES_ENDPOINT}/{warehouse_id}/stop"))
+
+    def edit_warehouse(self, warehouse_id: str, json: dict[str, Any]) -> None:
+        """
+        Update the configuration of a Databricks SQL warehouse.
+
+        See the `SQL Warehouses edit API
+        <https://docs.databricks.com/api/warehouses/v1/edit-warehouse>`_.
+
+        :param warehouse_id: ID of the SQL warehouse.
+        :param json: Request body for the SQL Warehouses edit API, forwarded as provided.
+        :return: ``None`` when the request succeeds, without waiting for configuration changes to finish.
+        """
+        self._do_api_call(("POST", f"{SQL_WAREHOUSES_ENDPOINT}/{warehouse_id}/edit"), json)
+
     def install(self, json: dict) -> None:
         """
         Install libraries on the cluster.
@@ -721,7 +886,8 @@ class DatabricksHook(BaseDatabricksHook):
         :param json: payload
         :return: metadata from update
         """
-        repos_endpoint = ("PATCH", f"api/2.0/repos/{repo_id}")
+        method, base_path = UPDATE_REPO_ENDPOINT
+        repos_endpoint = (method, f"{base_path}/{repo_id}")
         return self._do_api_call(repos_endpoint, json)
 
     def delete_repo(self, repo_id: str):
@@ -731,7 +897,8 @@ class DatabricksHook(BaseDatabricksHook):
         :param repo_id: ID of Databricks Repos
         :return:
         """
-        repos_endpoint = ("DELETE", f"api/2.0/repos/{repo_id}")
+        method, base_path = DELETE_REPO_ENDPOINT
+        repos_endpoint = (method, f"{base_path}/{repo_id}")
         self._do_api_call(repos_endpoint)
 
     def create_repo(self, json: dict[str, Any]) -> dict:
@@ -741,8 +908,7 @@ class DatabricksHook(BaseDatabricksHook):
         :param json: payload
         :return:
         """
-        repos_endpoint = ("POST", "api/2.0/repos")
-        return self._do_api_call(repos_endpoint, json)
+        return self._do_api_call(CREATE_REPO_ENDPOINT, json)
 
     def get_repo_by_path(self, path: str) -> str | None:
         """
@@ -769,7 +935,7 @@ class DatabricksHook(BaseDatabricksHook):
         :param json: payload
         :return: json containing permission specification
         """
-        return self._do_api_call(("PATCH", f"api/2.0/permissions/jobs/{job_id}"), json)
+        return self._do_api_call(("PATCH", f"2.0/permissions/jobs/{job_id}"), json)
 
     def post_sql_statement(self, json: dict[str, Any]) -> str:
         """
@@ -779,7 +945,17 @@ class DatabricksHook(BaseDatabricksHook):
         :return: The statement_id as a string.
         """
         response = self._do_api_call(("POST", f"{SQL_STATEMENTS_ENDPOINT}"), json)
-        return response["statement_id"]
+        statement_id = response["statement_id"]
+        if (sql_statement := json.get("statement")) is not None:
+            send_sql_hook_lineage(
+                context=self,
+                sql=sql_statement,
+                sql_parameters=json.get("parameters"),
+                job_id=statement_id,
+                default_db=json.get("catalog"),
+                default_schema=json.get("schema"),
+            )
+        return statement_id
 
     def get_sql_statement_state(self, statement_id: str) -> SQLStatementState:
         """
@@ -831,3 +1007,29 @@ class DatabricksHook(BaseDatabricksHook):
             message = str(e)
 
         return status, message
+
+    def get_openlineage_database_info(self, _):
+        """Return Databricks-specific database info for OpenLineage namespace resolution."""
+        from airflow.providers.openlineage.sqlparser import DatabaseInfo
+
+        port = f":{self.databricks_conn.port}" if self.databricks_conn.port else ""
+
+        return DatabaseInfo(
+            scheme=self.get_openlineage_database_dialect(None),
+            authority=f"{self.host}{port}",
+            information_schema_columns=[
+                "table_schema",
+                "table_name",
+                "column_name",
+                "ordinal_position",
+                "data_type",
+                "table_catalog",
+            ],
+            is_information_schema_cross_db=True,
+        )
+
+    def get_openlineage_database_dialect(self, _) -> str:
+        return "databricks"
+
+    def get_openlineage_default_schema(self) -> str | None:
+        return "default"

@@ -18,18 +18,24 @@ from __future__ import annotations
 
 import os
 import shutil
-from pathlib import Path
 
-from airflow_breeze.global_constants import get_airflow_version
+from airflow_breeze.global_constants import (
+    get_airflow_mypy_version,
+    get_airflow_version,
+    get_airflowctl_version,
+    get_java_sdk_version,
+    get_task_sdk_version,
+    get_ts_sdk_version,
+)
 from airflow_breeze.utils.console import Output, get_console
 from airflow_breeze.utils.helm_chart_utils import chart_version
 from airflow_breeze.utils.packages import get_provider_distributions_metadata, get_short_package_name
+from airflow_breeze.utils.path_utils import AIRFLOW_ROOT_PATH
 from airflow_breeze.utils.publish_docs_helpers import pretty_format_path
 
 PROCESS_TIMEOUT = 15 * 60
 
-ROOT_PROJECT_DIR = Path(__file__).parents[5].resolve()
-GENERATED_PATH = ROOT_PROJECT_DIR / "generated"
+GENERATED_PATH = AIRFLOW_ROOT_PATH / "generated"
 
 
 class DocsPublisher:
@@ -52,8 +58,7 @@ class DocsPublisher:
         if self.is_versioned:
             version = "stable"
             return f"{GENERATED_PATH}/_build/docs/{self.package_name}/{version}"
-        else:
-            return f"{GENERATED_PATH}/_build/docs/{self.package_name}"
+        return f"{GENERATED_PATH}/_build/docs/{self.package_name}"
 
     @property
     def _current_version(self):
@@ -63,25 +68,49 @@ class DocsPublisher:
                 "Make sure to add version in `provider.yaml` for the package."
             )
             raise RuntimeError(msg)
+
+        # Read version from stable.txt file
+        stable_txt_path = f"{GENERATED_PATH}/_build/docs/{self.package_name}/stable.txt"
+        if os.path.exists(stable_txt_path):
+            with open(stable_txt_path) as f:
+                return f.read().strip()
+
+        # Fallback to reading from source files if stable.txt doesn't exist
         if self.package_name == "apache-airflow":
             return get_airflow_version()
         if self.package_name.startswith("apache-airflow-providers-"):
             provider = get_provider_distributions_metadata().get(get_short_package_name(self.package_name))
             return provider["versions"][0]
+        if self.package_name == "task-sdk":
+            return get_task_sdk_version()
+        if self.package_name == "ts-sdk":
+            return get_ts_sdk_version()
         if self.package_name == "helm-chart":
             return chart_version()
+        if self.package_name == "apache-airflow-ctl":
+            return get_airflowctl_version()
+        if self.package_name == "apache-airflow-mypy":
+            return get_airflow_mypy_version()
+        if self.package_name == "java-sdk":
+            return get_java_sdk_version()
         raise SystemExit(f"Unsupported package: {self.package_name}")
 
     @property
     def _publish_dir(self) -> str:
         if self.is_versioned:
             return f"docs-archive/{self.package_name}/{self._current_version}"
-        else:
-            return f"docs-archive/{self.package_name}"
+        return f"docs-archive/{self.package_name}"
 
     def publish(self, override_versioned: bool, airflow_site_dir: str):
         """Copy documentation packages files to airflow-site repository."""
         get_console(output=self.output).print(f"Publishing docs for {self.package_name}")
+        # Nothing staged for this package: skip before _publish_dir resolves a version
+        # that may not be resolvable, and before an existing output dir is deleted below
+        # with nothing to replace it.
+        if not os.path.exists(self._build_dir):
+            get_console(output=self.output).print(f"Build directory {self._build_dir} does not exist!")
+            get_console(output=self.output).print()
+            return 0, f"Skipping {self.package_name}: Build directory does not exist"
         output_dir = os.path.join(airflow_site_dir, self._publish_dir)
         pretty_source = pretty_format_path(self._build_dir, os.getcwd())
         pretty_target = pretty_format_path(output_dir, airflow_site_dir)
@@ -102,6 +131,6 @@ class DocsPublisher:
         shutil.copytree(self._build_dir, output_dir)
         if self.is_versioned:
             with open(os.path.join(output_dir, "..", "stable.txt"), "w") as stable_file:
-                stable_file.write(self._current_version)
+                stable_file.write(self._current_version + "\n")
         get_console(output=self.output).print()
         return 0, f"Docs published: {self.package_name}"

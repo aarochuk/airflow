@@ -16,6 +16,8 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+import { useRef, useEffect } from "react";
+
 import { Box, useToken } from "@chakra-ui/react";
 import {
   Chart as ChartJS,
@@ -28,7 +30,6 @@ import {
   type ChartOptions,
 } from "chart.js";
 import dayjs from "dayjs";
-import { useMemo, useRef, useEffect } from "react";
 import { Line } from "react-chartjs-2";
 
 import { useColorMode } from "src/context/colorMode";
@@ -98,23 +99,42 @@ type Props = {
 
 export const TrendCountChart = ({ endDate, events, startDate }: Props) => {
   const { colorMode } = useColorMode();
-  const chartRef = useRef<ChartJS<"line">>();
+  const chartRef = useRef<ChartJS<"line">>(null);
 
   // Get raw color values instead of CSS variables
-  const [bgLight, bgDark, lineLight, lineDark] = useToken("colors", [
+  const [bgLightGreen, bgDarkGreen, lineLightGreen, lineDarkGreen] = useToken("colors", [
+    "green.100",
+    "green.800",
+    "green.500",
+    "green.400",
+  ]);
+
+  const [bgLightRed, bgDarkRed, lineLightRed, lineDarkRed] = useToken("colors", [
     "red.100",
     "red.800",
     "red.500",
     "red.400",
   ]);
 
-  const backgroundColor = colorMode === "light" ? bgLight : bgDark;
-  const lineColor = colorMode === "light" ? lineLight : lineDark;
+  const intervalData = aggregateEventsIntoIntervals(events, startDate, endDate);
 
-  const intervalData = useMemo(
-    () => aggregateEventsIntoIntervals(events, startDate, endDate),
-    [events, startDate, endDate],
-  );
+  const backgroundColor =
+    colorMode === "light"
+      ? intervalData.some((value) => value > 0)
+        ? bgLightRed
+        : bgLightGreen
+      : intervalData.some((value) => value > 0)
+        ? bgDarkRed
+        : bgDarkGreen;
+
+  const lineColor =
+    colorMode === "light"
+      ? intervalData.some((value) => value > 0)
+        ? lineLightRed
+        : lineLightGreen
+      : intervalData.some((value) => value > 0)
+        ? lineDarkRed
+        : lineDarkGreen;
 
   // Cleanup chart instance on unmount
   useEffect(
@@ -142,7 +162,7 @@ export const TrendCountChart = ({ endDate, events, startDate }: Props) => {
   };
 
   return (
-    <Box h="25px" w="200px">
+    <Box data-testid="trend-count-chart" h="25px" w="200px">
       <Line data={data} options={options} ref={chartRef} />
     </Box>
   );

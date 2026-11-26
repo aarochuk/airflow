@@ -23,7 +23,7 @@ from datetime import timedelta
 
 import time_machine
 
-from airflow.utils import timezone
+from airflow._shared.timezones import timezone
 from airflow.utils.log.file_processor_handler import FileProcessorHandler
 
 
@@ -77,13 +77,13 @@ class TestFileProcessorHandler:
 
         link = os.path.join(self.base_log_folder, "latest")
 
-        with time_machine.travel(date1, tick=False):
+        with time_machine.travel(f"{date1} 00:00:00+00:00", tick=False):
             handler.set_context(filename=os.path.join(self.dag_dir, "log1"))
             assert os.path.islink(link)
             assert os.path.basename(os.path.realpath(link)) == date1
             assert os.path.exists(os.path.join(link, "log1"))
 
-        with time_machine.travel(date2, tick=False):
+        with time_machine.travel(f"{date2} 00:00:00+00:00", tick=False):
             handler.set_context(filename=os.path.join(self.dag_dir, "log2"))
             assert os.path.islink(link)
             assert os.path.basename(os.path.realpath(link)) == date2

@@ -17,7 +17,14 @@
 # under the License.
 
 [build-system]
-requires = [ "hatchling==1.27.0" ]
+requires = [
+    "hatchling==1.33.0",
+    "packaging==26.3",
+    "pathspec==1.1.1",
+    "pluggy==1.7.0",
+    "tomlkit==0.15.2",
+    "trove-classifiers==2026.9.21.13",
+]
 build-backend = "hatchling.build"
 
 [project]
@@ -26,7 +33,7 @@ description = "Docker tests for Apache Airflow"
 classifiers = [
     "Private :: Do Not Upload",
 ]
-requires-python = "~=3.9,<3.13"
+requires-python = ">=3.11,!=3.15"
 authors = [
     { name = "Apache Software Foundation", email = "dev@airflow.apache.org" },
 ]
@@ -37,11 +44,16 @@ version = "0.0.1"
 
 dependencies = [
     "apache-airflow-devel-common",
-    "python-on-whales>=0.70.0",
 ]
 
-[tool.pytest.ini_options]
-addopts = "-rasl --verbosity=2 -p no:flaky -p no:nose -p no:legacypath"
+[tool.pytest]
+addopts = [
+    "-rasl",
+    "--verbosity=2",
+    "-p", "no:flaky",
+    "-p", "no:nose",
+    "-p", "no:legacypath",
+]
 norecursedirs = [
     ".eggs",
 ]
@@ -62,3 +74,8 @@ exclude = ["*"]
 
 [tool.hatch.build.targets.wheel]
 bypass-selection = true
+
+[dependency-groups]
+mypy = [
+    "apache-airflow-devel-common[mypy]",
+]

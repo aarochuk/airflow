@@ -16,12 +16,14 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Heading, useDisclosure } from "@chakra-ui/react";
+import { useDisclosure } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 import { FiEdit } from "react-icons/fi";
 
 import type { ConnectionResponse } from "openapi/requests/types.gen";
-import { Dialog } from "src/components/ui";
-import ActionButton from "src/components/ui/ActionButton";
+
+import { Modal, IconButton } from "src/system-components";
+
 import { useEditConnection } from "src/queries/useEditConnection";
 
 import ConnectionForm from "./ConnectionForm";
@@ -33,17 +35,19 @@ type Props = {
 };
 
 const EditConnectionButton = ({ connection, disabled }: Props) => {
+  const { t: translate } = useTranslation("admin");
   const { onClose, onOpen, open } = useDisclosure();
   const initialConnectionValue: ConnectionBody = {
     conn_type: connection.conn_type,
     connection_id: connection.connection_id,
     description: connection.description ?? "",
-    extra: connection.extra ?? "{}",
+    extra: connection.extra === "" || connection.extra === null ? "{}" : connection.extra,
     host: connection.host ?? "",
     login: connection.login ?? "",
     password: connection.password ?? "",
     port: connection.port?.toString() ?? "",
     schema: connection.schema ?? "",
+    team_name: connection.team_name ?? "",
   };
   const { editConnection, error, isPending, setError } = useEditConnection(initialConnectionValue, {
     onSuccessConfirm: onClose,
@@ -56,35 +60,24 @@ const EditConnectionButton = ({ connection, disabled }: Props) => {
 
   return (
     <>
-      <ActionButton
-        actionName="Edit Connection"
-        disabled={disabled}
-        icon={<FiEdit />}
-        onClick={() => {
-          onOpen();
-        }}
-        text="Edit Connection"
-        withText={false}
-      />
-
-      <Dialog.Root onOpenChange={handleClose} open={open} size="xl">
-        <Dialog.Content backdrop>
-          <Dialog.Header>
-            <Heading size="xl">Edit Variable</Heading>
-          </Dialog.Header>
-
-          <Dialog.CloseTrigger />
-
-          <Dialog.Body>
-            <ConnectionForm
-              error={error}
-              initialConnection={initialConnectionValue}
-              isPending={isPending}
-              mutateConnection={editConnection}
-            />
-          </Dialog.Body>
-        </Dialog.Content>
-      </Dialog.Root>
+      <IconButton disabled={disabled} label={translate("connections.edit")} onClick={onOpen}>
+        <FiEdit />
+      </IconButton>
+      <Modal
+        lazyMount
+        onOpenChange={handleClose}
+        open={open}
+        title={translate("connections.edit")}
+        unmountOnExit
+      >
+        <ConnectionForm
+          error={error}
+          initialConnection={initialConnectionValue}
+          isEditMode
+          isPending={isPending}
+          mutateConnection={editConnection}
+        />
+      </Modal>
     </>
   );
 };

@@ -31,7 +31,7 @@ from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
 from google.auth.transport import requests as google_requests
 from google.cloud.managedkafka_v1 import Cluster, ConsumerGroup, ManagedKafkaClient, Topic, types
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.common.consts import CLIENT_INFO
 from airflow.providers.google.common.hooks.base_google import GoogleBaseHook
 
@@ -67,7 +67,7 @@ class ManagedKafkaTokenProvider:
             dict(
                 exp=credentials.expiry.timestamp(),
                 iss="Google",
-                iat=datetime.datetime.now(datetime.timezone.utc).timestamp(),
+                iat=datetime.datetime.now(datetime.UTC).timestamp(),
                 scope="kafka",
                 sub=credentials.service_account_email,
             )
@@ -88,8 +88,8 @@ class ManagedKafkaTokenProvider:
     def confluent_token(self):
         credentials = self._valid_credentials()
 
-        utc_expiry = credentials.expiry.replace(tzinfo=datetime.timezone.utc)
-        expiry_seconds = (utc_expiry - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+        utc_expiry = credentials.expiry.replace(tzinfo=datetime.UTC)
+        expiry_seconds = (utc_expiry - datetime.datetime.now(datetime.UTC)).total_seconds()
 
         return self._get_kafka_access_token(credentials), time.time() + expiry_seconds
 
@@ -110,6 +110,7 @@ class ManagedKafkaHook(GoogleBaseHook):
         return ManagedKafkaClient(
             credentials=self.get_credentials(),
             client_info=CLIENT_INFO,
+            client_options=self.get_client_options(),
         )
 
     def wait_for_operation(self, operation: Operation, timeout: float | None = None):
@@ -120,7 +121,7 @@ class ManagedKafkaHook(GoogleBaseHook):
             error = operation.exception(timeout=timeout)
             raise AirflowException(error)
 
-    def get_confluent_token(self):
+    def get_confluent_token(self, config_str: str):
         """Get the authentication token for confluent client."""
         token_provider = ManagedKafkaTokenProvider(credentials=self.get_credentials())
         token = token_provider.confluent_token()

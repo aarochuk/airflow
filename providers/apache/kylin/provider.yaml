@@ -22,9 +22,25 @@ description: |
     `Apache Kylin <https://kylin.apache.org/>`__
 
 state: ready
-source-date-epoch: 1743477779
-# note that those versions are maintained by release manager - do not update them manually
+lifecycle: production
+source-date-epoch: 1791328844
+# Note that those versions are maintained by release manager - do not update them manually
+# with the exception of case where other provider in sources has >= new provider version.
+# In such case adding >= NEW_VERSION and bumping to NEW_VERSION in a provider have
+# to be done in the same PR
 versions:
+  - 3.11.1
+  - 3.11.0
+  - 3.10.4
+  - 3.10.3
+  - 3.10.2
+  - 3.10.1
+  - 3.10.0
+  - 3.9.3
+  - 3.9.2
+  - 3.9.1
+  - 3.9.0
+  - 3.8.3
   - 3.8.2
   - 3.8.1
   - 3.8.0
@@ -50,6 +66,8 @@ versions:
 integrations:
   - integration-name: Apache Kylin
     external-doc-url: https://kylin.apache.org/
+    how-to-guide:
+      - /docs/apache-airflow-providers-apache-kylin/operators.rst
     logo: /docs/integration-logos/kylin.png
     tags: [apache]
 
@@ -65,4 +83,5 @@ hooks:
 
 connection-types:
   - hook-class-name: airflow.providers.apache.kylin.hooks.kylin.KylinHook
+    hook-name: "Apache Kylin"
     connection-type: kylin

@@ -16,119 +16,83 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { HStack, type SelectValueChangeDetails } from "@chakra-ui/react";
-import { useCallback } from "react";
-import { useSearchParams, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 
-import type { TaskInstanceState } from "openapi/requests/types.gen";
-import { useTableURLState } from "src/components/DataTable/useTableUrlState";
-import { SearchBar } from "src/components/SearchBar";
-import { StateBadge } from "src/components/StateBadge";
-import { Select } from "src/components/ui";
+import { FilterBar } from "src/components/FilterBar";
+
 import { SearchParamsKeys, type SearchParamsKeysType } from "src/constants/searchParams";
-import { taskInstanceStateOptions as stateOptions } from "src/constants/stateOptions";
-import { capitalize } from "src/utils";
+import { useConfig } from "src/queries/useConfig";
+import { useFiltersHandler, type FilterableSearchParamsKeys } from "src/utils";
 
-const { NAME_PATTERN: NAME_PATTERN_PARAM, STATE: STATE_PARAM }: SearchParamsKeysType = SearchParamsKeys;
+const {
+  ASSET_EVENT_DATE_RANGE: ASSET_EVENT_DATE_RANGE_PARAM,
+  DAG_ID_PATTERN: DAG_ID_PATTERN_PARAM,
+  DAG_VERSION: DAG_VERSION_PARAM,
+  DURATION_GTE: DURATION_GTE_PARAM,
+  DURATION_LTE: DURATION_LTE_PARAM,
+  LOGICAL_DATE_RANGE: LOGICAL_DATE_RANGE_PARAM,
+  LOOP: LOOP_PARAM,
+  MAP_INDEX: MAP_INDEX_PARAM,
+  NAME_PATTERN: NAME_PATTERN_PARAM,
+  OPERATOR_NAME_PATTERN: OPERATOR_NAME_PATTERN_PARAM,
+  POOL_NAME_PATTERN: POOL_NAME_PATTERN_PARAM,
+  QUEUE_NAME_PATTERN: QUEUE_NAME_PATTERN_PARAM,
+  RENDERED_MAP_INDEX: RENDERED_MAP_INDEX_PARAM,
+  RUN_AFTER_RANGE: RUN_AFTER_RANGE_PARAM,
+  RUN_ID_PATTERN: RUN_ID_PATTERN_PARAM,
+  TASK_STATE: STATE_PARAM,
+  TEAMS: TEAMS_PARAM,
+  TRY_NUMBER: TRY_NUMBER_PARAM,
+}: SearchParamsKeysType = SearchParamsKeys;
 
-export const TaskInstancesFilter = ({
-  setTaskDisplayNamePattern,
-  taskDisplayNamePattern,
-}: {
-  readonly setTaskDisplayNamePattern: React.Dispatch<React.SetStateAction<string | undefined>>;
-  readonly taskDisplayNamePattern: string | undefined;
-}) => {
-  const { runId } = useParams();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const { setTableURLState, tableURLState } = useTableURLState();
-  const { pagination, sorting } = tableURLState;
+export const TaskInstancesFilter = () => {
+  const { dagId, runId } = useParams();
+  const multiTeamEnabled = Boolean(useConfig("multi_team"));
+  const paramKeys: Array<FilterableSearchParamsKeys> = [
+    NAME_PATTERN_PARAM as FilterableSearchParamsKeys,
+    RUN_AFTER_RANGE_PARAM as FilterableSearchParamsKeys,
+    LOGICAL_DATE_RANGE_PARAM as FilterableSearchParamsKeys,
+    ASSET_EVENT_DATE_RANGE_PARAM as FilterableSearchParamsKeys,
+    DURATION_GTE_PARAM as FilterableSearchParamsKeys,
+    DURATION_LTE_PARAM as FilterableSearchParamsKeys,
+    TRY_NUMBER_PARAM as FilterableSearchParamsKeys,
+    MAP_INDEX_PARAM as FilterableSearchParamsKeys,
+    RENDERED_MAP_INDEX_PARAM as FilterableSearchParamsKeys,
+    DAG_VERSION_PARAM as FilterableSearchParamsKeys,
+    OPERATOR_NAME_PATTERN_PARAM as FilterableSearchParamsKeys,
+    POOL_NAME_PATTERN_PARAM as FilterableSearchParamsKeys,
+    QUEUE_NAME_PATTERN_PARAM as FilterableSearchParamsKeys,
+    STATE_PARAM as FilterableSearchParamsKeys,
+  ];
 
-  const filteredState = searchParams.getAll(STATE_PARAM);
-  const hasFilteredState = filteredState.length > 0;
+  // A loop lives in one run, so this only makes sense once a run is in scope.
+  if (runId !== undefined) {
+    paramKeys.push(LOOP_PARAM as FilterableSearchParamsKeys);
+  }
 
-  const handleStateChange = useCallback(
-    ({ value }: SelectValueChangeDetails<string>) => {
-      const [val, ...rest] = value;
+  if (multiTeamEnabled) {
+    paramKeys.push(TEAMS_PARAM as FilterableSearchParamsKeys);
+  }
 
-      if ((val === undefined || val === "all") && rest.length === 0) {
-        searchParams.delete(STATE_PARAM);
-      } else {
-        searchParams.delete(STATE_PARAM);
-        value.filter((state) => state !== "all").map((state) => searchParams.append(STATE_PARAM, state));
-      }
-      setTableURLState({
-        pagination: { ...pagination, pageIndex: 0 },
-        sorting,
-      });
-      setSearchParams(searchParams);
-    },
-    [pagination, searchParams, setSearchParams, setTableURLState, sorting],
-  );
+  if (runId === undefined) {
+    paramKeys.unshift(RUN_ID_PATTERN_PARAM as FilterableSearchParamsKeys);
+  }
 
-  const handleSearchChange = (value: string) => {
-    if (value) {
-      searchParams.set(NAME_PATTERN_PARAM, value);
-    } else {
-      searchParams.delete(NAME_PATTERN_PARAM);
-    }
-    setTableURLState({
-      pagination: { ...pagination, pageIndex: 0 },
-      sorting,
-    });
-    setTaskDisplayNamePattern(value);
-    setSearchParams(searchParams);
-  };
+  if (dagId === undefined) {
+    paramKeys.unshift(DAG_ID_PATTERN_PARAM as FilterableSearchParamsKeys);
+  }
+
+  // ``useFiltersHandler`` already reads each filter's value, including composite ones whose key
+  // is not a url param of its own -- the loop pill spans ``loop_id`` and ``iteration``, so
+  // reading its key alone would leave it blank whenever a pass is selected elsewhere.
+  const { filterConfigs, handleFiltersChange, initialValues } = useFiltersHandler(paramKeys);
 
   return (
-    <HStack paddingY="4px">
-      <SearchBar
-        buttonProps={{ disabled: true }}
-        defaultValue={taskDisplayNamePattern ?? ""}
-        hideAdvanced
-        hotkeyDisabled={Boolean(runId)}
-        onChange={handleSearchChange}
-        placeHolder="Search Tasks"
-      />
-      <Select.Root
-        collection={stateOptions}
-        maxW="450px"
-        multiple
-        onValueChange={handleStateChange}
-        value={hasFilteredState ? filteredState : ["all"]}
-      >
-        <Select.Trigger
-          {...(hasFilteredState ? { clearable: true } : {})}
-          colorPalette="blue"
-          isActive={Boolean(filteredState)}
-        >
-          <Select.ValueText>
-            {() =>
-              hasFilteredState ? (
-                <HStack flexWrap="wrap" fontSize="sm" gap="4px" paddingY="8px">
-                  {filteredState.map((state) => (
-                    <StateBadge key={state} state={state as TaskInstanceState}>
-                      {state === "none" ? "No Status" : capitalize(state)}
-                    </StateBadge>
-                  ))}
-                </HStack>
-              ) : (
-                "All States"
-              )
-            }
-          </Select.ValueText>
-        </Select.Trigger>
-        <Select.Content>
-          {stateOptions.items.map((option) => (
-            <Select.Item item={option} key={option.label}>
-              {option.value === "all" ? (
-                option.label
-              ) : (
-                <StateBadge state={option.value as TaskInstanceState}>{option.label}</StateBadge>
-              )}
-            </Select.Item>
-          ))}
-        </Select.Content>
-      </Select.Root>
-    </HStack>
+    <FilterBar
+      configs={filterConfigs}
+      initialValues={initialValues}
+      onFiltersChange={handleFiltersChange}
+      showPresetFilters={runId === undefined}
+    />
   );
 };

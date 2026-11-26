@@ -31,7 +31,12 @@ from airflow.providers.google.cloud.operators.kubernetes_engine import (
     GKEDeleteClusterOperator,
     GKEDeleteCustomResourceOperator,
 )
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 DAG_ID = "kubernetes_engine_resource"
@@ -39,7 +44,10 @@ GCP_PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT", "default")
 
 GCP_LOCATION = "europe-north1-a"
 CLUSTER_NAME = f"gke-resource-{ENV_ID}".replace("_", "-")
-CLUSTER = {"name": CLUSTER_NAME, "initial_node_count": 1}
+CLUSTER = {
+    "name": CLUSTER_NAME,
+    "node_pools": [{"name": "default-pool", "initial_node_count": 1}],
+}
 
 PVC_NAME = "test-pvc-name"
 PVC_CONF = f"""
@@ -93,7 +101,7 @@ with DAG(
 
     delete_cluster = GKEDeleteClusterOperator(
         task_id="delete_cluster",
-        name=CLUSTER_NAME,
+        cluster_name=CLUSTER_NAME,
         project_id=GCP_PROJECT_ID,
         location=GCP_LOCATION,
         trigger_rule=TriggerRule.ALL_DONE,
@@ -110,5 +118,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

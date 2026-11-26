@@ -20,9 +20,17 @@ import os
 from datetime import datetime
 
 from airflow import DAG
-from airflow.decorators import task, teardown
+
+try:
+    from airflow.sdk import task, teardown
+except ImportError:
+    # Airflow 2 path
+    from airflow.decorators import task, teardown  # type: ignore[attr-defined,no-redef]
 from airflow.providers.openai.operators.openai import OpenAIEmbeddingOperator
-from airflow.providers.pinecone.operators.pinecone import CreatePodIndexOperator, PineconeIngestOperator
+from airflow.providers.pinecone.operators.pinecone import (
+    CreateServerlessIndexOperator,
+    PineconeIngestOperator,
+)
 
 index_name = os.getenv("INDEX_NAME", "example-pinecone-index")
 namespace = os.getenv("NAMESPACE", "example-pinecone-index")
@@ -74,10 +82,13 @@ with DAG(
     start_date=datetime(2023, 1, 1),
     catchup=False,
 ) as dag:
-    create_index = CreatePodIndexOperator(
+    create_index = CreateServerlessIndexOperator(
         task_id="create_index",
         index_name=index_name,
         dimension=1536,
+        cloud="aws",
+        region="us-west-2",
+        metric="cosine",
     )
 
     embed_task = OpenAIEmbeddingOperator(
@@ -109,5 +120,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

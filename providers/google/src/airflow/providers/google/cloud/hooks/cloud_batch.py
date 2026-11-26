@@ -33,7 +33,7 @@ from google.cloud.batch_v1 import (
     Task,
 )
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.common.consts import CLIENT_INFO
 from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID, GoogleBaseHook
 
@@ -73,7 +73,11 @@ class CloudBatchHook(GoogleBaseHook):
         :return: Google Batch Service client object.
         """
         if self._client is None:
-            self._client = BatchServiceClient(credentials=self.get_credentials(), client_info=CLIENT_INFO)
+            self._client = BatchServiceClient(
+                credentials=self.get_credentials(),
+                client_info=CLIENT_INFO,
+                client_options=self.get_client_options(),
+            )
         return self._client
 
     @GoogleBaseHook.fallback_to_default_project_id
@@ -147,19 +151,18 @@ class CloudBatchHook(GoogleBaseHook):
                 status: JobStatus.State = job.status.state
                 if status == JobStatus.State.SUCCEEDED:
                     return job
-                elif status == JobStatus.State.FAILED:
+                if status == JobStatus.State.FAILED:
                     message = (
                         "Unexpected error in the operation: "
-                        "Batch job with name {job_name} has failed its execution."
+                        f"Batch job with name {job_name} has failed its execution."
                     )
                     raise AirflowException(message)
-                elif status == JobStatus.State.DELETION_IN_PROGRESS:
+                if status == JobStatus.State.DELETION_IN_PROGRESS:
                     message = (
-                        "Unexpected error in the operation: Batch job with name {job_name} is being deleted."
+                        f"Unexpected error in the operation: Batch job with name {job_name} is being deleted."
                     )
                     raise AirflowException(message)
-                else:
-                    time.sleep(polling_period_seconds)
+                time.sleep(polling_period_seconds)
             except Exception as e:
                 self.log.exception("Exception occurred while checking for job completion.")
                 raise e
@@ -200,7 +203,9 @@ class CloudBatchAsyncHook(GoogleBaseHook):
     def get_conn(self):
         if self._client is None:
             self._client = BatchServiceAsyncClient(
-                credentials=self.get_credentials(), client_info=CLIENT_INFO
+                credentials=self.get_credentials(),
+                client_info=CLIENT_INFO,
+                client_options=self.get_client_options(),
             )
 
         return self._client

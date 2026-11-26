@@ -22,7 +22,12 @@ import { SearchParamsKeys, type SearchParamsKeysType } from "src/constants/searc
 
 import type { TableState } from "./types";
 
-const { LIMIT: LIMIT_PARAM, OFFSET: OFFSET_PARAM, SORT: SORT_PARAM }: SearchParamsKeysType = SearchParamsKeys;
+const {
+  CURSOR: CURSOR_PARAM,
+  LIMIT: LIMIT_PARAM,
+  OFFSET: OFFSET_PARAM,
+  SORT: SORT_PARAM,
+}: SearchParamsKeysType = SearchParamsKeys;
 
 export const stateToSearchParams = (state: TableState, defaultTableState?: TableState): URLSearchParams => {
   const queryParams = new URLSearchParams(globalThis.location.search);
@@ -39,17 +44,16 @@ export const stateToSearchParams = (state: TableState, defaultTableState?: Table
     queryParams.set(OFFSET_PARAM, `${state.pagination.pageIndex}`);
   }
 
-  if (state.sorting.length) {
-    state.sorting.forEach(({ desc, id }) => {
-      if (defaultTableState?.sorting.find((sort) => sort.id === id && sort.desc === desc)) {
-        queryParams.delete(SORT_PARAM, `${desc ? "-" : ""}${id}`);
-      } else {
-        queryParams.set(SORT_PARAM, `${desc ? "-" : ""}${id}`);
-      }
-    });
+  if (state.cursor !== undefined && state.cursor !== "") {
+    queryParams.set(CURSOR_PARAM, state.cursor);
   } else {
-    queryParams.delete(SORT_PARAM);
+    queryParams.delete(CURSOR_PARAM);
   }
+
+  queryParams.delete(SORT_PARAM);
+  state.sorting.forEach(({ desc, id }) => {
+    queryParams.append(SORT_PARAM, `${desc ? "-" : ""}${id}`);
+  });
 
   return queryParams;
 };
@@ -68,6 +72,13 @@ export const searchParamsToState = (searchParams: URLSearchParams, defaultState:
       },
     };
   }
+
+  const cursorValue = searchParams.get(CURSOR_PARAM);
+
+  if (cursorValue !== null) {
+    urlState = { ...urlState, cursor: cursorValue };
+  }
+
   const sorts = searchParams.getAll(SORT_PARAM);
   const sorting: SortingState = sorts.map((sort) => ({
     desc: sort.startsWith("-"),

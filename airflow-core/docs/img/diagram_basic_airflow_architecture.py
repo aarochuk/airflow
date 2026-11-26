@@ -14,6 +14,13 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#    "rich>=13.6.0",
+#    "diagrams>=0.23.4",
+# ]
+# ///
 from __future__ import annotations
 
 from pathlib import Path
@@ -26,9 +33,13 @@ from rich.console import Console
 
 MY_DIR = Path(__file__).parent
 MY_FILENAME = Path(__file__).with_suffix("").name
-PACKAGES_IMAGE = MY_DIR.parents[1] / "diagrams" / "packages.png"
-DATABASE_IMAGE = MY_DIR.parents[1] / "diagrams" / "database.png"
-MULTIPLE_FILES_IMAGE = MY_DIR.parents[1] / "diagrams" / "multiple_files.png"
+AIRFLOW_SOURCES_ROOT = MY_DIR.parents[2]
+DIAGRAMS_DIR = AIRFLOW_SOURCES_ROOT / "devel-common" / "src" / "docs" / "diagrams"
+PYTHON_MULTIPROCESS_LOGO = DIAGRAMS_DIR / "python_multiprocess_logo.png"
+PACKAGES_IMAGE = DIAGRAMS_DIR / "packages.png"
+DATABASE_IMAGE = DIAGRAMS_DIR / "database.png"
+MULTIPLE_FILES_IMAGE = DIAGRAMS_DIR / "multiple_files.png"
+CONFIG_FILE = DIAGRAMS_DIR / "config_file.png"
 
 console = Console(width=400, color_system="standard")
 
@@ -57,14 +68,16 @@ def generate_basic_airflow_diagram():
     ):
         user = User("Airflow User")
 
-        dag_files = Custom("DAG files", MULTIPLE_FILES_IMAGE.as_posix())
-        user >> Edge(color="brown", style="solid", reverse=False, label="author\n\n") >> dag_files
+        dag_bundle = Custom("Dag bundle", MULTIPLE_FILES_IMAGE.as_posix())
+        user >> Edge(color="brown", style="solid", reverse=False, label="author\n\n") >> dag_bundle
 
         with Cluster("Parsing, Scheduling & Executing"):
+            dag_processor = Python("Dag processor")
             scheduler = Python("Scheduler")
 
         metadata_db = Custom("Metadata DB", DATABASE_IMAGE.as_posix())
         scheduler >> Edge(color="red", style="dotted", reverse=True) >> metadata_db
+        dag_processor >> Edge(color="red", style="dotted", reverse=True) >> metadata_db
 
         plugins_and_packages = Custom(
             "Plugin folder\n& installed packages", PACKAGES_IMAGE.as_posix(), color="transparent"
@@ -73,15 +86,16 @@ def generate_basic_airflow_diagram():
         user >> Edge(color="blue", style="solid", reverse=False, label="install\n\n") >> plugins_and_packages
 
         with Cluster("UI"):
-            webserver = Python("Webserver")
+            webserver = Python("API Server")
 
         webserver >> Edge(color="black", style="solid", reverse=True, label="operate\n\n") >> user
 
         metadata_db >> Edge(color="red", style="dotted", reverse=True) >> webserver
 
-        dag_files >> Edge(color="brown", style="solid", label="read\n\n") >> scheduler
+        dag_bundle >> Edge(color="brown", style="solid", label="read\n\n") >> dag_processor
 
         plugins_and_packages >> Edge(color="blue", style="solid", label="install\n\n") >> scheduler
+        plugins_and_packages >> Edge(color="blue", style="solid", label="install\n\n") >> dag_processor
         plugins_and_packages >> Edge(color="blue", style="solid", label="install\n\n") >> webserver
 
     console.print(f"[green]Generating architecture image {image_file}")

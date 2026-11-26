@@ -17,9 +17,9 @@
 # specific language governing permissions and limitations
 # under the License.
 # /// script
-# requires-python = ">=3.9"
+# requires-python = ">=3.11"
 # dependencies = [
-#   "packaging>=23.2",
+#   "packaging>=25",
 #   "click>=8.1.8",
 #   "rich-click>=1.7.1",
 #   "rich>=13.6.0",
@@ -30,9 +30,7 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.resolve()))
 from in_container_utils import AIRFLOW_ROOT_PATH, click, console, run_command
 from packaging.requirements import Requirement
 
@@ -80,6 +78,16 @@ def install_development_dependencies(constraint: str, github_actions: bool):
     )
     for provider_id in providers_dependencies:
         development_dependencies.extend(providers_dependencies[provider_id]["devel-deps"])
+    # The shared distributions under shared/<name>/ provide the canonical
+    # ``airflow_shared.<name>`` namespace used by devel-common. They are marked
+    # ``Private :: Do Not Upload`` so they don't get pulled from PyPI by Airflow's
+    # transitive deps; install them explicitly from the local source tree so that
+    # ``import airflow_shared.X`` works in Lowest Deps and Compat test images that
+    # otherwise only ship the embedded ``airflow._shared.X`` / ``airflow.sdk._shared.X``.
+    shared_distributions = sorted(
+        path.parent.as_posix() for path in (AIRFLOW_ROOT_PATH / "shared").glob("*/pyproject.toml")
+    )
+    development_dependencies.extend(shared_distributions)
     command = ["uv", "pip", "install", *development_dependencies, "--constraints", constraint]
     result = run_command(command, check=False, github_actions=github_actions)
     if result.returncode != 0:

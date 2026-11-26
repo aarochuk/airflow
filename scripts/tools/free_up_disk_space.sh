@@ -20,20 +20,25 @@ COLOR_BLUE=$'\e[34m'
 COLOR_RESET=$'\e[0m'
 
 echo "${COLOR_BLUE}Disk space before cleanup${COLOR_RESET}"
-df -h
+df -H
 
 echo "${COLOR_BLUE}Freeing up disk space${COLOR_RESET}"
-sudo rm -rf /usr/share/dotnet/
-sudo rm -rf /usr/local/graalvm/
-sudo rm -rf /usr/local/.ghcup/
-sudo rm -rf /usr/local/share/powershell
-sudo rm -rf /usr/local/share/chromium
-sudo rm -rf /usr/local/share/boost
-sudo rm -rf /usr/local/lib/android
-sudo rm -rf /opt/hostedtoolcache/CodeQL
-sudo rm -rf /opt/hostedtoolcache/Ruby
-sudo rm -rf /opt/hostedtoolcache/go
-sudo rm -rf /opt/ghc
+
+# These directories are independent; cap concurrent deletions to limit disk contention.
+cleanup_targets=(
+    /usr/share/dotnet/
+    /usr/local/graalvm/
+    /usr/local/.ghcup/
+    /usr/local/share/powershell
+    /usr/local/share/chromium
+    /usr/local/share/boost
+    /usr/local/lib/android
+    /opt/hostedtoolcache
+    /opt/ghc
+)
+printf '%s\0' "${cleanup_targets[@]}" | xargs -0 -r -n 1 -P 4 sudo rm -rf --
+
 sudo apt-get clean
+
 echo "${COLOR_BLUE}Disk space after cleanup${COLOR_RESET}"
-df -h
+df -H

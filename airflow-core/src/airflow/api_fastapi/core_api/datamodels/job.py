@@ -16,7 +16,10 @@
 # under the License.
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
+
+from pydantic import AliasPath, Field
 
 from airflow.api_fastapi.core_api.base import BaseModel
 
@@ -34,10 +37,15 @@ class JobResponse(BaseModel):
     executor_class: str | None
     hostname: str | None
     unixname: str | None
+    team_names: list[str] = Field(default_factory=list)
+    bundle_names: list[str] | None = None
+    dag_display_name: str | None = Field(
+        validation_alias=AliasPath("dag_model", "dag_display_name"), default=None
+    )
 
 
 class JobCollectionResponse(BaseModel):
     """Job Collection Response."""
 
-    jobs: list[JobResponse]
+    jobs: Iterable[JobResponse]
     total_entries: int

@@ -16,14 +16,9 @@
 # under the License.
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 from cov_runner import run_tests
 
-sys.path.insert(0, str(Path(__file__).parent.resolve()))
-
-source_files = ["airflow/api_fastapi"]
+source_files = ["airflow-core/tests/unit/api_fastapi"]
 
 files_not_fully_covered: list[str] = []
 

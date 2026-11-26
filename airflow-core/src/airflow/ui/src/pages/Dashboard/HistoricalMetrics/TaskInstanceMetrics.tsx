@@ -16,19 +16,18 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Heading, HStack } from "@chakra-ui/react";
+import { Box, Separator, Heading, HStack, Stack } from "@chakra-ui/react";
 import type { TaskInstanceState, TaskInstanceStateCount } from "openapi-gen/requests/types.gen";
+import { useTranslation } from "react-i18next";
 import { MdOutlineTask } from "react-icons/md";
-
-import { StateBadge } from "src/components/StateBadge";
 
 import { MetricSection } from "./MetricSection";
 
 type TaskInstanceMetricsProps = {
-  readonly endDate: string;
+  readonly countsAreLowerBounds: boolean;
+  readonly endDate?: string;
   readonly startDate: string;
   readonly taskInstanceStates: TaskInstanceStateCount;
-  readonly total: number;
 };
 
 const TASK_STATES: Array<keyof TaskInstanceStateCount> = [
@@ -44,36 +43,49 @@ const TASK_STATES: Array<keyof TaskInstanceStateCount> = [
   "up_for_reschedule",
   "upstream_failed",
   "deferred",
+  "awaiting_input",
+  "no_status",
 ];
 
 export const TaskInstanceMetrics = ({
+  countsAreLowerBounds,
   endDate,
   startDate,
   taskInstanceStates,
-  total,
-}: TaskInstanceMetricsProps) => (
-  <Box borderRadius={5} borderWidth={1} mt={2} p={2}>
-    <HStack mb={4}>
-      <StateBadge colorPalette="blue" fontSize="md" variant="solid">
+}: TaskInstanceMetricsProps) => {
+  const { t: translate } = useTranslation();
+  const total = Object.values(taskInstanceStates).reduce((sum, count) => sum + count, 0);
+  // The total is only a lower bound when the counts are, so percentages would be wrong.
+  const isTotalTruncated = countsAreLowerBounds;
+  // "0+" would be meaningless.
+  const isLowerBound = (count: number) => countsAreLowerBounds && count > 0;
+
+  return (
+    <Box borderRadius={5} borderWidth={1} mt={2} p={4}>
+      <HStack>
         <MdOutlineTask />
-        {total}
-      </StateBadge>
-      <Heading size="md">Task Instances</Heading>
-    </HStack>
-    {TASK_STATES.sort((stateA, stateB) =>
-      taskInstanceStates[stateA] > taskInstanceStates[stateB] ? -1 : 1,
-    ).map((state) =>
-      taskInstanceStates[state] > 0 ? (
-        <MetricSection
-          endDate={endDate}
-          key={state}
-          kind="task_instances"
-          runs={taskInstanceStates[state]}
-          startDate={startDate}
-          state={state as TaskInstanceState}
-          total={total}
-        />
-      ) : undefined,
-    )}
-  </Box>
-);
+        <Heading size="md">{translate("taskInstance", { count: 2 })}</Heading>
+      </HStack>
+      <Separator my={3} />
+      <Stack gap={4}>
+        {TASK_STATES.sort((stateA, stateB) =>
+          taskInstanceStates[stateA] > taskInstanceStates[stateB] ? -1 : 1,
+        ).map((state) =>
+          taskInstanceStates[state] > 0 ? (
+            <MetricSection
+              capped={isLowerBound(taskInstanceStates[state])}
+              endDate={endDate}
+              isTotalTruncated={isTotalTruncated}
+              key={state}
+              kind="task_instances"
+              runs={taskInstanceStates[state]}
+              startDate={startDate}
+              state={state as TaskInstanceState}
+              total={total}
+            />
+          ) : undefined,
+        )}
+      </Stack>
+    </Box>
+  );
+};

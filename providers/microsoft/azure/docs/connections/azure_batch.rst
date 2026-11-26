@@ -1,4 +1,4 @@
-.. Licensed to the Apache Software Foundation (ASF) under one
+ .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
     regarding copyright ownership.  The ASF licenses this file
@@ -71,7 +71,7 @@ For example:
 
 .. code-block:: bash
 
-   export AIRFLOW_CONN_AZURE_BATCH_DEFAULT='azure-batch://batch%20acount:batch%20key@?account_url=mybatchaccount.com'
+   export AIRFLOW_CONN_AZURE_BATCH_DEFAULT='azure-batch://batch%20account:batch%20key@?account_url=mybatchaccount.com'
 
 
 .. _DefaultAzureCredential: https://docs.microsoft.com/en-us/python/api/overview/azure/identity-readme?view=azure-python#defaultazurecredential

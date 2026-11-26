@@ -26,35 +26,11 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-github",
         "name": "Github",
         "description": "`GitHub <https://www.github.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477824,
-        "versions": [
-            "2.8.3",
-            "2.8.2",
-            "2.8.0",
-            "2.7.0",
-            "2.6.2",
-            "2.6.1",
-            "2.6.0",
-            "2.5.1",
-            "2.5.0",
-            "2.4.0",
-            "2.3.2",
-            "2.3.1",
-            "2.3.0",
-            "2.2.1",
-            "2.2.0",
-            "2.1.0",
-            "2.0.0",
-            "1.0.3",
-            "1.0.2",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Github",
                 "external-doc-url": "https://www.github.com/",
+                "logo": "/docs/integration-logos/Github.svg",
                 "tags": ["software"],
             }
         ],
@@ -70,9 +46,16 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.github.hooks.github.GithubHook",
+                "hook-name": "GitHub",
                 "connection-type": "github",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema", "port", "login", "extra"],
+                    "relabeling": {
+                        "host": "GitHub Enterprise URL (Optional)",
+                        "password": "GitHub Access Token",
+                    },
+                    "placeholders": {"host": "https://{hostname}/api/v3 (for GitHub Enterprise)"},
+                },
             }
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "PyGithub>=2.1.1"],
-        "devel-dependencies": [],
     }

@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """
-Example Airflow DAG that show how to create a Dataproc cluster in Google Kubernetes Engine.
+Example Airflow DAG that show how to create a Managed Spark cluster in Google Kubernetes Engine.
 
 Required environment variables:
 GKE_NAMESPACE = os.environ.get("GKE_NAMESPACE", f"{CLUSTER_NAME}")
@@ -42,7 +42,12 @@ from airflow.providers.google.cloud.operators.kubernetes_engine import (
     GKECreateClusterOperator,
     GKEDeleteClusterOperator,
 )
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
@@ -97,7 +102,7 @@ with DAG(
     schedule="@once",
     start_date=datetime(2021, 1, 1),
     catchup=False,
-    tags=["example", "dataproc", "gke"],
+    tags=["example", "managed-spark", "gke"],
 ) as dag:
     create_gke_cluster = GKECreateClusterOperator(
         task_id="create_gke_cluster",
@@ -128,7 +133,7 @@ with DAG(
 
     delete_gke_cluster = GKEDeleteClusterOperator(
         task_id="delete_gke_cluster",
-        name=GKE_CLUSTER_NAME,
+        cluster_name=GKE_CLUSTER_NAME,
         project_id=PROJECT_ID,
         location=REGION,
         trigger_rule=TriggerRule.ALL_DONE,
@@ -152,5 +157,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

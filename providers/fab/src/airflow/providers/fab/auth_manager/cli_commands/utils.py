@@ -28,8 +28,10 @@ from flask import Flask
 from sqlalchemy.engine import make_url
 
 import airflow
-from airflow.configuration import conf
+from airflow import settings
 from airflow.exceptions import AirflowConfigException
+from airflow.providers.common.compat.sdk import conf
+from airflow.providers.fab.www.db import AirflowSQLAlchemy
 from airflow.providers.fab.www.extensions.init_appbuilder import init_appbuilder
 from airflow.providers.fab.www.extensions.init_session import init_airflow_session_interface
 from airflow.providers.fab.www.extensions.init_views import init_plugins
@@ -39,11 +41,11 @@ if TYPE_CHECKING:
 
 
 @cache
-def _return_appbuilder(app: Flask) -> AirflowAppBuilder:
+def _return_appbuilder(app: Flask, db) -> AirflowAppBuilder:
     """Return an appbuilder instance for the given app."""
     init_appbuilder(app, enable_plugins=False)
     init_plugins(app)
-    init_airflow_session_interface(app)
+    init_airflow_session_interface(app, db)
     return app.appbuilder  # type: ignore[attr-defined]
 
 
@@ -51,7 +53,7 @@ def _return_appbuilder(app: Flask) -> AirflowAppBuilder:
 def get_application_builder() -> Generator[AirflowAppBuilder, None, None]:
     static_folder = os.path.join(os.path.dirname(airflow.__file__), "www", "static")
     flask_app = Flask(__name__, static_folder=static_folder)
-    webserver_config = conf.get_mandatory_value("webserver", "config_file")
+    webserver_config = conf.get_mandatory_value("fab", "config_file")
     with flask_app.app_context():
         # Enable customizations in webserver_config.py to be applied via Flask.current_app.
         flask_app.config.from_pyfile(webserver_config, silent=True)
@@ -63,4 +65,9 @@ def get_application_builder() -> Generator[AirflowAppBuilder, None, None]:
                 "Please use absolute path such as `sqlite:////tmp/airflow.db`."
             )
         flask_app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-        yield _return_appbuilder(flask_app)
+
+        db = AirflowSQLAlchemy(flask_app)
+        yield _return_appbuilder(flask_app, db)
+        # The shared metadata engine outlives this helper — only a locally built one may be disposed.
+        if db.engine is not settings.engine:
+            db.engine.dispose(close=True)

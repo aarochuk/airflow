@@ -17,23 +17,25 @@
 
 from __future__ import annotations
 
-from abc import abstractmethod
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from airflow.exceptions import AirflowException
+from airflow.providers.amazon.aws.hooks.base_aws import AwsGenericHook
 from airflow.providers.amazon.aws.utils.waiter_with_logging import async_wait
 from airflow.triggers.base import BaseTrigger, TriggerEvent
 from airflow.utils.helpers import prune_dict
-
-if TYPE_CHECKING:
-    from airflow.providers.amazon.aws.hooks.base_aws import AwsGenericHook
 
 
 class AwsBaseWaiterTrigger(BaseTrigger):
     """
     Base class for all AWS Triggers that follow the "standard" model of just waiting on a waiter.
 
-    Subclasses need to implement the hook() method.
+    Subclasses should set the ``aws_hook_class`` attribute to the hook they need. The hook is then
+    built from the parameters this class already serializes, so the deferred half of a task talks to
+    AWS with the same region, SSL verification setting and botocore configuration as the synchronous
+    half. Subclasses whose hook takes something else may override :meth:`_hook_parameters` or, as a
+    last resort, :meth:`hook` itself.
 
     :param serialized_fields: Fields that are specific to the subclass trigger and need to be serialized
         to be passed to the __init__ method on deserialization.
@@ -66,6 +68,34 @@ class AwsBaseWaiterTrigger(BaseTrigger):
         https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
     """
 
+    # Should be assigned in child class, unless hook() is overridden.
+    aws_hook_class: type[AwsGenericHook]
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """
+        Reject a subclass that cannot build a hook, at import time.
+
+        ``hook()`` is only reached from ``run()``, which executes in the triggerer, so without this
+        a subclass that declares neither would defer successfully and fail later, out of sight of
+        the task that deferred. The operator side gets the same guarantee from
+        ``AwsBaseHookMixin.validate_attributes``. This runs on class creation rather than in
+        ``__init__`` because subclasses such as ``EksDeleteClusterTrigger`` never call
+        ``super().__init__()``.
+        """
+        super().__init_subclass__(**kwargs)
+        if cls.hook is not AwsBaseWaiterTrigger.hook:
+            return
+        hook_class = getattr(cls, "aws_hook_class", None)
+        if hook_class is None:
+            raise AttributeError(
+                f"Class attribute '{cls.__name__}.aws_hook_class' should be set, "
+                f"or {cls.__name__}.hook() overridden."
+            )
+        if not (isinstance(hook_class, type) and issubclass(hook_class, AwsGenericHook)):
+            raise AttributeError(
+                f"Class attribute '{cls.__name__}.aws_hook_class' is not a subclass of AwsGenericHook."
+            )
+
     def __init__(
         self,
         *,
@@ -80,7 +110,7 @@ class AwsBaseWaiterTrigger(BaseTrigger):
         waiter_delay: int,
         waiter_max_attempts: int,
         waiter_config_overrides: dict[str, Any] | None = None,
-        aws_conn_id: str | None,
+        aws_conn_id: str | None = "aws_default",
         region_name: str | None = None,
         verify: bool | str | None = None,
         botocore_config: dict | None = None,
@@ -88,7 +118,6 @@ class AwsBaseWaiterTrigger(BaseTrigger):
         super().__init__()
         # parameters that should be hardcoded in the child's implem
         self.serialized_fields = serialized_fields
-
         self.waiter_name = waiter_name
         self.waiter_args = waiter_args
         self.failure_message = failure_message
@@ -137,9 +166,33 @@ class AwsBaseWaiterTrigger(BaseTrigger):
             params,
         )
 
-    @abstractmethod
+    @property
+    def _hook_parameters(self) -> dict[str, Any]:
+        """Mapping of the serialized parameters onto the hook's constructor keywords."""
+        return {
+            "aws_conn_id": self.aws_conn_id,
+            "region_name": self.region_name,
+            "verify": self.verify,
+            "config": self.botocore_config,
+        }
+
     def hook(self) -> AwsGenericHook:
-        """Override in subclasses to return the right hook."""
+        """Build the hook this trigger waits with."""
+        if not hasattr(self, "aws_hook_class"):
+            raise AttributeError(
+                f"Class attribute '{type(self).__name__}.aws_hook_class' should be set, "
+                f"or {type(self).__name__}.hook() overridden."
+            )
+        return self.aws_hook_class(**self._hook_parameters)
+
+    def _event_from_exception(self, error: AirflowException) -> TriggerEvent:
+        return TriggerEvent(
+            {
+                "status": "error",
+                "message": str(error),
+                self.return_key: self.return_value,
+            }
+        )
 
     async def run(self) -> AsyncIterator[TriggerEvent]:
         hook = self.hook()
@@ -150,13 +203,17 @@ class AwsBaseWaiterTrigger(BaseTrigger):
                 client=client,
                 config_overrides=self.waiter_config_overrides,
             )
-            await async_wait(
-                waiter,
-                self.waiter_delay,
-                self.attempts,
-                self.waiter_args,
-                self.failure_message,
-                self.status_message,
-                self.status_queries,
-            )
-            yield TriggerEvent({"status": "success", self.return_key: self.return_value})
+            try:
+                await async_wait(
+                    waiter,
+                    self.waiter_delay,
+                    self.attempts,
+                    self.waiter_args,
+                    self.failure_message,
+                    self.status_message,
+                    self.status_queries,
+                )
+            except AirflowException as error:
+                yield self._event_from_exception(error)
+            else:
+                yield TriggerEvent({"status": "success", self.return_key: self.return_value})

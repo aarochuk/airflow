@@ -16,22 +16,33 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Heading, Link } from "@chakra-ui/react";
+import { Box, Link } from "@chakra-ui/react";
 import type { ColumnDef } from "@tanstack/react-table";
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
 
 import { useProviderServiceGetProviders } from "openapi/queries";
 import type { ProviderResponse } from "openapi/requests/types.gen";
+
 import { DataTable } from "src/components/DataTable";
+import type { DataTableFeatures } from "src/components/DataTable/features";
+import { useTableURLState } from "src/components/DataTable/useTableUrlState";
 import { ErrorAlert } from "src/components/ErrorAlert";
 
-const columns: Array<ColumnDef<ProviderResponse>> = [
+import { urlRegex } from "src/constants/urlRegex";
+import { useDocumentTitle } from "src/utils";
+
+const createColumns = (translate: TFunction): Array<ColumnDef<DataTableFeatures, ProviderResponse>> => [
   {
     accessorKey: "package_name",
     cell: ({ row: { original } }) => (
       <Link
         aria-label={original.package_name}
         color="fg.info"
-        href={`https://airflow.apache.org/docs/${original.package_name}/${original.version}/`}
+        href={
+          original.documentation_url ??
+          `https://airflow.apache.org/docs/${original.package_name}/${original.version}/`
+        }
         rel="noopener noreferrer"
         target="_blank"
       >
@@ -39,18 +50,17 @@ const columns: Array<ColumnDef<ProviderResponse>> = [
       </Link>
     ),
     enableSorting: false,
-    header: "Package Name",
+    header: translate("providers.columns.packageName"),
   },
   {
     accessorKey: "version",
     cell: ({ row: { original } }) => original.version,
     enableSorting: false,
-    header: () => "Version",
+    header: translate("providers.columns.version"),
   },
   {
     accessorKey: "description",
     cell: ({ row: { original } }) => {
-      const urlRegex = /https?:\/\/[\w.-]+(?:\.?:[\w.-]+)*(?:[#/?][\w!#$%&'()*+,./:;=?@[\]~-]*)?/gu;
       const urls = original.description.match(urlRegex);
       const cleanText = original.description.replaceAll(/\n(?:and)?/gu, " ").split(" ");
 
@@ -65,21 +75,35 @@ const columns: Array<ColumnDef<ProviderResponse>> = [
       );
     },
     enableSorting: false,
-    header: "Description",
+    header: translate("columns.description"),
   },
 ];
 
 export const Providers = () => {
-  const { data, error } = useProviderServiceGetProviders();
+  const { t: translate } = useTranslation(["admin", "common"]);
+
+  useDocumentTitle(translate("common:admin.Providers"));
+
+  const { setTableURLState, tableURLState } = useTableURLState();
+
+  const columns = createColumns(translate);
+
+  const { pagination } = tableURLState;
+
+  const { data, error } = useProviderServiceGetProviders({
+    limit: pagination.pageSize,
+    offset: pagination.pageIndex * pagination.pageSize,
+  });
 
   return (
-    <Box p={2}>
-      <Heading>Providers</Heading>
+    <Box px={2}>
       <DataTable
         columns={columns}
         data={data?.providers ?? []}
         errorMessage={<ErrorAlert error={error} />}
-        modelName="Provider"
+        initialState={tableURLState}
+        modelName="admin:providers.provider"
+        onStateChange={setTableURLState}
         total={data?.total_entries}
       />
     </Box>

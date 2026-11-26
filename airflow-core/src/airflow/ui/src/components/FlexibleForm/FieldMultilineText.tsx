@@ -22,27 +22,28 @@ import { paramPlaceholder, useParamStore } from "src/queries/useParamStore";
 
 import type { FlexibleFormElementProps } from ".";
 
-export const FieldMultilineText = ({ name }: FlexibleFormElementProps) => {
-  const { paramsDict, setParamsDict } = useParamStore();
+export const FieldMultilineText = ({ name, namespace = "default", onUpdate }: FlexibleFormElementProps) => {
+  const { disabled, paramsDict, setParamsDict } = useParamStore(namespace);
   const param = paramsDict[name] ?? paramPlaceholder;
   const handleChange = (value: string) => {
     if (paramsDict[name]) {
       // "undefined" values are removed from params, so we set it to null to avoid falling back to DAG defaults.
-      // eslint-disable-next-line unicorn/no-null
       paramsDict[name].value = value === "" ? null : value;
     }
 
     setParamsDict(paramsDict);
+    onUpdate(value);
   };
 
   return (
     <Textarea
+      disabled={disabled}
       id={`element_${name}`}
       name={`element_${name}`}
       onChange={(event) => handleChange(event.target.value)}
       rows={6}
       size="sm"
-      value={JSON.stringify(param.value ?? "")}
+      value={(param.value ?? "") as string}
     />
   );
 };

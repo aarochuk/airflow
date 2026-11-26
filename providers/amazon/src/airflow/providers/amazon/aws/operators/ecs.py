@@ -18,16 +18,16 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Container, Sequence
 from datetime import timedelta
 from functools import cached_property
+from time import sleep
 from typing import TYPE_CHECKING, Any
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+from botocore.exceptions import WaiterError
+
 from airflow.providers.amazon.aws.exceptions import EcsOperatorError, EcsTaskFailToStart
-from airflow.providers.amazon.aws.hooks.base_aws import AwsBaseHook
-from airflow.providers.amazon.aws.hooks.ecs import EcsClusterStates, EcsHook, should_retry_eni
+from airflow.providers.amazon.aws.hooks.ecs import EcsClusterStates, EcsHook
 from airflow.providers.amazon.aws.hooks.logs import AwsLogsHook
 from airflow.providers.amazon.aws.operators.base_aws import AwsBaseOperator
 from airflow.providers.amazon.aws.triggers.ecs import (
@@ -36,16 +36,23 @@ from airflow.providers.amazon.aws.triggers.ecs import (
     TaskDoneTrigger,
 )
 from airflow.providers.amazon.aws.utils import validate_execute_complete_event
+from airflow.providers.amazon.aws.utils.deferral import should_defer
 from airflow.providers.amazon.aws.utils.identifiers import generate_uuid
 from airflow.providers.amazon.aws.utils.mixins import aws_template_fields
 from airflow.providers.amazon.aws.utils.task_log_fetcher import AwsTaskLogFetcher
+from airflow.providers.common.compat.sdk import (
+    AirflowException,
+    AirflowFailException,
+    AirflowSkipException,
+    conf,
+)
 from airflow.utils.helpers import prune_dict
 
 if TYPE_CHECKING:
     import boto3
 
     from airflow.models import TaskInstance
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class EcsBaseOperator(AwsBaseOperator[EcsHook]):
@@ -89,7 +96,9 @@ class EcsCreateClusterOperator(EcsBaseOperator):
     :param waiter_max_attempts: The maximum number of attempts to be made,
         if not set then the default waiter value will be used.
     :param deferrable: If True, the operator will wait asynchronously for the job to complete.
-        This implies waiting for completion. This mode requires aiobotocore module to be installed.
+        Deferring when ``wait_for_completion`` is False is deprecated; from the next major release
+        this has no effect when ``wait_for_completion`` is False.
+        This mode requires aiobotocore module to be installed.
         (default: False)
     """
 
@@ -133,13 +142,15 @@ class EcsCreateClusterOperator(EcsBaseOperator):
             # In some circumstances the ECS Cluster is created immediately,
             # and there is no reason to wait for completion.
             self.log.info("Cluster %r in state: %r.", self.cluster_name, cluster_state)
-        elif self.deferrable:
+        elif should_defer(deferrable=self.deferrable, wait_for_completion=self.wait_for_completion):
             self.defer(
                 trigger=ClusterActiveTrigger(
                     cluster_arn=cluster_details["clusterArn"],
                     waiter_delay=self.waiter_delay,
                     waiter_max_attempts=self.waiter_max_attempts,
                     aws_conn_id=self.aws_conn_id,
+                    verify=self.verify,
+                    botocore_config=self.botocore_config,
                     region_name=self.region_name,
                 ),
                 method_name="_complete_exec_with_cluster_desc",
@@ -177,7 +188,9 @@ class EcsDeleteClusterOperator(EcsBaseOperator):
     :param waiter_max_attempts: The maximum number of attempts to be made,
         if not set then the default waiter value will be used.
     :param deferrable: If True, the operator will wait asynchronously for the job to complete.
-        This implies waiting for completion. This mode requires aiobotocore module to be installed.
+        Deferring when ``wait_for_completion`` is False is deprecated; from the next major release
+        this has no effect when ``wait_for_completion`` is False.
+        This mode requires aiobotocore module to be installed.
         (default: False)
     """
 
@@ -210,13 +223,15 @@ class EcsDeleteClusterOperator(EcsBaseOperator):
             # if the cluster doesn't have capacity providers that are associated with it,
             # the deletion is instantaneous, and we don't need to wait for it.
             self.log.info("Cluster %r in state: %r.", self.cluster_name, cluster_state)
-        elif self.deferrable:
+        elif should_defer(deferrable=self.deferrable, wait_for_completion=self.wait_for_completion):
             self.defer(
                 trigger=ClusterInactiveTrigger(
                     cluster_arn=cluster_details["clusterArn"],
                     waiter_delay=self.waiter_delay,
                     waiter_max_attempts=self.waiter_max_attempts,
                     aws_conn_id=self.aws_conn_id,
+                    verify=self.verify,
+                    botocore_config=self.botocore_config,
                     region_name=self.region_name,
                 ),
                 method_name="_complete_exec_with_cluster_desc",
@@ -340,6 +355,9 @@ class EcsRunTaskOperator(EcsBaseOperator):
     :param cluster: the cluster name on Elastic Container Service
     :param overrides: the same parameter that boto3 will receive (templated):
         https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ecs.html#ECS.Client.run_task
+        Note that ``containerOverrides[].environment`` is merged into the environment defined by
+        the task definition, while the other container override fields replace the task
+        definition's value. See :ref:`howto/operator:EcsRunTaskOperator`.
     :param aws_conn_id: connection id of AWS credentials / region name. If None,
         credential boto3 strategy will be used
         (https://boto3.amazonaws.com/v1/documentation/api/latest/guide/configuration.html).
@@ -391,10 +409,21 @@ class EcsRunTaskOperator(EcsBaseOperator):
     :param waiter_max_attempts: The maximum number of attempts to be made,
         if not set then the default waiter value will be used.
     :param deferrable: If True, the operator will wait asynchronously for the job to complete.
-        This implies waiting for completion. This mode requires aiobotocore module to be installed.
+        Deferring when ``wait_for_completion`` is False is deprecated; from the next major release
+        this has no effect when ``wait_for_completion`` is False.
+        This mode requires aiobotocore module to be installed.
         (default: False)
+    :param skip_on_exit_code: If task exits with this exit code, leave the task
+        in ``skipped`` state (default: None). If set to ``None``, any non-zero
+        exit code will be treated as a failure. Can be an int or a container of ints.
+    :param fail_on_exit_code: Non-zero exit codes that fail the task without retrying.
+        Can be an int or a container of ints (default: None). A matching code reported
+        by a stopped container takes precedence over ``skip_on_exit_code`` and other
+        container failures. Missing exit codes do not match this option.
     :param do_xcom_push: If True, the operator will push the ECS task ARN to XCom with key 'ecs_task_arn'.
         Additionally, if logs are fetched, the last log message will be pushed to XCom with the key 'return_value'. (default: False)
+    :param stop_task_on_failure: If True, attempt to stop the ECS task if the Airflow task fails
+        after the ECS task has started. (default: True)
     """
 
     ui_color = "#f0ede4"
@@ -458,6 +487,9 @@ class EcsRunTaskOperator(EcsBaseOperator):
         # Set the default waiter duration to 70 days (attempts*delay)
         # Airflow execution_timeout handles task timeout
         deferrable: bool = conf.getboolean("operators", "default_deferrable", fallback=False),
+        skip_on_exit_code: int | Container[int] | None = None,
+        fail_on_exit_code: int | Container[int] | None = None,
+        stop_task_on_failure: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -483,9 +515,6 @@ class EcsRunTaskOperator(EcsBaseOperator):
         self.reattach = reattach
         self.number_logs_exception = number_logs_exception
 
-        if self.awslogs_region is None:
-            self.awslogs_region = self.region_name
-
         self.arn: str | None = None
         self.container_name: str | None = container_name
         self._started_by: str | None = None
@@ -496,11 +525,21 @@ class EcsRunTaskOperator(EcsBaseOperator):
         self.waiter_delay = waiter_delay
         self.waiter_max_attempts = waiter_max_attempts
         self.deferrable = deferrable
-
-        if self._aws_logs_enabled() and not self.wait_for_completion:
-            self.log.warning(
-                "Trying to get logs without waiting for the task to complete is undefined behavior."
-            )
+        self.skip_on_exit_code = (
+            skip_on_exit_code
+            if isinstance(skip_on_exit_code, Container)
+            else [skip_on_exit_code]
+            if skip_on_exit_code is not None
+            else []
+        )
+        self.stop_task_on_failure = stop_task_on_failure
+        self.fail_on_exit_code = (
+            fail_on_exit_code
+            if isinstance(fail_on_exit_code, Container)
+            else [fail_on_exit_code]
+            if fail_on_exit_code is not None
+            else []
+        )
 
     @staticmethod
     def _get_ecs_task_id(task_arn: str | None) -> str | None:
@@ -509,66 +548,99 @@ class EcsRunTaskOperator(EcsBaseOperator):
         return task_arn.split("/")[-1]
 
     def execute(self, context):
+        if self._aws_logs_enabled() and not self.wait_for_completion:
+            self.log.warning(
+                "Trying to get logs without waiting for the task to complete is undefined behavior."
+            )
+
         self.log.info(
             "Running ECS Task - Task definition: %s - on cluster %s", self.task_definition, self.cluster
         )
         self.log.info("EcsOperator overrides: %s", self.overrides)
 
-        if self.reattach:
-            # Generate deterministic UUID which refers to unique TaskInstanceKey
-            ti: TaskInstance = context["ti"]
-            self._started_by = generate_uuid(*map(str, ti.key.primary))
-            self.log.info("Try to find run with startedBy=%r", self._started_by)
-            self._try_reattach_task(started_by=self._started_by)
+        task_started_by_this_run = False
 
-        if not self.arn:
-            # start the task except if we reattached to an existing one just before.
-            self._start_task()
+        try:
+            if self.reattach:
+                # Generate deterministic UUID which refers to unique TaskInstanceKey
+                ti: TaskInstance = context["ti"]
+                self._started_by = generate_uuid(*map(str, [ti.dag_id, ti.task_id, ti.run_id, ti.map_index]))
+                self.log.info("Try to find run with startedBy=%r", self._started_by)
+                self._try_reattach_task(started_by=self._started_by)
 
-        if self.do_xcom_push:
-            self.xcom_push(context, key="ecs_task_arn", value=self.arn)
+            if not self.arn:
+                # start the task except if we reattached to an existing one just before.
+                self._start_task()
+                task_started_by_this_run = True
 
-        if self.deferrable:
-            self.defer(
-                trigger=TaskDoneTrigger(
-                    cluster=self.cluster,
-                    task_arn=self.arn,
-                    waiter_delay=self.waiter_delay,
-                    waiter_max_attempts=self.waiter_max_attempts,
-                    aws_conn_id=self.aws_conn_id,
-                    region=self.region_name,
-                    log_group=self.awslogs_group,
-                    log_stream=self._get_logs_stream_name(),
-                ),
-                method_name="execute_complete",
-                # timeout is set to ensure that if a trigger dies, the timeout does not restart
-                # 60 seconds is added to allow the trigger to exit gracefully (i.e. yield TriggerEvent)
-                timeout=timedelta(seconds=self.waiter_max_attempts * self.waiter_delay + 60),
-            )
-            # self.defer raises a special exception, so execution stops here in this case.
+            if self.do_xcom_push:
+                context["ti"].xcom_push(key="ecs_task_arn", value=self.arn)
 
-        if not self.wait_for_completion:
-            return
+            if should_defer(deferrable=self.deferrable, wait_for_completion=self.wait_for_completion):
+                self.defer(
+                    trigger=TaskDoneTrigger(
+                        cluster=self.cluster,
+                        task_arn=self.arn,
+                        waiter_delay=self.waiter_delay,
+                        waiter_max_attempts=self.waiter_max_attempts,
+                        aws_conn_id=self.aws_conn_id,
+                        region_name=self.region_name,
+                        log_region_name=self.resolve_awslogs_region(),
+                        log_group=self.awslogs_group,
+                        log_stream=self._get_logs_stream_name(),
+                        verify=self.verify,
+                        botocore_config=self.botocore_config,
+                    ),
+                    method_name="execute_complete",
+                    # timeout is set to ensure that if a trigger dies, the timeout does not restart
+                    # 60 seconds is added to allow the trigger to exit gracefully (i.e. yield TriggerEvent)
+                    timeout=timedelta(seconds=self.waiter_max_attempts * self.waiter_delay + 60),
+                )
+                # self.defer raises a special exception, so execution stops here in this case.
 
-        if self._aws_logs_enabled():
-            self.log.info("Starting ECS Task Log Fetcher")
-            self.task_log_fetcher = self._get_task_log_fetcher()
-            self.task_log_fetcher.start()
+            if not self.wait_for_completion:
+                return
 
-            try:
+            if self._aws_logs_enabled():
+                self.log.info("Starting ECS Task Log Fetcher")
+                self.task_log_fetcher = self._get_task_log_fetcher()
+                self.task_log_fetcher.start()
+
+                try:
+                    self._wait_for_task_ended()
+                finally:
+                    self.task_log_fetcher.stop()
+                self.task_log_fetcher.join()
+            else:
                 self._wait_for_task_ended()
-            finally:
-                self.task_log_fetcher.stop()
-            self.task_log_fetcher.join()
-        else:
-            self._wait_for_task_ended()
 
-        self._after_execution()
+            self._after_execution()
 
-        if self.do_xcom_push and self.task_log_fetcher:
-            return self.task_log_fetcher.get_last_log_message()
-        else:
+            if self.do_xcom_push and self.task_log_fetcher:
+                return self.task_log_fetcher.get_last_log_message()
             return None
+        except WaiterError:
+            # Best-effort cleanup when post-initiation steps fail (e.g. IAM/permission errors).
+            if task_started_by_this_run and self.arn:
+                self.log.warning(
+                    "Execution failed after ECS task %s was started by this task instance.", self.arn
+                )
+
+                if self.stop_task_on_failure:
+                    try:
+                        self.log.warning("Attempting termination of ECS task %s.", self.arn)
+
+                        self.client.stop_task(
+                            cluster=self.cluster,
+                            task=self.arn,
+                            reason="Task failed after creation; cleanup by Airflow",
+                        )
+                    except Exception:
+                        self.log.exception(
+                            "Failed while attempting to stop ECS task %s",
+                            self.arn,
+                        )
+            raise
 
     def execute_complete(self, context: Context, event: dict[str, Any] | None = None) -> str | None:
         validated_event = validate_execute_complete_event(event)
@@ -580,7 +652,12 @@ class EcsRunTaskOperator(EcsBaseOperator):
         self._after_execution()
         if self._aws_logs_enabled():
             # same behavior as non-deferrable mode, return last line of logs of the task.
-            logs_client = AwsLogsHook(aws_conn_id=self.aws_conn_id, region_name=self.region_name).conn
+            logs_client = AwsLogsHook(
+                aws_conn_id=self.aws_conn_id,
+                region_name=self.resolve_awslogs_region(),
+                verify=self.verify,
+                config=self.botocore_config,
+            ).conn
             one_log = logs_client.get_log_events(
                 logGroupName=self.awslogs_group,
                 logStreamName=self._get_logs_stream_name(),
@@ -631,9 +708,21 @@ class EcsRunTaskOperator(EcsBaseOperator):
         self.log.info("ECS Task started: %s", response)
 
         self.arn = response["tasks"][0]["taskArn"]
-        if not self.container_name:
-            self.container_name = response["tasks"][0]["containers"][0]["name"]
         self.log.info("ECS task ID is: %s", self._get_ecs_task_id(self.arn))
+
+        if not self.container_name and (self.awslogs_group and self.awslogs_stream_prefix):
+            backoff_schedule = [10, 30]
+            for delay in backoff_schedule:
+                sleep(delay)
+                response = self.client.describe_tasks(cluster=self.cluster, tasks=[self.arn])
+                containers = response["tasks"][0].get("containers", [])
+                if containers:
+                    self.container_name = containers[0]["name"]
+                if self.container_name:
+                    break
+
+            if not self.container_name:
+                self.log.info("Could not find container name, required for the log stream after 2 tries")
 
     def _try_reattach_task(self, started_by: str):
         if not started_by:
@@ -668,7 +757,13 @@ class EcsRunTaskOperator(EcsBaseOperator):
         return self.awslogs_group and self.awslogs_stream_prefix
 
     def _get_logs_stream_name(self) -> str:
-        if (
+        if not self.container_name and self.awslogs_stream_prefix and "/" not in self.awslogs_stream_prefix:
+            self.log.warning(
+                "Container name could not be inferred and awslogs_stream_prefix '%s' does not contain '/'. "
+                "This may cause issues when extracting logs from Cloudwatch.",
+                self.awslogs_stream_prefix,
+            )
+        elif (
             self.awslogs_stream_prefix
             and self.container_name
             and not self.awslogs_stream_prefix.endswith(f"/{self.container_name}")
@@ -676,20 +771,22 @@ class EcsRunTaskOperator(EcsBaseOperator):
             return f"{self.awslogs_stream_prefix}/{self.container_name}/{self._get_ecs_task_id(self.arn)}"
         return f"{self.awslogs_stream_prefix}/{self._get_ecs_task_id(self.arn)}"
 
+    def resolve_awslogs_region(self) -> str | None:
+        return self.awslogs_region if self.awslogs_region is not None else self.region_name
+
     def _get_task_log_fetcher(self) -> AwsTaskLogFetcher:
         if not self.awslogs_group:
             raise ValueError("must specify awslogs_group to fetch task logs")
 
         return AwsTaskLogFetcher(
             aws_conn_id=self.aws_conn_id,
-            region_name=self.awslogs_region,
+            region_name=self.resolve_awslogs_region(),
             log_group=self.awslogs_group,
             log_stream_name=self._get_logs_stream_name(),
             fetch_interval=self.awslogs_fetch_interval,
             logger=self.log,
         )
 
-    @AwsBaseHook.retry(should_retry_eni)
     def _check_success_task(self) -> None:
         if not self.client or not self.arn:
             return
@@ -702,11 +799,6 @@ class EcsRunTaskOperator(EcsBaseOperator):
 
         for task in response["tasks"]:
             if task.get("stopCode", "") == "TaskFailedToStart":
-                # Reset task arn here otherwise the retry run will not start
-                # a new task but keep polling the old dead one
-                # I'm not resetting it for other exceptions here because
-                # EcsTaskFailToStart is the only exception that's being retried at the moment
-                self.arn = None
                 raise EcsTaskFailToStart(f"The task failed to start due to: {task.get('stoppedReason', '')}")
 
             # This is a `stoppedReason` that indicates a task has not
@@ -719,21 +811,41 @@ class EcsRunTaskOperator(EcsBaseOperator):
                     f" {task.get('stoppedReason', '')}"
                 )
             containers = task["containers"]
+            if self.fail_on_exit_code:
+                failed_container = next(
+                    (
+                        container
+                        for container in containers
+                        if container.get("lastStatus") == "STOPPED"
+                        and container.get("exitCode") not in (None, 0)
+                        and container["exitCode"] in self.fail_on_exit_code
+                    ),
+                    None,
+                )
+                if failed_container is not None:
+                    containers = [failed_container]
             for container in containers:
                 if container.get("lastStatus") == "STOPPED" and container.get("exitCode", 1) != 0:
+                    exit_code = container.get("exitCode", 1)
+                    if container.get("exitCode") is not None and exit_code in self.fail_on_exit_code:
+                        exception_cls: type[AirflowException] = AirflowFailException
+                    elif exit_code in self.skip_on_exit_code:
+                        exception_cls = AirflowSkipException
+                    else:
+                        exception_cls = AirflowException
+
                     if self.task_log_fetcher:
                         last_logs = "\n".join(
                             self.task_log_fetcher.get_last_log_messages(self.number_logs_exception)
                         )
-                        raise AirflowException(
+                        raise exception_cls(
                             f"This task is not in success state - last {self.number_logs_exception} "
                             f"logs from Cloudwatch:\n{last_logs}"
                         )
-                    else:
-                        raise AirflowException(f"This task is not in success state {task}")
-                elif container.get("lastStatus") == "PENDING":
+                    raise exception_cls(f"This task is not in success state {task}")
+                if container.get("lastStatus") == "PENDING":
                     raise AirflowException(f"This task is still pending {task}")
-                elif "error" in container.get("reason", "").lower():
+                if "error" in container.get("reason", "").lower():
                     raise AirflowException(
                         f"This containers encounter an error during launching: "
                         f"{container.get('reason', '').lower()}"

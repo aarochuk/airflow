@@ -19,8 +19,17 @@
 from __future__ import annotations
 
 import copy
+from typing import cast
 
 from kubernetes.client import models as k8s
+
+# Pinned alpine version for the xcom sidecar default. Pinning (rather than
+# using the implicit `:latest`) makes kubelet's default imagePullPolicy
+# `IfNotPresent` instead of `Always`, so a node that has the image cached
+# does not re-pull on every task — protecting CI and disconnected
+# deployments from Docker Hub anonymous-pull rate limits. Tracked by
+# scripts/ci/prek/upgrade_important_versions.py.
+XCOM_SIDECAR_IMAGE = "alpine:3.24.4"
 
 
 class PodDefaults:
@@ -34,7 +43,7 @@ class PodDefaults:
     SIDECAR_CONTAINER = k8s.V1Container(
         name=SIDECAR_CONTAINER_NAME,
         command=["sh", "-c", XCOM_CMD],
-        image="alpine",
+        image=XCOM_SIDECAR_IMAGE,
         volume_mounts=[VOLUME_MOUNT],
         resources=k8s.V1ResourceRequirements(
             requests={
@@ -50,17 +59,21 @@ def add_xcom_sidecar(
     *,
     sidecar_container_image: str | None = None,
     sidecar_container_resources: k8s.V1ResourceRequirements | dict | None = None,
+    sidecar_container_security_context: k8s.V1SecurityContext | dict | None = None,
 ) -> k8s.V1Pod:
     """Add sidecar."""
     pod_cp = copy.deepcopy(pod)
-    pod_cp.spec.volumes = pod.spec.volumes or []
-    pod_cp.spec.volumes.insert(0, PodDefaults.VOLUME)
-    pod_cp.spec.containers[0].volume_mounts = pod_cp.spec.containers[0].volume_mounts or []
-    pod_cp.spec.containers[0].volume_mounts.insert(0, PodDefaults.VOLUME_MOUNT)
+    pod_spec = cast("k8s.V1PodSpec", pod_cp.spec)
+    pod_spec.volumes = pod_spec.volumes or []
+    pod_spec.volumes.insert(0, copy.deepcopy(PodDefaults.VOLUME))
+    pod_spec.containers[0].volume_mounts = pod_spec.containers[0].volume_mounts or []
+    pod_spec.containers[0].volume_mounts.insert(0, copy.deepcopy(PodDefaults.VOLUME_MOUNT))
     sidecar = copy.deepcopy(PodDefaults.SIDECAR_CONTAINER)
     sidecar.image = sidecar_container_image or PodDefaults.SIDECAR_CONTAINER.image
     if sidecar_container_resources:
-        sidecar.resources = sidecar_container_resources
-    pod_cp.spec.containers.append(sidecar)
+        sidecar.resources = k8s.V1ResourceRequirements.model_validate(sidecar_container_resources)
+    if sidecar_container_security_context is not None:
+        sidecar.security_context = k8s.V1SecurityContext.model_validate(sidecar_container_security_context)
+    pod_spec.containers.append(sidecar)
 
     return pod_cp

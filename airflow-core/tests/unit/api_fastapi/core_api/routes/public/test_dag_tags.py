@@ -16,7 +16,7 @@
 # under the License.
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pendulum
 import pytest
@@ -28,14 +28,20 @@ from airflow.utils.session import provide_session
 from airflow.utils.state import DagRunState
 from airflow.utils.types import DagRunTriggeredByType, DagRunType
 
-from tests_common.test_utils.db import clear_db_dags, clear_db_runs, clear_db_serialized_dags
+from tests_common.test_utils.asserts import assert_queries_count
+from tests_common.test_utils.db import (
+    clear_db_dag_bundles,
+    clear_db_dags,
+    clear_db_runs,
+    clear_db_serialized_dags,
+)
 
 pytestmark = pytest.mark.db_test
 
 DAG1_ID = "test_dag1"
 DAG1_DISPLAY_NAME = "display1"
 DAG2_ID = "test_dag2"
-DAG2_START_DATE = datetime(2021, 6, 15, tzinfo=timezone.utc)
+DAG2_START_DATE = datetime(2021, 6, 15, tzinfo=UTC)
 DAG3_ID = "test_dag3"
 DAG4_ID = "test_dag4"
 DAG4_DISPLAY_NAME = "display4"
@@ -53,24 +59,26 @@ class TestDagEndpoint:
     def _clear_db():
         clear_db_runs()
         clear_db_dags()
+        clear_db_dag_bundles()
         clear_db_serialized_dags()
 
     def _create_deactivated_paused_dag(self, session=None):
         dag_model = DagModel(
             dag_id=DAG3_ID,
+            bundle_name="dag_maker",
             fileloc="/tmp/dag_del_1.py",
             timetable_summary="2 2 * * *",
-            is_active=False,
+            is_stale=True,
             is_paused=True,
             owners="test_owner,another_test_owner",
-            next_dagrun=datetime(2021, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+            next_dagrun=datetime(2021, 1, 1, 12, 0, 0, tzinfo=UTC),
         )
 
         dagrun_failed = DagRun(
             dag_id=DAG3_ID,
             run_id="run1",
-            logical_date=datetime(2018, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
-            start_date=datetime(2018, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+            logical_date=datetime(2018, 1, 1, 12, 0, 0, tzinfo=UTC),
+            start_date=datetime(2018, 1, 1, 12, 0, 0, tzinfo=UTC),
             run_type=DagRunType.SCHEDULED,
             state=DagRunState.FAILED,
             triggered_by=DagRunTriggeredByType.TEST,
@@ -79,8 +87,8 @@ class TestDagEndpoint:
         dagrun_success = DagRun(
             dag_id=DAG3_ID,
             run_id="run2",
-            logical_date=datetime(2019, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
-            start_date=datetime(2019, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+            logical_date=datetime(2019, 1, 1, 12, 0, 0, tzinfo=UTC),
+            start_date=datetime(2019, 1, 1, 12, 0, 0, tzinfo=UTC),
             run_type=DagRunType.MANUAL,
             state=DagRunState.SUCCESS,
             triggered_by=DagRunTriggeredByType.TEST,
@@ -92,19 +100,17 @@ class TestDagEndpoint:
 
     def _create_dag_tags(self, session=None):
         session.add(DagTag(dag_id=DAG1_ID, name="tag_2"))
-        session.add(DagTag(dag_id=DAG2_ID, name="tag_1"))
         session.add(DagTag(dag_id=DAG3_ID, name="tag_1"))
+        session.add(DagTag(dag_id=DAG3_ID, name="stale_only"))
 
     @pytest.fixture(autouse=True)
     @provide_session
-    def setup(self, dag_maker, session=None) -> None:
-        self._clear_db()
-
+    def setup(self, dag_maker, *, session=None) -> None:
         with dag_maker(
             DAG1_ID,
             dag_display_name=DAG1_DISPLAY_NAME,
             schedule=None,
-            start_date=datetime(2018, 6, 15, 0, 0, tzinfo=timezone.utc),
+            start_date=datetime(2018, 6, 15, 0, 0, tzinfo=UTC),
             doc_md="details",
             params={"foo": 1},
             tags=["example"],
@@ -122,6 +128,7 @@ class TestDagEndpoint:
             params={"foo": 1},
             max_active_tasks=16,
             max_active_runs=16,
+            tags=["tag_1"],
         ):
             EmptyOperator(task_id=TASK_ID)
 
@@ -141,7 +148,7 @@ class TestDagTags(TestDagEndpoint):
     """Unit tests for Get DAG Tags."""
 
     @pytest.mark.parametrize(
-        "query_params, expected_status_code, expected_dag_tags, expected_total_entries",
+        ("query_params", "expected_status_code", "expected_dag_tags", "expected_total_entries"),
         [
             # test with offset, limit, and without any tag_name_pattern
             (
@@ -189,6 +196,12 @@ class TestDagTags(TestDagEndpoint):
                 0,
             ),
             (
+                {"tag_name_pattern": "stale_only"},
+                200,
+                [],
+                0,
+            ),
+            (
                 {"tag_name_pattern": "1"},
                 200,
                 ["tag_1"],
@@ -199,6 +212,25 @@ class TestDagTags(TestDagEndpoint):
                 200,
                 ["tag_1", "tag_2"],
                 2,
+            ),
+            # tag_name_prefix_pattern counterpart
+            (
+                {"tag_name_prefix_pattern": "invalid"},
+                200,
+                [],
+                0,
+            ),
+            (
+                {"tag_name_prefix_pattern": "tag"},
+                200,
+                ["tag_1", "tag_2"],
+                2,
+            ),
+            (
+                {"tag_name_prefix_pattern": "~"},
+                200,
+                ["example", "tag_1", "tag_2"],
+                3,
             ),
             # test order_by
             (
@@ -238,7 +270,8 @@ class TestDagTags(TestDagEndpoint):
     def test_get_dag_tags(
         self, test_client, query_params, expected_status_code, expected_dag_tags, expected_total_entries
     ):
-        response = test_client.get("/dagTags", params=query_params)
+        with assert_queries_count(3 if expected_status_code == 200 else 2):
+            response = test_client.get("/dagTags", params=query_params)
         assert response.status_code == expected_status_code
         if expected_status_code != 200:
             return

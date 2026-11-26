@@ -17,30 +17,32 @@
 # under the License.
 from __future__ import annotations
 
-import base64
-import pickle
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any
 
+from aiohttp import BasicAuth
 from requests import Response
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
-from airflow.hooks.base import BaseHook
-from airflow.models import BaseOperator
-from airflow.providers.http.triggers.http import HttpTrigger
+from airflow.providers.common.compat.sdk import (
+    AirflowException,
+    BaseHook,
+    BaseOperator,
+    conf,
+    determine_kwargs,
+)
+from airflow.providers.http.triggers.http import HttpResponseSerializer, HttpTrigger, serialize_auth_type
 from airflow.utils.helpers import merge_dicts
 
 if TYPE_CHECKING:
     from requests.auth import AuthBase
 
     from airflow.providers.http.hooks.http import HttpHook
+    from airflow.sdk import Context
 
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+# Idempotent methods per RFC 9110 §9.2.2 (formerly RFC 7231).
+# PUT and DELETE are idempotent even though they are not safe; PATCH is not idempotent.
+IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE"})
+HTTP_DEFERRABLE_DOCS = "https://airflow.apache.org/docs/apache-airflow-providers-http/stable/deferrable.html"
 
 
 class HttpOperator(BaseOperator):
@@ -51,13 +53,16 @@ class HttpOperator(BaseOperator):
         For more information on how to use this operator, take a look at the guide:
         :ref:`howto/operator:HttpOperator`
 
+        For deferrable-mode idempotency caveats, see:
+        :ref:`howto/deferrable:HttpOperator`
+
     :param http_conn_id: The :ref:`http connection<howto/connection:http>` to run
-        the operator against
+        the operator against. (templated)
     :param endpoint: The relative part of the full url. (templated)
     :param method: The HTTP method to use, default = "POST"
     :param data: The data to pass. POST-data in POST/PUT and params
         in the URL for a GET request. (templated)
-    :param headers: The HTTP headers to be added to the GET request
+    :param headers: The HTTP headers to be added to the request
     :param pagination_function: A callable that generates the parameters used to call the API again,
         based on the previous response. Typically used when the API is paginated and returns for e.g a
         cursor, a 'next page id', or a 'next page URL'. When provided, the Operator will call the API
@@ -94,6 +99,10 @@ class HttpOperator(BaseOperator):
     :param tcp_keep_alive_interval: The TCP Keep Alive interval parameter (corresponds to
         ``socket.TCP_KEEPINTVL``)
     :param deferrable: Run operator in the deferrable mode
+    :param warn_on_non_idempotent: When True (default), log a warning if deferrable
+        mode is used with a method outside the RFC 9110 §9.2.2 idempotent set.
+        Set False to silence the warning when a duplicate request is acceptable.
+        See :ref:`howto/deferrable:HttpOperator`.
     :param retry_args: Arguments which define the retry behaviour.
         See Tenacity documentation at https://github.com/jd/tenacity
     """
@@ -103,6 +112,7 @@ class HttpOperator(BaseOperator):
         "endpoint",
         "data",
         "headers",
+        "http_conn_id",
     )
     template_fields_renderers = {"headers": "json", "data": "py"}
     template_ext: Sequence[str] = ()
@@ -122,12 +132,13 @@ class HttpOperator(BaseOperator):
         request_kwargs: dict[str, Any] | None = None,
         http_conn_id: str = "http_default",
         log_response: bool = False,
-        auth_type: type[AuthBase] | None = None,
+        auth_type: type[AuthBase] | type[BasicAuth] | None = None,
         tcp_keep_alive: bool = True,
         tcp_keep_alive_idle: int = 120,
         tcp_keep_alive_count: int = 20,
         tcp_keep_alive_interval: int = 30,
         deferrable: bool = conf.getboolean("operators", "default_deferrable", fallback=False),
+        warn_on_non_idempotent: bool = True,
         retry_args: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -148,6 +159,7 @@ class HttpOperator(BaseOperator):
         self.tcp_keep_alive_count = tcp_keep_alive_count
         self.tcp_keep_alive_interval = tcp_keep_alive_interval
         self.deferrable = deferrable
+        self.warn_on_non_idempotent = warn_on_non_idempotent
         self.retry_args = retry_args
         self.request_kwargs = request_kwargs or {}
 
@@ -172,9 +184,27 @@ class HttpOperator(BaseOperator):
 
     def execute(self, context: Context) -> Any:
         if self.deferrable:
+            self._warn_if_deferrable_non_idempotent_method()
             self.execute_async(context=context)
         else:
             return self.execute_sync(context=context)
+
+    def _warn_if_deferrable_non_idempotent_method(self) -> None:
+        """Log once per attempt when a deferrable request may be re-sent on Triggerer restart."""
+        if not self.warn_on_non_idempotent:
+            return
+        method = (self.method or "").upper()
+        if method in IDEMPOTENT_METHODS:
+            return
+        self.log.warning(
+            "HttpOperator with deferrable=True and method=%s may send duplicate "
+            "requests if the Triggerer restarts. Deferrable mode executes the request in "
+            "the Triggerer, which may be re-run on restart. Use only with idempotent methods "
+            "or use HttpSensor/EventSensor for polling. Set warn_on_non_idempotent=False to "
+            "silence this warning. See %s",
+            self.method,
+            HTTP_DEFERRABLE_DOCS,
+        )
 
     def execute_sync(self, context: Context) -> Any:
         self.log.info("Calling HTTP method")
@@ -221,7 +251,7 @@ class HttpOperator(BaseOperator):
         self.defer(
             trigger=HttpTrigger(
                 http_conn_id=self.http_conn_id,
-                auth_type=self.auth_type,
+                auth_type=serialize_auth_type(self._resolve_auth_type()),
                 method=self.method,
                 endpoint=self.endpoint,
                 headers=self.headers,
@@ -231,10 +261,29 @@ class HttpOperator(BaseOperator):
             method_name="execute_complete",
         )
 
+    def _resolve_auth_type(self) -> type[AuthBase] | type[BasicAuth] | None:
+        """
+        Resolve the authentication type for the HTTP request.
+
+        If auth_type is not explicitly set, attempt to infer it from the connection configuration.
+        For connections with login/password, default to BasicAuth.
+
+        :return: The resolved authentication type class, or None if no auth is needed.
+        """
+        if self.auth_type is not None:
+            return self.auth_type
+
+        try:
+            conn = BaseHook.get_connection(self.http_conn_id)
+            if conn.login or conn.password:
+                return BasicAuth
+        except Exception as e:
+            self.log.warning("Failed to resolve auth type from connection: %s", e)
+
+        return None
+
     def process_response(self, context: Context, response: Response | list[Response]) -> Any:
         """Process the response."""
-        from airflow.utils.operator_helpers import determine_kwargs
-
         make_default_response: Callable = self._default_response_maker(response=response)
 
         if self.log_response:
@@ -272,33 +321,34 @@ class HttpOperator(BaseOperator):
         Relies on trigger to throw an exception, otherwise it assumes execution was successful.
         """
         if event["status"] == "success":
-            response = pickle.loads(base64.standard_b64decode(event["response"]))
-
-            self.paginate_async(context=context, response=response, previous_responses=paginated_responses)
-            return self.process_response(context=context, response=response)
-        else:
-            raise AirflowException(f"Unexpected error in the operation: {event['message']}")
+            response = HttpResponseSerializer.deserialize(event["response"])
+            return self.paginate_async(
+                context=context, response=response, previous_responses=paginated_responses
+            )
+        raise AirflowException(f"Unexpected error in the operation: {event['message']}")
 
     def paginate_async(
         self, context: Context, response: Response, previous_responses: None | list[Response] = None
     ):
-        if self.pagination_function:
-            all_responses = previous_responses or []
-            all_responses.append(response)
+        if not self.pagination_function:
+            return self.process_response(context=context, response=response)
 
-            next_page_params = self.pagination_function(response)
-            if not next_page_params:
-                return self.process_response(context=context, response=all_responses)
-            self.defer(
-                trigger=HttpTrigger(
-                    http_conn_id=self.http_conn_id,
-                    auth_type=self.auth_type,
-                    method=self.method,
-                    **self._merge_next_page_parameters(next_page_params),
-                ),
-                method_name="execute_complete",
-                kwargs={"paginated_responses": all_responses},
-            )
+        all_responses = previous_responses or []
+        all_responses.append(response)
+
+        next_page_params = self.pagination_function(response)
+        if not next_page_params:
+            return self.process_response(context=context, response=all_responses)
+        self.defer(
+            trigger=HttpTrigger(
+                http_conn_id=self.http_conn_id,
+                auth_type=serialize_auth_type(self._resolve_auth_type()),
+                method=self.method,
+                **self._merge_next_page_parameters(next_page_params),
+            ),
+            method_name="execute_complete",
+            kwargs={"paginated_responses": all_responses},
+        )
 
     def _merge_next_page_parameters(self, next_page_params: dict) -> dict:
         """

@@ -26,33 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-datadog",
         "name": "Datadog",
         "description": "`Datadog <https://www.datadoghq.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477808,
-        "versions": [
-            "3.8.3",
-            "3.8.2",
-            "3.8.0",
-            "3.7.1",
-            "3.7.0",
-            "3.6.1",
-            "3.6.0",
-            "3.5.1",
-            "3.5.0",
-            "3.4.0",
-            "3.3.2",
-            "3.3.1",
-            "3.3.0",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.0.4",
-            "2.0.3",
-            "2.0.2",
-            "2.0.1",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Datadog",
@@ -70,9 +43,19 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.datadog.hooks.datadog.DatadogHook",
+                "hook-name": "Datadog",
                 "connection-type": "datadog",
+                "conn-fields": {
+                    "api_host": {"label": "API endpoint", "schema": {"type": ["string", "null"]}},
+                    "api_key": {"label": "API key", "schema": {"type": ["string", "null"]}},
+                    "app_key": {"label": "Application key", "schema": {"type": ["string", "null"]}},
+                    "source_type_name": {"label": "Source type name", "schema": {"type": ["string", "null"]}},
+                },
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema", "login", "password", "port", "extra"],
+                    "relabeling": {"host": "Events host name"},
+                    "placeholders": {},
+                },
             }
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "datadog>=0.14.0"],
-        "devel-dependencies": [],
     }

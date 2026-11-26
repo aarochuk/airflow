@@ -16,16 +16,17 @@
 # under the License.
 from __future__ import annotations
 
+import json
 import os
 from unittest import mock
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+from azure.core import MatchConditions
 from azure.mgmt.datafactory.aio import DataFactoryManagementClient
-from azure.mgmt.datafactory.models import FactoryListResponse
 
-from airflow.exceptions import AirflowException
 from airflow.models.connection import Connection
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.microsoft.azure.hooks.data_factory import (
     AzureDataFactoryAsyncHook,
     AzureDataFactoryHook,
@@ -243,12 +244,18 @@ def test_create_factory(hook: AzureDataFactoryHook):
     hook._conn.factories.create_or_update.assert_called_with(RESOURCE_GROUP, FACTORY, MODEL)
 
 
-def test_update_factory(hook: AzureDataFactoryHook):
+@pytest.mark.parametrize(
+    ("if_match", "expected_match_condition"),
+    [(None, None), ("etag-value", MatchConditions.IfNotModified)],
+)
+def test_update_factory(hook: AzureDataFactoryHook, if_match, expected_match_condition):
     with patch.object(hook, "_factory_exists") as mock_factory_exists:
         mock_factory_exists.return_value = True
-        hook.update_factory(MODEL, RESOURCE_GROUP, FACTORY)
+        hook.update_factory(MODEL, RESOURCE_GROUP, FACTORY, if_match)
 
-    hook._conn.factories.create_or_update.assert_called_with(RESOURCE_GROUP, FACTORY, MODEL, None)
+    hook._conn.factories.create_or_update.assert_called_with(
+        RESOURCE_GROUP, FACTORY, MODEL, etag=if_match, match_condition=expected_match_condition
+    )
 
 
 def test_update_factory_non_existent(hook: AzureDataFactoryHook):
@@ -265,10 +272,16 @@ def test_delete_factory(hook: AzureDataFactoryHook):
     hook._conn.factories.delete.assert_called_with(RESOURCE_GROUP, FACTORY)
 
 
-def test_get_linked_service(hook: AzureDataFactoryHook):
-    hook.get_linked_service(NAME, RESOURCE_GROUP, FACTORY)
+@pytest.mark.parametrize(
+    ("if_none_match", "expected_match_condition"),
+    [(None, None), ("etag-value", MatchConditions.IfModified)],
+)
+def test_get_linked_service(hook: AzureDataFactoryHook, if_none_match, expected_match_condition):
+    hook.get_linked_service(NAME, RESOURCE_GROUP, FACTORY, if_none_match)
 
-    hook._conn.linked_services.get.assert_called_with(RESOURCE_GROUP, FACTORY, NAME, None)
+    hook._conn.linked_services.get.assert_called_with(
+        RESOURCE_GROUP, FACTORY, NAME, etag=if_none_match, match_condition=expected_match_condition
+    )
 
 
 def test_create_linked_service(hook: AzureDataFactoryHook):
@@ -333,24 +346,42 @@ def test_delete_dataset(hook: AzureDataFactoryHook):
     hook._conn.datasets.delete.assert_called_with(RESOURCE_GROUP, FACTORY, NAME)
 
 
-def test_get_dataflow(hook: AzureDataFactoryHook):
-    hook.get_dataflow(NAME, RESOURCE_GROUP, FACTORY)
+@pytest.mark.parametrize(
+    ("if_none_match", "expected_match_condition"),
+    [(None, None), ("etag-value", MatchConditions.IfModified)],
+)
+def test_get_dataflow(hook: AzureDataFactoryHook, if_none_match, expected_match_condition):
+    hook.get_dataflow(NAME, RESOURCE_GROUP, FACTORY, if_none_match)
 
-    hook._conn.data_flows.get.assert_called_with(RESOURCE_GROUP, FACTORY, NAME, None)
+    hook._conn.data_flows.get.assert_called_with(
+        RESOURCE_GROUP, FACTORY, NAME, etag=if_none_match, match_condition=expected_match_condition
+    )
 
 
-def test_create_dataflow(hook: AzureDataFactoryHook):
-    hook.create_dataflow(NAME, MODEL, RESOURCE_GROUP, FACTORY)
+@pytest.mark.parametrize(
+    ("if_match", "expected_match_condition"),
+    [(None, None), ("etag-value", MatchConditions.IfNotModified)],
+)
+def test_create_dataflow(hook: AzureDataFactoryHook, if_match, expected_match_condition):
+    hook.create_dataflow(NAME, MODEL, RESOURCE_GROUP, FACTORY, if_match)
 
-    hook._conn.data_flows.create_or_update.assert_called_with(RESOURCE_GROUP, FACTORY, NAME, MODEL, None)
+    hook._conn.data_flows.create_or_update.assert_called_with(
+        RESOURCE_GROUP, FACTORY, NAME, MODEL, etag=if_match, match_condition=expected_match_condition
+    )
 
 
-def test_update_dataflow(hook: AzureDataFactoryHook):
+@pytest.mark.parametrize(
+    ("if_match", "expected_match_condition"),
+    [(None, None), ("etag-value", MatchConditions.IfNotModified)],
+)
+def test_update_dataflow(hook: AzureDataFactoryHook, if_match, expected_match_condition):
     with patch.object(hook, "_dataflow_exists") as mock_dataflow_exists:
         mock_dataflow_exists.return_value = True
-        hook.update_dataflow(NAME, MODEL, RESOURCE_GROUP, FACTORY)
+        hook.update_dataflow(NAME, MODEL, RESOURCE_GROUP, FACTORY, if_match)
 
-    hook._conn.data_flows.create_or_update.assert_called_with(RESOURCE_GROUP, FACTORY, NAME, MODEL, None)
+    hook._conn.data_flows.create_or_update.assert_called_with(
+        RESOURCE_GROUP, FACTORY, NAME, MODEL, etag=if_match, match_condition=expected_match_condition
+    )
 
 
 def test_update_dataflow_non_existent(hook: AzureDataFactoryHook):
@@ -474,12 +505,18 @@ def test_create_trigger(hook: AzureDataFactoryHook):
     hook._conn.triggers.create_or_update.assert_called_with(RESOURCE_GROUP, FACTORY, NAME, MODEL)
 
 
-def test_update_trigger(hook: AzureDataFactoryHook):
+@pytest.mark.parametrize(
+    ("if_match", "expected_match_condition"),
+    [(None, None), ("etag-value", MatchConditions.IfNotModified)],
+)
+def test_update_trigger(hook: AzureDataFactoryHook, if_match, expected_match_condition):
     with patch.object(hook, "_trigger_exists") as mock_trigger_exists:
         mock_trigger_exists.return_value = True
-        hook.update_trigger(NAME, MODEL, RESOURCE_GROUP, FACTORY)
+        hook.update_trigger(NAME, MODEL, RESOURCE_GROUP, FACTORY, if_match)
 
-    hook._conn.triggers.create_or_update.assert_called_with(RESOURCE_GROUP, FACTORY, NAME, MODEL, None)
+    hook._conn.triggers.create_or_update.assert_called_with(
+        RESOURCE_GROUP, FACTORY, NAME, MODEL, etag=if_match, match_condition=expected_match_condition
+    )
 
 
 def test_update_trigger_non_existent(hook: AzureDataFactoryHook):
@@ -522,7 +559,7 @@ def test_cancel_trigger(hook: AzureDataFactoryHook):
 
 @pytest.mark.parametrize(
     argnames="factory_list_result",
-    argvalues=[iter([FactoryListResponse]), iter([])],
+    argvalues=[iter([object()]), iter([])],
     ids=["factory_exists", "factory_does_not_exist"],
 )
 def test_connection_success(hook, factory_list_result):
@@ -680,22 +717,30 @@ class TestAzureDataFactoryAsyncHook:
         assert response == mock_status
 
     @pytest.mark.asyncio
-    @mock.patch("azure.mgmt.datafactory.models._models_py3.PipelineRun")
-    @mock.patch(f"{MODULE}.AzureDataFactoryAsyncHook.get_connection")
+    @mock.patch(f"{MODULE}.get_async_connection", new_callable=mock.AsyncMock)
     @mock.patch(f"{MODULE}.AzureDataFactoryAsyncHook.get_async_conn")
-    async def test_get_pipeline_run_exception_without_resource(
-        self, mock_conn, mock_get_connection, mock_pipeline_run
-    ):
+    async def test_get_pipeline_run_exception_without_resource(self, mock_conn, mock_get_async_connection):
         """
         Test get_pipeline_run function without passing the resource name to check the decorator function and
         raise exception
         """
         mock_connection = Connection(extra={"factory_name": DATAFACTORY_NAME})
-        mock_get_connection.return_value = mock_connection
-        mock_conn.return_value.pipeline_runs.get.return_value = mock_pipeline_run
+        mock_get_async_connection.return_value = mock_connection
+        mock_conn.return_value.pipeline_runs.get.return_value = MagicMock()
         hook = AzureDataFactoryAsyncHook(AZURE_DATA_FACTORY_CONN_ID)
         with pytest.raises(AirflowException):
             await hook.get_pipeline_run(RUN_ID, None, DATAFACTORY_NAME)
+
+    @staticmethod
+    def _conn_with_raising_extra_dejson(extra: dict, login="clientId", password="clientSecret"):
+        conn = mock.Mock()
+        conn.login = login
+        conn.password = password
+        conn.extra = json.dumps(extra)
+        type(conn).extra_dejson = PropertyMock(
+            side_effect=RuntimeError("You cannot use AsyncToSync in the same thread as an async event loop")
+        )
+        return conn
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -754,6 +799,50 @@ class TestAzureDataFactoryAsyncHook:
         assert isinstance(response, DataFactoryManagementClient)
 
     @pytest.mark.asyncio
+    async def test_get_async_conn_does_not_touch_extra_dejson(self):
+        conn = self._conn_with_raising_extra_dejson(
+            {"tenantId": "tenantId", "subscriptionId": "subscriptionId"}
+        )
+        hook = AzureDataFactoryAsyncHook(AZURE_DATA_FACTORY_CONN_ID)
+        with (
+            mock.patch(f"{MODULE}.get_async_connection", new=mock.AsyncMock(return_value=conn)),
+            mock.patch(f"{MODULE}.AsyncClientSecretCredential"),
+            mock.patch(f"{MODULE}.AsyncDataFactoryManagementClient") as mock_client,
+        ):
+            response = await hook.get_async_conn()
+        assert response is mock_client.return_value
+
+    @pytest.mark.asyncio
+    async def test_get_async_conn_uses_get_async_connection(self):
+        conn = self._conn_with_raising_extra_dejson(
+            {"tenantId": "tenantId", "subscriptionId": "subscriptionId"}
+        )
+        hook = AzureDataFactoryAsyncHook(AZURE_DATA_FACTORY_CONN_ID)
+        with (
+            mock.patch(
+                f"{MODULE}.get_async_connection", new=mock.AsyncMock(return_value=conn)
+            ) as mock_get_async_connection,
+            mock.patch(f"{MODULE}.AsyncClientSecretCredential"),
+            mock.patch(f"{MODULE}.AsyncDataFactoryManagementClient"),
+        ):
+            await hook.get_async_conn()
+        mock_get_async_connection.assert_awaited_once_with(AZURE_DATA_FACTORY_CONN_ID)
+
+    @pytest.mark.asyncio
+    @mock.patch(f"{MODULE}.AzureDataFactoryAsyncHook.get_async_conn")
+    async def test_provide_targeted_factory_async_does_not_touch_extra_dejson(self, mock_get_async_conn):
+        conn = self._conn_with_raising_extra_dejson(
+            {"resource_group_name": RESOURCE_GROUP_NAME, "factory_name": DATAFACTORY_NAME}
+        )
+        mock_get_async_conn.return_value.pipeline_runs.get = mock.AsyncMock(return_value=MagicMock())
+        hook = AzureDataFactoryAsyncHook(AZURE_DATA_FACTORY_CONN_ID)
+        with mock.patch(f"{MODULE}.get_async_connection", new=mock.AsyncMock(return_value=conn)):
+            await hook.get_pipeline_run(RUN_ID, None, None)
+        mock_get_async_conn.return_value.pipeline_runs.get.assert_awaited_once_with(
+            RESOURCE_GROUP_NAME, DATAFACTORY_NAME, RUN_ID
+        )
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "mocked_connection",
         [
@@ -797,7 +886,9 @@ class TestAzureDataFactoryAsyncHook:
     async def test_get_async_conn_key_error_subscription_id(self, mocked_connection):
         """Test get_async_conn function when subscription_id is missing in the connection"""
         hook = AzureDataFactoryAsyncHook(mocked_connection.conn_id)
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError, match="A Subscription ID is required to connect to Azure Data Factory."
+        ):
             await hook.get_async_conn()
 
     @pytest.mark.asyncio
@@ -821,7 +912,9 @@ class TestAzureDataFactoryAsyncHook:
     async def test_get_async_conn_key_error_tenant_id(self, mocked_connection):
         """Test get_async_conn function when tenant id is missing in the connection"""
         hook = AzureDataFactoryAsyncHook(mocked_connection.conn_id)
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError, match="A Tenant ID is required when authenticating with Client ID and Secret."
+        ):
             await hook.get_async_conn()
 
     def test_get_field_prefixed_extras(self):
@@ -867,8 +960,47 @@ class TestAzureDataFactoryAsyncHook:
     @pytest.mark.asyncio
     @mock.patch(f"{MODULE}.AzureDataFactoryAsyncHook.get_async_conn")
     async def test_refresh_conn(self, mock_get_async_conn):
-        """Test refresh_conn method _conn is reset and get_async_conn is called"""
+        """Test refresh_conn closes the async client before recreating it."""
         hook = AzureDataFactoryAsyncHook(AZURE_DATA_FACTORY_CONN_ID)
+        mock_async_conn = mock.AsyncMock()
+        hook._async_conn = mock_async_conn
         await hook.refresh_conn()
         assert not hook._conn
+        mock_async_conn.close.assert_awaited_once()
+        assert hook._async_conn is None
         assert mock_get_async_conn.called
+
+    @pytest.mark.asyncio
+    async def test_close_method(self):
+        """Test close method properly closes the async connection"""
+        hook = AzureDataFactoryAsyncHook(AZURE_DATA_FACTORY_CONN_ID)
+        mock_conn = mock.AsyncMock()
+        hook._async_conn = mock_conn
+
+        await hook.close()
+
+        mock_conn.close.assert_called_once()
+        assert hook._async_conn is None
+
+    @pytest.mark.asyncio
+    async def test_close_method_when_conn_is_none(self):
+        """Test close method does nothing when connection is None"""
+        hook = AzureDataFactoryAsyncHook(AZURE_DATA_FACTORY_CONN_ID)
+        hook._async_conn = None
+
+        # Should not raise any exception
+        await hook.close()
+        assert hook._async_conn is None
+
+    @pytest.mark.asyncio
+    async def test_context_manager_calls_close(self):
+        """Test async context manager calls close on exit"""
+        hook = AzureDataFactoryAsyncHook(AZURE_DATA_FACTORY_CONN_ID)
+        mock_conn = mock.AsyncMock()
+        hook._async_conn = mock_conn
+
+        async with hook:
+            pass
+
+        mock_conn.close.assert_called_once()
+        assert hook._async_conn is None

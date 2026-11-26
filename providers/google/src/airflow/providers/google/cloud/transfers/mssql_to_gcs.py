@@ -65,9 +65,11 @@ class MSSQLToGCSOperator(BaseSQLToGCSOperator):
 
     """
 
+    template_fields: Sequence[str] = (*BaseSQLToGCSOperator.template_fields, "mssql_conn_id")
+
     ui_color = "#e0a98c"
 
-    type_map = {2: "BOOLEAN", 3: "INTEGER", 4: "TIMESTAMP", 5: "NUMERIC"}
+    type_map = {2: "BOOL", 3: "INTEGER", 4: "TIMESTAMP", 5: "NUMERIC"}
 
     def __init__(
         self,

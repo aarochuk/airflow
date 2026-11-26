@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -55,7 +54,7 @@
     :maxdepth: 1
     :caption: Resources
 
-    Example DAGs <https://github.com/apache/airflow/tree/providers-zendesk/|version|/providers/zendesk/tests/system/zendesk/example_zendesk_custom_get.py>
+    Example Dags <https://github.com/apache/airflow/tree/providers-zendesk/|version|/providers/zendesk/tests/system/zendesk/example_zendesk_custom_get.py>
     PyPI Repository <https://pypi.org/project/apache-airflow-providers-zendesk/>
     Installing from sources <installing-providers-from-sources>
 
@@ -76,7 +75,7 @@ apache-airflow-providers-zendesk package
 `Zendesk <https://www.zendesk.com/>`__
 
 
-Release: 4.9.1
+Release: 4.12.1
 
 Provider package
 ----------------
@@ -87,18 +86,28 @@ All classes for this package are included in the ``airflow.providers.zendesk`` p
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-zendesk``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-==================  ==================
-PIP package         Version required
-==================  ==================
-``apache-airflow``  ``>=2.9.0``
-``zenpy``           ``>=2.0.40``
-==================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.8.0``
+``zenpy``                                   ``>=2.0.40``
+==========================================  ==================
+
+Downloading official packages
+-----------------------------
+
+You can download officially released packages and verify their checksums and signatures from the
+`Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
+
+* `The apache-airflow-providers-zendesk 4.12.1 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_zendesk-4.12.1.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_zendesk-4.12.1.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_zendesk-4.12.1.tar.gz.sha512>`__)
+* `The apache-airflow-providers-zendesk 4.12.1 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_zendesk-4.12.1-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_zendesk-4.12.1-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_zendesk-4.12.1-py3-none-any.whl.sha512>`__)

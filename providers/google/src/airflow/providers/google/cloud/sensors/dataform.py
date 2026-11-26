@@ -22,12 +22,11 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator
 from airflow.providers.google.cloud.hooks.dataform import DataformHook
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class DataformWorkflowInvocationStateSensor(BaseSensorOperator):
@@ -54,7 +53,10 @@ class DataformWorkflowInvocationStateSensor(BaseSensorOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields: Sequence[str] = ("workflow_invocation_id",)
+    template_fields: Sequence[str] = (
+        "workflow_invocation_id",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,
@@ -131,7 +133,10 @@ class DataformWorkflowInvocationActionStateSensor(BaseSensorOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields: Sequence[str] = ("workflow_invocation_id",)
+    template_fields: Sequence[str] = (
+        "workflow_invocation_id",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,

@@ -17,221 +17,761 @@
 
 
 
-UI / Screenshots
-=================
-The Airflow UI makes it easy to monitor and troubleshoot your data pipelines.
-Here's a quick overview of some of the features and visualizations you
-can find in the Airflow UI.
+UI Overview
+===========
+The Airflow UI provides a powerful way to monitor, manage, and troubleshoot your data pipelines and data assets. As of
+Airflow 3, the UI has been refreshed with a modern look, support for dark and light themes, and a redesigned navigation
+experience.
 
+This guide offers a reference-style walkthrough of key UI components, with annotated screenshots to help new and
+experienced users alike.
 
-Dags View
-.........
+.. note::
+   Screenshots in this guide are available in both **dark** and **light** theme. Use the tabs above any screenshot to
+   switch; your choice applies to every screenshot on the page. You can toggle themes in the Airflow UI from user
+   settings located at the bottom corner.
 
-List of the dags in your environment, and a set of shortcuts to useful pages.
-You can see exactly how many tasks succeeded, failed, or are currently
-running at a glance.
+.. note::
+   The Airflow 3 UI uses modern browser and CSS features. Use a current version of Chrome, Edge, Firefox, or
+   Safari. Older browser versions that do not support modern CSS color functions such as ``oklch()`` or
+   ``color-mix()`` may render the UI incorrectly.
 
-In order to filter dags (e.g. by team), you can add tags in each DAG.
-The filter is saved in a cookie and can be reset by the reset button.
-For example:
+.. _ui-home:
 
-.. code-block:: python
+Home Page
+---------
+The Home Page provides a high-level overview of the system state and recent activity. It is the default landing page in
+Airflow 3 and includes:
 
-   dag = DAG("dag", tags=["team1", "sql"])
+- **Health indicators** for system components such as the MetaDatabase, Scheduler, Triggerer, and Dag Processor
+- **Quick links** to Dags filtered by status (e.g., Failed Dags, Running Dags, Active Dags)
+- **Dag and Task Instance history**, showing counts and success/failure rates over a selectable time range
+- **Recent asset events**, including materializations and triggered Dags
 
+This page is useful for quickly assessing the health of your environment and identifying recent issues or
+asset-triggered events.
 
-------------
+.. tab-set::
+    :sync-group: ui-theme
 
-.. image:: img/dags.png
+    .. tab-item:: Dark
+        :sync: dark
 
-------------
+        .. image:: img/ui-dark/home_dark.png
+           :alt: Airflow Home Page showing system health, Dag/task stats, and asset events (Dark Mode)
 
+    .. tab-item:: Light
+        :sync: light
 
-.. _ui:cluster-activity-view:
+        .. image:: img/ui-light/home_light.png
+           :alt: Airflow Home Page showing system health, Dag/task stats, and asset events (Light Mode)
 
-Cluster Activity View
-.....................
+.. _ui-dag-list:
 
-Native Airflow dashboard page into the UI to collect several useful metrics for monitoring your Airflow cluster.
+Dag List View
+-------------
 
-------------
+The Dag List View appears when you click the **Dags** tab in the main navigation bar. It displays all Dags available in
+your environment, with a clear summary of their status, recent runs, and configuration.
 
-.. image:: img/cluster_activity.png
+Each row includes:
 
-------------
+- **Dag ID**
+- **Schedule** and next run time
+- **Status of the latest Dag run**
+- **Bar chart of recent runs**
+- **Tags**, which can be used for grouping or filtering Dags (e.g., ``example``, ``produces``)
+- **Pause/resume toggle**
+- Links to access Dag-level views
 
+At the top of the view, you can:
 
-.. _ui:assets-view:
+- Use **filters** for Dag status, schedule state, and tags
+- Use **search** or **advanced search (⌘+K)** to find specific Dags
+- Sort the list using the dropdown (e.g., Latest Run Start Date)
 
-Asset View
-.............
+.. tab-set::
+    :sync-group: ui-theme
 
-A combined listing of the current assets and a graph illustrating how they are produced and consumed by dags.
+    .. tab-item:: Dark
+        :sync: dark
 
-Clicking on any dataset in either the list or the graph will highlight it and its relationships, and filter the list to show the recent history of task instances that have updated that dataset and whether it has triggered further DAG runs.
+        .. image:: img/ui-dark/dag_list.png
+           :alt: Dag List View in dark mode showing search, filters, and Dag-level controls
 
-------------
+    .. tab-item:: Light
+        :sync: light
 
-.. image:: img/assets.png
+        .. image:: img/ui-light/dag_list.png
+           :alt: Dag List View in light mode showing the same Dags and actions for comparison
 
-------------
+Some Dags in this list may interact with data assets. For example, Dags that are triggered by asset conditions may
+display popups showing upstream asset inputs.
 
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_list_asset_condition_popup.png
+           :alt: Dag List View showing asset condition popup (Dark Mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_list_asset_condition_popup.png
+           :alt: Dag List View showing asset condition popup (Light Mode)
+
+.. _ui-dag-details:
+
+Dag Details Page
+----------------
+
+Clicking a Dag from the list opens the Dag Details Page. This view offers centralized access to a Dag's metadata, recent
+activity, and task-level diagnostics.
+
+Key elements include:
+
+- **Dag metadata**, including ID, owner, tags, schedule, and latest Dag version
+- **Action buttons** to trigger the Dag, reparse it, or pause/resume
+- **Tabbed interface**: Overview (recent failures, run counts, task logs); Grid View (status heatmap); Graph View (task dependencies); Runs (full run history); Tasks (aggregated stats); Events (system- or asset-triggered); Code (Dag source); and Details (extended metadata)
+
+This page also includes a visual **timeline of recent Dag runs** and a **log preview for failures**, helping users quickly identify issues across runs.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_overview_dashboard.png
+           :alt: Dag Details Page in dark mode showing overview dashboard and failure diagnostics
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_overview_dashboard.png
+           :alt: Dag Details Page in light mode showing overview dashboard and failure diagnostics
+
+.. _ui-grid-view:
 
 Grid View
-.........
+'''''''''
 
-A bar chart and grid representation of the DAG that spans across time.
-The top row is a chart of DAG Runs by duration,
-and below, task instances. If a pipeline is late,
-you can quickly see where the different steps are and identify
-the blocking ones.
+The Grid View is the primary interface for inspecting Dag runs and task states. It offers an interactive way to debug,
+retry, or monitor workflows over time.
 
-------------
+Use Grid View to:
 
-.. image:: img/grid.png
+- **Understand the status of recent Dag runs** at a glance
+- **Identify failed or retried tasks** by color and tooltip
+- **Take action** by clicking a task cell to view logs or mark task instances as successful, failed, or cleared
+- **Act on several task instances at once**: Ctrl + click (Cmd + click on macOS) adds or removes a cell, and
+  Shift + click selects every cell between the last one picked and the clicked one. The selected task instances can
+  then be cleared, marked, or deleted together, and the actions of the details panel are hidden meanwhile. A mapped
+  task's cell stands for all of its mapped task instances, and a task group's cell for every task instance inside the
+  group in that run. The cell of a task inside a loop stands for every pass of that task in the run, and a loop's
+  cell for every pass of the loop.
+- **Filter tasks** by name or partial ID
+- **Select a run range**, like "last 25 runs" using the dropdown above the grid
 
-------------
+Each row represents a task, and each column represents a Dag run. You can hover over any task instance for more detail,
+or click to drill down into logs and metadata.
 
-The details panel will update when selecting a DAG Run by clicking on a duration bar:
+.. tab-set::
+    :sync-group: ui-theme
 
-.. image:: img/grid_run_details.png
+    .. tab-item:: Dark
+        :sync: dark
 
-Or selecting a Task Instance by clicking on a status box:
+        .. image:: img/ui-dark/dag_overview_grid.png
+           :alt: Grid View showing Dag run status matrix with varied task states (Dark Mode)
 
-.. image:: img/grid_instance_details.png
+    .. tab-item:: Light
+        :sync: light
 
-Or selecting a Task across all runs by click on the task_id:
+        .. image:: img/ui-light/dag_overview_grid.png
+           :alt: Grid View showing Dag run status matrix with varied task states (Light Mode)
 
-.. image:: img/grid_task_details.png
-
-Manual runs are indicated by a play icon (just like the Trigger DAG button).
-Asset triggered runs are indicated by a database icon:
-
-.. image:: img/run_types.png
-
-Task groups are indicated by a caret and can be opened or closed:
-
-.. image:: img/grid_task_group.png
-
-Mapped Tasks are indicated by square brackets and will show a table of each mapped task instance in the Mapped Tasks panel:
-
-.. image:: img/grid_mapped_task.png
-
-------------
-
-
-.. _ui:graph-view:
+.. _ui-graph-view:
 
 Graph View
-..........
+''''''''''
 
-The graph view is perhaps the most comprehensive. Visualize your DAG's
-dependencies and their current status for a specific run.
+The Graph View shows the logical structure of your Dag - how tasks are connected, what order they run in, and how
+branching or retries are configured.
+
+This view is helpful when:
+
+- **Debugging why a task didn't run** (e.g., skipped due to a trigger rule)
+- **Understanding task dependencies** across complex pipelines
+- **Inspecting run-specific task states** (e.g., success, failed, upstream failed)
+
+Each node represents a task. Edges show the dependencies between them. You can click any task to view its metadata and
+recent run history.
+
+Use the dropdown at the top to switch between Dag runs and see how task states changed across executions.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_overview_graph.png
+           :alt: Graph View showing Dag structure with no Dag run selected (Dark Mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_overview_graph.png
+           :alt: Graph View showing Dag structure with no Dag run selected (Light Mode)
+
+.. _ui-dag-tabs:
+
+Dag Tabs
+--------
+In addition to the interactive views like Grid and Graph, the Dag Details page includes several other tabs that provide
+deeper insights and metadata:
+
+Runs Tab
+''''''''
+The **Runs** tab displays a sortable table of all Dag runs, along with their status, execution duration, run type, and Dag version.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_overview_runs.png
+           :alt: Dag Runs Tab (Dark Mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_overview_runs.png
+           :alt: Dag Runs Tab (Light Mode)
+
+Tasks Tab
+'''''''''
+
+The **Tasks** tab shows metadata for each task in the Dag, including operator type, trigger rule, most recent run status, and run history.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_overview_tasks.png
+           :alt: Dag Tasks Tab (Dark Mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_overview_tasks.png
+           :alt: Dag Tasks Tab (Light Mode)
+
+Events Tab
+''''''''''
+
+The **Events** tab surfaces structured events related to the Dag, such as Dag triggers and version patches. This tab is especially useful for Dag versioning and troubleshooting changes.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_overview_events.png
+           :alt: Dag Events Tab (Dark Mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_overview_events.png
+           :alt: Dag Events Tab (Light Mode)
+
+Code Tab
+''''''''
+
+The **Code** tab displays the current version of the Dag definition, including the timestamp of the last parse. Users can view the code for any specific Dag version.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_overview_code.png
+           :alt: Dag Code Tab (Dark Mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_overview_code.png
+           :alt: Dag Code Tab (Light Mode)
+
+Details Tab
+'''''''''''
+
+The **Details** tab provides configuration details and metadata for the Dag, including schedule, file location, concurrency limits, and version identifiers.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_overview_details.png
+           :alt: Dag Details Tab (Dark Mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_overview_details.png
+           :alt: Dag Details Tab (Light Mode)
+
+Versions Tab
+''''''''''''
+
+.. versionadded:: 3.4.0
+
+The **Versions** tab compares two versions of the Dag. Pick a version in **Compare from** and another in
+**Compare to**, and the tab lists every change between them: the path of what changed, whether it was added,
+changed or removed, its category (for example task, schedule, param or asset) and its impact. Changes that
+affect execution, such as a task's operator or retries, are marked separately from metadata-only changes like
+a description or tag.
+
+The **Before** and **After** columns, and the names in each path, are shown only to users who can read the
+Dag's code. Other users still see what kind of change was made, with identifying names in the path masked and
+the values marked as hidden. A large comparison is cut at 500 changes by
+default; set **Max changes** (up to 5000) to see more. The selected versions are kept in the URL, so a
+comparison can be shared as a link.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_overview_versions.png
+           :alt: Dag Versions Tab (Dark Mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_overview_versions.png
+           :alt: Dag Versions Tab (Light Mode)
+
+.. _ui-dag-runs:
+
+Dag Run View
+------------
+Each Dag Run has its own view, accessible by selecting a specific row in the Dag's **Runs** tab. The Dag Run view
+displays metadata about the selected run, as well as task-level details, rendered code, and more.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_run_task_instances.png
+           :alt: Dag Run - Task Instances tab (dark mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_run_task_instances.png
+           :alt: Dag Run - Task Instances tab (light mode)
+
+Key elements include:
+
+- **Dag Run metadata**, including logical date, run type, duration, Dag version, and parsed time
+- **Action buttons** to clear or mark the run, or add a note
+- A persistent **Grid View sidebar**, which shows task durations and states across recent Dag runs. This helps spot recurring issues or performance trends at a glance.
+
+Dag Run Tabs
+------------
+
+Task Instances
+''''''''''''''
+
+Displays the status and metadata for each task instance within the Dag Run. Columns include:
+
+- Task ID
+- State
+- Start and End Dates
+- Try Number
+- Operator Type
+- Duration
+- Dag Version
+
+Each row also includes a mini Gantt-style timeline that visually represents the task's duration.
+
+Events
+''''''
+
+If available, this tab lists system-level or asset-triggered events that contributed to this Dag Run's execution.
+
+Code
+''''
+
+Displays the Dag source code as it was at the time this run was parsed. This view is helpful for debugging version drift
+or comparing behavior across Dag Runs that used different code.
+
+Dag Run code for ``hello >> airflow()``:
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_run_code_hello_airflow.png
+           :alt: Dag Run Code Snapshot - airflow() (dark mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_run_code_hello_airflow.png
+           :alt: Dag Run Code Snapshot - airflow() (light mode)
+
+Dag Run code for ``hello >> world()``:
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_run_code_hello_world.png
+           :alt: Dag Run Code Snapshot - world() (dark mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_run_code_hello_world.png
+           :alt: Dag Run Code Snapshot - world() (light mode)
+
+Details
+'''''''
+
+Provides extended metadata for the Dag Run, including:
+
+- Run ID and Trigger Type
+- Queued At, Start and End Time, and Duration
+- Data Interval boundaries
+- Trigger Source and Run Config
+- Dag Version ID and Bundle Name
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_run_details.png
+           :alt: Dag Run - Details tab (dark mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_run_details.png
+           :alt: Dag Run - Details tab (light mode)
+
+Graph View
+''''''''''
+
+Shows the Dag's task dependency structure overlaid with the status of each task in this specific run. This is useful for visual debugging of task failure paths or identifying downstream blockers.
+
+Each node includes a visual indicator of task duration.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_run_graph.png
+           :alt: Dag Run - Graph View (dark mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_run_graph.png
+           :alt: Dag Run - Graph View (light mode)
+
+.. _ui-ti-view:
+
+Dag Trigger Window
+------------------
+
+Single Run
+''''''''''
+
+The Single Run window allows you to trigger a Dag run.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_trigger_window_single_run.png
+           :alt: Dag Trigger Window - Single Run (Dark Mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_trigger_window_single_run.png
+           :alt: Dag Trigger Window - Single Run (Light Mode)
+
+Backfill
+''''''''
+
+The Backfill window allows you to trigger a Dag run for past dates.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/backfill.png
+           :alt: Dag Trigger Window - Backfill (Dark Mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/backfill.png
+           :alt: Dag Trigger Window - Backfill (Light Mode)
+
+Task Instance View
+------------------
+
+When you click on a specific task from the Dag Run view, you're brought to the **Task Instance View**, which shows
+detailed logs and metadata for that individual task execution.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_task_instance_logs.png
+           :alt: Task Logs (dark mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_task_instance_logs.png
+           :alt: Task Logs (light mode)
+
+.. _ui-ti-tabs:
+
+Task Instance Tabs
+------------------
+
+Each task instance has a tabbed view providing access to logs, rendered templates, XComs, and execution metadata.
+
+Logs
+''''
+The default tab shows the task logs, which include system output, error messages, and traceback information. This is the first place to look when a task fails.
+
+Rendered Templates
+''''''''''''''''''
+Displays the rendered version of templated fields in your task. Useful for debugging context variables or verifying
+dynamic content.
+
+XCom
+''''
+Shows any values pushed via ``XCom.push()`` or returned from Python functions when using TaskFlow.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_run_task_instance_xcom.png
+           :alt: Task Instance - XCom tab (dark mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_run_task_instance_xcom.png
+           :alt: Task Instance - XCom tab (light mode)
+
+Events
+''''''
+If present, displays relevant events related to this specific task instance execution.
+
+Code
+''''
+Shows the Dag source code parsed at the time of execution. This helps verify what version of the Dag the task ran with.
+
+Details
+'''''''
+Displays runtime metadata about the task instance, including:
+
+- Task ID and State
+- Dag Run ID, Dag Version, and Bundle Name
+- Operator used and runtime duration
+- Pool and slot usage
+- Executor and configuration
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/dag_task_instance_details.png
+           :alt: Task Instance - Details tab (dark mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/dag_task_instance_details.png
+           :alt: Task Instance - Details tab (light mode)
+
+.. _ui-asset-views:
+
+Asset Views
+-----------
+
+The **Assets** section provides a dedicated interface to monitor and debug asset-centric workflows. Assets represent
+logical data units—such as files, tables, or models—that tasks can produce or consume. Airflow tracks these dependencies
+and provides visualizations to better understand their orchestration.
+
+Asset List
+''''''''''
+
+The Asset List shows all known assets, grouped by name. For each asset, you can see:
+
+- The group the asset belongs to (if any)
+- The Dags that consume the asset
+- The tasks that produce the asset
+
+Hovering over a count of Dags or tasks shows a tooltip with the full list of producers or consumers.
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/asset_list_consuming_dags.png
+           :alt: Asset List (dark mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/asset_list_consuming_dags.png
+           :alt: Asset List (light mode)
+
+Clicking on the link takes you to the Asset Graph View.
+
+Asset Graph View
+''''''''''''''''
+
+The Asset Graph View shows the asset in context, including upstream producers and downstream consumers. You can use this view to:
+
+- Understand asset lineage and the Dags involved
+- Trigger asset events manually
+- View recent asset events and the Dag runs they triggered
+
+.. tab-set::
+    :sync-group: ui-theme
+
+    .. tab-item:: Dark
+        :sync: dark
+
+        .. image:: img/ui-dark/asset_view.png
+           :alt: Asset Graph View (dark mode)
+
+    .. tab-item:: Light
+        :sync: light
+
+        .. image:: img/ui-light/asset_view.png
+           :alt: Asset Graph View (light mode)
+
+
+Graph Overlays in Dag View
+''''''''''''''''''''''''''
+
+When a Dag contains asset-producing or asset-consuming tasks, you can enable asset overlays on the Dag Graph view. Toggle the switches next to each asset to:
+
+- See how assets flow between Dags
+- Inspect asset-triggered dependencies
+
+Two graph modes are available:
+
+- **All Dag Dependencies**: Shows all Dag-to-Dag and task-level connections
+
+  .. tab-set::
+      :sync-group: ui-theme
+
+      .. tab-item:: Dark
+          :sync: dark
+
+          .. image:: img/ui-dark/dag_graph_all_dependencies.png
+             :alt: Dag Graph View - All Dependencies (dark mode)
+
+      .. tab-item:: Light
+          :sync: light
+
+          .. image:: img/ui-light/dag_graph_all_dependencies.png
+             :alt: Dag Graph View - All Dependencies (light mode)
+
+- **External Conditions**: Shows only Dags triggered via asset events
+
+  .. tab-set::
+      :sync-group: ui-theme
+
+      .. tab-item:: Dark
+          :sync: dark
+
+          .. image:: img/ui-dark/dag_graph_external_conditions.png
+             :alt: Dag Graph View - External Conditions Only (dark mode)
+
+      .. tab-item:: Light
+          :sync: light
+
+          .. image:: img/ui-light/dag_graph_external_conditions.png
+             :alt: Dag Graph View - External Conditions Only (light mode)
+
+.. _ui-admin-views:
+
+Admin Views
+-----------
+
+The **Admin** tab provides system-level tools for configuring and extending Airflow. These views are primarily intended for administrators and platform operators responsible for deployment, integration, and performance tuning.
+
+Key pages include:
+
+- **Variables** – Store key-value pairs accessible from Dags. Variables can be used to manage environment-specific parameters or secrets.
+- **Connections** – Define connection URIs to external systems such as databases, cloud services, or APIs. These are consumed by Airflow operators and hooks.
+- **Pools** – Control resource allocation by limiting the number of concurrently running tasks assigned to a named pool. Useful for managing contention or quota-constrained systems.
+- **Providers** – View installed provider packages (e.g., ``apache-airflow-providers-google``), including available hooks, sensors, and operators. This is helpful for verifying provider versions or troubleshooting import errors.
+- **Plugins** – Inspect registered Airflow plugins that extend the platform via custom operators, macros, or UI elements.
+- **Config** – View the full effective Airflow configuration as parsed from ``airflow.cfg``, environment variables, or overridden defaults. This can help debug issues related to scheduler behavior, secrets backends, and more.
+
+.. note::
+   The Admin tab is only visible to users with appropriate RBAC permissions.
 
 ------------
 
-.. image:: img/graph.png
+.. image:: img/ui-dark/variable_hidden.png
 
 ------------
 
-Calendar View
-.............
-
-The calendar view gives you an overview of your entire DAG's history over months or even years.
-Letting you quickly see trends of the overall success/failure rate of runs over time.
+.. image:: img/ui-dark/admin_connections.png
 
 ------------
 
-.. image:: img/calendar.png
-
-------------
-
-Variable View
-.............
-
-The variable view allows you to list, create, edit or delete the key-value pair
-of a variable used during jobs. The value of a variable will be hidden if the key contains
-any words in ('password', 'secret', 'passwd', 'authorization', 'api_key', 'apikey', 'access_token')
-by default, but can be configured to show in cleartext. See :ref:`security:mask-sensitive-values`.
-
-------------
-
-.. image:: img/variable_hidden.png
-
-------------
-
-Gantt Chart
-...........
-
-The Gantt chart lets you analyse task duration and overlap. You can quickly
-identify bottlenecks and where the bulk of the time is spent for specific
-DAG runs.
-
-------------
-
-.. image:: img/gantt.png
-
-------------
-
-.. _ui:task-duration:
-
-Task Duration
-.............
-
-The duration of your different tasks over the past N runs. This view lets
-you find outliers and quickly understand where the time is spent in your
-DAG over many runs.
-
-
-------------
-
-.. image:: img/duration.png
-
-------------
-
-.. _ui:landing-times:
-
-Landing Times
-.............
-
-The landing time for a task instance is the delta between the dag run's data interval end
-(typically this means when the dag "should" run) and the dag run completion time.
-
-------------
-
-.. image:: img/landing_times.png
-
-------------
-
-Code View
-.........
-
-Transparency is everything. While the code for your pipeline is in source
-control, this is a quick way to get to the code that generates the DAG and
-provide yet more context.
-
-------------
-
-.. image:: img/code.png
-
-Trigger Form
-............
-
-If you trigger a manual DAG run with the arrow-button, a form is displayed.
-The form display is based on the DAG Parameters as described in :doc:`core-concepts/params`.
-
-------------
-
-.. image:: img/trigger-dag-tutorial-form-1.png
-
-Audit Log
-.............
-
-See all events related to a DAG. Filter events by changing the Task and DAG Run
-selection and by including/excluding different event names.
-
-------------
-
-.. image:: img/audit_log.png
-
-------------
+.. image:: img/ui-dark/admin_connections_add.png

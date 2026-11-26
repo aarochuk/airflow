@@ -26,36 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-imap",
         "name": "Internet Message Access Protocol (IMAP)",
         "description": "`Internet Message Access Protocol (IMAP) <https://tools.ietf.org/html/rfc3501>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477835,
-        "versions": [
-            "3.8.3",
-            "3.8.2",
-            "3.8.0",
-            "3.7.0",
-            "3.6.1",
-            "3.6.0",
-            "3.5.0",
-            "3.4.0",
-            "3.3.2",
-            "3.3.1",
-            "3.3.0",
-            "3.2.2",
-            "3.2.1",
-            "3.2.0",
-            "3.1.1",
-            "3.1.0",
-            "3.0.0",
-            "2.2.3",
-            "2.2.2",
-            "2.2.1",
-            "2.2.0",
-            "2.1.0",
-            "2.0.1",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Internet Message Access Protocol (IMAP)",
@@ -77,7 +47,11 @@ def get_provider_info():
             }
         ],
         "connection-types": [
-            {"hook-class-name": "airflow.providers.imap.hooks.imap.ImapHook", "connection-type": "imap"}
+            {
+                "hook-class-name": "airflow.providers.imap.hooks.imap.ImapHook",
+                "hook-name": "IMAP",
+                "connection-type": "imap",
+            }
         ],
         "config": {
             "imap": {
@@ -93,6 +67,4 @@ def get_provider_info():
                 },
             }
         },
-        "dependencies": ["apache-airflow>=2.9.0"],
-        "devel-dependencies": [],
     }

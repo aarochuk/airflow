@@ -26,26 +26,14 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-cohere",
         "name": "Cohere",
         "description": "`Cohere <https://docs.cohere.com/docs>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477799,
-        "versions": [
-            "1.4.3",
-            "1.4.2",
-            "1.4.0",
-            "1.3.0",
-            "1.2.1",
-            "1.2.0",
-            "1.1.3",
-            "1.1.2",
-            "1.1.1",
-            "1.1.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Cohere",
                 "external-doc-url": "https://docs.cohere.com/docs",
-                "how-to-guide": ["/docs/apache-airflow-providers-cohere/operators/embedding.rst"],
+                "how-to-guide": [
+                    "/docs/apache-airflow-providers-cohere/operators/embedding.rst",
+                    "/docs/apache-airflow-providers-cohere/operators/rerank.rst",
+                ],
                 "tags": ["software"],
             }
         ],
@@ -53,14 +41,23 @@ def get_provider_info():
             {"integration-name": "Cohere", "python-modules": ["airflow.providers.cohere.hooks.cohere"]}
         ],
         "operators": [
-            {"integration-name": "Cohere", "python-modules": ["airflow.providers.cohere.operators.embedding"]}
+            {
+                "integration-name": "Cohere",
+                "python-modules": [
+                    "airflow.providers.cohere.operators.embedding",
+                    "airflow.providers.cohere.operators.rerank",
+                ],
+            }
         ],
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.cohere.hooks.cohere.CohereHook",
+                "hook-name": "Cohere",
                 "connection-type": "cohere",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema", "login", "port", "extra"],
+                    "relabeling": {"password": "API Key"},
+                },
             }
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "cohere>=5.13.4"],
-        "devel-dependencies": [],
     }

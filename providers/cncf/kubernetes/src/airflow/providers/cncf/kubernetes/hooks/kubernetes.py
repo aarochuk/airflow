@@ -19,37 +19,43 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import tempfile
-from collections.abc import Generator
+from collections.abc import AsyncGenerator
 from functools import cached_property
 from time import sleep
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import aiofiles
 import requests
-import tenacity
-from asgiref.sync import sync_to_async
 from kubernetes import client, config, utils, watch
 from kubernetes.client.models import V1Deployment
 from kubernetes.config import ConfigException
-from kubernetes_asyncio import client as async_client, config as async_config
-from urllib3.exceptions import HTTPError
+from kubernetes_asyncio import client as async_client, config as async_config, watch as async_watch
 
-from airflow.exceptions import AirflowException, AirflowNotFoundException
-from airflow.hooks.base import BaseHook
 from airflow.models import Connection
-from airflow.providers.cncf.kubernetes.kube_client import _disable_verify_ssl, _enable_tcp_keepalive
-from airflow.providers.cncf.kubernetes.kubernetes_helper_functions import should_retry_creation
-from airflow.providers.cncf.kubernetes.utils.pod_manager import (
-    PodOperatorHookProtocol,
+from airflow.providers.cncf.kubernetes.exceptions import KubernetesApiPermissionError
+from airflow.providers.cncf.kubernetes.kube_client import (
+    _disable_verify_ssl,
+    _TimeoutAsyncK8sApiClient,
+    _TimeoutK8sApiClient,
+)
+from airflow.providers.cncf.kubernetes.kubernetes_helper_functions import generic_api_retry
+from airflow.providers.cncf.kubernetes.utils.container import (
     container_is_completed,
     container_is_running,
 )
+from airflow.providers.common.compat.connection import get_async_connection
+from airflow.providers.common.compat.sdk import AirflowException, AirflowNotFoundException, BaseHook
 from airflow.utils import yaml
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Generator
+
+    from aiohttp import ClientResponse
     from kubernetes.client import V1JobList
     from kubernetes.client.models import V1Job, V1Pod
+    from pydantic import BaseModel
 
 LOADING_KUBE_CONFIG_FILE_RESOURCE = "Loading Kubernetes configuration file kube_config from {}..."
 
@@ -67,6 +73,39 @@ def _load_body_to_dict(body: str) -> dict:
     except yaml.YAMLError as e:
         raise AirflowException(f"Exception when loading resource definition: {e}\n")
     return body_dict
+
+
+class PodOperatorHookProtocol(Protocol):
+    """
+    Protocol to define methods relied upon by KubernetesPodOperator.
+
+    Subclasses of KubernetesPodOperator, such as GKEStartPodOperator, may use
+    hooks that don't extend KubernetesHook.  We use this protocol to document the
+    methods used by KPO and ensure that these methods exist on such other hooks.
+    """
+
+    @property
+    def core_v1_client(self) -> client.CoreV1Api:
+        """Get authenticated client object."""
+
+    @property
+    def is_in_cluster(self) -> bool:
+        """Expose whether the hook is configured with ``load_incluster_config`` or not."""
+
+    def get_pod(self, name: str, namespace: str) -> V1Pod:
+        """Read pod object from kubernetes API."""
+
+    def get_namespace(self) -> str | None:
+        """Return the namespace that defined in the connection."""
+
+    def get_xcom_sidecar_container_image(self) -> str | None:
+        """Return the xcom sidecar image that defined in the connection."""
+
+    def get_xcom_sidecar_container_resources(self) -> dict | None:
+        """Return the xcom sidecar resources that defined in the connection."""
+
+    def get_xcom_sidecar_container_security_context(self) -> dict | None:
+        """Return the xcom sidecar security context that defined in the connection."""
 
 
 class KubernetesHook(BaseHook, PodOperatorHookProtocol):
@@ -93,6 +132,7 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
     :param cluster_context: Optionally specify a context to use (e.g. if you have multiple
         in your kubeconfig.
     :param config_file: Path to kubeconfig file.
+    :param config_dict: Takes the config file as a dict.
     :param in_cluster: Set to ``True`` if running from within a kubernetes cluster.
     :param disable_verify_ssl: Set to ``True`` if SSL verification should be disabled.
     :param disable_tcp_keepalive: Set to ``True`` if you want to disable keepalive logic.
@@ -128,6 +168,9 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
             "xcom_sidecar_container_resources": StringField(
                 lazy_gettext("XCom sidecar resources (JSON format)"), widget=BS3TextFieldWidget()
             ),
+            "xcom_sidecar_container_security_context": StringField(
+                lazy_gettext("XCom sidecar security context (JSON format)"), widget=BS3TextFieldWidget()
+            ),
         }
 
     @classmethod
@@ -140,19 +183,22 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
 
     def __init__(
         self,
-        conn_id: str | None = default_conn_name,
+        conn_id: str | None = None,
+        kubernetes_conn_id: str | None = default_conn_name,
         client_configuration: client.Configuration | None = None,
         cluster_context: str | None = None,
         config_file: str | None = None,
+        config_dict: dict | None = None,
         in_cluster: bool | None = None,
         disable_verify_ssl: bool | None = None,
         disable_tcp_keepalive: bool | None = None,
     ) -> None:
         super().__init__()
-        self.conn_id = conn_id
+        self.conn_id = conn_id or kubernetes_conn_id
         self.client_configuration = client_configuration
         self.cluster_context = cluster_context
         self.config_file = config_file
+        self.config_dict = config_dict
         self.in_cluster = in_cluster
         self.disable_verify_ssl = disable_verify_ssl
         self.disable_tcp_keepalive = disable_tcp_keepalive
@@ -173,12 +219,11 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
         default to cluster-derived credentials.
         """
         try:
-            return super().get_connection(conn_id)
+            return super().get_connection(conn_id)  # type: ignore[return-value]
         except AirflowNotFoundException:
             if conn_id == cls.default_conn_name:
                 return Connection(conn_id=cls.default_conn_name)
-            else:
-                raise
+            raise
 
     @cached_property
     def conn_extras(self):
@@ -213,12 +258,14 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
         cluster_context = self._coalesce_param(self.cluster_context, self._get_field("cluster_context"))
         kubeconfig_path = self._coalesce_param(self.config_file, self._get_field("kube_config_path"))
         kubeconfig = self._get_field("kube_config")
-        num_selected_configuration = sum(1 for o in [in_cluster, kubeconfig, kubeconfig_path] if o)
+        num_selected_configuration = sum(
+            1 for o in [in_cluster, kubeconfig, kubeconfig_path, self.config_dict] if o
+        )
 
         if num_selected_configuration > 1:
             raise AirflowException(
-                "Invalid connection configuration. Options kube_config_path, "
-                "kube_config, in_cluster are mutually exclusive. "
+                "Invalid connection configuration. Options config_file/kube_config_path, "
+                "kube_config, in_cluster, and config_dict are mutually exclusive. "
                 "You can only use one option at a time."
             )
 
@@ -231,14 +278,17 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
 
         if disable_verify_ssl is True:
             _disable_verify_ssl()
-        if disable_tcp_keepalive is not True:
-            _enable_tcp_keepalive()
+        enable_tcp_keepalive = disable_tcp_keepalive is not True
 
         if in_cluster:
             self.log.debug("loading kube_config from: in_cluster configuration")
             self._is_in_cluster = True
             config.load_incluster_config()
-            return client.ApiClient()
+            return _TimeoutK8sApiClient(
+                configuration=self.client_configuration,
+                disable_verify_ssl=disable_verify_ssl is True,
+                enable_tcp_keepalive=enable_tcp_keepalive,
+            )
 
         if kubeconfig_path is not None:
             self.log.debug("loading kube_config from: %s", kubeconfig_path)
@@ -248,7 +298,11 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
                 client_configuration=self.client_configuration,
                 context=cluster_context,
             )
-            return client.ApiClient()
+            return _TimeoutK8sApiClient(
+                configuration=self.client_configuration,
+                disable_verify_ssl=disable_verify_ssl is True,
+                enable_tcp_keepalive=enable_tcp_keepalive,
+            )
 
         if kubeconfig is not None:
             with tempfile.NamedTemporaryFile() as temp_config:
@@ -263,11 +317,39 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
                     client_configuration=self.client_configuration,
                     context=cluster_context,
                 )
-            return client.ApiClient()
+            return _TimeoutK8sApiClient(
+                configuration=self.client_configuration,
+                disable_verify_ssl=disable_verify_ssl is True,
+                enable_tcp_keepalive=enable_tcp_keepalive,
+            )
 
-        return self._get_default_client(cluster_context=cluster_context)
+        if self.config_dict:
+            self.log.debug(LOADING_KUBE_CONFIG_FILE_RESOURCE.format("config dictionary"))
+            self._is_in_cluster = False
+            config.load_kube_config_from_dict(
+                config_dict=self.config_dict,
+                client_configuration=self.client_configuration,
+                context=cluster_context,
+            )
+            return _TimeoutK8sApiClient(
+                configuration=self.client_configuration,
+                disable_verify_ssl=disable_verify_ssl is True,
+                enable_tcp_keepalive=enable_tcp_keepalive,
+            )
 
-    def _get_default_client(self, *, cluster_context: str | None = None) -> client.ApiClient:
+        return self._get_default_client(
+            cluster_context=cluster_context,
+            disable_verify_ssl=disable_verify_ssl,
+            enable_tcp_keepalive=enable_tcp_keepalive,
+        )
+
+    def _get_default_client(
+        self,
+        *,
+        cluster_context: str | None = None,
+        disable_verify_ssl: bool | None = None,
+        enable_tcp_keepalive: bool = False,
+    ) -> client.ApiClient:
         # if we get here, then no configuration has been supplied
         # we should try in_cluster since that's most likely
         # but failing that just load assuming a kubeconfig file
@@ -282,7 +364,11 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
                 client_configuration=self.client_configuration,
                 context=cluster_context,
             )
-        return client.ApiClient()
+        return _TimeoutK8sApiClient(
+            configuration=self.client_configuration,
+            disable_verify_ssl=disable_verify_ssl is True,
+            enable_tcp_keepalive=enable_tcp_keepalive,
+        )
 
     @property
     def is_in_cluster(self) -> bool:
@@ -345,6 +431,7 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
         self.log.debug("Response: %s", response)
         return response
 
+    @generic_api_retry
     def get_custom_object(
         self, group: str, version: str, plural: str, name: str, namespace: str | None = None
     ):
@@ -367,6 +454,7 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
         )
         return response
 
+    @generic_api_retry
     def delete_custom_object(
         self, group: str, version: str, plural: str, name: str, namespace: str | None = None, **kwargs
     ):
@@ -402,6 +490,13 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
     def get_xcom_sidecar_container_resources(self):
         """Return the xcom sidecar resources that defined in the connection."""
         field = self._get_field("xcom_sidecar_container_resources")
+        if not field:
+            return None
+        return json.loads(field)
+
+    def get_xcom_sidecar_container_security_context(self):
+        """Return the xcom sidecar security context that defined in the connection."""
+        field = self._get_field("xcom_sidecar_container_security_context")
         if not field:
             return None
         return json.loads(field)
@@ -492,15 +587,10 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
         :param namespace: Deployment namespace
         """
         return self.apps_v1_client.read_namespaced_deployment_status(
-            name=name, namespace=namespace, pretty=True, **kwargs
+            name=name, namespace=namespace, pretty="true", **kwargs
         )
 
-    @tenacity.retry(
-        stop=tenacity.stop_after_attempt(3),
-        wait=tenacity.wait_random_exponential(),
-        reraise=True,
-        retry=tenacity.retry_if_exception(should_retry_creation),
-    )
+    @generic_api_retry
     def create_job(
         self,
         job: V1Job,
@@ -515,9 +605,10 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
         json_job = json.dumps(sanitized_job, indent=2)
 
         self.log.debug("Job Creation Request: \n%s", json_job)
+        metadata = cast("client.V1ObjectMeta", job.metadata)
         try:
             resp = self.batch_v1_client.create_namespaced_job(
-                body=sanitized_job, namespace=job.metadata.namespace, **kwargs
+                body=sanitized_job, namespace=cast("str", metadata.namespace), **kwargs
             )
             self.log.debug("Job Creation Response: %s", resp)
         except Exception as e:
@@ -527,6 +618,7 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
             raise e
         return resp
 
+    @generic_api_retry
     def get_job(self, job_name: str, namespace: str) -> V1Job:
         """
         Get Job of specified name and namespace.
@@ -535,19 +627,21 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
         :param namespace: Namespace of the Job.
         :return: Job object
         """
-        return self.batch_v1_client.read_namespaced_job(name=job_name, namespace=namespace, pretty=True)
+        return self.batch_v1_client.read_namespaced_job(name=job_name, namespace=namespace, pretty="true")
 
+    @generic_api_retry
     def get_job_status(self, job_name: str, namespace: str) -> V1Job:
         """
         Get job with status of specified name and namespace.
+
+        Reads the Job object rather than the ``jobs/status`` subresource: both return the same ``status``,
+        but RBAC checks subresources separately, so this only needs ``get`` on ``jobs``.
 
         :param job_name: Name of Job to fetch.
         :param namespace: Namespace of the Job.
         :return: Job object
         """
-        return self.batch_v1_client.read_namespaced_job_status(
-            name=job_name, namespace=namespace, pretty=True
-        )
+        return self.batch_v1_client.read_namespaced_job(name=job_name, namespace=namespace, pretty="true")
 
     def wait_until_job_complete(self, job_name: str, namespace: str, job_poll_interval: float = 10) -> V1Job:
         """
@@ -566,14 +660,16 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
             self.log.info("The job '%s' is incomplete. Sleeping for %i sec.", job_name, job_poll_interval)
             sleep(job_poll_interval)
 
+    @generic_api_retry
     def list_jobs_all_namespaces(self) -> V1JobList:
         """
         Get list of Jobs from all namespaces.
 
         :return: V1JobList object
         """
-        return self.batch_v1_client.list_job_for_all_namespaces(pretty=True)
+        return self.batch_v1_client.list_job_for_all_namespaces(pretty="true")
 
+    @generic_api_retry
     def list_jobs_from_namespace(self, namespace: str) -> V1JobList:
         """
         Get list of Jobs from dedicated namespace.
@@ -581,9 +677,9 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
         :param namespace: Namespace of the Job.
         :return: V1JobList object
         """
-        return self.batch_v1_client.list_namespaced_job(namespace=namespace, pretty=True)
+        return self.batch_v1_client.list_namespaced_job(namespace=namespace, pretty="true")
 
-    def is_job_complete(self, job: V1Job) -> bool:
+    def is_job_complete(self, job: V1Job | async_client.V1Job) -> bool:
         """
         Check whether the given job is complete (with success or fail).
 
@@ -597,7 +693,7 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
                     s = "s" if len(final_condition_types) > 1 else ""
                     self.log.info(
                         "The job '%s' state%s: %s",
-                        job.metadata.name,
+                        job.metadata.name if job.metadata else None,
                         s,
                         ", ".join(f"{c.type} at {c.last_transition_time}" for c in final_condition_types),
                     )
@@ -605,7 +701,7 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
         return False
 
     @staticmethod
-    def is_job_failed(job: V1Job) -> str | bool:
+    def is_job_failed(job: V1Job | async_client.V1Job) -> str | bool | None:
         """
         Check whether the given job is failed.
 
@@ -618,7 +714,7 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
         return False
 
     @staticmethod
-    def is_job_successful(job: V1Job) -> str | bool:
+    def is_job_successful(job: V1Job | async_client.V1Job) -> str | bool:
         """
         Check whether the given job is completed successfully..
 
@@ -629,7 +725,10 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
             return bool(next((c for c in conditions if c.type == "Complete" and c.status), None))
         return False
 
-    def patch_namespaced_job(self, job_name: str, namespace: str, body: object) -> V1Job:
+    @generic_api_retry
+    def patch_namespaced_job(
+        self, job_name: str, namespace: str, body: dict[str, Any] | list[dict[str, Any]] | BaseModel
+    ) -> V1Job:
         """
         Update the specified Job.
 
@@ -677,8 +776,9 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
             try:
                 deployment = self.get_deployment_status(name=name, namespace=namespace)
             except Exception as e:
-                self.log.exception("Exception occurred while checking for Deployment status.")
-                raise e
+                msg = "Exception occurred while checking for Deployment status."
+                self.log.exception(msg)
+                raise ValueError(msg) from e
 
             deployment_status = V1Deployment.to_dict(deployment)["status"]
             replicas = deployment_status["replicas"]
@@ -691,9 +791,8 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
                 and replicas == ready_replicas
             ):
                 return
-            else:
-                self.log.info("Waiting until Deployment will be ready...")
-                sleep(polling_period_seconds)
+            self.log.info("Waiting until Deployment will be ready...")
+            sleep(polling_period_seconds)
 
             _timeout -= polling_period_seconds
 
@@ -708,90 +807,255 @@ class KubernetesHook(BaseHook, PodOperatorHookProtocol):
 
         return list(yaml.safe_load_all(response.text))
 
+    def test_connection(self):
+        try:
+            conn = self.get_conn()
+            version: client.VersionInfo = client.VersionApi(conn).get_code()
+            return True, f"Connection successful. Version Info: {version.to_dict()}"
+        except Exception as e:
+            return False, str(e)
+
 
 def _get_bool(val) -> bool | None:
     """Convert val to bool if can be done with certainty; if we cannot infer intention we return None."""
     if isinstance(val, bool):
         return val
-    elif isinstance(val, str):
+    if isinstance(val, str):
         if val.strip().lower() == "true":
             return True
-        elif val.strip().lower() == "false":
+        if val.strip().lower() == "false":
             return False
     return None
 
 
-class AsyncKubernetesHook(KubernetesHook):
-    """Hook to use Kubernetes SDK asynchronously."""
+def _split_log_bytes(raw_bytes: bytes) -> list[str]:
+    return raw_bytes.decode("utf-8", errors="replace").splitlines()
 
-    def __init__(self, config_dict: dict | None = None, *args, **kwargs):
+
+class AsyncKubernetesHook(KubernetesHook):
+    """
+    Hook to use Kubernetes SDK asynchronously.
+
+    Non-exec authentication reuses an API client across calls. Call ``await hook.close()``
+    when finished to release its connection pool and SSL context. Pod and job triggers
+    do this in their cleanup methods.
+    """
+
+    def __init__(
+        self,
+        config_dict: dict | None = None,
+        connection_extras: dict | None = None,
+        client_configuration: async_client.Configuration | None = None,
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
 
         self.config_dict = config_dict
-        self._extras: dict | None = None
+        self._extras: dict | None = connection_extras
+        self._event_polling_fallback = False
+        self._client_cacheable = False
+        # Override the parent's sync-typed client_configuration with the async type.
+        self.client_configuration: async_client.Configuration | None = client_configuration  # type: ignore[assignment]
+        # Cached result of exec-auth detection. None means not yet detected.
+        # This is to optimise and not calling _uses_exec_auth repeatedly on every _load_config() call.
+        self._is_exec_auth: bool | None = None
+        self._cached_kube_client: async_client.ApiClient | None = None
+
+    def _uses_exec_auth(self, kubeconfig_data: dict, context: str | None = None) -> bool:
+        """
+        Detect if the active kubeconfig context uses exec-based authentication.
+
+        Exec plugins return short-lived tokens (EKS, GKE, etc). Only the user
+        tied to the active context is checked. If the active context or its user
+        cannot be resolved, falls back to scanning all users and returns True if
+        any use exec auth — erring on the side of not caching.
+        """
+        active_context = context or kubeconfig_data.get("current-context")
+
+        active_user: str | None = None
+        for ctx in kubeconfig_data.get("contexts", []):
+            if ctx.get("name") == active_context:
+                active_user = (ctx.get("context") or {}).get("user")
+                break
+
+        users = kubeconfig_data.get("users", [])
+        if active_user is not None:
+            for user in users:
+                if user.get("name") == active_user:
+                    return "exec" in (user.get("user") or {})
+            return False
+
+        # fallback to check all users if active context user cannot be resolved; this is a safe fallback since it errs on the side of not caching
+        return any("exec" in (u.get("user") or {}) for u in users)
+
+    async def _kubeconfig_file_uses_exec_auth(self, kubeconfig_path: str, context: str | None) -> bool:
+        """Detect exec auth in the kubeconfig at ``kubeconfig_path``; an unreadable file counts as exec."""
+        try:
+            async with aiofiles.open(kubeconfig_path) as f:
+                kubeconfig_data = yaml.safe_load(await f.read())
+            return self._uses_exec_auth(kubeconfig_data, context=context)
+        except Exception as exc:
+            self.log.warning(
+                "Error while parsing kube_config from %s to detect exec auth; "
+                "continuing without caching the config: %s",
+                kubeconfig_path,
+                exc,
+            )
+            return True
+
+    @staticmethod
+    def _resolve_default_kubeconfig_path() -> str | None:
+        """Return the path to the default-location kubeconfig, if it resolves to a single existing file."""
+        paths = [
+            os.path.expanduser(path)
+            for path in async_config.KUBE_CONFIG_DEFAULT_LOCATION.split(os.pathsep)
+            if path
+        ]
+        # kubernetes_asyncio skips the paths that do not exist, so only the surviving ones
+        # decide whether the active user can be read from a single file.
+        existing = [path for path in paths if os.path.exists(path)]
+        if len(existing) != 1:
+            return None
+        return existing[0]
+
+    async def _default_kubeconfig_uses_exec_auth(self, context: str | None) -> bool:
+        """Detect exec auth in the default kubeconfig; anything but one readable file counts as exec."""
+        kubeconfig_path = self._resolve_default_kubeconfig_path()
+        if kubeconfig_path is None:
+            # No single file to read: which user is active is kubernetes_asyncio's to decide,
+            # so leave the config uncached rather than reimplementing its merge rules here.
+            return True
+        return await self._kubeconfig_file_uses_exec_auth(kubeconfig_path, context)
 
     async def _load_config(self):
-        """Return Kubernetes API session for use with requests."""
+        """
+        Load Kubernetes configuration.
+
+        Reload credentials on every access while retaining the client for non-exec auth.
+        Exec-based auth continues to use a new client for each access.
+        """
+        if self.client_configuration is None:
+            self.client_configuration = async_client.Configuration()
+
         in_cluster = self._coalesce_param(self.in_cluster, await self._get_field("in_cluster"))
         cluster_context = self._coalesce_param(self.cluster_context, await self._get_field("cluster_context"))
-        kubeconfig_path = await self._get_field("kube_config_path")
+        kubeconfig_path = self._coalesce_param(self.config_file, await self._get_field("kube_config_path"))
         kubeconfig = await self._get_field("kube_config")
+
         num_selected_configuration = sum(
             1 for o in [in_cluster, kubeconfig, kubeconfig_path, self.config_dict] if o
         )
 
-        async def api_client_from_kubeconfig_file(_kubeconfig_path: str | None):
-            await async_config.load_kube_config(
-                config_file=_kubeconfig_path,
-                client_configuration=self.client_configuration,
-                context=cluster_context,
-            )
-            return async_client.ApiClient()
-
         if num_selected_configuration > 1:
             raise AirflowException(
-                "Invalid connection configuration. Options kube_config_path, "
-                "kube_config, in_cluster are mutually exclusive. "
+                "Invalid connection configuration. Options config_file/kube_config_path, "
+                "kube_config, in_cluster, and config_dict are mutually exclusive. "
                 "You can only use one option at a time."
             )
 
         if in_cluster:
             self.log.debug(LOADING_KUBE_CONFIG_FILE_RESOURCE.format("within a pod"))
+            async_config.load_incluster_config(client_configuration=self.client_configuration)
             self._is_in_cluster = True
-            async_config.load_incluster_config()
-            return async_client.ApiClient()
+            self._client_cacheable = True
+            return
 
+        self._is_in_cluster = False
         if self.config_dict:
             self.log.debug(LOADING_KUBE_CONFIG_FILE_RESOURCE.format("config dictionary"))
-            self._is_in_cluster = False
-            await async_config.load_kube_config_from_dict(self.config_dict)
-            return async_client.ApiClient()
 
+            await async_config.load_kube_config_from_dict(
+                self.config_dict,
+                context=cluster_context,
+                client_configuration=self.client_configuration,
+            )
+
+            if self._is_exec_auth is None:
+                self._is_exec_auth = self._uses_exec_auth(self.config_dict, context=cluster_context)
+
+            if not self._is_exec_auth:
+                self._client_cacheable = True
+
+            return
         if kubeconfig_path is not None:
             self.log.debug("loading kube_config from: %s", kubeconfig_path)
-            self._is_in_cluster = False
-            return await api_client_from_kubeconfig_file(kubeconfig_path)
 
+            await async_config.load_kube_config(
+                config_file=kubeconfig_path,
+                client_configuration=self.client_configuration,
+                context=cluster_context,
+            )
+
+            if self._is_exec_auth is None:
+                self._is_exec_auth = await self._kubeconfig_file_uses_exec_auth(
+                    kubeconfig_path, cluster_context
+                )
+
+            if not self._is_exec_auth:
+                self._client_cacheable = True
+
+            return
         if kubeconfig is not None:
             async with aiofiles.tempfile.NamedTemporaryFile() as temp_config:
-                self.log.debug(
-                    "Reading kubernetes configuration file from connection "
-                    "object and writing temporary config file with its content",
-                )
-                await temp_config.write(kubeconfig.encode())
+                if isinstance(kubeconfig, dict):
+                    kubeconfig_data = kubeconfig
+                    kubeconfig_str = json.dumps(kubeconfig)
+                else:
+                    try:
+                        kubeconfig_data = _load_body_to_dict(kubeconfig)
+                    except AirflowException as exc:
+                        self.log.debug(
+                            "Could not parse kubeconfig string to detect exec auth; "
+                            "config will not be cached: %s",
+                            exc,
+                        )
+                        kubeconfig_data = None
+                    kubeconfig_str = kubeconfig
+
+                await temp_config.write(kubeconfig_str.encode())
                 await temp_config.flush()
-                self._is_in_cluster = False
-                return await api_client_from_kubeconfig_file(temp_config.name)
+
+                await async_config.load_kube_config(
+                    config_file=temp_config.name,
+                    client_configuration=self.client_configuration,
+                    context=cluster_context,
+                )
+
+                if self._is_exec_auth is None:
+                    self._is_exec_auth = (
+                        self._uses_exec_auth(kubeconfig_data, context=cluster_context)
+                        if kubeconfig_data
+                        else True
+                    )
+
+                if not self._is_exec_auth:
+                    self._client_cacheable = True
+
+            return
         self.log.debug(LOADING_KUBE_CONFIG_FILE_RESOURCE.format("default configuration file"))
+
         await async_config.load_kube_config(
             client_configuration=self.client_configuration,
             context=cluster_context,
         )
 
+        if self._is_exec_auth is None:
+            self._is_exec_auth = await self._default_kubeconfig_uses_exec_auth(cluster_context)
+
+        if not self._is_exec_auth:
+            self._client_cacheable = True
+
     async def get_conn_extras(self) -> dict:
         if self._extras is None:
             if self.conn_id:
-                connection = await sync_to_async(self.get_connection)(self.conn_id)
+                try:
+                    connection = await get_async_connection(self.conn_id)
+                except AirflowNotFoundException:
+                    if self.conn_id == self.default_conn_name:
+                        connection = Connection(conn_id=self.default_conn_name)
+                    else:
+                        raise
                 self._extras = connection.extra_dejson
             else:
                 self._extras = {}
@@ -810,16 +1074,31 @@ class AsyncKubernetesHook(KubernetesHook):
         return extras.get(prefixed_name)
 
     @contextlib.asynccontextmanager
-    async def get_conn(self) -> async_client.ApiClient:
-        kube_client = None
+    async def get_conn(self) -> AsyncGenerator[async_client.ApiClient, None]:  # type: ignore[override]
+        await self._load_config()
+        if self._client_cacheable:
+            # Reuse one client per hook: each construction runs ssl.create_default_context()
+            # on the event loop and opens a new connection pool. Owners release it via
+            # close(); triggers do so in cleanup().
+            if self._cached_kube_client is None:
+                self._cached_kube_client = _TimeoutAsyncK8sApiClient(configuration=self.client_configuration)
+            yield self._cached_kube_client
+            return
+        # Exec-based auth is not cacheable: build and close a client per call.
+        kube_client = _TimeoutAsyncK8sApiClient(configuration=self.client_configuration)
         try:
-            kube_client = await self._load_config() or async_client.ApiClient()
             yield kube_client
         finally:
-            if kube_client is not None:
-                await kube_client.close()
+            await kube_client.close()
 
-    async def get_pod(self, name: str, namespace: str) -> V1Pod:
+    async def close(self) -> None:
+        """Release the cached API client, if any. Safe to call multiple times."""
+        cached, self._cached_kube_client = self._cached_kube_client, None
+        if cached is not None:
+            await cached.close()
+
+    @generic_api_retry
+    async def get_pod(self, name: str, namespace: str) -> async_client.V1Pod:
         """
         Get pod's object.
 
@@ -827,32 +1106,46 @@ class AsyncKubernetesHook(KubernetesHook):
         :param namespace: Name of the pod's namespace.
         """
         async with self.get_conn() as connection:
-            v1_api = async_client.CoreV1Api(connection)
-            pod: V1Pod = await v1_api.read_namespaced_pod(
-                name=name,
-                namespace=namespace,
-            )
-        return pod
+            try:
+                v1_api = async_client.CoreV1Api(connection)
+                pod: async_client.V1Pod = await v1_api.read_namespaced_pod(
+                    name=name,
+                    namespace=namespace,
+                )
+                return pod
+            except async_client.ApiException as e:
+                if e.status == 403:
+                    raise KubernetesApiPermissionError("Permission denied (403) from Kubernetes API.") from e
+                # Other statuses stay ApiException: generic_api_retry owns the decision about which
+                # ones are transient, and wrapping them here would hide the status from its predicate.
+                raise
 
-    async def delete_pod(self, name: str, namespace: str):
+    @generic_api_retry
+    async def delete_pod(self, name: str, namespace: str, grace_period_seconds: int | None = None):
         """
         Delete pod's object.
 
         :param name: Name of the pod.
         :param namespace: Name of the pod's namespace.
+        :param grace_period_seconds: Optional duration in seconds the pod needs to terminate gracefully.
         """
         async with self.get_conn() as connection:
             try:
                 v1_api = async_client.CoreV1Api(connection)
                 await v1_api.delete_namespaced_pod(
-                    name=name, namespace=namespace, body=client.V1DeleteOptions()
+                    name=name,
+                    namespace=namespace,
+                    body=async_client.V1DeleteOptions(grace_period_seconds=grace_period_seconds),
                 )
             except async_client.ApiException as e:
                 # If the pod is already deleted
                 if str(e.status) != "404":
                     raise
 
-    async def read_logs(self, name: str, namespace: str):
+    @generic_api_retry
+    async def read_logs(
+        self, name: str, namespace: str, container_name: str | None = None, since_seconds: int | None = None
+    ) -> list[str]:
         """
         Read logs inside the pod while starting containers inside.
 
@@ -863,40 +1156,215 @@ class AsyncKubernetesHook(KubernetesHook):
 
         :param name: Name of the pod.
         :param namespace: Name of the pod's namespace.
+        :param container_name: Name of the container inside the pod.
+        :param since_seconds: Only return logs newer than a relative duration in seconds.
         """
         async with self.get_conn() as connection:
             try:
                 v1_api = async_client.CoreV1Api(connection)
-                logs = await v1_api.read_namespaced_pod_log(
-                    name=name,
-                    namespace=namespace,
-                    follow=False,
-                    timestamps=True,
-                )
-                logs = logs.splitlines()
-                for line in logs:
-                    self.log.info("Container logs from %s", line)
-                return logs
-            except HTTPError:
-                self.log.exception("There was an error reading the kubernetes API.")
+                # Always retrieve raw bytes and decode with 'replace' to avoid
+                # UnicodeDecodeError when pod output contains non-UTF-8 bytes
+                # (e.g. binary data, truncated multi-byte sequences).
+                # kubernetes_asyncio's default decoding uses strict UTF-8 which
+                # crashes the task in those cases.
+                kwargs: dict[str, Any] = {
+                    "name": name,
+                    "namespace": namespace,
+                    "follow": False,
+                    "timestamps": True,
+                    "_preload_content": False,
+                }
+                if container_name is not None:
+                    kwargs["container"] = container_name
+                if since_seconds is not None:
+                    kwargs["since_seconds"] = since_seconds
+
+                raw_resp: ClientResponse = await v1_api.read_namespaced_pod_log(**kwargs)  # type: ignore  # _preload_content=False makes returning ClientResponse instead of str!
+                raw_bytes = await raw_resp.read()
+                # CPU-bound decode/split, offloaded so it can't block the triggerer event loop.
+                return await asyncio.to_thread(_split_log_bytes, raw_bytes)
+            except async_client.ApiException as e:
+                if e.status == 403:
+                    raise KubernetesApiPermissionError("Permission denied (403) from Kubernetes API.") from e
                 raise
 
-    async def get_job_status(self, name: str, namespace: str) -> V1Job:
+    @generic_api_retry
+    async def get_pod_events(
+        self, name: str, namespace: str, resource_version: str | None = None
+    ) -> async_client.CoreV1EventList:
+        """
+        Get pod events.
+
+        :param name: Pod name to get events for
+        :param namespace: Kubernetes namespace
+        :param resource_version: Only return events not older than this resource version
+        """
+        async with self.get_conn() as connection:
+            try:
+                v1_api = async_client.CoreV1Api(connection)
+                kwargs: dict[str, Any] = {
+                    "field_selector": f"involvedObject.name={name}",
+                    "namespace": namespace,
+                }
+                if resource_version is not None:
+                    kwargs["resource_version"] = resource_version
+                    kwargs["resource_version_match"] = "NotOlderThan"
+
+                events: async_client.CoreV1EventList = await v1_api.list_namespaced_event(**kwargs)
+                return events
+            except async_client.ApiException as e:
+                if e.status == 403:
+                    raise KubernetesApiPermissionError("Permission denied (403) from Kubernetes API.") from e
+                raise
+
+    @generic_api_retry
+    async def watch_pod_events(
+        self,
+        name: str,
+        namespace: str,
+        resource_version: str | None = None,
+        timeout_seconds: int = 30,
+    ) -> AsyncGenerator[async_client.CoreV1Event]:
+        """
+        Watch Kubernetes events for a pod.
+
+        Reconnects on watch termination and resumes from the last observed
+        resourceVersion. The watch stops when the pod is terminal or deleted,
+        and falls back to polling if watch access is denied.
+
+        :param name: Pod name to watch events for
+        :param namespace: Kubernetes namespace
+        :param resource_version: Only return events not older than this resource version
+        :param timeout_seconds: Timeout in seconds for the watch stream. A small additional buffer may be applied internally.
+                                This does not limit the total duration of event streaming.
+        """
+        last_rv = resource_version
+
+        while True:
+            # If watch is known to be unavailable, use polling fallback
+            if self._event_polling_fallback:
+                async for event_polled in self.watch_pod_events_polling_fallback(
+                    name, namespace, last_rv, timeout_seconds
+                ):
+                    yield event_polled
+                return
+
+            # Watch may not be created if pod inspection triggers early return.
+            w = None
+
+            try:
+                # Pod lifecycle is authoritative; events alone are not.
+                pod = await self.get_pod(name=name, namespace=namespace)
+                if pod.status and pod.status.phase in ("Succeeded", "Failed"):
+                    self.log.info(
+                        "Pod '%s' reached terminal phase '%s'; stopping event watch",
+                        name,
+                        pod.status.phase,
+                    )
+                    return
+
+                w = async_watch.Watch()
+                async with self.get_conn() as connection:
+                    v1_api = async_client.CoreV1Api(connection)
+
+                    async for event_watched in w.stream(
+                        v1_api.list_namespaced_event,
+                        namespace=namespace,
+                        field_selector=f"involvedObject.name={name}",
+                        resource_version=last_rv,
+                        timeout_seconds=timeout_seconds,
+                    ):
+                        event = event_watched.get("object")
+                        if not event or not event.metadata:
+                            continue
+
+                        if event.metadata.resource_version:
+                            last_rv = event.metadata.resource_version
+
+                        yield event
+
+            # Never swallow cancellation.
+            except asyncio.CancelledError:
+                raise
+
+            except async_client.exceptions.ApiException as e:
+                status = getattr(e, "status", None)
+
+                if status == 403:
+                    # Permanently fall back to polling when watch is not permitted.
+                    self.log.warning(
+                        "Kubernetes API does not permit watching events; falling back to polling: %s",
+                        str(e),
+                    )
+                    self._event_polling_fallback = True
+                    continue
+
+                if status == 404:
+                    # Terminate the watch if pod no longer exists.
+                    self.log.info("Pod '%s' no longer exists; stopping event watch", name)
+                    return
+
+                if status == 410:
+                    # Restart watch from current state if resourceVersion is too old.
+                    self.log.info(
+                        "resourceVersion too old while watching pod '%s'; restarting watch",
+                        name,
+                    )
+                    last_rv = None
+                    continue
+
+                # Other API errors are either transient or configuration/programming errors.
+                # Re-raise so generic_api_retry can apply centralized retry/backoff for
+                # transient failures, and fail fast for non-retryable ones.
+                raise
+
+            finally:
+                if w is not None:
+                    w.stop()
+
+    async def watch_pod_events_polling_fallback(
+        self,
+        name: str,
+        namespace: str,
+        resource_version: str | None = None,
+        interval: int = 30,
+    ) -> AsyncGenerator[async_client.CoreV1Event]:
+        """
+        Fallback method to poll pod event at regular intervals.
+
+        This is required when the Airflow triggerer does not have permission to watch events.
+
+        :param name: Pod name to watch events for
+        :param namespace: Kubernetes namespace
+        :param resource_version: Only return events not older than this resource version
+        :param interval: Polling interval in seconds
+        """
+        events: async_client.CoreV1EventList = await self.get_pod_events(name, namespace, resource_version)
+        for event in events.items:
+            yield event
+        await asyncio.sleep(interval)
+
+    @generic_api_retry
+    async def get_job_status(self, name: str, namespace: str) -> async_client.V1Job:
         """
         Get job's status object.
+
+        Reads the Job object, see :meth:`KubernetesHook.get_job_status`.
 
         :param name: Name of the pod.
         :param namespace: Name of the pod's namespace.
         """
         async with self.get_conn() as connection:
             v1_api = async_client.BatchV1Api(connection)
-            job: V1Job = await v1_api.read_namespaced_job_status(
+            job: async_client.V1Job = await v1_api.read_namespaced_job(
                 name=name,
                 namespace=namespace,
             )
         return job
 
-    async def wait_until_job_complete(self, name: str, namespace: str, poll_interval: float = 10) -> V1Job:
+    async def wait_until_job_complete(  # type: ignore[override]
+        self, name: str, namespace: str, poll_interval: float = 10
+    ) -> async_client.V1Job:
         """
         Block job of specified name and namespace until it is complete or failed.
 
@@ -907,7 +1375,7 @@ class AsyncKubernetesHook(KubernetesHook):
         """
         while True:
             self.log.info("Requesting status for the job '%s' ", name)
-            job: V1Job = await self.get_job_status(name=name, namespace=namespace)
+            job: async_client.V1Job = await self.get_job_status(name=name, namespace=namespace)
             if self.is_job_complete(job=job):
                 return job
             self.log.info("The job '%s' is incomplete. Sleeping for %i sec.", name, poll_interval)

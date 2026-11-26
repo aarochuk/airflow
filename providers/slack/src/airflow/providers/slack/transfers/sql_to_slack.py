@@ -16,24 +16,20 @@
 # under the License.
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping, Sequence
 from functools import cached_property
 from tempfile import NamedTemporaryFile
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
-from typing_extensions import Literal
-
-from airflow.exceptions import AirflowException, AirflowSkipException
+from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.providers.common.compat.sdk import AirflowException, AirflowSkipException
 from airflow.providers.slack.hooks.slack import SlackHook
 from airflow.providers.slack.transfers.base_sql_to_slack import BaseSqlToSlackOperator
 from airflow.providers.slack.utils import parse_filename
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class SqlToSlackApiFileOperator(BaseSqlToSlackOperator):
@@ -74,6 +70,8 @@ class SqlToSlackApiFileOperator(BaseSqlToSlackOperator):
         "slack_filename",
         "slack_initial_comment",
         "slack_title",
+        "slack_conn_id",
+        "sql_conn_id",
     )
     template_ext: Sequence[str] = (".sql", ".jinja", ".j2")
     template_fields_renderers = {"sql": "sql", "slack_message": "jinja"}
@@ -93,7 +91,7 @@ class SqlToSlackApiFileOperator(BaseSqlToSlackOperator):
         slack_initial_comment: str | None = None,
         slack_title: str | None = None,
         slack_base_url: str | None = None,
-        slack_method_version: Literal["v1", "v2"] = "v2",
+        slack_method_version: Literal["v1", "v2"] | None = None,
         df_kwargs: dict | None = None,
         action_on_empty_df: Literal["send", "skip", "error"] = "send",
         **kwargs,
@@ -113,6 +111,13 @@ class SqlToSlackApiFileOperator(BaseSqlToSlackOperator):
             raise ValueError(f"Invalid `action_on_empty_df` value {action_on_empty_df!r}")
         self.action_on_empty_df = action_on_empty_df
 
+        if self.slack_method_version:
+            warnings.warn(
+                "The property `slack_method_version` is no longer required for `SqlToSlackApiFileOperator`, as slack_sdk is using the files_upload_v2 method by default.",
+                AirflowProviderDeprecationWarning,
+                stacklevel=2,
+            )
+
     @cached_property
     def slack_hook(self):
         """Slack API Hook."""
@@ -123,12 +128,6 @@ class SqlToSlackApiFileOperator(BaseSqlToSlackOperator):
             proxy=self.slack_proxy,
             retry_handlers=self.slack_retry_handlers,
         )
-
-    @property
-    def _method_resolver(self):
-        if self.slack_method_version == "v1":
-            return self.slack_hook.send_file
-        return self.slack_hook.send_file_v1_to_v2
 
     def execute(self, context: Context) -> None:
         # Parse file format from filename
@@ -149,9 +148,9 @@ class SqlToSlackApiFileOperator(BaseSqlToSlackOperator):
             if df_result.empty:
                 if self.action_on_empty_df == "skip":
                     raise AirflowSkipException("SQL output df is empty. Skipping.")
-                elif self.action_on_empty_df == "error":
+                if self.action_on_empty_df == "error":
                     raise ValueError("SQL output df must be non-empty. Failing.")
-                elif self.action_on_empty_df != "send":
+                if self.action_on_empty_df != "send":
                     raise ValueError(f"Invalid `action_on_empty_df` value {self.action_on_empty_df!r}")
             if output_file_format == "CSV":
                 df_result.to_csv(output_file_name, **self.df_kwargs)
@@ -164,7 +163,7 @@ class SqlToSlackApiFileOperator(BaseSqlToSlackOperator):
                 # if SUPPORTED_FILE_FORMATS extended and no actual implementation for specific format.
                 raise AirflowException(f"Unexpected output file format: {output_file_format}")
 
-            self._method_resolver(
+            self.slack_hook.send_file_v1_to_v2(
                 channels=self.slack_channels,
                 file=output_file_name,
                 filename=self.slack_filename,

@@ -16,40 +16,117 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Button, type ButtonProps } from "@chakra-ui/react";
-import type { ReactElement } from "react";
-import { NavLink } from "react-router-dom";
+import type { ReactNode, ForwardRefExoticComponent, RefAttributes } from "react";
 
-const styles = {
-  alignItems: "center",
-  borderRadius: "none",
-  colorPalette: "blue",
-  flexDir: "column",
-  height: 20,
-  variant: "ghost",
-  whiteSpace: "wrap",
-  width: 20,
-} satisfies ButtonProps;
+import { Box, type BoxProps, Button, Icon, type IconProps, Link, type ButtonProps } from "@chakra-ui/react";
+import type { IconType } from "react-icons";
+import { Link as RouterLink, matchPath, useLocation } from "react-router-dom";
+
+const commonLabelProps: BoxProps = {
+  fontSize: "2xs",
+  overflow: "hidden",
+  textAlign: "center",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  width: "full",
+};
 
 type NavButtonProps = {
-  readonly icon: ReactElement;
-  readonly title?: string;
-  readonly to?: string;
+  readonly icon: ForwardRefExoticComponent<IconProps & RefAttributes<SVGSVGElement>> | IconType;
+  readonly isExternal?: boolean;
+  readonly pluginIcon?: ReactNode;
+  // Only applies to a single internal `to`.
+  readonly search?: string;
+  readonly title: string;
+  // A single destination renders the button as a link; an array only affects isActive matching
+  // (used for buttons like menu triggers that should highlight for any of several routes).
+  readonly to?: Array<string> | string;
 } & ButtonProps;
 
-export const NavButton = ({ icon, title, to, ...rest }: NavButtonProps) =>
-  to === undefined ? (
-    <Button {...styles} {...rest}>
-      <Box alignSelf="center">{icon}</Box>
-      <Box fontSize="xs">{title}</Box>
+export const NavButton = ({
+  icon,
+  isExternal = false,
+  pluginIcon,
+  search,
+  title,
+  to,
+  ...rest
+}: NavButtonProps) => {
+  const { pathname } = useLocation();
+
+  const activePaths = to === undefined ? [] : Array.isArray(to) ? to : [to];
+  const isActive = activePaths.some((path) => matchPath({ end: path === "/", path }, pathname) !== null);
+
+  const commonButtonProps: ButtonProps = {
+    _expanded: isActive
+      ? undefined
+      : {
+          bg: "brand.emphasized", // Even darker for better light mode contrast
+          color: "fg",
+        },
+    _focus: isActive
+      ? undefined
+      : {
+          color: "fg",
+        },
+    _hover: isActive
+      ? undefined
+      : {
+          _active: {
+            bg: "brand.solid",
+            color: "white",
+          },
+          bg: "brand.emphasized", // Even darker for better light mode contrast
+          color: "fg",
+        },
+    alignItems: "center",
+    "aria-current": isActive ? "page" : undefined,
+    "aria-label": title,
+    bg: isActive ? "brand.solid" : undefined,
+    borderRadius: "md",
+    borderWidth: 0,
+    boxSize: 14,
+    color: isActive ? "white" : "fg.muted",
+    colorPalette: "brand",
+    cursor: "pointer",
+    flexDir: "column",
+    gap: 0,
+    overflow: "hidden",
+    padding: 0,
+    textDecoration: "none",
+
+    transition: "background-color 0.2s ease, color 0.2s ease",
+    variant: "plain",
+    whiteSpace: "wrap",
+    ...rest,
+  };
+
+  if (to === undefined || Array.isArray(to)) {
+    return (
+      <Button {...commonButtonProps}>
+        {pluginIcon ?? <Icon as={icon} boxSize={5} />}
+        <Box {...commonLabelProps}>{title}</Box>
+      </Button>
+    );
+  }
+
+  if (isExternal) {
+    return (
+      <Button {...commonButtonProps} asChild>
+        <a href={to} rel="noopener noreferrer" target="_blank">
+          {pluginIcon ?? <Icon as={icon} boxSize={5} />}
+          <Box {...commonLabelProps}>{title}</Box>
+        </a>
+      </Button>
+    );
+  }
+
+  return (
+    <Button as={Link} asChild {...commonButtonProps}>
+      <RouterLink to={{ pathname: to, search }}>
+        {pluginIcon ?? <Icon as={icon} boxSize={5} />}
+        <Box {...commonLabelProps}>{title}</Box>
+      </RouterLink>
     </Button>
-  ) : (
-    <NavLink to={to}>
-      {({ isActive }: { readonly isActive: boolean }) => (
-        <Button {...styles} variant={isActive ? "solid" : "ghost"} {...rest}>
-          <Box alignSelf="center">{icon}</Box>
-          <Box fontSize="xs">{title}</Box>
-        </Button>
-      )}
-    </NavLink>
   );
+};

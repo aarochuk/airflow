@@ -25,6 +25,333 @@
 Changelog
 ---------
 
+.. note::
+    ``StateStoreObjectStorageBackend`` now raises ``ValueError`` when ``[common.io] state_store_objectstorage_path``
+    has no URL scheme (for example ``/tmp/task-state``). Before, large values were written but reading them back
+    failed with ``JSONDecodeError``. Plain ``get``, ``set``, ``delete`` and ``clear`` calls worked with such a
+    path and now raise too. Set the path to a URL such as ``s3://conn_id@bucket/task-state``, or
+    ``file:///path/to/task-state`` for local storage.
+
+    ``XComObjectStorageBackend`` now raises ``ValueError`` when it has to write a value to object storage
+    and ``[common.io] xcom_objectstorage_path`` has no URL scheme (for example ``""`` or ``/tmp/xcom``).
+    Before, the write succeeded but reads returned the file path instead of the value. Set the path to a
+    URL such as ``s3://conn_id@bucket/path``, or ``file:///path/to/xcom`` for local storage.
+
+1.11.1
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Write common.io state store values in chunks instead of one bytes copy (#76108)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] Upgrade important CI environment (#76278)``
+
+1.11.0
+......
+
+.. note::
+    On Airflow 3.4 and later, ``XComObjectStorageBackend`` implements ``store_value``, which Dags that use
+    task loops require, and writes objects to
+    ``<dag_id>/<run_id>/<task_id>/ti-<task instance id>/<quoted key>.json`` instead of a random file name, or to
+    ``.../write-<uuid>/<quoted key>.json`` for an XCom written for another task. ``dag_id``, ``run_id`` and
+    ``task_id`` are shortened only when the path would exceed 1,024 bytes. The quoted key is replaced by its
+    SHA-256 digest when it is longer than 200 characters, and a compression suffix is appended when
+    compression is configured. A subclass that overrides ``serialize_value`` keeps it, but cannot be used
+    with task loops until it implements ``store_value`` as well.
+
+Features
+~~~~~~~~
+
+* ``Let XCom backends tell loop iterations apart through store_value (#74858)``
+* ``Separate object storage task state by dynamic region on Airflow 3.4 (#74275)``
+
+Doc-only
+~~~~~~~~
+
+* ``Document region_index in task state storage paths (#74346)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Remove unused mypy suppressions in common providers (#75257)``
+
+1.10.1
+......
+
+Misc
+~~~~
+
+* ``Drop support for Python 3.10 (#74157)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Update provider READMEs for the Python 3.11 baseline (#74158)``
+   * ``Keep retried task attempts and their data under the attempt UUID (#74222)``
+   * ``[main] Upgrade important CI environment (#73629)``
+
+1.10.0
+......
+
+Features
+~~~~~~~~
+
+* ``Template every connection id accepted by provider operators (#73286)``
+
+Misc
+~~~~
+
+* ``Import the state store types from the public 'airflow.sdk.state' module (#73600)``
+
+Doc-only
+~~~~~~~~
+
+* ``Fix the BaseXCom class reference in the XCom backend guide (#73360)``
+* ``Fix docs referring to a non-existent MetastoreStateBackend class (#73080)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert "[main] Upgrade important CI environment (#73308)" (#73621)``
+   * ``[main] Upgrade important CI environment (#73308)``
+   * ``Prepare providers release 2026-09-22``
+
+1.9.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Implement async state store methods for object storage backend (#72131)``
+
+Doc-only
+~~~~~~~~
+
+* ``Fix duplicated and incorrect words in documentation (#70868)``
+* ``Document each provider's optional extras in its docs index (#69478)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+   * ``Prepare providers release 2026-08-01 (#70932)``
+   * ``Prepare providers release 2026-07-22 (#70256)``
+   * ``Prepare ad-hoc providers release 2026-07-01 (cncf.kubernetes, common.io, keycloak) (#69223)``
+
+1.8.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Introduce object store backend for task and asset state store (#68283)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+1.7.3
+.....
+
+Misc
+~~~~
+
+* ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix stale system test documentation links (#65071)``
+
+
+1.7.2
+.....
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+   * ``Prepare providers release 2026-03-09 (#63198)``
+   * ``Prepare documentation for next release of providers (2026-02-24) (#62495)``
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+
+1.7.1
+.....
+
+Misc
+~~~~
+
+* ``Consume ''AirflowOptionalProviderFeatureException'' from compat sdk in providers (#60335)``
+* ``New year means updated Copyright notices (#60344)``
+* ``Migrate common provider to use airflow.sdk.configuration.conf (#59989)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Remove TaskInstance and TaskLogReader unused methods (#59922)``
+
+1.7.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+
+1.6.5
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to 19 files in providers (cncf,common) (#57995)``
+   * ``Fix documentation/provider.yaml consistencies (#57283)``
+
+1.6.4
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix XCom object storage backend path validation (#56244)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Enable PT011 rule to prvoider tests (#56495)``
+   * ``Remove useless Airflow version compatibility checks (#55852)``
+
+1.6.3
+.....
+
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix circular import when using ''XComObjectStorageBackend'' (#55805)``
+
+Doc-only
+~~~~~~~~
+
+* ``Make term Dag consistent in providers docs (#55101)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare release for Sep 2025 1st wave of providers (#55203)``
+   * ``Fix Airflow 2 reference in README/index of providers (#55240)``
+   * ``Remove Legacy Query Object Usage from airflow-models (#52325)``
+   * ``Move trigger_rule utils from 'airflow/utils'  to 'airflow.task'and integrate with Execution API spec (#53389)``
+   * ``Switch pre-commit to prek (#54258)``
+
+1.6.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Prevent FileNotFoundError in deserialize_value of XCom io provider to crash the scheduler (#52702)``
+
+Misc
+~~~~
+
+* ``Deprecate decorators from Core (#53629)``
+* ``Add Python 3.13 support for Airflow. (#46891)``
+* ``Cleanup type ignores (#53298)``
+* ``Remove type ignore across codebase after mypy upgrade (#53243)``
+* ``Move remaining 'airflow.io' code to Task SDK (#53211)``
+* ``Replace usages of XCOM_RETURN_KEY in providers to not be from utils (#53170)``
+* ``Remove upper-binding for "python-requires" (#52980)``
+* ``Temporarily switch to use >=,< pattern instead of '~=' (#52967)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.6.1
+.....
+
+Misc
+~~~~
+
+* ``Replace models.BaseOperator to Task SDK one for Common Providers (#52443)``
+* ``Drop support for Python 3.9 (#52072)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Make sure all test version imports come from test_common (#52425)``
+   * ``Switch the Supervisor/task process from line-based to length-prefixed (#51699)``
+
+1.6.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.10+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Remove AIRFLOW_2_10_PLUS conditions (#49877)``
+* ``Bump min Airflow version in providers to 2.10 (#49843)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Update description of provider.yaml dependencies (#50231)``
+   * ``Avoid committing history for providers (#49907)``
+
+1.5.4
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Use BaseXCom serialize_value when objectstorage_threshold is less than given input (#49173)``
+
+Misc
+~~~~
+
+* ``Use contextlib.suppress(exception) instead of try-except-pass and add SIM105 ruff rule (#49251)``
+* ``remove superfluous else block (#49199)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.5.3
+.....
+
+Misc
+~~~~
+
+* ``Move ObjectStoragePath and attach to Task SDK (#48906)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Remove unnecessary entries in get_provider_info and update the schema (#48849)``
+   * ``Remove fab from preinstalled providers (#48457)``
+   * ``Fix common-io and common-compat provider description format (#48864)``
+   * ``Improve documentation building iteration (#48760)``
+   * ``Prepare docs for Apr 1st wave of providers (#48828)``
+   * ``Simplify tooling by switching completely to uv (#48223)``
+   * ``Upgrade ruff to latest version (#48553)``
+   * ``Move bases classes to 'airflow.sdk.bases' (#48487)``
+
 1.5.2
 .....
 
@@ -96,8 +423,6 @@ Misc
    * ``Use Python 3.9 as target version for Ruff & Black rules (#44298)``
    * ``Prepare docs for Nov 1st wave of providers (#44011)``
    * ``Split providers out of the main "airflow/" tree into a UV workspace project (#42505)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Update path of example dags in docs (#45069)``
 
 1.4.2

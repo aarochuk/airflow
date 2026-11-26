@@ -23,10 +23,9 @@ import os
 
 from flask_appbuilder.const import AUTH_DB
 
-# from airflow.www.fab_security.manager import AUTH_LDAP
-# from airflow.www.fab_security.manager import AUTH_OAUTH
-# from airflow.www.fab_security.manager import AUTH_OID
-# from airflow.www.fab_security.manager import AUTH_REMOTE_USER
+# from flask_appbuilder.const import AUTH_LDAP
+# from flask_appbuilder.const import AUTH_OAUTH
+# from flask_appbuilder.const import AUTH_REMOTE_USER
 
 
 basedir = os.path.abspath(os.path.dirname(__file__))
@@ -43,7 +42,6 @@ WTF_CSRF_TIME_LIMIT = None
 # for details.
 
 # The authentication type
-# AUTH_OID : Is for OpenID
 # AUTH_DB : Is for database
 # AUTH_LDAP : Is for LDAP
 # AUTH_REMOTE_USER : Is for using REMOTE_USER from web server

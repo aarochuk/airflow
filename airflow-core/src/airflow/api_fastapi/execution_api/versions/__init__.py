@@ -19,13 +19,129 @@ from __future__ import annotations
 
 from cadwyn import HeadVersion, Version, VersionBundle
 
-from airflow.api_fastapi.execution_api.versions.v2025_03_26 import (
-    AddIncludePriorDatesParam,
-    RemoveTIRuntimeChecksEndpoint,
+from airflow.api_fastapi.execution_api.versions.v2025_04_28 import AddRenderedMapIndexField
+from airflow.api_fastapi.execution_api.versions.v2025_05_20 import DowngradeUpstreamMapIndexes
+from airflow.api_fastapi.execution_api.versions.v2025_08_10 import (
+    AddDagRunStateFieldAndPreviousEndpoint,
+    AddIncludePriorDatesToGetXComSlice,
+)
+from airflow.api_fastapi.execution_api.versions.v2025_09_23 import AddDagVersionIdField
+from airflow.api_fastapi.execution_api.versions.v2025_10_27 import MakeDagRunConfNullable
+from airflow.api_fastapi.execution_api.versions.v2025_11_05 import AddTriggeringUserNameField
+from airflow.api_fastapi.execution_api.versions.v2026_04_06 import (
+    AddDagEndpoint,
+    AddDagRunDetailEndpoint,
+    AddNoteField,
+    AddPartitionKeyField,
+    AddRunAfterField,
+    AddTaskInstanceStartDateField,
+    MakeDagRunStartDateNullable,
+    ModifyDeferredTaskKwargsToJsonValue,
+    MovePreviousRunEndpoint,
+    RemoveUpstreamMapIndexesField,
+)
+from airflow.api_fastapi.execution_api.versions.v2026_06_30 import (
+    AddAssetsByAliasEndpoint,
+    AddAwaitingInputStatePayload,
+    AddConnectionTestEndpoint,
+    AddConsumedAssetEventPartitionKeyField,
+    AddPartitionDateField,
+    AddRetryPolicyFields,
+    AddTaskAndAssetStateStoreEndpoints,
+    AddTaskInstanceQueueField,
+    AddTeamNameField,
+    AddVariableKeysEndpoint,
+)
+from airflow.api_fastapi.execution_api.versions.v2026_10_30 import (
+    AddArgBindingsToTIRunContext,
+    AddCallbackRunEndpoint,
+    AddDagRunNoteUpdateEndpoint,
+    AddExpandedTICountToTIRunContext,
+    AddFirstTaskRescheduleStartDateField,
+    AddLoopContext,
+    AddLoopDecisionField,
+    AddMultiTeamToTIRunContext,
+    AddPreviousIterationToXComFilterParams,
+    AddStoppedTaskReport,
+    AddTaskInstanceRegionCoordinates,
+    AddTerminalStateRetryReasonField,
+    IdentifyArchivedTaskStateUpdates,
+    ReturnNotFoundForMissingDagRun,
+)
+from airflow.api_fastapi.execution_api.versions.v2026_12_01 import RemoveStringTriggerKwargs
+from airflow.api_fastapi.execution_api.versions.v2027_02_28 import (
+    AddCallbackStateEndpoint,
+    AddDagProcessorJobEndpoints,
+    AddExecutionTimeoutToTIRunContext,
+    AddExternalClearTargetField,
+    MakeVariableValueNonNullable,
+    ResolveOmittedXComMapIndexByTaskDefinition,
 )
 
 bundle = VersionBundle(
     HeadVersion(),
-    Version("2025-03-26", RemoveTIRuntimeChecksEndpoint, AddIncludePriorDatesParam),
-    Version("2025-03-19"),
+    Version(
+        "2027-02-28",
+        AddDagProcessorJobEndpoints,
+        AddExecutionTimeoutToTIRunContext,
+        AddExternalClearTargetField,
+        MakeVariableValueNonNullable,
+        AddCallbackStateEndpoint,
+        ResolveOmittedXComMapIndexByTaskDefinition,
+    ),
+    Version("2026-12-01", RemoveStringTriggerKwargs),
+    Version(
+        "2026-10-30",
+        AddArgBindingsToTIRunContext,
+        AddCallbackRunEndpoint,
+        AddDagRunNoteUpdateEndpoint,
+        AddExpandedTICountToTIRunContext,
+        AddLoopContext,
+        AddLoopDecisionField,
+        AddTerminalStateRetryReasonField,
+        AddMultiTeamToTIRunContext,
+        AddPreviousIterationToXComFilterParams,
+        AddStoppedTaskReport,
+        AddTaskInstanceRegionCoordinates,
+        IdentifyArchivedTaskStateUpdates,
+        AddFirstTaskRescheduleStartDateField,
+        ReturnNotFoundForMissingDagRun,
+    ),
+    Version(
+        "2026-06-30",
+        AddVariableKeysEndpoint,
+        AddConnectionTestEndpoint,
+        AddAwaitingInputStatePayload,
+        AddTaskInstanceQueueField,
+        AddRetryPolicyFields,
+        AddTeamNameField,
+        AddTaskAndAssetStateStoreEndpoints,
+        AddAssetsByAliasEndpoint,
+        AddPartitionDateField,
+        AddConsumedAssetEventPartitionKeyField,
+    ),
+    Version(
+        "2026-04-06",
+        AddPartitionKeyField,
+        MovePreviousRunEndpoint,
+        AddDagRunDetailEndpoint,
+        MakeDagRunStartDateNullable,
+        ModifyDeferredTaskKwargsToJsonValue,
+        RemoveUpstreamMapIndexesField,
+        AddNoteField,
+        AddTaskInstanceStartDateField,
+        AddRunAfterField,
+        AddDagEndpoint,
+    ),
+    Version("2025-11-05", AddTriggeringUserNameField),
+    Version("2025-10-27", MakeDagRunConfNullable),
+    Version("2025-09-23", AddDagVersionIdField),
+    Version(
+        "2025-08-10",
+        AddDagRunStateFieldAndPreviousEndpoint,
+        AddIncludePriorDatesToGetXComSlice,
+    ),
+    Version("2025-05-20", DowngradeUpstreamMapIndexes),
+    Version("2025-04-28", AddRenderedMapIndexField),
+    Version("2025-04-11"),
 )

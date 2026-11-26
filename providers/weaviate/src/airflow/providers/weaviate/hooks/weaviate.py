@@ -33,15 +33,18 @@ from weaviate.classes.query import Filter
 from weaviate.exceptions import ObjectAlreadyExistsException
 from weaviate.util import generate_uuid5
 
-from airflow.hooks.base import BaseHook
+from airflow.providers.common.compat.sdk import BaseHook
 
 if TYPE_CHECKING:
-    from typing import Callable, Literal
+    from collections.abc import Callable
+    from typing import Literal
 
     import pandas as pd
     from weaviate.auth import AuthCredentials
     from weaviate.collections import Collection
+    from weaviate.collections.classes.batch import ErrorReference
     from weaviate.collections.classes.config import CollectionConfig, CollectionConfigSimple
+    from weaviate.collections.classes.filters import _Filters
     from weaviate.collections.classes.internal import (
         Object,
         QueryReturnType,
@@ -65,11 +68,23 @@ REQUESTS_EXCEPTIONS_TYPES = (
 
 
 def check_http_error_is_retryable(exc: BaseException):
+    try:
+        # Stays on httpx (not httpx2): ``exc`` is raised inside weaviate-client, which is built
+        # on httpx, so an httpx2.ConnectError would never match and retries would silently stop.
+        # Migrate once weaviate-client moves to httpx2; tracked at https://github.com/apache/airflow/issues/70522
+        import httpx
+
+        if isinstance(exc, httpx.ConnectError):
+            return True
+    except ImportError:
+        pass
     return (
         isinstance(exc, requests.exceptions.RequestException)
         and exc.response
         and exc.response.status_code
         and exc.response.status_code in HTTP_RETRY_STATUS_CODE
+        or isinstance(exc, weaviate.UnexpectedStatusCodeException)
+        and exc.status_code in HTTP_RETRY_STATUS_CODE
     )
 
 
@@ -128,14 +143,14 @@ class WeaviateHook(BaseHook):
         http_secure = extras.pop("http_secure", False)
         grpc_secure = extras.pop("grpc_secure", False)
         return weaviate.connect_to_custom(
-            http_host=conn.host,
-            http_port=conn.port or 443 if http_secure else 80,
+            http_host=conn.host,  # type: ignore[arg-type]
+            http_port=conn.port or (443 if http_secure else 80),
             http_secure=http_secure,
             grpc_host=extras.pop("grpc_host", conn.host),
             grpc_port=extras.pop("grpc_port", 443 if grpc_secure else 80),
             grpc_secure=grpc_secure,
             headers=extras.pop("additional_headers", {}),
-            auth_credentials=self._extract_auth_credentials(conn),
+            auth_credentials=self._extract_auth_credentials(conn),  # type: ignore[arg-type]
         )
 
     def _extract_auth_credentials(self, conn: Connection) -> AuthCredentials:
@@ -189,6 +204,74 @@ class WeaviateHook(BaseHook):
         """
         client = self.conn
         return client.collections.get(name)
+
+    def delete_by_property(
+        self,
+        *,
+        collection_names: list[str] | str,
+        filter_criteria: _Filters,
+        if_error: str | None = None,
+        dry_run: bool = False,
+        verbose: bool = False,
+    ) -> list[str] | None:
+        """
+        Delete objects in collections using a provided Filter object. The maximum number of objects that can be deleted at once should be set through environment variable `QUERY_MAXIMUM_RESULTS`.
+
+        :param collection_names: The name(s) of the collection(s) to delete from.
+        :param filter_criteria: A `Filter` object defining the filter criteria for deletion.
+        :param if_error: define the actions to be taken if there is an error while deleting objects, possible
+         options are `None` and `continue`
+        :param dry_run: Use 'dry_run' to check how many objects would be deleted, without actually performing the deletion.
+        :param verbose: Set output to 'verbose' to see more details (ID and deletion status) for each deletion
+        :return: If `if_error="continue"`, returns list of failed collection names. Else, returns None.
+
+        Example:
+        >>> from weaviate.classes.query import Filter
+        >>> my_filter = (
+        >>>     Filter.by_property("round").equal("Double Jeopardy!") &
+        >>>     Filter.by_property("points").less_than(600)
+        >>> )
+        >>> delete_by_filter(
+        >>>     collection_names=["collection_a", "collection_b"],
+        >>>     filter_criteria=my_filter,
+        >>>     if_error="continue"
+        >>> )
+        """
+        collection_names = [collection_names] if isinstance(collection_names, str) else collection_names
+
+        failed_collection_list = []
+        for collection_name in collection_names:
+            try:
+                self.log.info("Attempting to delete objects from '%s'", collection_name)
+
+                for attempt in Retrying(
+                    stop=stop_after_attempt(3),
+                    retry=(
+                        retry_if_exception(lambda exc: check_http_error_is_retryable(exc))
+                        | retry_if_exception_type(REQUESTS_EXCEPTIONS_TYPES)
+                    ),
+                ):
+                    with attempt:
+                        self.log.info(attempt)
+                        collection = self.get_collection(collection_name)
+                        delete_many_return = collection.data.delete_many(
+                            where=filter_criteria, verbose=verbose, dry_run=dry_run
+                        )
+                        if dry_run:
+                            self.log.info(delete_many_return)
+            except Exception as e:
+                # Capture generic exception to avoid missing any error, but we could anticipate the following errors:
+                # 1. weaviate.exceptions.UnexpectedStatusCodeException
+                # 2. weaviate.exceptions.WeaviateDeleteManyError
+                if if_error == "continue":
+                    self.log.error(e)
+                    failed_collection_list.append(collection_name)
+                else:
+                    raise e
+
+        if if_error == "continue":
+            return failed_collection_list
+        return None
 
     def delete_collections(
         self, collection_names: list[str] | str, if_error: str = "stop"
@@ -268,6 +351,61 @@ class WeaviateHook(BaseHook):
                 data = json.loads(data.to_json(orient="records"))
         return cast("list[dict[str, Any]]", data)
 
+    def batch_create_links(
+        self,
+        collection_name: str,
+        data: list[dict[str, Any]] | pd.DataFrame | None,
+        from_property_col: str = "from_property",
+        from_uuid_col: str = "from_uuid",
+        to_uuid_col: str = "to",
+        retry_attempts_per_object: int = 5,
+    ) -> list[ErrorReference] | None:
+        """
+        Batch create links from an object to another other object through cross-references (https://weaviate.io/developers/weaviate/manage-data/import#import-with-references).
+
+        :param collection_name: The name of the collection containing the source objects.
+        :param data: list or dataframe of objects we want to create links.
+        :param from_property_col: name of the reference property column.
+        :param from_uuid_col: Name of the column containing the from UUID.
+        :param to_uuid_col: Name of the column containing the target UUID.
+        :param retry_attempts_per_object: number of time to try in case of failure before giving up.
+        """
+        converted_data = self._convert_dataframe_to_list(data)
+        collection = self.get_collection(collection_name)
+
+        with collection.batch.dynamic() as batch:
+            # Batch create links
+            for data_obj in converted_data:
+                for attempt in Retrying(
+                    stop=stop_after_attempt(retry_attempts_per_object),
+                    retry=(
+                        retry_if_exception(lambda exc: check_http_error_is_retryable(exc))
+                        | retry_if_exception_type(REQUESTS_EXCEPTIONS_TYPES)
+                    ),
+                ):
+                    with attempt:
+                        from_property = data_obj.pop(from_property_col, None)
+                        from_uuid = data_obj.pop(from_uuid_col, None)
+                        to_uuid = data_obj.pop(to_uuid_col, None)
+                        self.log.debug(
+                            "Attempt %s of create links between %s and %s using reference property %s",
+                            attempt.retry_state.attempt_number,
+                            from_uuid,
+                            to_uuid,
+                            from_property,
+                        )
+                        batch.add_reference(
+                            from_property=from_property,
+                            from_uuid=from_uuid,
+                            to=to_uuid,
+                        )
+
+        failed_references = collection.batch.failed_references
+        if failed_references:
+            self.log.error("Number of failed imports: %s", len(failed_references))
+
+        return failed_references
+
     def batch_data(
         self,
         collection_name: str,
@@ -276,6 +414,7 @@ class WeaviateHook(BaseHook):
         uuid_col: str = "id",
         retry_attempts_per_object: int = 5,
         references: ReferenceInputs | None = None,
+        tenant: str | None = None,
     ) -> None:
         """
         Add multiple objects or object references at once into weaviate.
@@ -286,10 +425,13 @@ class WeaviateHook(BaseHook):
         :param uuid_col: Name of the column containing the UUID.
         :param retry_attempts_per_object: number of time to try in case of failure before giving up.
         :param references: The references of the object to be added as a dictionary. Use `wvc.Reference.to` to create the correct values in the dict.
+        :param tenant: The tenant to which the objects will be added.
         """
         converted_data = self._convert_dataframe_to_list(data)
 
         collection = self.get_collection(collection_name)
+        if tenant:
+            collection = collection.with_tenant(tenant)
         with collection.batch.dynamic() as batch:
             # Batch import all data
             for data_obj in converted_data:
@@ -450,14 +592,17 @@ class WeaviateHook(BaseHook):
             )
         return all_objects
 
-    def delete_object(self, collection_name: str, uuid: UUID | str) -> bool:
+    def delete_object(self, collection_name: str, uuid: UUID | str, tenant: str | None = None) -> bool:
         """
         Delete an object from weaviate.
 
         :param collection_name: Collection name associated with the object given.
         :param uuid: uuid of the object to be deleted
+        :param tenant: The tenant from which the object will be deleted.
         """
         collection = self.get_collection(collection_name)
+        if tenant:
+            collection = collection.with_tenant(tenant)
         return collection.data.delete_by_id(uuid=uuid)
 
     def update_object(
@@ -505,7 +650,11 @@ class WeaviateHook(BaseHook):
         return collection.data.exists(uuid=uuid)
 
     def _delete_objects(
-        self, uuids: list[UUID], collection_name: str, retry_attempts_per_object: int = 5
+        self,
+        uuids: list[UUID],
+        collection_name: str,
+        retry_attempts_per_object: int = 5,
+        tenant: str | None = None,
     ) -> None:
         """
         Delete multiple objects.
@@ -515,6 +664,7 @@ class WeaviateHook(BaseHook):
         :param uuids: Collection of uuids.
         :param collection_name: Name of the collection in Weaviate schema where data is to be ingested.
         :param retry_attempts_per_object: number of times to try in case of failure before giving up.
+        :param tenant: The tenant from which the objects will be deleted.
         """
         for uuid in uuids:
             for attempt in Retrying(
@@ -526,7 +676,7 @@ class WeaviateHook(BaseHook):
             ):
                 with attempt:
                     try:
-                        self.delete_object(uuid=uuid, collection_name=collection_name)
+                        self.delete_object(uuid=uuid, collection_name=collection_name, tenant=tenant)
                         self.log.debug("Deleted object with uuid %s", uuid)
                     except weaviate.exceptions.UnexpectedStatusCodeException as e:
                         if e.status_code == 404:
@@ -571,8 +721,7 @@ class WeaviateHook(BaseHook):
                 raise ValueError(
                     "Property 'id' already in dataset. Consider renaming or specify 'uuid_column'."
                 )
-            else:
-                uuid_column = "id"
+            uuid_column = "id"
 
         if uuid_column in column_names:
             raise ValueError(
@@ -594,6 +743,7 @@ class WeaviateHook(BaseHook):
         document_column: str,
         uuid_column: str,
         collection_name: str,
+        tenant: str | None = None,
         offset: int = 0,
         limit: int = 2000,
     ) -> dict[str, set]:
@@ -603,6 +753,7 @@ class WeaviateHook(BaseHook):
         :param data: A single pandas DataFrame.
         :param document_column: The name of the property to query.
         :param collection_name: The name of the collection to query.
+        :param tenant: The tenant to query.
         :param uuid_column: The name of the column containing the UUID.
         :param offset: pagination parameter to indicate the which object to start fetching data.
         :param limit: pagination param to indicate the number of records to fetch from start object.
@@ -611,6 +762,8 @@ class WeaviateHook(BaseHook):
         document_keys = set(data[document_column])
         while True:
             collection = self.get_collection(collection_name)
+            if tenant:
+                collection = collection.with_tenant(tenant)
             data_objects = collection.query.fetch_objects(
                 filters=Filter.any_of(
                     [Filter.by_property(document_column).equal(key) for key in document_keys]
@@ -657,7 +810,12 @@ class WeaviateHook(BaseHook):
         return grouped_key_to_set
 
     def _get_segregated_documents(
-        self, data: pd.DataFrame, document_column: str, collection_name: str, uuid_column: str
+        self,
+        data: pd.DataFrame,
+        document_column: str,
+        collection_name: str,
+        uuid_column: str,
+        tenant: str | None = None,
     ) -> tuple[dict[str, set], set, set, set]:
         """
         Segregate documents into changed, unchanged and new document, when compared to Weaviate db.
@@ -666,6 +824,7 @@ class WeaviateHook(BaseHook):
         :param document_column: The name of the property to query.
         :param collection_name: The name of the collection to query.
         :param uuid_column: The name of the column containing the UUID.
+        :param tenant: The tenant to query.
         """
         changed_documents = set()
         unchanged_docs = set()
@@ -675,6 +834,7 @@ class WeaviateHook(BaseHook):
             uuid_column=uuid_column,
             document_column=document_column,
             collection_name=collection_name,
+            tenant=tenant,
         )
 
         input_documents_to_uuid = self._prepare_document_to_uuid_map(
@@ -702,6 +862,7 @@ class WeaviateHook(BaseHook):
         total_objects_count: int = 1,
         batch_delete_error: Sequence | None = None,
         verbose: bool = False,
+        tenant: str | None = None,
     ) -> Sequence[dict[str, UUID | str]]:
         """
         Delete all object that belong to list of documents.
@@ -713,6 +874,7 @@ class WeaviateHook(BaseHook):
             query is 10,000, if we have more objects to delete we need to run query multiple times.
         :param batch_delete_error: list to hold errors while inserting.
         :param verbose: Flag to enable verbose output during the ingestion process.
+        :param tenant: The tenant from which document objects will be deleted.
         """
         batch_delete_error = batch_delete_error or []
 
@@ -720,6 +882,8 @@ class WeaviateHook(BaseHook):
         MAX_LIMIT_ON_TOTAL_DELETABLE_OBJECTS = 10000
 
         collection = self.get_collection(collection_name)
+        if tenant:
+            collection = collection.with_tenant(tenant)
         delete_many_return = collection.data.delete_many(
             where=Filter.any_of([Filter.by_property(document_column).equal(key) for key in document_keys]),
             verbose=verbose,
@@ -747,6 +911,7 @@ class WeaviateHook(BaseHook):
         uuid_column: str | None = None,
         vector_column: str = "Vector",
         verbose: bool = False,
+        tenant: str | None = None,
     ) -> Sequence[dict[str, UUID | str] | None]:
         """
         Create or replace objects belonging to documents.
@@ -775,6 +940,7 @@ class WeaviateHook(BaseHook):
         :param uuid_column: Column with pre-generated UUIDs. If not provided, UUIDs will be generated.
         :param vector_column: Column with embedding vectors for pre-embedded data.
         :param verbose: Flag to enable verbose output during the ingestion process.
+        :param tenant: The tenant to which objects will be added.
         :return: list of UUID which failed to create
         """
         if existing not in ["skip", "replace", "error"]:
@@ -786,11 +952,9 @@ class WeaviateHook(BaseHook):
             return []
 
         if isinstance(data, Sequence) and isinstance(data[0], dict):
-            # This is done to narrow the type to list[dict[str, Any].
-            data = pd.json_normalize(cast("list[dict[str, Any]]", data))
+            data = pd.json_normalize([d for d in data if isinstance(d, dict)])
         elif isinstance(data, Sequence) and isinstance(data[0], pd.DataFrame):
-            # This is done to narrow the type to list[pd.DataFrame].
-            data = pd.concat(cast("list[pd.DataFrame]", data), ignore_index=True)
+            data = pd.concat([d for d in data if isinstance(d, pd.DataFrame)], ignore_index=True)
         else:
             data = cast("pd.DataFrame", data)
 
@@ -828,6 +992,7 @@ class WeaviateHook(BaseHook):
             document_column=document_column,
             uuid_column=uuid_column,
             collection_name=collection_name,
+            tenant=tenant,
         )
         if verbose:
             self.log.info(
@@ -847,7 +1012,7 @@ class WeaviateHook(BaseHook):
                 f"Documents {', '.join(changed_documents)} already exists. You can either skip or replace"
                 f" them by passing 'existing=skip' or 'existing=replace' respectively."
             )
-        elif existing == "skip":
+        if existing == "skip":
             data = data[data[document_column].isin(new_documents)]
             if verbose:
                 self.log.info(
@@ -869,6 +1034,7 @@ class WeaviateHook(BaseHook):
                     total_objects_count=total_objects_count,
                     batch_delete_error=batch_delete_error,
                     verbose=verbose,
+                    tenant=tenant,
                 )
             data = data[data[document_column].isin(new_documents.union(changed_documents))]
             self.log.info("Batch inserting %s objects for non-existing and changed documents.", data.shape[0])
@@ -879,6 +1045,7 @@ class WeaviateHook(BaseHook):
                 data=data,
                 vector_col=vector_column,
                 uuid_col=uuid_column,
+                tenant=tenant,
             )
             if batch_delete_error:
                 if batch_delete_error:
@@ -887,10 +1054,13 @@ class WeaviateHook(BaseHook):
                 self._delete_objects(
                     [item["uuid"] for item in batch_delete_error],
                     collection_name=collection_name,
+                    tenant=tenant,
                 )
 
         if verbose:
             collection = self.get_collection(collection_name)
+            if tenant:
+                collection = collection.with_tenant(tenant)
             self.log.info(
                 "Total objects in collection %s : %s ",
                 collection_name,

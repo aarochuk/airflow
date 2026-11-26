@@ -17,18 +17,14 @@
 # under the License.
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.grpc.hooks.grpc import GrpcHook
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class GrpcOperator(BaseOperator):
@@ -49,7 +45,7 @@ class GrpcOperator(BaseOperator):
     :param log_response: A flag to indicate if we need to log the response
     """
 
-    template_fields: Sequence[str] = ("stub_class", "call_func", "data")
+    template_fields: Sequence[str] = ("stub_class", "call_func", "data", "grpc_conn_id")
     template_fields_renderers = {"data": "py"}
 
     def __init__(

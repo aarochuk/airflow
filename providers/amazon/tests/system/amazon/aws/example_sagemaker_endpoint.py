@@ -21,9 +21,6 @@ from datetime import datetime
 
 import boto3
 
-from airflow.decorators import task
-from airflow.models.baseoperator import chain
-from airflow.models.dag import DAG
 from airflow.providers.amazon.aws.operators.s3 import (
     S3CreateBucketOperator,
     S3CreateObjectOperator,
@@ -37,9 +34,29 @@ from airflow.providers.amazon.aws.operators.sagemaker import (
     SageMakerTrainingOperator,
 )
 from airflow.providers.amazon.aws.sensors.sagemaker import SageMakerEndpointSensor
-from airflow.utils.trigger_rule import TriggerRule
 
-from system.amazon.aws.utils import ENV_ID_KEY, SystemTestContextBuilder, prune_logs
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import DAG, chain, task
+else:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
+    from airflow.models.baseoperator import chain  # type: ignore[attr-defined,no-redef]
+    from airflow.models.dag import DAG  # type: ignore[attr-defined,no-redef,assignment]
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
+
+from system.amazon.aws.utils import (
+    ENV_ID_KEY,
+    SystemTestContextBuilder,
+    print_and_delete_log_group_task,
+    prune_logs,
+)
 
 DAG_ID = "example_sagemaker_endpoint"
 
@@ -86,12 +103,9 @@ def delete_endpoint_config(endpoint_config_job_name):
 
 @task(trigger_rule=TriggerRule.ALL_DONE)
 def delete_endpoint(endpoint_name):
-    boto3.client("sagemaker").delete_endpoint(EndpointName=endpoint_name)
-
-
-@task(trigger_rule=TriggerRule.ALL_DONE)
-def archive_logs(log_group_name):
-    boto3.client("logs").put_retention_policy(logGroupName=log_group_name, retentionInDays=1)
+    sagemaker_client = boto3.client("sagemaker")
+    sagemaker_client.delete_endpoint(EndpointName=endpoint_name)
+    sagemaker_client.get_waiter("endpoint_deleted").wait(EndpointName=endpoint_name)
 
 
 @task
@@ -167,7 +181,7 @@ def set_up(env_id, role_arn, ti=None):
             {
                 "VariantName": f"{env_id}-demo",
                 "ModelName": model_name,
-                "InstanceType": "ml.t2.medium",
+                "InstanceType": "ml.m5.large",
                 "InitialInstanceCount": 1,
             },
         ],
@@ -193,7 +207,6 @@ with DAG(
     dag_id=DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),
-    tags=["example"],
     catchup=False,
 ) as dag:
     test_context = sys_test_context_task()
@@ -288,7 +301,7 @@ with DAG(
         delete_model,
         delete_bucket,
         log_cleanup,
-        archive_logs(f"/aws/sagemaker/Endpoints/{test_setup['endpoint_name']}"),
+        print_and_delete_log_group_task(f"/aws/sagemaker/Endpoints/{test_setup['endpoint_name']}"),
     )
 
     from tests_common.test_utils.watcher import watcher
@@ -299,5 +312,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

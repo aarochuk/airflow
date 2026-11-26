@@ -1,32 +1,57 @@
-// generated with @7nohe/openapi-react-query-codegen@1.6.2
-import { UseQueryOptions, useSuspenseQuery } from "@tanstack/react-query";
+// generated with @7nohe/openapi-react-query-codegen@3.0.2
+import { useSuspenseQuery, type UseSuspenseQueryOptions } from "@tanstack/react-query";
+import { AxiosError } from "axios";
 
-import { SimpleAuthManagerLoginService } from "../requests/services.gen";
+import { createTokenAllAdmins, loginAllAdmins, type Options } from "../requests/sdk.gen";
+import type {
+  CreateTokenAllAdminsData,
+  CreateTokenAllAdminsError,
+  LoginAllAdminsData,
+  LoginAllAdminsError,
+} from "../requests/types.gen";
 import * as Common from "./common";
 
-export const useSimpleAuthManagerLoginServiceCreateTokenAllAdminsSuspense = <
-  TData = Common.SimpleAuthManagerLoginServiceCreateTokenAllAdminsDefaultResponse,
-  TError = unknown,
+/**
+ * Create Token All Admins
+ *
+ * Create a token with no credentials only if ``simple_auth_manager_all_admins`` is True.
+ */
+export const useCreateTokenAllAdminsSuspense = <
+  TData = NonNullable<Common.CreateTokenAllAdminsDefaultResponse>,
+  TError = AxiosError<CreateTokenAllAdminsError>,
   TQueryKey extends Array<unknown> = unknown[],
 >(
+  clientOptions: Options<CreateTokenAllAdminsData, true> = {},
   queryKey?: TQueryKey,
-  options?: Omit<UseQueryOptions<TData, TError>, "queryKey" | "queryFn">,
+  options?: Omit<UseSuspenseQueryOptions<TData, TError>, "queryKey" | "queryFn">,
 ) =>
   useSuspenseQuery<TData, TError>({
-    queryKey: Common.UseSimpleAuthManagerLoginServiceCreateTokenAllAdminsKeyFn(queryKey),
-    queryFn: () => SimpleAuthManagerLoginService.createTokenAllAdmins() as TData,
+    queryKey: Common.UseCreateTokenAllAdminsKeyFn(clientOptions, queryKey),
+    queryFn: ({ signal }) =>
+      createTokenAllAdmins({ ...clientOptions, signal, throwOnError: true }).then(
+        (response) => response.data as TData,
+      ) as TData,
     ...options,
   });
-export const useSimpleAuthManagerLoginServiceLoginAllAdminsSuspense = <
-  TData = Common.SimpleAuthManagerLoginServiceLoginAllAdminsDefaultResponse,
-  TError = unknown,
+/**
+ * Login All Admins
+ *
+ * Login the user with no credentials.
+ */
+export const useLoginAllAdminsSuspense = <
+  TData = NonNullable<Common.LoginAllAdminsDefaultResponse>,
+  TError = AxiosError<LoginAllAdminsError>,
   TQueryKey extends Array<unknown> = unknown[],
 >(
+  clientOptions: Options<LoginAllAdminsData, true> = {},
   queryKey?: TQueryKey,
-  options?: Omit<UseQueryOptions<TData, TError>, "queryKey" | "queryFn">,
+  options?: Omit<UseSuspenseQueryOptions<TData, TError>, "queryKey" | "queryFn">,
 ) =>
   useSuspenseQuery<TData, TError>({
-    queryKey: Common.UseSimpleAuthManagerLoginServiceLoginAllAdminsKeyFn(queryKey),
-    queryFn: () => SimpleAuthManagerLoginService.loginAllAdmins() as TData,
+    queryKey: Common.UseLoginAllAdminsKeyFn(clientOptions, queryKey),
+    queryFn: ({ signal }) =>
+      loginAllAdmins({ ...clientOptions, signal, throwOnError: true }).then(
+        (response) => response.data as TData,
+      ) as TData,
     ...options,
   });

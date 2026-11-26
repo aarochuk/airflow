@@ -19,437 +19,227 @@ Static code checks
 ==================
 
 The static code checks in Airflow are used to verify that the code meets certain quality standards.
-All the static code checks can be run through pre-commit hooks.
+All the static code checks can be run through prek hooks.
 
-The pre-commit hooks perform all the necessary installation when you run them
-for the first time. See the table below to identify which pre-commit checks require the Breeze Docker images.
+The prek hooks perform all the necessary installation when you run them
+for the first time.
 
 You can also run the checks via `Breeze <../dev/breeze/doc/README.rst>`_ environment.
 
-**The outline for this document in GitHub is available at top-right corner button (with 3-dots and 3 lines).**
+.. contents:: Table of Contents
+   :depth: 2
+   :local:
 
-Pre-commit hooks
-----------------
+Prek hooks
+----------
 
-Pre-commit hooks help speed up your local development cycle and place less burden on the CI infrastructure.
-Consider installing the pre-commit hooks as a necessary prerequisite.
+Prek hooks help speed up your local development cycle and place less burden on the CI infrastructure.
+Consider installing the prek hooks as a necessary prerequisite.
 
-The pre-commit hooks by default only check the files you are currently working on and make
-them fast. Yet, these checks use exactly the same environment as the CI tests
+The hooks by default only check the files you are currently working on (and are staged) which makes the
+checks rather fast. Yet, these checks use exactly the same environment as the CI tests
 use. So, you can be sure your modifications will also work for CI if they pass
-pre-commit hooks.
+prek hooks.
 
-We have integrated the fantastic `pre-commit <https://pre-commit.com>`__ framework
-in our development workflow. To install and use it, you need at least Python 3.9 locally.
+We have integrated the `prek <https://github.com/j178/prek>`__ framework
+in our development workflow. It can be installed in various ways and does not even need ``pip`` or
+``python`` to be installed. It is a drop-in replacement for the legacy ``pre-commit`` tool, but it is
+much faster and more feature-rich. It is written in Rust and it is designed to install environments in parallel,
+so it is much faster than the ``pre-commit`` tool.
 
-Installing pre-commit hooks
----------------------------
+Installing prek hooks
+---------------------
 
-It is the best to use pre-commit hooks when you have your local virtualenv for
-Airflow activated since then pre-commit hooks and other dependencies are
-automatically installed. You can also install the pre-commit hooks manually using ``uv`` or ``pip``.
+It is the best to use prek hooks when you have your local virtualenv for
+Airflow activated since then prek hooks and other dependencies are
+automatically installed. You can also install the prek hooks manually using ``uv`` or ``pipx``.
 
 .. code-block:: bash
 
-    uv tool install pre-commit
+    uv tool install prek
 
 .. code-block:: bash
 
-    pip install pre-commit
+    pipx install prek
 
-After installation, pre-commit hooks are run automatically when you commit the code and they will
+Since we have a lot of hooks and sometimes you want to run them individually, it's advised to install
+auto-completion for the ``prek`` command. You can do it by adding the following line to your
+``.bashrc`` or ``.zshrc`` file:
+
+For bash:
+
+.. code-block:: bash
+
+    eval "$(COMPLETE=bash prek)"  # for bash
+
+For zsh:
+
+.. code-block:: zsh
+
+    eval "$(COMPLETE=zsh prek)"
+
+Similarly for other shells like fish, powershell, etc.
+
+After installation, prek hooks are run automatically when you commit the code and they will
 only run on the files that you change during your commit, so they are usually pretty fast and do
-not slow down your iteration speed on your changes. There are also ways to disable the ``pre-commits``
+not slow down your iteration speed on your changes. There are also ways to disable the prek hooks
 temporarily when you commit your code with ``--no-verify`` switch or skip certain checks that you find
-to much disturbing your local workflow. See `Available pre-commit checks <#available-pre-commit-checks>`_
-and `Using pre-commit <#using-pre-commit>`_
+to much disturbing your local workflow. See `Using prek <#using-prek>`_
 
-The pre-commit hooks use several external linters that need to be installed before pre-commit is run.
+The ``prek`` hooks use several external linters that need to be installed before prek is run.
 Each of the checks installs its own environment, so you do not need to install those, but there are some
 checks that require locally installed binaries. On Linux, you typically install
 them with ``sudo apt install``, on macOS - with ``brew install``.
 
-The current list of prerequisites is limited to ``xmllint``:
+The current list of prerequisites is limited to ``xmllint`` and ``golang`` if you want to modify
+the Golang code.:
 
-- on Linux, install via ``sudo apt install libxml2-utils``
-- on macOS, install via ``brew install libxml2``
+- on Linux, install via ``sudo apt install libxml2-utils golang``
+- on macOS, install via ``brew install libxml2 golang``
 
-Some pre-commit hooks also require the Docker Engine to be configured as the static
-checks are executed in the Docker environment (See table in the
-`Available pre-commit checks <#available-pre-commit-checks>`_ . You should build the images
-locally before installing pre-commit checks as described in `Breeze docs <../dev/breeze/doc/README.rst>`__.
+Some prek hooks also require the Docker Engine to be configured as the static
+checks are executed in the Docker environment. You should build the images
+locally before installing prek checks as described in `Breeze docs <../dev/breeze/doc/README.rst>`__.
 
 Sometimes your image is outdated and needs to be rebuilt because some dependencies have been changed.
-In such cases, the Docker-based pre-commit will inform you that you should rebuild the image.
+In such cases, the Docker-based prek will inform you that you should rebuild the image.
 
-In case you do not have your local images built, the pre-commit hooks fail and provide
-instructions on what needs to be done.
+Enabling prek hooks
+-------------------
 
-Enabling pre-commit hooks
--------------------------
-
-To turn on pre-commit checks for ``commit`` operations in git, enter:
+To turn on prek checks for ``commit`` operations in git, enter:
 
 .. code-block:: bash
 
-    pre-commit install
-
+    prek install
 
 To install the checks also for ``pre-push`` operations, enter:
 
 .. code-block:: bash
 
-    pre-commit install -t pre-push
-
+    prek install --hook-type pre-push
 
 For details on advanced usage of the install method, use:
 
 .. code-block:: bash
 
-   pre-commit install --help
+   prek install --help
 
-Available pre-commit checks
----------------------------
+.. note::
 
-This table lists pre-commit hooks used by Airflow. The ``Image`` column indicates which hooks
-require Breeze Docker image to be built locally.
+    The ``prek`` tool is a drop-in replacement for the legacy ``pre-commit`` tool - much faster and more
+    feature-rich, If you have already installed ``pre-commit`` to handle your hooks, you can run
+    ``prek install -f`` to replace the existing ``pre-commit`` hooks with the ``prek`` hooks.
 
-  .. BEGIN AUTO-GENERATED STATIC CHECK LIST
+Available prek hooks
+--------------------
 
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| ID                                                        | Description                                            | Image   |
-+===========================================================+========================================================+=========+
-| bandit                                                    | bandit                                                 |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| blacken-docs                                              | Run black on docs                                      |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-aiobotocore-optional                                | Check if aiobotocore is an optional dependency only    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-airflow-k8s-not-used                                | Check airflow.kubernetes imports are not used          |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-airflow-providers-bug-report-template               | Sort airflow-bug-report provider list                  |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-apache-license-rat                                  | Check if licenses are OK for Apache                    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-base-operator-partial-arguments                     | Check BaseOperator and partial() arguments             |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-base-operator-usage                                 | * Check BaseOperator core imports                      |         |
-|                                                           | * Check BaseOperatorLink core imports                  |         |
-|                                                           | * Check BaseOperator other imports                     |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-boring-cyborg-configuration                         | Checks for Boring Cyborg configuration consistency     |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-breeze-top-dependencies-limited                     | Check top-level breeze deps                            |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-builtin-literals                                    | Require literal syntax when initializing builtins      |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-changelog-format                                    | Check changelog format                                 |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-changelog-has-no-duplicates                         | Check changelogs for duplicate entries                 |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-cncf-k8s-only-for-executors                         | Check cncf.kubernetes imports used for executors only  |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-code-deprecations                                   | Check deprecations categories in decorators            |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-common-compat-used-for-openlineage                  | Check common.compat is used for OL deprecated classes  |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-core-deprecation-classes                            | Verify usage of Airflow deprecation classes in core    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-daysago-import-from-utils                           | days_ago imported from airflow.utils.dates             |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-decorated-operator-implements-custom-name           | Check @task decorator implements custom_operator_name  |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-default-configuration                               | Check the default configuration                        | *       |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-deferrable-default                                  | Check and fix default value of default_deferrable      |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-docstring-param-types                               | Check that docstrings do not specify param types       |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-example-dags-urls                                   | Check that example dags url include provider versions  |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-executables-have-shebangs                           | Check that executables have shebang                    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-extra-packages-references                           | Checks setup extra packages                            |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-extras-order                                        | Check order of extras in Dockerfile                    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-fab-migrations                                      | Check no migration is done on FAB related table        |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-for-inclusive-language                              | Check for language that we do not accept as community  |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-get-lineage-collector-providers                     | Check providers import hook lineage code from compat   |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-hooks-apply                                         | Check if all hooks apply to the repository             |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-imports-in-providers                                | Check imports in providers                             |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-incorrect-use-of-LoggingMixin                       | Make sure LoggingMixin is not used alone               |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-init-decorator-arguments                            | Sync model __init__ and decorator arguments            |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-integrations-list-consistent                        | Sync integrations list with docs                       |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-lazy-logging                                        | Check that all logging methods are lazy                |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-links-to-example-dags-do-not-use-hardcoded-versions | Verify no hard-coded version in example dags           |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-merge-conflict                                      | Check that merge conflicts are not being committed     |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-min-python-version                                  | Check minimum Python version                           |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-newsfragments-are-valid                             | Check newsfragments are valid                          |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-no-airflow-deprecation-in-providers                 | Do not use DeprecationWarning in providers             |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-no-providers-in-core-examples                       | No providers imports in core example DAGs              |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-only-new-session-with-provide-session               | Check NEW_SESSION is only used with @provide_session   |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-persist-credentials-disabled-in-github-workflows    | Check persistent creds in workflow files               |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-pre-commit-information-consistent                   | Validate hook IDs & names and sync with docs           |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-provide-create-sessions-imports                     | Check session util imports                             |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-provider-docs-valid                                 | Validate provider doc files                            |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-provider-yaml-valid                                 | Validate provider.yaml files                           | *       |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-providers-subpackages-init-file-exist               | Provider subpackage init files are there               |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-pydevd-left-in-code                                 | Check for pydevd debug statements accidentally left    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-revision-heads-map                                  | Check that the REVISION_HEADS_MAP is up-to-date        |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-safe-filter-usage-in-html                           | Don't use safe in templates                            |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-significant-newsfragments-are-valid                 | Check significant newsfragments are valid              |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-sql-dependency-common-data-structure                | Check dependency of SQL providers                      |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-start-date-not-used-in-defaults                     | start_date not in default_args                         |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-system-tests-present                                | Check if system tests have required segments of code   |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-system-tests-tocs                                   | Check that system tests is properly added              |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-taskinstance-tis-attrs                              | Check that TI and TIS have the same attributes         |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-template-context-variable-in-sync                   | Sync template context variable refs                    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-template-fields-valid                               | Check templated fields mapped in operators/sensors     | *       |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-tests-in-the-right-folders                          | Check if tests are in the right folders                |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-tests-unittest-testcase                             | Unit tests do not inherit from unittest.TestCase       |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-urlparse-usage-in-code                              | Don't use urlparse in code                             |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-xml                                                 | Check XML files with xmllint                           |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| check-zip-file-is-not-committed                           | Check no zip files are committed                       |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| codespell                                                 | Run codespell                                          |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| compile-fab-assets                                        | Compile FAB provider assets                            |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| compile-ui-assets                                         | Compile ui assets (manual)                             |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| compile-ui-assets-dev                                     | Compile ui assets in dev mode (manual)                 |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| create-missing-init-py-files-tests                        | Create missing init.py files in tests                  |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| debug-statements                                          | Detect accidentally committed debug statements         |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| detect-private-key                                        | Detect if private key is added to the repository       |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| doctoc                                                    | Add TOC for Markdown and RST files                     |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| end-of-file-fixer                                         | Make sure that there is an empty line at the end       |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| fix-encoding-pragma                                       | Remove encoding header from Python files               |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| flynt                                                     | Run flynt string format converter for Python           |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| generate-airflow-diagrams                                 | Generate airflow diagrams                              |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| generate-openapi-spec                                     | Generate the FastAPI API spec                          | *       |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| generate-pypi-readme                                      | Generate PyPI README                                   |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| generate-tasksdk-datamodels                               | Generate Datamodels for TaskSDK client                 | *       |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| generate-volumes-for-sources                              | Generate volumes for docker compose                    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| identity                                                  | Print checked files                                    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| insert-license                                            | * Add license for all SQL files                        |         |
-|                                                           | * Add license for all RST files                        |         |
-|                                                           | * Add license for CSS/JS/JSX/PUML/TS/TSX               |         |
-|                                                           | * Add license for all Shell files                      |         |
-|                                                           | * Add license for all toml files                       |         |
-|                                                           | * Add license for all Python files                     |         |
-|                                                           | * Add license for all XML files                        |         |
-|                                                           | * Add license for all Helm template files              |         |
-|                                                           | * Add license for all YAML files except Helm templates |         |
-|                                                           | * Add license for all Markdown files                   |         |
-|                                                           | * Add license for all other files                      |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| kubeconform                                               | Kubeconform check on our helm chart                    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| lint-chart-schema                                         | Lint chart/values.schema.json file                     |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| lint-dockerfile                                           | Lint Dockerfile                                        |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| lint-helm-chart                                           | Lint Helm Chart                                        |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| lint-json-schema                                          | * Lint JSON Schema files                               |         |
-|                                                           | * Lint NodePort Service                                |         |
-|                                                           | * Lint Docker compose files                            |         |
-|                                                           | * Lint chart/values.schema.json                        |         |
-|                                                           | * Lint chart/values.yaml                               |         |
-|                                                           | * Lint config_templates/config.yml                     |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| lint-markdown                                             | Run markdownlint                                       |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| mixed-line-ending                                         | Detect if mixed line ending is used (\r vs. \r\n)      |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| mypy-airflow-core                                         | * Run mypy for airflow-core                            | *       |
-|                                                           | * Run mypy for airflow-core (manual)                   |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| mypy-airflow-ctl                                          | * Run mypy for airflow-ctl                             | *       |
-|                                                           | * Run mypy for airflow-ctl (manual)                    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| mypy-dev                                                  | * Run mypy for dev                                     | *       |
-|                                                           | * Run mypy for dev (manual)                            |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| mypy-devel-common                                         | * Run mypy for devel-common                            | *       |
-|                                                           | * Run mypy for devel-common (manual)                   |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| mypy-providers                                            | * Run mypy for providers                               | *       |
-|                                                           | * Run mypy for providers (manual)                      |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| mypy-task-sdk                                             | * Run mypy for task-sdk                                | *       |
-|                                                           | * Run mypy for task-sdk (manual)                       |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| pretty-format-json                                        | Format JSON files                                      |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| pylint                                                    | pylint                                                 |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| python-no-log-warn                                        | Check if there are no deprecate log warn               |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| replace-bad-characters                                    | Replace bad characters                                 |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| rst-backticks                                             | Check if RST files use double backticks for code       |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| ruff                                                      | Run 'ruff' for extremely fast Python linting           |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| ruff-format                                               | Run 'ruff format'                                      |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| shellcheck                                                | Check Shell scripts syntax correctness                 |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| trailing-whitespace                                       | Remove trailing whitespace at end of line              |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| ts-compile-format-lint-ui                                 | Compile / format / lint UI                             | *       |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-black-version                                      | Update black versions everywhere (manual)              |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-breeze-cmd-output                                  | Update breeze docs                                     |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-breeze-readme-config-hash                          | Update Breeze README.md with config files hash         |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-chart-dependencies                                 | Update chart dependencies to latest (manual)           |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-er-diagram                                         | Update ER diagram                                      | *       |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-in-the-wild-to-be-sorted                           | Sort INTHEWILD.md alphabetically                       |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-inlined-dockerfile-scripts                         | Inline Dockerfile and Dockerfile.ci scripts            |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-installed-providers-to-be-sorted                   | Sort and uniquify installed_providers.txt              |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-installers-and-pre-commit                          | Update installers and pre-commit to latest (manual)    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-local-yml-file                                     | Update mounts in the local yml file                    |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-migration-references                               | Update migration ref doc                               | *       |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-providers-build-files                              | Update providers build files                           |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-providers-dependencies                             | Update dependencies for providers                      |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-pyproject-toml                                     | Update Airflow's meta-package pyproject.toml           |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-reproducible-source-date-epoch                     | Update Source Date Epoch for reproducible builds       |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-spelling-wordlist-to-be-sorted                     | Sort spelling_wordlist.txt                             |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-supported-versions                                 | Updates supported versions in documentation            |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-vendored-in-k8s-json-schema                        | Vendor k8s definitions into values.schema.json         |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| update-version                                            | Update versions in docs                                |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| validate-operators-init                                   | No templated field logic checks in operator __init__   |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| yamllint                                                  | Check YAML files with yamllint                         |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
-| zizmor                                                    | Run zizmor to check for github workflow syntax errors  |         |
-+-----------------------------------------------------------+--------------------------------------------------------+---------+
+You can see the list of available hooks by running:
 
-  .. END AUTO-GENERATED STATIC CHECK LIST
+.. code-block:: bash
 
-Using pre-commit
-----------------
+    prek list
 
-After installation, pre-commit hooks are run automatically when you commit the
-code. But you can run pre-commit hooks manually as needed.
+You can also see more details about the hooks by running:
+
+.. code-block:: bash
+
+    prek list --verbose
+
+And if you want to see the details of a particular hook, you can run:
+
+.. code-block:: bash
+
+    prek list --verbose <hook-id>
+
+When you install auto-completion, you can also use the tab-completion to see the available hooks.
+
+License headers in RST files
+----------------------------
+
+Every ``*.rst`` file starts with the license header on line 1, with each non-empty line indented by one
+space. This is the shape the ``insert-license`` hook writes for a new file, and the
+``check-rst-license-header`` hook rewrites any other shape (a leading blank line, no indentation) into it and
+fails so that you can stage the change. ``scripts/ci/license-templates/LICENSE.rst`` holds the text without the
+indentation, which the hooks add. Files under ``newsfragments/`` carry no header.
+
+Two groups of files are excluded from the hook:
+
+- The ``cli-and-env-variables-ref.rst`` files of ``airflow-core`` and ``airflow-ctl`` start with a ``:tocdepth:``
+  field list, which only counts as document metadata while it is the first element.
+- The ``providers/*/README.rst`` files are generated and published as the PyPI description, where the indented
+  header renders as an empty block quote.
+
+Using prek
+----------
+
+After installation, prek hooks are run automatically when you commit the
+code or push it to the repository (depending on stages configured for the hooks). Some of the
+hooks are configured to run on "manual" stage only and are not run automatically.
+
+The hooks of the root ``.pre-commit-config.yaml`` run one at a time, except for some slow checks
+that set ``priority: 1000``. Those checks run in parallel at the end. Before you set that priority
+on another hook, read the rules in ``scripts/ci/prek/AGENTS.md``. ``check-prek-parallel-hooks``
+fails when a hook sets a priority other than 1000, or sets 1000 but is not listed in
+``PARALLEL_HOOKS`` in ``scripts/ci/prek/check_prek_parallel_hooks.py``.
+
+By default when you run ``prek``, the ``pre-commit`` stage hooks are run.
+
+But you can run prek hooks manually as needed.
 
 -   Run all checks on your staged files by using:
 
 .. code-block:: bash
 
-    pre-commit run
+    prek
 
--   Run only mypy check on your staged files (in ``airflow/`` excluding providers) by using:
-
-.. code-block:: bash
-
-    pre-commit run mypy-airflow
-
--   Run only mypy checks on all files by using:
+-   Run only mypy check on your staged airflow and dev files by specifying the
+    ``mypy-airflow-core`` and ``mypy-dev`` prek hooks (more hooks can be specified).
+    For non-provider projects, mypy runs locally via ``uv`` (no breeze image needed):
 
 .. code-block:: bash
 
-    pre-commit run mypy-airflow --all-files
+    prek mypy-airflow-core mypy-dev
 
-
--   Run all checks on all files by using:
-
-.. code-block:: bash
-
-    pre-commit run --all-files
-
-
--   Run all checks only on files modified in the last locally available commit in your checked out branch:
+-   Run only mypy airflow checks on all "airflow-core" files by using:
 
 .. code-block:: bash
 
-    pre-commit run --source=HEAD^ --origin=HEAD
+    prek mypy-airflow-core --all-files
 
-
--   Show files modified automatically by pre-commit when pre-commits automatically fix errors
+-   Run all pre-commit stage hooks on all files by using:
 
 .. code-block:: bash
 
-    pre-commit run --show-diff-on-failure
+    prek --all-files
+
+-   Run all pre-commit stage hooks only on files modified in the last locally available
+    commit in your checked out branch:
+
+.. code-block:: bash
+
+    prek --last-commit
+
+-   Run all pre-commit stage hooks only on files modified in your last branch that is targeted
+    to be merged into the main branch:
+
+.. code-block:: bash
+
+    prek --from-ref main
+
+-   Show files modified automatically by prek when prek automatically fixes errors (after running all
+    ``pre-commit`` stage hooks on locally modified files):
+
+.. code-block:: bash
+
+    prek --show-diff-on-failure
 
 -   Skip one or more of the checks by specifying a comma-separated list of
     checks to skip in the SKIP variable:
 
 .. code-block:: bash
 
-    SKIP=mypy-airflow-core,ruff pre-commit run --all-files
+    SKIP=ruff,rst-backticks prek --all-files
 
 
 You can always skip running the tests by providing ``--no-verify`` flag to the
@@ -457,151 +247,144 @@ You can always skip running the tests by providing ``--no-verify`` flag to the
 
 To check other usage types of the pre-commit framework, see `Pre-commit website <https://pre-commit.com/>`__.
 
+.. AGENT-SKILL-START
+   type: agents-md-commands
+   order: 30
+   lines:
+     - "- **Type-check (non-providers):** run the prek hook \u2014 `prek run mypy-<project> --all-files` (e.g. `mypy-airflow-core`, `mypy-task-sdk`, `mypy-shared-logging`; each `shared/<dist>` workspace member has its own `mypy-shared-<dist>` hook). The hook uses a dedicated virtualenv and mypy cache under `.build/mypy-venvs/<hook>/` and `.build/mypy-caches/<hook>/`; mypy itself is installed from `uv.lock` via the `mypy` dependency group (`uv sync --group mypy`), so it never mutates your project `.venv`. The hook prefers `uv` from the project's main `.venv/bin/uv` (installed by `uv sync` \u2014 `uv` is part of the `dev` dependency group via the `all` extras) for a project-pinned uv version; it falls back to `uv` on `$PATH` with a warning if that binary is missing. Clear with `breeze down --cleanup-mypy-cache`."
+     - "- **Type-check (providers):** `breeze run mypy path/to/code`"
+     - "- **Lint with ruff only:** `prek run ruff --from-ref <target_branch>`"
+     - "- **Format with ruff only:** `prek run ruff-format --from-ref <target_branch>`"
+     - "- **Run regular (fast) static checks:** `prek run --from-ref <target_branch> --stage pre-commit`"
+     - "- **Run manual (slower) checks:** `prek run --from-ref <target_branch> --stage manual --skip compile-ui-assets-dev --skip view-skill-eval --skip run-skill-eval-codex` (the skipped hooks start long-running local servers or provision the opt-in Codex environment rather than run checks that complete)"
+     - "- **Build docs:** `breeze build-docs`"
+     - "- **List the local verification for your changes:** `breeze verify` (add `--full` for everything CI runs for the default matrix cell except static checks, `--json` for machine-readable output). It uses the same selective-checks logic as CI."
+     - "- **Determine which tests to run based on changed files:** `breeze ci selective-check --commit-ref <commit_with_squashed_changes>`"
+.. AGENT-SKILL-END
+
 Disabling particular checks
 ---------------------------
 
-In case you have a problem with running particular ``pre-commit`` check you can still continue using the
-benefits of having ``pre-commit`` installed, with some of the checks disabled. In order to disable
+In case you have a problem with running particular ``prek`` check you can still continue using the
+benefits of having ``prek`` installed, with some of the checks disabled. In order to disable
 checks you might need to set ``SKIP`` environment variable to coma-separated list of checks to skip. For example,
 when you want to skip some checks (ruff/mypy for example), you should be able to do it by setting
 ``export SKIP=ruff,mypy-airflow-core,``. You can also add this to your ``.bashrc`` or ``.zshrc`` if you
 do not want to set it manually every time you enter the terminal.
 
 In case you do not have breeze image configured locally, you can also disable all checks that require breeze
-the image by setting ``SKIP_BREEZE_PRE_COMMITS`` to "true". This will mark the tests as "green" automatically
+the image by setting ``SKIP_BREEZE_PREK_HOOKS`` to "true". This will mark the tests as "green" automatically
 when run locally (note that those checks will anyway run in CI).
 
-Manual pre-commits
-------------------
+Disabling goproxy for firewall issues
+-------------------------------------
 
-Most of the checks we run are configured to run automatically when you commit the code. However,
-there are some checks that are not run automatically and you need to run them manually. Those
-checks are marked with ``manual`` in the ``Description`` column in the table below. You can run
-them manually by running ``pre-commit run --hook-stage manual <hook-id>``.
+Sometimes your environment might not allow to connect to the ``goproxy`` server, which is used to
+proxy/cache Go modules. When your firewall blocks go proxy it usually ends with message similar to:
+
+.. code-block:: text
+
+  lookup proxy.golang.org: i/o timeout
+
+In such case, you can disable the ``goproxy`` by setting the
+``GOPROXY`` environment variable to "direct". You can do it by running:
+
+.. code-block:: bash
+
+    export GOPROXY=direct
+
+Alternatively if your company has its own Go proxy, you can set the ``GOPROXY`` to
+your company Go proxy URL. For example:
+
+.. code-block:: bash
+
+    export GOPROXY=https://mycompanygoproxy.com
+
+See `Go Proxy lesson <https://www.practical-go-lessons.com/chap-18-go-module-proxies#configuration-of-the-go-module-proxy>`__)
+for more details on how to configure Go proxy - including setting multiple proxies.
+
+You can add the variable to your ``.bashrc`` or ``.zshrc`` if you do not want to set it manually every time you
+enter the terminal.
+
+Manual prek hooks
+-----------------
+
+Most of the checks we run are configured to run automatically when you commit the code or push PR. However,
+there are some checks that are not run automatically and you need to run them manually. You can run
+them manually by running ``prek --stage manual <hook-id>``.
 
 Mypy checks
 -----------
 
-When we run mypy checks locally when committing a change, one of the ``mypy-*`` checks is run, ``mypy-airflow``,
-``mypy-dev``, ``mypy-providers``, ``mypy-airflow-ctl``, depending on the files you are changing. The mypy checks
-are run by passing those changed files to mypy. This is way faster than running checks for all files (even
-if mypy cache is used - especially when you change a file in airflow core that is imported and used by many
-files). However, in some cases, it produces different results than when running checks for the whole set
-of files, because ``mypy`` does not even know that some types are defined in other files and it might not
-be able to follow imports properly if they are dynamic. Therefore in CI we run ``mypy`` check for whole
-directories (``airflow`` - excluding providers, ``providers``, ``dev`` and ``docs``) to make sure
-that we catch all ``mypy`` errors - so you can experience different results when running mypy locally and
-in CI. If you want to run mypy checks for all files locally, you can do it by running the following
-command (example for ``airflow`` files):
+When we run mypy checks locally, the ``mypy-*`` checks run depending on the files you are changing:
+``mypy-airflow-core``, ``mypy-dev``, ``mypy-providers``, ``mypy-scripts``, ``mypy-task-sdk``,
+``mypy-airflow-ctl``, ``mypy-devel-common``, ``mypy-airflow-ctl-tests``, ``mypy-helm-tests``,
+``mypy-airflow-e2e-tests``, ``mypy-task-sdk-integration-tests``, ``mypy-docker-tests``,
+``mypy-kubernetes-tests``, and one ``mypy-shared-<dist>`` hook per ``shared/<dist>`` workspace
+distribution (e.g. ``mypy-shared-configuration``, ``mypy-shared-logging``).
+
+For **non-provider projects**, mypy runs locally using ``uv`` — no breeze CI image is needed. These
+checks run as regular prek hooks in the ``pre-commit`` stage, checking whole directories at once. This
+means they run both as part of local commits and as part of regular static checks in CI (not as
+separate mypy CI jobs).
+
+Each non-provider ``mypy-*`` hook uses a **dedicated virtualenv and mypy cache** under ``.build/`` so
+running mypy never mutates your regular project ``.venv`` and each hook keeps a stable, CI-aligned
+dependency set:
+
+- virtualenvs: ``.build/mypy-venvs/<hook-name>/``
+- mypy caches: ``.build/mypy-caches/<hook-name>/``
+
+The hook prefers ``uv`` from your project's main ``.venv/bin/uv`` — so the uv version used to sync
+and run mypy is pinned by the project rather than whatever ``uv`` is on your ``PATH``. If that
+binary is missing, the hook falls back to ``uv`` on ``PATH`` and prints a warning. ``uv`` is part
+of the ``dev`` dependency group via the ``all`` extras, so a plain sync installs it:
 
 .. code-block:: bash
 
-  pre-commit run --hook-stage manual mypy-<FOLDER> --all-files
+  uv sync
 
-For example:
+Prek hooks that invoke ``uv`` (directly or via ``breeze``) also verify that the ``uv`` they are
+about to run is at least the version pinned in ``[tool.uv] required-version`` in the root
+``pyproject.toml``. If your ``uv`` is older, the hook fails fast with an instruction to run
+``uv self update`` (or ``uv sync`` to refresh the project-pinned uv).
 
-.. code-block:: bash
+Adding a new shared library
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-  pre-commit run --hook-stage manual mypy-airflow --all-files
+Every ``shared/<dist>`` workspace member has its own ``mypy-shared-<dist>`` prek hook so it is
+type-checked in isolation against its own dependency set. When you add a new shared library under
+``shared/<new-dist>/``, you also need to:
 
-MyPy uses a separate docker-volume (called ``mypy-cache-volume``) that keeps the cache of last MyPy
-execution in order to speed MyPy checks up (sometimes by order of magnitude). While in most cases MyPy
-will handle refreshing the cache when and if needed, there are some cases when it won't (cache invalidation
-is the hard problem in computer science). This might happen for example when we upgrade MyPY. In such
-cases you might need to manually remove the cache volume by running ``breeze down --cleanup-mypy-cache``.
+1. Add a ``[dependency-groups]`` section with ``mypy = ["apache-airflow-devel-common[mypy]"]`` in
+   ``shared/<new-dist>/pyproject.toml`` (so ``uv sync --group mypy`` installs mypy into the hook's
+   dedicated virtualenv).
+2. Create ``shared/<new-dist>/.pre-commit-config.yaml`` with a ``mypy-shared-<new-dist>`` hook
+   entry that calls ``../../scripts/ci/prek/run_mypy_full_dist_local_venv_or_breeze_in_ci.py shared/<new-dist>``.
 
-Running static code checks via Breeze
--------------------------------------
+The ``check-shared-mypy-hooks`` prek hook enforces step 2 — it fails and prints the exact config
+contents to add when any ``shared/<dist>`` is missing its dedicated mypy hook.
 
-The static code checks can be launched using the Breeze environment.
-
-You run the static code checks via ``breeze static-check`` or commands.
-
-You can see the list of available static checks either via ``--help`` flag or by using the autocomplete
-option.
-
-Run the ``mypy`` check for the currently staged changes (in ``airflow/`` excluding providers):
-
-.. code-block:: bash
-
-     breeze static-checks --type mypy-airflow
-
-Run the ``mypy`` check for all files:
+To run the prek hook for a specific project (example for ``airflow-core`` files):
 
 .. code-block:: bash
 
-     breeze static-checks --type mypy-airflow --all-files
+  prek mypy-airflow-core --all-files
 
-Run the ``ruff`` check for the ``tests/core.py`` file with verbose output:
-
-.. code-block:: bash
-
-     breeze static-checks --type ruff --file tests/core.py --verbose
-
-Run the ``ruff`` check for the ``tests.core`` package with verbose output:
+To show unused mypy ignores, run:
 
 .. code-block:: bash
 
-     breeze static-checks --type ruff --file tests/core/* --verbose
+  export SHOW_UNUSED_MYPY_WARNINGS=true
+  prek mypy-airflow-core --all-files
 
-Run the ``ruff-format`` check for the files ``airflow/example_dags/example_bash_operator.py`` and
-``airflow/example_dags/example_python_operator.py``:
+For **providers**, mypy still runs via breeze (``breeze run mypy``) as a separate CI job and requires
+``breeze ci-image build --python 3.11`` to be built locally. Providers use a separate docker-volume
+(called ``mypy-cache-volume``) that keeps the cache of last MyPy execution.
 
-.. code-block:: bash
-
-     breeze static-checks --type ruff-format --file airflow/example_dags/example_bash_operator.py \
-         airflow/example_dags/example_python_operator.py
-
-Run all checks for the currently staged files:
-
-.. code-block:: bash
-
-     breeze static-checks
-
-Run all checks for all files:
-
-.. code-block:: bash
-
-    breeze static-checks --all-files
-
-Run all checks for last commit:
-
-.. code-block:: bash
-
-     breeze static-checks --last-commit
-
-Run all checks for all changes in my branch since branched from main:
-
-.. code-block:: bash
-
-     breeze static-checks --type mypy-airflow --only-my-changes
-
-More examples can be found in
-`Breeze documentation <../dev/breeze/doc/03_developer_tasks.rst#running-static-checks>`_
-
-
-Debugging pre-commit check scripts requiring image
---------------------------------------------------
-
-Those commits that use Breeze docker image might sometimes fail, depending on your operating system and
-docker setup, so sometimes it might be required to run debugging with the commands. This is done via
-two environment variables ``VERBOSE`` and ``DRY_RUN``. Setting them to "true" will respectively show the
-commands to run before running them or skip running the commands.
-
-Note that you need to run pre-commit with --verbose command to get the output regardless of the status
-of the static check (normally it will only show output on failure).
-
-Printing the commands while executing:
-
-.. code-block:: bash
-
-     VERBOSE="true" pre-commit run --verbose ruff
-
-Just performing dry run:
-
-.. code-block:: bash
-
-     DRY_RUN="true" pre-commit run --verbose ruff
+To clear all mypy caches (the Docker volume used by providers, any legacy repo-root ``.mypy_cache``,
+and the per-hook venvs + caches under ``.build/mypy-venvs/`` and ``.build/mypy-caches/``), run
+``breeze down --cleanup-mypy-cache``.
 
 -----------
 

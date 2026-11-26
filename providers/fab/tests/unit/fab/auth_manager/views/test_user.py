@@ -23,7 +23,7 @@ from airflow.providers.fab.www import app as application
 from airflow.providers.fab.www.security import permissions
 
 from tests_common.test_utils.config import conf_vars
-from unit.fab.auth_manager.api_endpoints.api_connexion_utils import create_user, delete_user
+from unit.fab.auth_manager.test_utils import create_user, delete_user
 from unit.fab.auth_manager.views import _assert_dataset_deprecation_warning
 from unit.fab.utils import client_with_login
 
@@ -43,17 +43,35 @@ def fab_app():
 
 @pytest.fixture(scope="module")
 def user_user_reader(fab_app):
-    yield create_user(
-        fab_app,
-        username="user_user",
-        role_name="role_user",
-        permissions=[
-            (permissions.ACTION_CAN_READ, permissions.RESOURCE_USER),
-            (permissions.ACTION_CAN_READ, permissions.RESOURCE_WEBSITE),
-        ],
-    )
+    with fab_app.app_context():
+        yield create_user(
+            fab_app,
+            username="user_user",
+            role_name="role_user",
+            permissions=[
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_USER),
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_WEBSITE),
+            ],
+        )
 
-    delete_user(fab_app, "user_user")
+        delete_user(fab_app, "user_user")
+
+
+@pytest.fixture(scope="module")
+def user_show_and_profile(fab_app):
+    with fab_app.app_context():
+        yield create_user(
+            fab_app,
+            username="user_show_and_profile",
+            role_name="role_show_and_profile",
+            permissions=[
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_USER),
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_MY_PROFILE),
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_WEBSITE),
+            ],
+        )
+
+        delete_user(fab_app, "user_show_and_profile")
 
 
 @pytest.fixture
@@ -73,3 +91,22 @@ class TestUserView:
 
         _assert_dataset_deprecation_warning(recwarn)
         assert resp.status_code == 200
+
+    def test_show_user_keeps_self_service_actions_on_userinfo(self, fab_app, user_show_and_profile):
+        fab_app.config["WTF_CSRF_ENABLED"] = False
+        client = client_with_login(
+            fab_app,
+            username="user_show_and_profile",
+            password="user_show_and_profile",
+        )
+
+        resp = client.get(f"/users/show/{user_show_and_profile.id}")
+        assert resp.status_code == 200
+        assert "/action/resetmypassword/" not in resp.text
+        assert "/action/userinfoedit/" not in resp.text
+
+        # show() must not remove the actions from the view's shared dict, userinfo needs them
+        resp = client.get("/users/userinfo/")
+        assert resp.status_code == 200
+        assert "/action/resetmypassword/" in resp.text
+        assert "/action/userinfoedit/" in resp.text

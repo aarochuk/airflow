@@ -23,13 +23,14 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from airflow.exceptions import TaskDeferred
 from airflow.providers.amazon.aws.hooks.lambda_function import LambdaHook
 from airflow.providers.amazon.aws.operators.lambda_function import (
     LambdaCreateFunctionOperator,
     LambdaInvokeFunctionOperator,
 )
+from airflow.providers.common.compat.sdk import TaskDeferred
 
+from unit.amazon.aws.utils.test_deferral import expect_deferral_warning
 from unit.amazon.aws.utils.test_template_fields import validate_template_fields
 
 FUNCTION_NAME = "function_name"
@@ -42,6 +43,7 @@ IMAGE_URI = "image_uri"
 LOG_RESPONSE = base64.b64encode(b"FOO\n\nBAR\n\n").decode()
 BAD_LOG_RESPONSE = LOG_RESPONSE[:-3]
 NO_LOG_RESPONSE_SENTINEL = type("NoLogResponseSentinel", (), {})()
+LAMBDA_FUNC_NO_EXECUTION = "Lambda function did not execute"
 
 
 class TestLambdaCreateFunctionOperator:
@@ -113,8 +115,9 @@ class TestLambdaCreateFunctionOperator:
         mock_hook_create_lambda.assert_called_once()
         mock_hook_conn.get_waiter.assert_called_once_with("function_active_v2")
 
+    @pytest.mark.parametrize("wait_for_completion", [True, False])
     @mock.patch.object(LambdaHook, "create_lambda")
-    def test_create_lambda_deferrable(self, _):
+    def test_create_lambda_deferrable(self, _, wait_for_completion):
         operator = LambdaCreateFunctionOperator(
             task_id="task_test",
             function_name=FUNCTION_NAME,
@@ -122,9 +125,13 @@ class TestLambdaCreateFunctionOperator:
             code={
                 "ImageUri": IMAGE_URI,
             },
+            wait_for_completion=wait_for_completion,
             deferrable=True,
         )
-        with pytest.raises(TaskDeferred):
+        with (
+            expect_deferral_warning(deferrable=True, wait_for_completion=wait_for_completion),
+            pytest.raises(TaskDeferred),
+        ):
             operator.execute(None)
 
     @mock.patch.object(LambdaHook, "create_lambda")
@@ -202,7 +209,7 @@ class TestLambdaInvokeFunctionOperator:
         "keep_empty_log_lines", [pytest.param(True, id="keep"), pytest.param(False, id="truncate")]
     )
     @pytest.mark.parametrize(
-        "log_result, expected_execution_logs",
+        ("log_result", "expected_execution_logs"),
         [
             pytest.param(LOG_RESPONSE, True, id="log-result"),
             pytest.param(BAD_LOG_RESPONSE, False, id="corrupted-log-result"),
@@ -275,7 +282,7 @@ class TestLambdaInvokeFunctionOperator:
         )
         hook_mock().invoke_lambda.return_value = {"ResponseMetadata": "", "StatusCode": 404}
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=LAMBDA_FUNC_NO_EXECUTION):
             operator.execute(None)
 
     @patch.object(LambdaInvokeFunctionOperator, "hook", new_callable=mock.PropertyMock)
@@ -291,7 +298,7 @@ class TestLambdaInvokeFunctionOperator:
             "Payload": Mock(),
         }
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=LAMBDA_FUNC_NO_EXECUTION):
             operator.execute(None)
 
     def test_template_fields(self):

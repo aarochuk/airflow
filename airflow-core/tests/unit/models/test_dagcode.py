@@ -21,15 +21,16 @@ from unittest.mock import patch
 
 import pendulum
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 import airflow.example_dags as example_dags_module
-from airflow.decorators import task as task_decorator
-from airflow.models import DagBag
-from airflow.models.dag import DAG
+from airflow.dag_processing.dagbag import DagBag
 from airflow.models.dag_version import DagVersion
 from airflow.models.dagcode import DagCode
-from airflow.models.serialized_dag import SerializedDagModel as SDM
+from airflow.sdk import task as task_decorator
+from airflow.sdk.importers import DagSourceCode
+from airflow.serialization.definitions.dag import SerializedDAG
 
 # To move it to a shared module.
 from airflow.utils.file import open_maybe_zipped
@@ -37,6 +38,7 @@ from airflow.utils.session import create_session
 from airflow.utils.state import DagRunState
 from airflow.utils.types import DagRunTriggeredByType, DagRunType
 
+from tests_common.test_utils.dag import sync_dag_to_db
 from tests_common.test_utils.db import clear_db_dag_code, clear_db_dags
 
 pytestmark = pytest.mark.db_test
@@ -49,12 +51,17 @@ def make_example_dags(module):
     from airflow.utils.session import create_session
 
     with create_session() as session:
-        if session.query(DagBundleModel).filter(DagBundleModel.name == "testing").count() == 0:
+        if (
+            session.scalar(
+                select(func.count()).select_from(DagBundleModel).where(DagBundleModel.name == "testing")
+            )
+            == 0
+        ):
             testing = DagBundleModel(name="testing")
             session.add(testing)
 
     dagbag = DagBag(module.__path__[0])
-    DAG.bulk_write_to_db("testing", None, dagbag.dags.values())
+    SerializedDAG.bulk_write_to_db("testing", None, dagbag.dags.values())
     return dagbag.dags
 
 
@@ -71,24 +78,25 @@ class TestDagCode:
 
     def _write_two_example_dags(self, session):
         example_dags = make_example_dags(example_dags_module)
-        bash_dag = example_dags["example_bash_operator"]
-        SDM.write_dag(bash_dag, bundle_name="testing")
-        dag_version = DagVersion.get_latest_version("example_bash_operator")
-        x = DagCode(dag_version, bash_dag.fileloc)
+        xcomargs_dag = example_dags["example_xcom_args"]
+        sync_dag_to_db(xcomargs_dag, session=session)
+        dag_version = DagVersion.get_latest_version("example_xcom_args")
+        x = DagCode(dag_version, xcomargs_dag.fileloc)
         session.add(x)
         session.commit()
         xcom_dag = example_dags["example_xcom"]
-        SDM.write_dag(xcom_dag, bundle_name="testing")
+        sync_dag_to_db(xcom_dag, session=session)
         dag_version = DagVersion.get_latest_version("example_xcom")
         x = DagCode(dag_version, xcom_dag.fileloc)
         session.add(x)
         session.commit()
-        return [bash_dag, xcom_dag]
+        return [xcomargs_dag, xcom_dag]
 
     def _write_example_dags(self):
         example_dags = make_example_dags(example_dags_module)
-        for dag in example_dags.values():
-            SDM.write_dag(dag, bundle_name="testing")
+        with create_session() as session:
+            for dag in example_dags.values():
+                sync_dag_to_db(dag, session=session)
         return example_dags
 
     def test_write_to_db(self, testing_dag_bundle):
@@ -109,13 +117,12 @@ class TestDagCode:
         with create_session() as session:
             for dag in example_dags.values():
                 assert DagCode.has_dag(dag.dag_id)
-                result = (
-                    session.query(DagCode.fileloc, DagCode.dag_id, DagCode.source_code)
-                    .filter(DagCode.dag_id == dag.dag_id)
+                result = session.execute(
+                    select(DagCode.fileloc, DagCode.dag_id, DagCode.source_code)
+                    .where(DagCode.dag_id == dag.dag_id)
                     .order_by(DagCode.last_updated.desc())
                     .limit(1)
-                    .one()
-                )
+                ).one()
 
                 assert result.fileloc == dag.fileloc
                 with open_maybe_zipped(dag.fileloc, "r") as source:
@@ -127,8 +134,10 @@ class TestDagCode:
         Test that code can be retrieved from DB when you do not have access to Code file.
         Source Code should at least exist in one of DB or File.
         """
-        example_dag = make_example_dags(example_dags_module).get("example_bash_operator")
-        SDM.write_dag(example_dag, bundle_name="testing")
+        from airflow.providers.standard import example_dags
+
+        example_dag = make_example_dags(example_dags).get("example_bash_operator")
+        sync_dag_to_db(example_dag)
 
         # Mock that there is no access to the Dag File
         with patch("airflow.models.dagcode.open_maybe_zipped") as mock_open:
@@ -140,53 +149,50 @@ class TestDagCode:
 
     def test_db_code_created_on_serdag_change(self, session, testing_dag_bundle):
         """Test new DagCode is created in DB when ser dag is changed"""
-        example_dag = make_example_dags(example_dags_module).get("example_bash_operator")
-        SDM.write_dag(example_dag, bundle_name="testing")
-        example_dag.create_dagrun(
+        from airflow.providers.standard import example_dags
+
+        example_dag = make_example_dags(example_dags).get("example_bash_operator")
+        sync_dag_to_db(example_dag, session=session).create_dagrun(
             run_id="test1",
             run_after=pendulum.datetime(2025, 1, 1, tz="UTC"),
             state=DagRunState.QUEUED,
             triggered_by=DagRunTriggeredByType.TEST,
             run_type=DagRunType.MANUAL,
         )
-        result = (
-            session.query(DagCode)
-            .filter(DagCode.fileloc == example_dag.fileloc)
+        result = session.scalars(
+            select(DagCode)
+            .where(DagCode.fileloc == example_dag.fileloc)
             .order_by(DagCode.last_updated.desc())
             .limit(1)
-            .one()
-        )
+        ).one()
 
         assert result.source_code is not None
 
         example_dag.doc_md = "new doc"
         with patch("airflow.models.dagcode.DagCode.get_code_from_file") as mock_code:
             mock_code.return_value = "# dummy code"
-            SDM.write_dag(example_dag, bundle_name="testing")
+            sync_dag_to_db(example_dag, session=session)
 
-        new_result = (
-            session.query(DagCode)
-            .filter(DagCode.fileloc == example_dag.fileloc)
+        new_result = session.scalars(
+            select(DagCode)
+            .where(DagCode.fileloc == example_dag.fileloc)
             .order_by(DagCode.last_updated.desc())
             .limit(1)
-            .one()
-        )
+        ).one()
 
         assert new_result.source_code != result.source_code
         assert new_result.last_updated > result.last_updated
-        assert session.query(DagCode).count() == 2
+        assert session.scalar(select(func.count()).select_from(DagCode)) == 2
 
     def test_has_dag(self, dag_maker):
         """Test has_dag method."""
         with dag_maker("test_has_dag") as dag:
             pass
-        dag.sync_to_db()
-        SDM.write_dag(dag, bundle_name="dag_maker")
+        sync_dag_to_db(dag)
 
         with dag_maker() as dag2:
             pass
-        dag2.sync_to_db()
-        SDM.write_dag(dag2, bundle_name="dag_maker")
+        sync_dag_to_db(dag2)
 
         assert DagCode.has_dag(dag.dag_id)
 
@@ -199,8 +205,7 @@ class TestDagCode:
                 print("task4")
 
             mytask()
-        dag.sync_to_db()
-        SDM.write_dag(dag, bundle_name="dag_maker")
+        sync_dag_to_db(dag)
         dag_code = DagCode.get_latest_dagcode(dag.dag_id)
         dag_code.source_code_hash = 2
         session.add(dag_code)
@@ -210,3 +215,97 @@ class TestDagCode:
         DagCode.update_source_code(dag.dag_id, dag.fileloc)
         dag_code3 = DagCode.get_latest_dagcode(dag.dag_id)
         assert dag_code3.source_code_hash != 2
+
+    def test_update_source_code_refreshes_fileloc(self, dag_maker, session):
+        """When the source changes, update_source_code also refreshes a stale fileloc."""
+        with dag_maker("dag_fileloc") as dag:
+
+            @task_decorator
+            def mytask():
+                print("hi")
+
+            mytask()
+        sync_dag_to_db(dag)
+
+        dag_code = DagCode.get_latest_dagcode(dag.dag_id)
+        # Simulate a stale fileloc and a changed source so the update path is taken.
+        dag_code.fileloc = "/old/stale/path.py"
+        dag_code.source_code_hash = "stalehash"
+        session.add(dag_code)
+        session.commit()
+
+        DagCode.update_source_code(dag.dag_id, dag.fileloc)
+
+        refreshed = DagCode.get_latest_dagcode(dag.dag_id)
+        assert refreshed.fileloc == dag.fileloc
+        assert refreshed.source_code_hash != "stalehash"
+
+    def test_update_source_code_refreshes_fileloc_when_source_unchanged(self, dag_maker, session):
+        """A moved/renamed file with identical contents still refreshes a stale fileloc."""
+        with dag_maker("dag_fileloc_moved") as dag:
+
+            @task_decorator
+            def mytask():
+                print("hi")
+
+            mytask()
+        sync_dag_to_db(dag)
+
+        dag_code = DagCode.get_latest_dagcode(dag.dag_id)
+        # Stale fileloc but the stored source hash still matches the file contents.
+        dag_code.fileloc = "/old/stale/path.py"
+        session.add(dag_code)
+        session.commit()
+        original_hash = dag_code.source_code_hash
+
+        DagCode.update_source_code(dag.dag_id, dag.fileloc)
+
+        refreshed = DagCode.get_latest_dagcode(dag.dag_id)
+        assert refreshed.fileloc == dag.fileloc
+        assert refreshed.source_code_hash == original_hash
+
+    def test_language_defaults_to_python(self, dag_maker):
+        """Code written without an explicit language is recorded as Python."""
+        with dag_maker("dag_language_default") as dag:
+            pass
+        sync_dag_to_db(dag)
+
+        assert DagCode.get_latest_dagcode(dag.dag_id).language == "python"
+
+    def test_write_code_with_dag_source_code(self, dag_maker, session):
+        with dag_maker("dag_source_code_test") as dag:
+            pass
+        sync_dag_to_db(dag)
+        dag_version = DagVersion.get_latest_version(dag.dag_id)
+        clear_db_dag_code()
+
+        dag_code = DagCode.write_code(
+            dag_version,
+            dag.fileloc,
+            dag_source_code=DagSourceCode(source_code="dag: my_dag\nversion: 1", language="yaml"),
+            session=session,
+        )
+        session.commit()
+
+        stored = DagCode.get_latest_dagcode(dag.dag_id, session=session)
+        assert (stored.id, stored.source_code, stored.language) == (
+            dag_code.id,
+            "dag: my_dag\nversion: 1",
+            "yaml",
+        )
+
+    def test_update_source_code_with_dag_source_code(self, dag_maker, session):
+        with dag_maker("dag_source_code_update") as dag:
+            pass
+        sync_dag_to_db(dag)
+
+        DagCode.update_source_code(
+            dag.dag_id,
+            dag.fileloc,
+            dag_source_code=DagSourceCode(source_code="print('custom importer')", language="custom_lang"),
+            session=session,
+        )
+        session.commit()
+
+        latest = DagCode.get_latest_dagcode(dag.dag_id, session=session)
+        assert (latest.source_code, latest.language) == ("print('custom importer')", "custom_lang")

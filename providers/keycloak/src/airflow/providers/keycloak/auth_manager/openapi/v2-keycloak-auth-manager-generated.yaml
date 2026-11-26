@@ -1,0 +1,493 @@
+openapi: 3.1.0
+info:
+  title: Keycloak auth manager sub application
+  description: This is the Keycloak auth manager fastapi sub application. This API
+    is only available if the auth manager used in the Airflow environment is Keycloak
+    auth manager. This sub application provides login routes.
+  version: 0.1.0
+paths:
+  /auth/login:
+    get:
+      tags:
+      - KeycloakAuthManagerLogin
+      summary: Login
+      description: Initiate the authentication.
+      operationId: login
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+  /auth/login/cli:
+    get:
+      tags:
+      - KeycloakAuthManagerLogin
+      summary: Login Cli
+      description: Start the browser login of a command-line client.
+      operationId: login_cli
+      parameters:
+      - name: redirect_uri
+        in: query
+        required: true
+        schema:
+          type: string
+          title: Redirect Uri
+      - name: state
+        in: query
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 512
+          title: State
+      - name: code_challenge
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^[A-Za-z0-9_-]{43}$
+          title: Code Challenge
+      - name: code_challenge_method
+        in: query
+        required: true
+        schema:
+          const: S256
+          type: string
+          title: Code Challenge Method
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '307':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPExceptionResponse'
+          description: Temporary Redirect
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPExceptionResponse'
+          description: Bad Request
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPExceptionResponse'
+          description: Service Unavailable
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /auth/login_callback:
+    get:
+      tags:
+      - KeycloakAuthManagerLogin
+      summary: Login Callback
+      description: Authenticate the user.
+      operationId: login_callback
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+  /auth/logout:
+    get:
+      tags:
+      - KeycloakAuthManagerLogin
+      summary: Logout
+      description: Log out the user from Keycloak.
+      operationId: logout
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+  /auth/logout_callback:
+    get:
+      tags:
+      - KeycloakAuthManagerLogin
+      summary: Logout Callback
+      description: 'Complete the log-out.
+
+
+        This callback is redirected by Keycloak after the user has been logged out
+        from Keycloak.'
+      operationId: logout_callback
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+  /auth/token:
+    post:
+      tags:
+      - KeycloakAuthManagerToken
+      summary: Create Token
+      operationId: create_token
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenBody'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPExceptionResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPExceptionResponse'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPExceptionResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /auth/token/cli:
+    post:
+      tags:
+      - KeycloakAuthManagerToken
+      summary: Create Token Cli
+      operationId: create_token_cli
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenCliBody'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPExceptionResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPExceptionResponse'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPExceptionResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /auth/token/cli/device:
+    post:
+      tags:
+      - KeycloakAuthManagerToken
+      summary: Create Device Authorization Cli
+      description: Start the device code login of a command-line client.
+      operationId: create_device_authorization_cli
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceAuthorizationResponse'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPExceptionResponse'
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPExceptionResponse'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPExceptionResponse'
+components:
+  schemas:
+    DeviceAuthorizationResponse:
+      properties:
+        device_code:
+          type: string
+          title: Device Code
+        user_code:
+          type: string
+          title: User Code
+        verification_uri:
+          type: string
+          title: Verification Uri
+        verification_uri_complete:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Verification Uri Complete
+        expires_in:
+          type: integer
+          title: Expires In
+        interval:
+          type: integer
+          title: Interval
+          default: 5
+      type: object
+      required:
+      - device_code
+      - user_code
+      - verification_uri
+      - expires_in
+      title: DeviceAuthorizationResponse
+      description: Device authorization response (RFC 8628 section 3.2) for the device
+        code login of CLI clients.
+    HTTPExceptionResponse:
+      properties:
+        detail:
+          anyOf:
+          - type: string
+          - additionalProperties: true
+            type: object
+          title: Detail
+      type: object
+      required:
+      - detail
+      title: HTTPExceptionResponse
+      description: HTTPException Model used for error response.
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    TokenAuthorizationCodeBody:
+      properties:
+        grant_type:
+          type: string
+          const: authorization_code
+          title: Grant Type
+        code:
+          type: string
+          title: Code
+        code_verifier:
+          type: string
+          maxLength: 128
+          minLength: 43
+          title: Code Verifier
+        redirect_uri:
+          type: string
+          title: Redirect Uri
+      additionalProperties: false
+      type: object
+      required:
+      - grant_type
+      - code
+      - code_verifier
+      - redirect_uri
+      title: TokenAuthorizationCodeBody
+      description: Authorization code grant serializer for post bodies, used by the
+        browser login of CLI clients.
+    TokenBody:
+      oneOf:
+      - $ref: '#/components/schemas/TokenPasswordBody'
+      - $ref: '#/components/schemas/TokenClientCredentialsBody'
+      - $ref: '#/components/schemas/TokenJwtFederatedBody'
+      title: TokenBody
+      description: Token request body.
+      discriminator:
+        propertyName: grant_type
+        mapping:
+          client_credentials: '#/components/schemas/TokenClientCredentialsBody'
+          password: '#/components/schemas/TokenPasswordBody'
+          urn:ietf:params:oauth:grant-type:jwt-bearer: '#/components/schemas/TokenJwtFederatedBody'
+    TokenCliBody:
+      oneOf:
+      - $ref: '#/components/schemas/TokenPasswordBody'
+      - $ref: '#/components/schemas/TokenRefreshBody'
+      - $ref: '#/components/schemas/TokenAuthorizationCodeBody'
+      - $ref: '#/components/schemas/TokenDeviceCodeBody'
+      title: TokenCliBody
+      description: Token request body for command-line clients.
+      discriminator:
+        propertyName: grant_type
+        mapping:
+          authorization_code: '#/components/schemas/TokenAuthorizationCodeBody'
+          password: '#/components/schemas/TokenPasswordBody'
+          refresh_token: '#/components/schemas/TokenRefreshBody'
+          urn:ietf:params:oauth:grant-type:device_code: '#/components/schemas/TokenDeviceCodeBody'
+    TokenClientCredentialsBody:
+      properties:
+        grant_type:
+          type: string
+          const: client_credentials
+          title: Grant Type
+        client_id:
+          type: string
+          title: Client Id
+        client_secret:
+          type: string
+          title: Client Secret
+      additionalProperties: false
+      type: object
+      required:
+      - grant_type
+      - client_id
+      - client_secret
+      title: TokenClientCredentialsBody
+      description: Client credentials grant token serializer for post bodies.
+    TokenDeviceCodeBody:
+      properties:
+        grant_type:
+          type: string
+          const: urn:ietf:params:oauth:grant-type:device_code
+          title: Grant Type
+        device_code:
+          type: string
+          title: Device Code
+      additionalProperties: false
+      type: object
+      required:
+      - grant_type
+      - device_code
+      title: TokenDeviceCodeBody
+      description: Device code grant serializer for post bodies, used by the device
+        code login of CLI clients.
+    TokenJwtFederatedBody:
+      properties:
+        grant_type:
+          type: string
+          const: urn:ietf:params:oauth:grant-type:jwt-bearer
+          title: Grant Type
+        assertion:
+          type: string
+          title: Assertion
+      additionalProperties: false
+      type: object
+      required:
+      - grant_type
+      - assertion
+      title: TokenJwtFederatedBody
+      description: 'JWT-bearer grant token serializer for post bodies.
+
+
+        Accepts a Keycloak access token obtained via any Keycloak-native authentication
+
+        method (e.g. a client federated to an external OIDC identity provider) instead
+        of
+
+        Airflow re-authenticating to Keycloak itself.'
+    TokenPasswordBody:
+      properties:
+        grant_type:
+          type: string
+          const: password
+          title: Grant Type
+          default: password
+        username:
+          type: string
+          title: Username
+        password:
+          type: string
+          title: Password
+      additionalProperties: false
+      type: object
+      required:
+      - username
+      - password
+      title: TokenPasswordBody
+      description: Password grant token serializer for post bodies.
+    TokenRefreshBody:
+      properties:
+        grant_type:
+          type: string
+          const: refresh_token
+          title: Grant Type
+        token:
+          type: string
+          title: Token
+      additionalProperties: false
+      type: object
+      required:
+      - grant_type
+      - token
+      title: TokenRefreshBody
+      description: Refresh grant serializer for post bodies; ``token`` is the current
+        CLI token.
+    TokenResponse:
+      properties:
+        access_token:
+          type: string
+          title: Access Token
+      type: object
+      required:
+      - access_token
+      title: TokenResponse
+      description: Token serializer for responses.
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError

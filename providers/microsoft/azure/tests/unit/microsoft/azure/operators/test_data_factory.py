@@ -17,17 +17,20 @@
 from __future__ import annotations
 
 import functools
+import itertools
 from typing import TYPE_CHECKING
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import pendulum
 import pytest
+from azure.core.exceptions import ResourceNotFoundError
+from azure.mgmt.datafactory.models import CreateRunResponse
 
-from airflow.exceptions import AirflowException, TaskDeferred
 from airflow.models import DAG, Connection
 from airflow.models.dagrun import DagRun
 from airflow.models.taskinstance import TaskInstance
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred, timezone
 from airflow.providers.microsoft.azure.hooks.data_factory import (
     AzureDataFactoryHook,
     AzureDataFactoryPipelineRunException,
@@ -35,16 +38,18 @@ from airflow.providers.microsoft.azure.hooks.data_factory import (
 )
 from airflow.providers.microsoft.azure.operators.data_factory import AzureDataFactoryRunPipelineOperator
 from airflow.providers.microsoft.azure.triggers.data_factory import AzureDataFactoryTrigger
-from airflow.utils import timezone
 from airflow.utils.types import DagRunType
 
-from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
-
-if TYPE_CHECKING:
-    from airflow.models.baseoperator import BaseOperator
+from tests_common.test_utils.task_state import drop_reserved_task_state_keys
+from tests_common.test_utils.taskinstance import create_task_instance as _create_task_instance
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS, AIRFLOW_V_3_3_PLUS
+from unit.microsoft.azure.test_utils import TaskStateStore
 
 if AIRFLOW_V_3_0_PLUS:
     from airflow.sdk.execution_time.comms import XComResult
+
+if TYPE_CHECKING:
+    from airflow.models.baseoperator import BaseOperator
 
 DEFAULT_DATE = timezone.datetime(2021, 1, 1)
 SUBSCRIPTION_ID = "my-subscription-id"
@@ -65,6 +70,9 @@ EXPECTED_PIPELINE_RUN_OP_EXTRA_LINK = (
     "factories/{factory_name}"
 )
 AZ_PIPELINE_RUN_ID = "7f8c6c72-c093-11ec-a83d-0242ac120007"
+STORED_RUN_ID = "stored-run-id"
+NEW_RUN_ID = "new-run-id"
+RUN_ID_KEY = "azure_data_factory_pipeline_run_id"
 
 
 class TestAzureDataFactoryRunPipelineOperator:
@@ -103,7 +111,7 @@ class TestAzureDataFactoryRunPipelineOperator:
 
     @patch.object(AzureDataFactoryHook, "run_pipeline", return_value=MagicMock(**PIPELINE_RUN_RESPONSE))
     @pytest.mark.parametrize(
-        "pipeline_run_status,expected_output",
+        ("pipeline_run_status", "expected_output"),
         [
             (AzureDataFactoryPipelineRunStatus.SUCCEEDED, None),
             (AzureDataFactoryPipelineRunStatus.FAILED, "exception"),
@@ -141,11 +149,20 @@ class TestAzureDataFactoryRunPipelineOperator:
                     operator.execute(context=self.mock_context)
             else:
                 # Demonstrating the operator timing out after surpassing the configured timeout value.
-                with pytest.raises(
-                    AzureDataFactoryPipelineRunException,
-                    match=(
-                        f"Pipeline run {PIPELINE_RUN_RESPONSE['run_id']} has not reached a terminal status "
-                        f"after {self.config['timeout']} seconds."
+                # Mock time.monotonic and time.sleep so the poll count is deterministic regardless of
+                # CI load; real sleep durations can vary enough to change how many iterations complete.
+                with (
+                    patch(
+                        "airflow.providers.microsoft.azure.hooks.data_factory.time.monotonic",
+                        side_effect=itertools.count(0.0, 1.0),
+                    ),
+                    patch("airflow.providers.microsoft.azure.hooks.data_factory.time.sleep"),
+                    pytest.raises(
+                        AzureDataFactoryPipelineRunException,
+                        match=(
+                            f"Pipeline run {PIPELINE_RUN_RESPONSE['run_id']} has not reached a terminal status "
+                            f"after {self.config['timeout']} seconds."
+                        ),
                     ),
                 ):
                     operator.execute(context=self.mock_context)
@@ -224,9 +241,35 @@ class TestAzureDataFactoryRunPipelineOperator:
             # Checking the pipeline run status should _not_ be called when ``wait_for_termination`` is False.
             mock_get_pipeline_run.assert_not_called()
 
+    @mock.patch("airflow.providers.microsoft.azure.hooks.data_factory.AzureDataFactoryHook.run_pipeline")
+    def test_run_id_extracted_from_hybrid_model_response(self, mock_run_pipeline):
+        """Regression test: azure-mgmt-datafactory v10 hybrid models don't expose attributes via vars().
+
+        Hybrid models use property descriptors, so vars(response)["run_id"] raises KeyError.
+        The operator must use attribute access (response.run_id) which works with both old and new models.
+        """
+
+        class HybridModelResponse(dict):
+            """Simulates an azure-mgmt-datafactory v10 hybrid model response."""
+
+            def __init__(self):
+                super().__init__({"runId": "hybrid-run-id-123"})
+
+            @property
+            def run_id(self):
+                return self["runId"]
+
+        mock_run_pipeline.return_value = HybridModelResponse()
+
+        operator = AzureDataFactoryRunPipelineOperator(wait_for_termination=False, **self.config)
+        operator.execute(context=self.mock_context)
+
+        assert operator.run_id == "hybrid-run-id-123"
+        self.mock_ti.xcom_push.assert_called_once_with(key="run_id", value="hybrid-run-id-123")
+
     @pytest.mark.db_test
     @pytest.mark.parametrize(
-        "resource_group,factory",
+        ("resource_group", "factory"),
         [
             # Both resource_group_name and factory_name are passed to the operator.
             ("op-resource-group", "op-factory-name"),
@@ -239,7 +282,7 @@ class TestAzureDataFactoryRunPipelineOperator:
         ],
     )
     def test_run_pipeline_operator_link(
-        self, resource_group, factory, create_task_instance_of_operator, mock_supervisor_comms
+        self, resource_group, factory, dag_maker, create_task_instance_of_operator, mock_supervisor_comms
     ):
         ti = create_task_instance_of_operator(
             AzureDataFactoryRunPipelineOperator,
@@ -253,12 +296,13 @@ class TestAzureDataFactoryRunPipelineOperator:
         ti.xcom_push(key="run_id", value=PIPELINE_RUN_RESPONSE["run_id"])
 
         if AIRFLOW_V_3_0_PLUS and mock_supervisor_comms:
-            mock_supervisor_comms.get_message.return_value = XComResult(
+            mock_supervisor_comms.send.return_value = XComResult(
                 key="run_id",
                 value=PIPELINE_RUN_RESPONSE["run_id"],
             )
 
-        url = ti.task.operator_extra_links[0].get_link(operator=ti.task, ti_key=ti.key)
+        task = dag_maker.dag.get_task(ti.task_id)
+        url = task.operator_extra_links[0].get_link(operator=task, ti_key=ti.key)
         EXPECTED_PIPELINE_RUN_OP_EXTRA_LINK = (
             "https://adf.azure.com/en-us/monitoring/pipelineruns/{run_id}"
             "?factory=/subscriptions/{subscription_id}/"
@@ -295,7 +339,7 @@ def create_task_instance(create_task_instance_of_operator, session):
 
 class TestAzureDataFactoryRunPipelineOperatorWithDeferrable:
     @pytest.fixture(autouse=True)
-    def setup_operator(self, create_task_instance):
+    def setup_operator(self, dag_maker, create_task_instance):
         """Fixture to set up the operator using create_task_instance."""
         self.ti = create_task_instance(
             operator_class=AzureDataFactoryRunPipelineOperator,
@@ -306,6 +350,7 @@ class TestAzureDataFactoryRunPipelineOperatorWithDeferrable:
             parameters={"myParam": "value"},
             deferrable=True,
         )
+        self.task = dag_maker.dag.get_task(self.ti.task_id)
 
     def get_dag_run(self, dag_id: str = "test_dag_id", run_id: str = "test_dag_id") -> DagRun:
         if AIRFLOW_V_3_0_PLUS:
@@ -319,6 +364,12 @@ class TestAzureDataFactoryRunPipelineOperatorWithDeferrable:
         return dag_run
 
     def get_task_instance(self, task: BaseOperator) -> TaskInstance:
+        if AIRFLOW_V_3_0_PLUS:
+            return _create_task_instance(
+                task,
+                run_id=timezone.datetime(2022, 1, 1).isoformat(),
+                dag_version_id=mock.MagicMock(),
+            )
         return TaskInstance(task, timezone.datetime(2022, 1, 1))
 
     def get_conn(
@@ -348,8 +399,10 @@ class TestAzureDataFactoryRunPipelineOperatorWithDeferrable:
                 execution_date=logical_date,
                 run_id=DagRun.generate_run_id(DagRunType.MANUAL, logical_date),
             )
-
-        task_instance = TaskInstance(task=task)
+        if AIRFLOW_V_3_0_PLUS:
+            task_instance = _create_task_instance(task=task, dag_version_id=mock.MagicMock())
+        else:
+            task_instance = TaskInstance(task=task)
         task_instance.dag_run = dag_run
         task_instance.xcom_push = mock.Mock()
         date_key = "logical_date" if AIRFLOW_V_3_0_PLUS else "execution_date"
@@ -383,7 +436,7 @@ class TestAzureDataFactoryRunPipelineOperatorWithDeferrable:
         CreateRunResponse.run_id = AZ_PIPELINE_RUN_ID
         mock_run_pipeline.return_value = CreateRunResponse
 
-        self.ti.task.execute(context=self.create_context(self.ti.task))
+        self.task.execute(context=self.create_context(self.task))
         assert not mock_defer.called
 
     @pytest.mark.db_test
@@ -407,7 +460,7 @@ class TestAzureDataFactoryRunPipelineOperatorWithDeferrable:
         mock_run_pipeline.return_value = CreateRunResponse
 
         with pytest.raises(AzureDataFactoryPipelineRunException):
-            self.ti.task.execute(context=self.create_context(self.ti.task))
+            self.task.execute(context=self.create_context(self.task))
         assert not mock_defer.called
 
     @pytest.mark.db_test
@@ -426,7 +479,7 @@ class TestAzureDataFactoryRunPipelineOperatorWithDeferrable:
         mock_run_pipeline.return_value = CreateRunResponse
 
         with pytest.raises(TaskDeferred) as exc:
-            self.ti.task.execute(context=self.create_context(self.ti.task))
+            self.task.execute(context=self.create_context(self.task))
 
         assert isinstance(exc.value.trigger, AzureDataFactoryTrigger), (
             "Trigger is not a AzureDataFactoryTrigger"
@@ -435,9 +488,8 @@ class TestAzureDataFactoryRunPipelineOperatorWithDeferrable:
     @pytest.mark.db_test
     def test_azure_data_factory_run_pipeline_operator_async_execute_complete_success(self):
         """Assert that execute_complete log success message"""
-
-        with mock.patch.object(self.ti.task.log, "info") as mock_log_info:
-            self.ti.task.execute_complete(
+        with mock.patch.object(self.task.log, "info") as mock_log_info:
+            self.task.execute_complete(
                 context={},
                 event={"status": "success", "message": "success", "run_id": AZ_PIPELINE_RUN_ID},
             )
@@ -446,9 +498,151 @@ class TestAzureDataFactoryRunPipelineOperatorWithDeferrable:
     @pytest.mark.db_test
     def test_azure_data_factory_run_pipeline_operator_async_execute_complete_fail(self):
         """Assert that execute_complete raise exception on error"""
-
         with pytest.raises(AirflowException):
-            self.ti.task.execute_complete(
+            self.task.execute_complete(
                 context={},
                 event={"status": "error", "message": "error", "run_id": AZ_PIPELINE_RUN_ID},
             )
+
+
+@pytest.mark.skipif(not AIRFLOW_V_3_3_PLUS, reason="The task state store arrived in Airflow 3.3")
+class TestAzureDataFactoryRunPipelineOperatorDurable:
+    CONFIG = {
+        "task_id": TASK_ID,
+        "azure_data_factory_conn_id": AZURE_DATA_FACTORY_CONN_ID,
+        "pipeline_name": PIPELINE_NAME,
+        "resource_group_name": "resource-group-name",
+        "factory_name": "factory-name",
+        "check_interval": 1,
+        "timeout": 3,
+    }
+
+    @pytest.fixture(autouse=True)
+    def setup_mocks(self):
+        with (
+            patch.object(
+                AzureDataFactoryHook,
+                "run_pipeline",
+                autospec=True,
+                return_value=MagicMock(spec=CreateRunResponse, run_id=NEW_RUN_ID),
+            ) as self.mock_run_pipeline,
+            patch.object(AzureDataFactoryHook, "get_pipeline_run_status", autospec=True) as self.mock_status,
+            patch.object(
+                AzureDataFactoryHook, "wait_for_pipeline_run_status", autospec=True, return_value=True
+            ) as self.mock_wait,
+        ):
+            yield
+
+    @staticmethod
+    def make_context(**stored):
+        return {"ti": MagicMock(spec=TaskInstance), "task_state_store": TaskStateStore(**stored)}
+
+    def test_execute_stores_run_id_of_fresh_submit(self):
+        context = self.make_context()
+        operator = AzureDataFactoryRunPipelineOperator(**self.CONFIG)
+
+        operator.execute(context)
+
+        self.mock_run_pipeline.assert_called_once()
+        assert drop_reserved_task_state_keys(context["task_state_store"].values) == {RUN_ID_KEY: NEW_RUN_ID}
+        context["ti"].xcom_push.assert_called_once_with(key="run_id", value=NEW_RUN_ID)
+
+    @pytest.mark.parametrize(
+        "status", [AzureDataFactoryPipelineRunStatus.QUEUED, AzureDataFactoryPipelineRunStatus.IN_PROGRESS]
+    )
+    def test_execute_reconnects_to_run_in_progress(self, status):
+        self.mock_status.return_value = status
+        context = self.make_context(**{RUN_ID_KEY: STORED_RUN_ID})
+        operator = AzureDataFactoryRunPipelineOperator(**self.CONFIG)
+
+        operator.execute(context)
+
+        self.mock_run_pipeline.assert_not_called()
+        assert self.mock_wait.call_args.args[1] == STORED_RUN_ID
+        assert operator.run_id == STORED_RUN_ID
+        context["ti"].xcom_push.assert_called_once_with(key="run_id", value=STORED_RUN_ID)
+
+    def test_execute_deferrable_reconnects_to_run_in_progress(self):
+        self.mock_status.return_value = AzureDataFactoryPipelineRunStatus.IN_PROGRESS
+        context = self.make_context(**{RUN_ID_KEY: STORED_RUN_ID})
+        operator = AzureDataFactoryRunPipelineOperator(**self.CONFIG, deferrable=True)
+
+        with pytest.raises(TaskDeferred) as exc:
+            operator.execute(context)
+
+        self.mock_run_pipeline.assert_not_called()
+        assert isinstance(exc.value.trigger, AzureDataFactoryTrigger)
+        assert exc.value.trigger.run_id == STORED_RUN_ID
+        assert exc.value.trigger.cancel_on_error is False
+        context["ti"].xcom_push.assert_called_once_with(key="run_id", value=STORED_RUN_ID)
+
+    def test_execute_deferrable_stores_run_id_before_deferring(self):
+        self.mock_status.return_value = AzureDataFactoryPipelineRunStatus.IN_PROGRESS
+        context = self.make_context()
+        operator = AzureDataFactoryRunPipelineOperator(**self.CONFIG, deferrable=True)
+
+        with pytest.raises(TaskDeferred):
+            operator.execute(context)
+
+        assert drop_reserved_task_state_keys(context["task_state_store"].values) == {RUN_ID_KEY: NEW_RUN_ID}
+
+    @pytest.mark.parametrize("deferrable", [False, True])
+    def test_execute_skips_succeeded_run(self, deferrable):
+        self.mock_status.return_value = AzureDataFactoryPipelineRunStatus.SUCCEEDED
+        context = self.make_context(**{RUN_ID_KEY: STORED_RUN_ID})
+        operator = AzureDataFactoryRunPipelineOperator(**self.CONFIG, deferrable=deferrable)
+
+        operator.execute(context)
+
+        self.mock_run_pipeline.assert_not_called()
+        self.mock_wait.assert_not_called()
+        assert operator.run_id == STORED_RUN_ID
+        context["ti"].xcom_push.assert_called_once_with(key="run_id", value=STORED_RUN_ID)
+
+    @pytest.mark.parametrize(
+        "stored_status",
+        [
+            AzureDataFactoryPipelineRunStatus.FAILED,
+            AzureDataFactoryPipelineRunStatus.CANCELLED,
+            AzureDataFactoryPipelineRunStatus.CANCELING,
+            "NotFound",
+        ],
+    )
+    def test_execute_resubmits_when_stored_run_cannot_be_resumed(self, stored_status):
+        if stored_status == "NotFound":
+            self.mock_status.side_effect = ResourceNotFoundError("not found")
+        else:
+            self.mock_status.return_value = stored_status
+        context = self.make_context(**{RUN_ID_KEY: STORED_RUN_ID})
+        operator = AzureDataFactoryRunPipelineOperator(**self.CONFIG)
+
+        operator.execute(context)
+
+        self.mock_run_pipeline.assert_called_once()
+        assert drop_reserved_task_state_keys(context["task_state_store"].values) == {RUN_ID_KEY: NEW_RUN_ID}
+        assert operator.run_id == NEW_RUN_ID
+
+    def test_execute_without_waiting_returns_for_run_in_progress(self):
+        self.mock_status.return_value = AzureDataFactoryPipelineRunStatus.IN_PROGRESS
+        context = self.make_context(**{RUN_ID_KEY: STORED_RUN_ID})
+        operator = AzureDataFactoryRunPipelineOperator(**self.CONFIG, wait_for_termination=False)
+
+        operator.execute(context)
+
+        self.mock_run_pipeline.assert_not_called()
+        self.mock_wait.assert_not_called()
+        context["ti"].xcom_push.assert_called_once_with(key="run_id", value=STORED_RUN_ID)
+
+    def test_execute_not_durable_always_submits(self):
+        self.mock_status.return_value = AzureDataFactoryPipelineRunStatus.IN_PROGRESS
+        context = self.make_context(**{RUN_ID_KEY: STORED_RUN_ID})
+        operator = AzureDataFactoryRunPipelineOperator(**self.CONFIG, durable=False)
+
+        operator.execute(context)
+
+        self.mock_run_pipeline.assert_called_once()
+        self.mock_status.assert_not_called()
+        assert drop_reserved_task_state_keys(context["task_state_store"].values) == {
+            RUN_ID_KEY: STORED_RUN_ID
+        }
+        context["ti"].xcom_push.assert_called_once_with(key="run_id", value=NEW_RUN_ID)

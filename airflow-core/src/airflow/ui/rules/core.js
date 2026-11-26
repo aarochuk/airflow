@@ -16,7 +16,6 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-
 /**
  * @import { FlatConfig } from "@typescript-eslint/utils/ts-eslint";
  */
@@ -279,7 +278,7 @@ export const coreRules = /** @type {const} @satisfies {FlatConfig.Config} */ ({
      *
      * @see [max-lines](https://eslint.org/docs/latest/rules/max-lines)
      */
-    "max-lines": [ERROR, { max: 250, skipBlankLines: true, skipComments: true }],
+    "max-lines": [ERROR, { max: 500, skipBlankLines: true, skipComments: true }],
 
     /**
      * Enforce a maximum depth that callbacks can be nested to 3.
@@ -428,6 +427,24 @@ export const coreRules = /** @type {const} @satisfies {FlatConfig.Config} */ ({
     "no-duplicate-case": ERROR,
 
     /**
+     * Disallow duplicate value imports from the same module.
+     * Separate `import type` statements are allowed.
+     *
+     * @example
+     * ```typescript
+     * // ❌ Incorrect
+     * import { Foo } from "src/system-components";
+     * import { Bar } from "src/system-components";
+     *
+     * // ✅ Correct
+     * import { Foo, Bar } from "src/system-components";
+     * import type { Baz } from "src/system-components";
+     * ```
+     * @see [no-duplicate-imports](https://eslint.org/docs/latest/rules/no-duplicate-imports)
+     */
+    "no-duplicate-imports": [ERROR, { allowSeparateTypeImports: true }],
+
+    /**
      * Disallow empty block statements.
      *
      * @example
@@ -458,23 +475,6 @@ export const coreRules = /** @type {const} @satisfies {FlatConfig.Config} */ ({
      * @see [no-empty-character-class](https://eslint.org/docs/latest/rules/no-empty-character-class)
      */
     "no-empty-character-class": ERROR,
-
-    /**
-     * Disallow empty functions.
-     *
-     * @example
-     * ```typescript
-     * // ❌ Incorrect
-     * const foo = function() {}
-     *
-     * // ✅ Correct
-     * const foo = () {
-     *   // At least this one has a comment
-     * }
-     * ```
-     * @see [no-empty-function](https://eslint.org/docs/latest/rules/no-empty-function)
-     */
-    "no-empty-function": ERROR,
 
     /**
      * Disallow empty destructuring patterns.
@@ -765,23 +765,6 @@ export const coreRules = /** @type {const} @satisfies {FlatConfig.Config} */ ({
      * @see [no-object-constructor](https://eslint.org/docs/latest/rules/no-object-constructor)
      */
     "no-object-constructor": ERROR,
-
-    /**
-     * Disallow old octal literals.
-     *
-     * @example
-     * ```typescript
-     * // ❌ Incorrect
-     * const num = 071;
-     * const result = 5 + 07;
-     *
-     * // ✅ Correct
-     * const num = 0o71;
-     * const result = 5 + 0o7;
-     * ```
-     * @see [no-octal](https://eslint.org/docs/latest/rules/no-octal)
-     */
-    "no-octal": ERROR,
 
     /**
      * Disallow reassignment of function parameters.

@@ -15,8 +15,8 @@
     specific language governing permissions and limitations
     under the License.
 
-Dockerfile Changelog
-====================
+Changelog
+=========
 
 The ``Dockerfile`` does not strictly follow the `SemVer <https://semver.org/>`_ approach of
 Apache Airflow when it comes to features and backwards compatibility. While Airflow code strictly
@@ -34,6 +34,123 @@ the Airflow team.
        any Airflow version from the ``Airflow 2`` line. There is no guarantee that it will work, but if it does,
        then you can use latest features from that image to build images for previous Airflow versions.
 
+Airflow 3.5.0
+~~~~~~~~~~~~~
+
+  * The default Python version of the image changed from 3.13 to 3.14. The images without a
+    ``-pythonX.Y`` suffix - such as ``apache/airflow:3.5.0``, ``latest`` and their ``slim-`` variants -
+    now use Python 3.14. Use the ``-python3.13`` images to stay on Python 3.13.
+
+Airflow 3.4.0
+~~~~~~~~~~~~~
+
+  * The image does not support Python 3.10 anymore as Python 3.10 reaches end of life in October 2026.
+    Images are released for Python 3.11, 3.12, 3.13 and 3.14.
+
+  * The ``tdsodbc`` package was added to the image so that the FreeTDS ODBC driver
+    (``libtdsodbc.so``) is available for connecting to Sybase/TDS databases via ODBC.
+
+  * The ``libxmlsec1-openssl`` package was added to the image. ``libxmlsec1`` contains no crypto
+    engine of its own, so ``import xmlsec`` (used by ``python3-saml``) failed with
+    ``libxmlsec1-openssl.so.1: cannot open shared object file``.
+
+In Airflow 3.4.0 the base image changed again - from ``debian:bookworm-slim`` with a Python compiled in
+the image, to the Debian 13 "trixie" `Docker Hardened Image <https://dhi.io>`_ for Python, which already
+carries a Python built by Docker. This removes the Python compilation, and the source download and signature verification
+that went with it, from the build entirely - the OS dependency layer of the production image went from
+roughly 210s to 105s in a local cache-disabled build.
+
+* The ``BASE_IMAGE`` arg now defaults to ``ghcr.io/apache/airflow/base/python:<version>-debian13-dev``,
+  which is Airflow's public mirror of the upstream ``dhi.io/python`` image. Pulling from ``dhi.io``
+  directly requires a ``docker login dhi.io``; pulling the mirror requires nothing. If you pass your own
+  ``BASE_IMAGE``, it now has to be an image that already provides Python - a bare ``debian:bookworm-slim``
+  only works with ``AIRFLOW_IMAGE_FLAVOR="legacy"``.
+* The image is based on Debian 13 "trixie" instead of Debian 12 "bookworm". Library packages renamed in
+  trixie's 64-bit ``time_t`` transition (for example ``libssl3t64``, ``libldap2``) have to be used in
+  custom ``RUNTIME_APT_DEPS``, and the MySQL-compatible client comes from MariaDB 11.8 (with
+  ``mariadb-client-compat`` providing the ``mysql`` named commands).
+* The new ``AIRFLOW_IMAGE_FLAVOR`` arg (``hardened`` by default) can be set to ``legacy`` to build the
+  image as before: Python compiled from sources on a plain Debian ``BASE_IMAGE`` such as
+  ``debian:bookworm-slim``. Images of that flavor are published for the 3.4.x line, are deprecated, and
+  will be removed in Airflow 3.5.0. The flavor is recorded in the ``org.apache.airflow.image.flavor`` label.
+* The ``PYTHON_LTO`` arg was removed. It only controlled Link-Time Optimization while compiling Python;
+  the legacy flavor always compiles with LTO. To build a FIPS-compliant image, point ``BASE_IMAGE`` at a FIPS
+  variant of the hardened image, for example ``dhi.io/python:3.13.16-debian13-fips-dev`` (those variants
+  require a paid Docker subscription).
+* Python is installed under ``/usr`` by the base image, as Debian packages. ``/usr/python`` is a symlink to it, and the
+  ``/usr/local/bin`` symlinks are unchanged, so paths that worked before keep working.
+* The hardened images ship the standard library with no ``.pyc`` files, so the build compiles it into the
+  image. This keeps the behaviour introduced in Airflow 3.1.4 (see below): the standard library is owned
+  by root while the image runs as ``airflow``, so a missing bytecode cache could never be filled and every
+  import would leak a negative ``dentry``.
+* Python in the hardened images is not the plain upstream build: Docker patches it (``pkgutil.get_data()``
+  rejects ``..`` resource paths), builds it without profile-guided optimization, and compiles it with a
+  1 MiB default thread stack. The image restores the previous 8 MiB thread stack. See
+  :ref:`image-hardened-base` for these and the other differences from the previous images.
+
+As with any base image change, some ``apt`` packages that used to be present as a side effect are not
+there any more. The hardened images are deliberately minimal - they ship no compiler, no ``curl``,
+``wget``, ``git`` or ``gzip``, and a stripped ``/etc`` - so a custom image that relied on something being
+present may need to install it explicitly. See :doc:`Building the image <build>`.
+
+Airflow 3.1.4
+~~~~~~~~~~~~~
+
+In Airflow 3.1.4, the images are build without removing of .pyc and .pyo files when Python is built.
+This increases the size of the image slightly (<0.5%), but improves performance of Python in the container
+because Python does not need to recompile the files on the first run but more importantly, if you use
+``exec`` to run Health Checks, removed .pyc files caused a small but ever growing memory leak in the Unix
+kernel connected to negative ``dentries`` created when .pyc files were attempted to be compiled and failed.
+This over time could lead to out-of-memory issues on the host running the container.
+
+More information about ``dentries`` can be found in `this article <https://lwn.net/Articles/814535/>`_.
+
+Airflow 3.1.0
+~~~~~~~~~~~~~
+
+In Airflow 3.1.0 we changed the base images used for building the Airflow images. Previously the images
+were based on "official" Python images from DockerHub, however those images sometimes lag behind the
+latest security patches and their maintainers made decisions about using older setuptools and pip versions,
+however we want to be able to use the latest versions of those tools to build the images. Therefore
+we decided to use ``bookworm-slim`` images from Debian as the base images for Airflow images and we compile
+and install the latest Python version in the image based on the official packages from the Python Software
+Foundation. This change should be transparent for those who extend the images or use them "as is", however
+for those who want to build custom images, there are changes to the build-args passed to the ``docker build``
+command:
+
+* The ``PYTHON_BASE_IMAGE`` arg is no longer supported - the base image is always ``debian:bookworm-slim``
+* Instead ``AIRFLOW_PYTHON_VERSION`` arg is introduced to select the Python version to be installed in the
+  image. It should be full Python version - for example ``3.12.7`` or two-digit version like ``3.12``
+  (the latest released Python patch version will be installed in that case).
+* Python is now installed in ``/usr/python/`` directory not in ``/usr/local/`` as it was previously.
+  This should not affect regular uses because there are symlinks from ``/usr/local/bin/`` to
+  ``/usr/python/bin/``, and ``/usr/python/bin`` is first on the PATH, however if the ``/usr/local/``
+  location has been hard-coded to - for example - detect ``site-packages`` dir, the folders moved to
+  the ``/usr/python`` directory.
+
+There might be other subtle changes in the image due to the change of the base image, some packages (
+especially dev libraries installed with ``apt`` might not be installed by default if they were installed
+as a side-effect in the original image, however that should only affect those who want to customise the image.
+They should be able to install in their custom images following the :doc:`Building the image <build>`
+
+The Python 3.13 image for Airflow 3.1.0 (both slim and regular) does not contain ``fab`` provider because
+at the time of release the ``fab`` provider did not support Python 3.13. It should be possible to install
+future versions of ``fab`` provider (when they support Python 3.13) in the image using ``pip install``,
+and until it is possible - if you need ``fab`` provider (and particularly FABAuthManager) in the
+image, you should use Python 3.12 image. You can use experimental KeycloakAuthManager in Python 3.13 image
+or develop your own AuthManager.
+
+Airflow 3.0.2
+~~~~~~~~~~~~~
+
+  * The ``git`` binary was added to the image by default which is needed for the git provider to work.
+
+Airflow 3.0.1
+~~~~~~~~~~~~~
+
+  * The ``ARM`` image is not experimental any more - we are running the ARM tests regularly in our CI. The
+    ``MySQL`` support for `ARM` images however is still experimental.
+
 Airflow 3.0
 ~~~~~~~~~~~
 
@@ -44,6 +161,13 @@ Airflow 3.0
     have mssql metadata support any more.
   * The ``INSTALL_PACKAGES_FROM_CONTEXT`` arg changed to ``INSTALL_DISTRIBUTIONS_FROM_CONTEXT``
   * The parameter ``UPGRADE_INVALIDATION_STRING`` is renamed to ``UPGRADE_RANDOM_INDICATOR_STRING``
+
+Airflow 2.11.1
+~~~~~~~~~~~~~~
+
+  * The image does not support Python 3.9 anymore as Python 3.9 reached end of life on October 31, 2025 and
+    The Airflow 2.11.1 has been released on February 20, 2026 and Airflow 2.11.1 does not support Python 3.9.
+
 
 Airflow 2.10
 ~~~~~~~~~~~~
@@ -314,25 +438,39 @@ that invalidates the already released image, and regenerating the image makes it
 While we cannot assure 100% backwards compatibility when it happens, we at least document it
 here so that users affected can find the reason for the changes.
 
-+--------------+---------------------+-----------------------------------------+------------------------+------------------------------------------------+
-| Date         | Affected images     | Potentially breaking change             | Reason                 | Link to Pull Request / Issue                   |
-+==============+=====================+=========================================+========================+================================================+
-| 02 Aug 2024  | 2.9.3               | * The ``apache-airflow-providers-fab``  | FAB provider logout    | https://github.com/apache/airflow/issues/40922 |
-|              |                     |   upgraded from 1.2.1 to 1.2.2          | did not work for 2.9.3 |                                                |
-+--------------+---------------------+-----------------------------------------+------------------------+------------------------------------------------+
-| 12 Mar 2024  | 2.8.3               | * The image was refreshed with new      | Both dependencies      | https://github.com/apache/airflow/pull/37748   |
-|              |                     |   dependencies (pandas < 2.2 and        | caused breaking        | https://github.com/apache/airflow/pull/37701   |
-|              |                     |   SMTP provider 1.6.1                   | changes                |                                                |
-+--------------+---------------------+-----------------------------------------+------------------------+------------------------------------------------+
-| 16 Dec 2023  | All 2..\*           | * The AIRFLOW_GID 500 was removed       | MySQL repository is    | https://github.com/apache/airflow/issues/36231 |
-|              |                     | * MySQL ``apt`` repository key changed. | removed after the      |                                                |
-|              |                     |                                         | key expiry fiasco      |                                                |
-+--------------+---------------------+-----------------------------------------+------------------------+------------------------------------------------+
-| 17 June 2022 | 2.2.5               | * The ``Authlib`` library downgraded    | Flask App Builder      | https://github.com/apache/airflow/pull/24516   |
-|              |                     |   from 1.0.1 to 0.15.5 version          | not compatible with    |                                                |
-|              | 2.3.0-2.3.2         |                                         | Authlib >= 1.0.0       |                                                |
-+--------------+---------------------+-----------------------------------------+------------------------+------------------------------------------------+
-| 18 Jan 2022  | All 2.2.\*, 2.1.\*  | * The AIRFLOW_GID 500 was removed       | MySQL changed keys     | https://github.com/apache/airflow/pull/20912   |
-|              |                     | * MySQL ``apt`` repository key changed. | to sign their packages |                                                |
-|              |                     |                                         | on 17 Jan 2022         |                                                |
-+--------------+---------------------+-----------------------------------------+------------------------+------------------------------------------------+
+
++--------------+-------------+-----------------------------------------------------------------------------------+-------------------------------------------------------+------------------------------------------------+
+| Date         | Versions    | Potentially breaking change                                                       | Reason                                                | Link to Pull Request / Issue                   |
++==============+=============+===================================================================================+=======================================================+================================================+
+| 19 July 2026 | 3.3.0       | * The ``apache-airflow-providers-databricks`` provider was upgraded from 6.13.0   | ``thrift`` 0.23.0 conflicted with                     | https://github.com/apache/airflow/issues/69603 |
+|              |             |   to 7.16.1 in the Python 3.11 and 3.12 images.                                   | ``databricks-sql-connector`` 4.x (which requires      |                                                |
+|              |             | * ``databricks-sql-connector`` upgraded from 2.0.2 to 4.2.5 and ``thrift`` from   | ``thrift<0.21.0``), so the resolver kept the newer    |                                                |
+|              |             |   0.23.0 to 0.16.0.                                                               | thrift and downgraded the connector, dragging the     |                                                |
+|              |             |                                                                                   | databricks provider back to 6.13.0 (Oct 2024) with    |                                                |
+|              |             |                                                                                   | import errors on 3.3.0.                               |                                                |
++--------------+-------------+-----------------------------------------------------------------------------------+-------------------------------------------------------+------------------------------------------------+
+| 28 Feb 2026  | 2.11.1      | * The grpcio==1.78.0 is used instead of 1.78.1 in Python 3.12 images.             | The 1.78.1 version was yanked - caused major outage.  | https://github.com/grpc/grpc/issues/41725.     |
++--------------+-------------+-----------------------------------------------------------------------------------+-------------------------------------------------------+------------------------------------------------+
+| 23 Feb 2026  | 2.11.1      | * Several dependencies upgraded with minor versions/patchlevels                   | Virtualenv project pulling out released 20.37.0       | https://github.com/pypa/virtualenv/issues/3061 |
+|              |             | * See https://github.com/apache/airflow/commit/4a55543 for details                |                                                       |                                                |
++--------------+-------------+-----------------------------------------------------------------------------------+-------------------------------------------------------+------------------------------------------------+
+| 19 July 2025 | 3.0.3       | * The ``standard`` provider upgraded from 1.4.0 to 1.4.1                          | Sensor skipping issue                                 | https://github.com/apache/airflow/pull/53455   |
++--------------+-------------+-----------------------------------------------------------------------------------+-------------------------------------------------------+------------------------------------------------+
+| 24 Jun 2025  | 3.0.2       | * The ``fab`` provider upgraded from 2.2.0 to 2.2.1                               | FAB provider user creation did not work               | https://github.com/apache/airflow/issues/51854 |
+|              |             | * ``common.messaging`` provider upgraded from 1.0.2 to 1.0.3                      | importing SQS message failed with circular import     | https://github.com/apache/airflow/issues/51770 |
+|              |             | * git binary is added to the image                                                | git bundle need it                                    | https://github.com/apache/airflow/pull/51580   |
++--------------+-------------+-----------------------------------------------------------------------------------+-------------------------------------------------------+------------------------------------------------+
+| 02 Aug 2024  | 2.9.3       | * The ``apache-airflow-providers-fab`` upgraded from 1.2.1 to 1.2.2               | FAB provider logout did not work for 2.9.3            | https://github.com/apache/airflow/issues/40922 |
++--------------+-------------+-----------------------------------------------------------------------------------+-------------------------------------------------------+------------------------------------------------+
+| 12 Mar 2024  | 2.8.3       | * The image was refreshed with new dependencies (pandas < 2.2 and SMTP provider   | Both dependencies caused breaking changes             | https://github.com/apache/airflow/pull/37748   |
+|              |             |   1.6.1)                                                                          |                                                       | https://github.com/apache/airflow/pull/37701   |
++--------------+-------------+-----------------------------------------------------------------------------------+-------------------------------------------------------+------------------------------------------------+
+| 16 Dec 2023  | All 2.*     | * The AIRFLOW_GID 500 was removed                                                 | MySQL repository is removed after the key expiry      | https://github.com/apache/airflow/issues/36231 |
+|              |             | * MySQL ``apt`` repository key changed.                                           | fiasco                                                |                                                |
++--------------+-------------+-----------------------------------------------------------------------------------+-------------------------------------------------------+------------------------------------------------+
+| 17 June 2022 | 2.2.5       | * The ``Authlib`` library downgraded from 1.0.1 to 0.15.5 version                 | Flask App Builder not compatible with Authlib >= 1.0  | https://github.com/apache/airflow/pull/24516   |
+|              | 2.3.0-2.3.2 |                                                                                   |                                                       |                                                |
++--------------+-------------+-----------------------------------------------------------------------------------+-------------------------------------------------------+------------------------------------------------+
+| 18 Jan 2022  | All 2.2.*,  | * The AIRFLOW_GID 500 was removed                                                 | MySQL changed keys to sign their packages on 17 Jan   | https://github.com/apache/airflow/pull/20912   |
+|              | 2.1.*       | * MySQL ``apt`` repository key changed.                                           | 2022                                                  |                                                |
++--------------+-------------+-----------------------------------------------------------------------------------+-------------------------------------------------------+------------------------------------------------+

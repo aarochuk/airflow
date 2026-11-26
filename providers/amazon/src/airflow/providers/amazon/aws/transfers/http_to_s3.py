@@ -22,8 +22,8 @@ from __future__ import annotations
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from airflow.models import BaseOperator
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.http.hooks.http import HttpHook
 
 if TYPE_CHECKING:
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     from requests.auth import AuthBase
 
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class HttpToS3Operator(BaseOperator):
@@ -90,7 +90,15 @@ class HttpToS3Operator(BaseOperator):
                  CA cert bundle than the one used by botocore.
     """
 
-    template_fields: Sequence[str] = ("http_conn_id", "endpoint", "data", "headers", "s3_bucket", "s3_key")
+    template_fields: Sequence[str] = (
+        "http_conn_id",
+        "endpoint",
+        "data",
+        "headers",
+        "s3_bucket",
+        "s3_key",
+        "aws_conn_id",
+    )
     template_fields_renderers = {"headers": "json", "data": "py"}
     template_ext: Sequence[str] = ()
     ui_color = "#f4a460"
@@ -164,6 +172,8 @@ class HttpToS3Operator(BaseOperator):
     def execute(self, context: Context):
         self.log.info("Calling HTTP method")
         response = self.http_hook.run(self.endpoint, self.data, self.headers, self.extra_options)
+        if self.log_response:
+            self.log.info(response.text)
 
         self.s3_hook.load_bytes(
             response.content,

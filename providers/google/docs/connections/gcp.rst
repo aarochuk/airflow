@@ -16,8 +16,7 @@
     under the License.
 
 
-
-.. _howto/connection:gcp:
+.. _howto/connection:google_cloud_platform:
 
 Google Cloud Connection
 ================================
@@ -82,7 +81,7 @@ For example:
 
    export AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT='google-cloud-platform://'
 
-.. _howto/connection:gcp:configuring_the_connection:
+.. _howto/connection:google_cloud_platform:configuring_the_connection:
 
 Configuring the Connection
 --------------------------
@@ -110,21 +109,61 @@ Credential Configuration File
 
     Not required if using application default credentials.
 
+IdP Token Issue URL (Client Credentials Grant Flow)
+    URL of an external identity provider (IdP) token endpoint. When set, Airflow uses the OAuth 2.0
+    Client Credentials Grant flow to request an OIDC token from this endpoint and passes it as the
+    subject token of the ``Credential Configuration File``, which is required in that case.
+
+Client ID (Client Credentials Grant Flow)
+    Client ID of the application registered with the IdP. Sent in the token request to
+    ``IdP Token Issue URL``.
+
+Client Secret (Client Credentials Grant Flow)
+    Client secret of the application registered with the IdP. Sent in the token request to
+    ``IdP Token Issue URL``.
+
+IdP Extra Request Parameters
+    JSON object with additional parameters to include in the token request to ``IdP Token Issue URL``,
+    for example ``{"audience": "api://my-application"}``.
+
+Anonymous credentials (ignores all other settings)
+    Use anonymous credentials for APIs that do not require authentication, such as reading public
+    Cloud Storage objects. Cannot be combined with ``Keyfile Path``, ``Keyfile JSON``,
+    ``Credential Configuration File`` or ``Secret name which holds Keyfile JSON``.
+
 Secret name which holds Keyfile JSON
     Name of the secret in Secret Manager which contains a `service account
     <https://cloud.google.com/docs/authentication/#service_accounts>`_ key.
 
     Not required if using application default credentials.
 
+Keyfile Secret Project Id (in GCP Secret Manager)
+    Project ID containing the secret specified by ``key_secret_name``. Used only when a secret name is set.
+    If omitted, Airflow uses the project ID returned by ``google.auth.default()``.
+    Set ``key_secret_project_id`` if the secret is in a different project or ADC cannot resolve a project ID.
+    The connection's ``Project Id`` setting is not used to locate the secret.
+
 Scopes (comma separated)
     A list of comma-separated `Google Cloud scopes
     <https://developers.google.com/identity/protocols/googlescopes>`_ to
     authenticate with.
 
+
+Quota Project ID (optional)
+    The Google Cloud project ID to use for API quota and billing purposes. This is useful
+    when using a shared service account but want to attribute quota/billing to a different
+    project. If not specified, no separate quota project is configured on the credentials
+    and Google Cloud's default behavior applies. Must be a valid GCP project ID (lowercase
+    letters, digits, hyphens, 6-30 characters, starting with a letter).
+
+    .. note:: If using anonymous credentials, quota project logic is ignored.
+
+    .. warning:: Ensure the service account has permission to use the specified quota project; an invalid or unauthorized project ID will result in an API error.
+
 Number of Retries
     Integer, number of times to retry with randomized
     exponential backoff. If all retries fail, the :class:`googleapiclient.errors.HttpError`
-    represents the last request. If zero (default), we attempt the
+    represents the last request. The default is 5. If zero, we attempt the
     request only once.
 
 Impersonation Chain
@@ -149,10 +188,18 @@ Impersonation Chain
         * ``project`` - Project Id
         * ``key_path`` - Keyfile Path
         * ``keyfile_dict`` - Keyfile JSON
+        * ``credential_config_file`` - Credential Configuration File
         * ``key_secret_name`` - Secret name which holds Keyfile JSON
         * ``key_secret_project_id`` - Project Id which holds Keyfile JSON
         * ``scope`` - Scopes
         * ``num_retries`` - Number of Retries
+        * ``impersonation_chain`` - Impersonation Chain
+        * ``quota_project_id`` - Quota Project ID
+        * ``is_anonymous`` - Anonymous credentials
+        * ``idp_issuer_url`` - IdP Token Issue URL
+        * ``client_id`` - Client ID
+        * ``client_secret`` - Client Secret
+        * ``idp_extra_parameters`` - IdP Extra Request Parameters
 
 
     Note that all components of the URI should be URL-encoded.
@@ -169,7 +216,7 @@ Impersonation Chain
 
        export AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT='{"conn_type": "google_cloud_platform", "extra": {"key_path": "/keys/key.json", "scope": "https://www.googleapis.com/auth/cloud-platform", "project": "airflow", "num_retries": 5}}'
 
-.. _howto/connection:gcp:impersonation:
+.. _howto/connection:google_cloud_platform:impersonation:
 
 Direct impersonation of a service account
 -----------------------------------------
@@ -309,3 +356,183 @@ Note that as domain-wide delegation is currently supported by most of the Google
 * All of Google Cloud operators and hooks.
 * Firebase hooks.
 * All transfer operators that involve Google cloud in different providers, for example: :class:`airflow.providers.amazon.aws.transfers.gcs_to_s3.GCSToS3Operator`.
+
+
+Quota Project Support
+---------------------
+
+Airflow's Google Cloud providers support specifying a "quota project" (a billing project) for
+API calls. That lets API usage be billed to a different Google Cloud project than the one that
+owns the service account. This is useful for organizations that share service accounts but
+centralize billing in specific projects.
+
+Usage
+~~~~~
+
+There are two ways to set a quota project in Airflow:
+
+- Via connection extras (recommended for environment-wide defaults).
+- Directly on supported hook instances (recommended when a single task must bill to a different project).
+
+Connection extras
+^^^^^^^^^^^^^^^^^
+
+Add the quota project ID to the Google Cloud connection extras. For example:
+
+.. code-block:: json
+
+  {
+    "quota_project_id": "your-billing-project-id"
+  }
+
+You can set this via the Airflow UI, the Connections REST API, or an environment variable, for
+example:
+
+.. code-block:: bash
+
+  export AIRFLOW_CONN_GOOGLE_CLOUD_DEFAULT='{
+    "conn_type": "google_cloud_platform",
+    "extra": {
+      "quota_project_id": "your-billing-project-id"
+    }
+  }'
+
+Hook parameter
+^^^^^^^^^^^^^^
+
+You can also pass the quota project directly when creating a hook. This takes
+precedence over the connection extras:
+
+.. code-block:: python
+
+  from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
+
+  hook = BigQueryHook(quota_project_id="your-billing-project-id")
+
+Priority
+^^^^^^^^
+
+If a quota project is provided both in the connection extras and as a hook
+parameter, the hook parameter wins.
+
+Compatibility
+^^^^^^^^^^^^^
+
+This setting works with Google Cloud services that support the quota project mechanism (the
+``x-goog-user-project`` header), for example BigQuery, Cloud Storage, Dataflow,
+and other Google Cloud APIs that accept quota project headers.
+
+Impact
+^^^^^^
+
+Using a quota project affects where API usage is billed, which quotas are applied, and how
+usage is reported for monitoring and auditing.
+
+
+.. _howto/connection:google_cloud_platform:corporate_proxy:
+
+Using the Google Cloud Connection Behind a Corporate Proxy
+----------------------------------------------------------
+
+If Airflow workers are deployed behind a corporate HTTP proxy, two things are required for
+Google API calls to reach the internet.
+
+**1. Set the standard proxy environment variables on each worker:**
+
+.. code-block:: bash
+
+    export HTTPS_PROXY=http://<proxy-host>:<port>
+    export HTTP_PROXY=http://<proxy-host>:<port>
+    export NO_PROXY=localhost,127.0.0.1,.cluster.local
+
+In a Kubernetes / Helm deployment add them to ``values.yaml``:
+
+.. code-block:: yaml
+
+    env:
+      - name: HTTPS_PROXY
+        value: "http://<proxy-host>:<port>"
+      - name: HTTP_PROXY
+        value: "http://<proxy-host>:<port>"
+      - name: NO_PROXY
+        value: "localhost,127.0.0.1,.cluster.local"
+
+**2. Install the** ``PySocks`` **package in the worker image — this is mandatory.**
+
+For a bare-metal or custom Docker image, add it at build time:
+
+.. code-block:: dockerfile
+
+    RUN pip install pysocks
+
+In a Kubernetes / Helm deployment, bake ``pysocks`` into your custom worker image the same way as
+above, then point the chart at that image in ``values.yaml``:
+
+.. code-block:: yaml
+
+    images:
+      airflow:
+        repository: your-registry/airflow-with-pysocks
+        tag: "3.x.x"
+
+Why PySocks is required even for an HTTP proxy
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+All Google API endpoints (``oauth2.googleapis.com``, ``bigquery.googleapis.com``, etc.) are
+HTTPS. To route an HTTPS request through an HTTP proxy, the client must first open an
+``HTTP CONNECT`` tunnel and then do TLS end-to-end inside it.
+
+The ``httplib2`` library — used by ``google-api-python-client`` and the
+``_authorize()`` path of ``GoogleBaseHook`` for services such as BigQuery Jobs API,
+Dataflow, Compute, Cloud SQL, Datastore, Cloud Functions, and Marketing Platform — does
+**not** implement ``CONNECT`` tunneling itself. It delegates proxying to the external
+`PySocks <https://pypi.org/project/PySocks/>`_ package, which must be importable at runtime
+to activate its HTTP ``CONNECT`` tunnel path via a ``socks.socksocket``.
+If PySocks is not installed, ``httplib2`` silently falls back to a direct connection even
+when ``HTTPS_PROXY`` is set, and the worker attempts a direct DNS lookup of the Google
+endpoint — which fails in a network-restricted environment.
+
+The symptom is a ``socket.gaierror: [Errno -2] Name or service not known`` (or
+``[Errno 11001] getaddrinfo failed`` on Windows) when a task first tries to authenticate
+or call a Google service.
+
+.. note::
+   Hooks backed by the newer ``google-cloud-*`` client libraries (Cloud Storage / GCS,
+   Pub/Sub, Spanner, BigQuery Storage API, etc.) use ``google-auth`` with the ``requests``
+   transport, which has native ``CONNECT``-tunnel support and does **not** need PySocks.
+   Only the ``discovery``-based hooks that go through ``_authorize()`` are affected.
+
+Quick verification
+~~~~~~~~~~~~~~~~~~
+
+Run the following inside the worker container to confirm the proxy and PySocks are working:
+
+.. code-block:: bash
+
+    # Proxy can reach Google (a 404 from Google = tunnel succeeded)
+    curl -x http://<proxy-host>:<port> https://oauth2.googleapis.com
+
+    # PySocks is importable
+    python -c "import socks; print('PySocks OK')"
+
+Authenticating to Google Sovereign Cloud in Airflow
+---------------------------------------------------
+
+When working with a Sovereign Cloud, you are operating outside the standard ``googleapis.com`` domain.
+To point Airflow to the correct environment **in addition to your primary connection**, you must configure the **Universe Domain**.
+
+Set the Global Environment Variable
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For Airflow to communicate with a Sovereign Cloud, the underlying Google Cloud client libraries need to know the destination.
+The easiest way to do this is by setting an environment variable on your Airflow:
+
+.. code-block:: bash
+
+    export GOOGLE_CLOUD_UNIVERSE_DOMAIN="your-universe-domain"
+
+Why this is necessary
+~~~~~~~~~~~~~~~~~~~~~
+
+By default, Google Cloud libraries look for the "Global" universe. Setting the ``GOOGLE_CLOUD_UNIVERSE_DOMAIN`` tells the library to generate API endpoints
+specific to your partner-managed environment (e.g., ``storage.your-sovereign-domain.goog`` instead of ``storage.googleapis.com``).

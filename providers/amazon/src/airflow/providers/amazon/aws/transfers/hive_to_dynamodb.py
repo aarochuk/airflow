@@ -20,15 +20,15 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Literal
 
-from airflow.models import BaseOperator
 from airflow.providers.amazon.aws.hooks.dynamodb import DynamoDBHook
 from airflow.providers.apache.hive.hooks.hive import HiveServer2Hook
+from airflow.providers.common.compat.sdk import BaseOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class HiveToDynamoDBOperator(BaseOperator):
@@ -53,9 +53,14 @@ class HiveToDynamoDBOperator(BaseOperator):
     :param hiveserver2_conn_id: Reference to the
         :ref: `Hive Server2 thrift service connection id <howto/connection:hiveserver2>`.
     :param aws_conn_id: aws connection
+    :param df_type: DataFrame type to use ("pandas" or "polars").
     """
 
-    template_fields: Sequence[str] = ("sql",)
+    template_fields: Sequence[str] = (
+        "sql",
+        "hiveserver2_conn_id",
+        "aws_conn_id",
+    )
     template_ext: Sequence[str] = (".sql",)
     template_fields_renderers = {"sql": "hql"}
     ui_color = "#a0e08c"
@@ -73,6 +78,7 @@ class HiveToDynamoDBOperator(BaseOperator):
         schema: str = "default",
         hiveserver2_conn_id: str = "hiveserver2_default",
         aws_conn_id: str | None = "aws_default",
+        df_type: Literal["pandas", "polars"] = "pandas",
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -86,6 +92,7 @@ class HiveToDynamoDBOperator(BaseOperator):
         self.schema = schema
         self.hiveserver2_conn_id = hiveserver2_conn_id
         self.aws_conn_id = aws_conn_id
+        self.df_type = df_type
 
     def execute(self, context: Context):
         hive = HiveServer2Hook(hiveserver2_conn_id=self.hiveserver2_conn_id)
@@ -93,7 +100,7 @@ class HiveToDynamoDBOperator(BaseOperator):
         self.log.info("Extracting data from Hive")
         self.log.info(self.sql)
 
-        data = hive.get_pandas_df(self.sql, schema=self.schema)
+        data = hive.get_df(self.sql, schema=self.schema, df_type=self.df_type)
         dynamodb = DynamoDBHook(
             aws_conn_id=self.aws_conn_id,
             table_name=self.table_name,
@@ -104,7 +111,10 @@ class HiveToDynamoDBOperator(BaseOperator):
         self.log.info("Inserting rows into dynamodb")
 
         if self.pre_process is None:
-            dynamodb.write_batch_data(json.loads(data.to_json(orient="records")))
+            if self.df_type == "polars":
+                dynamodb.write_batch_data(data.to_dicts())  # type:ignore[operator]
+            elif self.df_type == "pandas":
+                dynamodb.write_batch_data(json.loads(data.to_json(orient="records")))  # type:ignore[union-attr]
         else:
             dynamodb.write_batch_data(
                 self.pre_process(data=data, args=self.pre_process_args, kwargs=self.pre_process_kwargs)

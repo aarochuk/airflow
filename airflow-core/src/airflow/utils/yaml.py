@@ -44,7 +44,7 @@ def safe_load(stream: bytes | str | BinaryIO | TextIO) -> Any:
     try:
         from yaml import CSafeLoader as SafeLoader
     except ImportError:
-        from yaml import SafeLoader  # type: ignore[assignment, no-redef]
+        from yaml import SafeLoader  # type: ignore[assignment]
 
     return orig(stream, SafeLoader)
 
@@ -57,7 +57,7 @@ def dump(data: Any, **kwargs) -> str:
     try:
         from yaml import CSafeDumper as SafeDumper
     except ImportError:
-        from yaml import SafeDumper  # type: ignore[assignment, no-redef]
+        from yaml import SafeDumper  # type: ignore[assignment]
 
     return cast("str", orig(data, Dumper=SafeDumper, **kwargs))
 
@@ -66,8 +66,6 @@ def __getattr__(name):
     # Delegate anything else to the yaml module
     import yaml
 
-    if name == "FullLoader":
-        # Try to use CFullLoader by default
-        getattr(yaml, "CFullLoader", yaml.FullLoader)
-
+    # FullLoader stays pyyaml's on purpose: CFullLoader does not see add_constructor
+    # registrations, so custom tags would raise ConstructorError instead of resolving.
     return getattr(yaml, name)

@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -56,7 +55,7 @@
     :maxdepth: 1
     :caption: Resources
 
-    Example DAGs <https://github.com/apache/airflow/tree/providers-papermill/|version|/providers/papermill/tests/system/papermill>
+    Example Dags <https://github.com/apache/airflow/tree/providers-papermill/|version|/providers/papermill/tests/system/papermill>
     PyPI Repository <https://pypi.org/project/apache-airflow-providers-papermill/>
     Installing from sources <installing-providers-from-sources>
 
@@ -77,7 +76,7 @@ apache-airflow-providers-papermill package
 `Papermill <https://github.com/nteract/papermill>`__
 
 
-Release: 3.9.2
+Release: 3.13.3
 
 Provider package
 ----------------
@@ -88,44 +87,28 @@ All classes for this package are included in the ``airflow.providers.papermill``
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-papermill``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-==================  ==================
-PIP package         Version required
-==================  ==================
-``apache-airflow``  ``>=2.9.0``
-``papermill[all]``  ``>=2.6.0``
-``scrapbook[all]``  ``>=0.5.0``
-``ipykernel``       ``>=6.29.4``
-``pandas``          ``>=2.1.2,<2.2``
-``nbconvert``       ``>=7.16.1``
-==================  ==================
-
-Cross provider package dependencies
------------------------------------
-
-Those are dependencies that might be needed in order to use all the features of the package.
-You need to install the specified provider distributions in order to use them.
-
-You can install such cross-provider dependencies when installing from PyPI. For example:
-
-.. code-block:: bash
-
-    pip install apache-airflow-providers-papermill[common.compat]
-
-
-==================================================================================================================  =================
-Dependent package                                                                                                   Extra
-==================================================================================================================  =================
-`apache-airflow-providers-common-compat <https://airflow.apache.org/docs/apache-airflow-providers-common-compat>`_  ``common.compat``
-==================================================================================================================  =================
+==========================================  =================================================================
+PIP package                                 Version required
+==========================================  =================================================================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.8.0``
+``papermill[all]``                          ``>=2.6.0``
+``scrapbook[all]``                          ``>=0.5.0``
+``ipykernel``                               ``>=6.29.4``
+``pandas``                                  ``>=2.1.2; python_version < "3.13"``
+``pandas``                                  ``>=2.2.3; python_version >= "3.13" and python_version < "3.14"``
+``pandas``                                  ``>=2.3.3; python_version >= "3.14"``
+``nbconvert``                               ``>=7.16.1``
+==========================================  =================================================================
 
 Downloading official packages
 -----------------------------
@@ -133,5 +116,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-papermill 3.9.2 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_papermill-3.9.2.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_papermill-3.9.2.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_papermill-3.9.2.tar.gz.sha512>`__)
-* `The apache-airflow-providers-papermill 3.9.2 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_papermill-3.9.2-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_papermill-3.9.2-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_papermill-3.9.2-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-papermill 3.13.3 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_papermill-3.13.3.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_papermill-3.13.3.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_papermill-3.13.3.tar.gz.sha512>`__)
+* `The apache-airflow-providers-papermill 3.13.3 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_papermill-3.13.3-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_papermill-3.13.3-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_papermill-3.13.3-py3-none-any.whl.sha512>`__)

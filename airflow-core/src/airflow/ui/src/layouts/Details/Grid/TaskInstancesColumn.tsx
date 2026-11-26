@@ -16,45 +16,161 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box } from "@chakra-ui/react";
-import { useParams, useSearchParams } from "react-router-dom";
+import type { MouseEvent } from "react";
 
-import type { GridTaskInstanceSummary } from "openapi/requests/types.gen";
+import { Box, type BoxProps } from "@chakra-ui/react";
+import type { VirtualItem } from "@tanstack/react-virtual";
+import { useParams } from "react-router-dom";
+
+import type { GridRunsResponse, GridTISummaries } from "openapi/requests";
+import type { LightGridTaskInstanceSummary } from "openapi/requests/types.gen";
+
+import { VersionIndicatorOptions } from "src/constants/showVersionIndicatorOptions";
+import type { GridCell } from "src/context/gridSelection";
 
 import { GridTI } from "./GridTI";
+import { DagVersionIndicator } from "./VersionIndicator";
+import { ROW_HEIGHT } from "./constants";
+import { getCellKey } from "./useGridSelection";
 import type { GridTask } from "./utils";
 
 type Props = {
-  readonly depth?: number;
   readonly nodes: Array<GridTask>;
-  readonly runId: string;
-  readonly taskInstances: Array<GridTaskInstanceSummary>;
+  readonly onCellClick?: (event: MouseEvent<HTMLAnchorElement>, cell: GridCell) => void;
+  readonly run: GridRunsResponse;
+  // Keys of the selected cells and of the cells inside the selected groups.
+  readonly selectedCellKeys?: ReadonlySet<string>;
+  readonly showVersionIndicatorMode?: VersionIndicatorOptions;
+  readonly tiSummaries?: GridTISummaries;
+  readonly virtualItems?: Array<VirtualItem>;
 };
 
-export const TaskInstancesColumn = ({ nodes, runId, taskInstances }: Props) => {
-  const { dagId = "" } = useParams();
-  const [searchParams] = useSearchParams();
-  const search = searchParams.toString();
+type CellBorderProps = Pick<BoxProps, "borderBottomWidth" | "borderColor" | "borderTopWidth">;
 
-  return nodes.map((node) => {
-    const taskInstance = taskInstances.find((ti) => ti.task_id === node.id);
+const taskInstanceCellBorderProps = (hideRowBorders: boolean, rowIndex: number): CellBorderProps =>
+  hideRowBorders
+    ? { borderBottomWidth: 0, borderTopWidth: 0 }
+    : {
+        borderBottomWidth: 1,
+        borderColor: "border",
+        borderTopWidth: rowIndex === 0 ? 1 : 0,
+      };
 
-    if (!taskInstance) {
-      return <Box height="20px" key={`${node.id}-${runId}`} width="18px" />;
-    }
+export const TaskInstancesColumn = ({
+  nodes,
+  onCellClick,
+  run,
+  selectedCellKeys,
+  showVersionIndicatorMode,
+  tiSummaries,
+  virtualItems,
+}: Props) => {
+  const { dagId = "", runId } = useParams();
+  const isSelected = runId === run.run_id;
 
-    return (
-      <GridTI
-        dagId={dagId}
-        isGroup={node.isGroup}
-        isMapped={node.is_mapped}
-        key={node.id}
-        label={node.label}
-        runId={runId}
-        search={search}
-        state={taskInstance.state}
-        taskId={node.id}
-      />
-    );
-  });
+  const itemsToRender =
+    virtualItems ?? nodes.map((_, index) => ({ index, size: ROW_HEIGHT, start: index * ROW_HEIGHT }));
+
+  const taskInstances = tiSummaries?.task_instances ?? [];
+  const taskInstanceMap = new Map<string, LightGridTaskInstanceSummary>();
+
+  for (const ti of taskInstances) {
+    taskInstanceMap.set(ti.task_id, ti);
+  }
+
+  const versionNumbers = new Set(
+    taskInstances.map((ti) => ti.dag_version_number).filter((vn) => vn !== null && vn !== undefined),
+  );
+  const hasMixedVersions = versionNumbers.size > 1;
+
+  const hideRowBorders = isSelected;
+
+  return (
+    <Box
+      bg={isSelected ? "brand.emphasized" : undefined}
+      data-run-id={run.run_id}
+      data-selected={isSelected}
+      position="relative"
+      transition="background-color 0.2s"
+      width="18px"
+    >
+      {itemsToRender.map((virtualItem, idx) => {
+        const node = nodes[virtualItem.index];
+
+        if (!node) {
+          return undefined;
+        }
+
+        const taskInstance = taskInstanceMap.get(node.id);
+
+        if (!taskInstance) {
+          return (
+            <Box
+              {...taskInstanceCellBorderProps(hideRowBorders, virtualItem.index)}
+              height={`${ROW_HEIGHT}px`}
+              key={`${node.id}-${run.run_id}`}
+              left={0}
+              position="absolute"
+              top={0}
+              transform={`translateY(${virtualItem.start}px)`}
+              width="18px"
+            />
+          );
+        }
+
+        let hasVersionChangeFlag = false;
+
+        if (
+          hasMixedVersions &&
+          (showVersionIndicatorMode === VersionIndicatorOptions.DAG_VERSION ||
+            showVersionIndicatorMode === VersionIndicatorOptions.ALL) &&
+          idx > 0
+        ) {
+          const prevVirtualItem = itemsToRender[idx - 1];
+          const prevNode = prevVirtualItem ? nodes[prevVirtualItem.index] : undefined;
+          const prevTaskInstance = prevNode ? taskInstanceMap.get(prevNode.id) : undefined;
+
+          hasVersionChangeFlag = Boolean(
+            prevTaskInstance && prevTaskInstance.dag_version_number !== taskInstance.dag_version_number,
+          );
+        }
+
+        return (
+          <Box
+            {...taskInstanceCellBorderProps(hideRowBorders, virtualItem.index)}
+            height={`${ROW_HEIGHT}px`}
+            key={node.id}
+            left={0}
+            position="absolute"
+            top={0}
+            transform={`translateY(${virtualItem.start}px)`}
+          >
+            {hasVersionChangeFlag && (
+              <DagVersionIndicator
+                dagVersionNumber={taskInstance.dag_version_number ?? undefined}
+                orientation="horizontal"
+              />
+            )}
+            <GridTI
+              dagId={dagId}
+              hasNote={taskInstance.has_note ?? false}
+              instance={taskInstance}
+              isGroup={node.isGroup}
+              isMapped={node.is_mapped}
+              isMultiSelected={
+                selectedCellKeys === undefined || selectedCellKeys.size === 0
+                  ? undefined
+                  : selectedCellKeys.has(getCellKey(run.run_id, node.id))
+              }
+              label={node.label}
+              loopMaxIterations={node.loop_max_iterations}
+              onClick={(event) => onCellClick?.(event, { runId: run.run_id, taskId: node.id })}
+              runId={run.run_id}
+              taskId={node.id}
+            />
+          </Box>
+        );
+      })}
+    </Box>
+  );
 };

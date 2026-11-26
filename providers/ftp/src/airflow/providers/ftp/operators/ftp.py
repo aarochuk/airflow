@@ -27,7 +27,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.ftp.hooks.ftp import FTPHook, FTPSHook
 
 
@@ -72,7 +72,7 @@ class FTPFileTransmitOperator(BaseOperator):
             )
     """
 
-    template_fields: Sequence[str] = ("local_filepath", "remote_filepath")
+    template_fields: Sequence[str] = ("local_filepath", "remote_filepath", "ftp_conn_id")
 
     def __init__(
         self,

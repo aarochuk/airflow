@@ -36,11 +36,11 @@ For most Docs writing purposes, the `reStructured Text Primer <https://www.sphin
 
 A general docs workflow
 -----------------------
-When you make changes to the docs, it follows roughly the same process as creating and testing code changes. However, for docs, instead of unit tests and integration tests, you run pre-commit checks, spell checks, and visual inspection of your changes in a documentation build.
+When you make changes to the docs, it follows roughly the same process as creating and testing code changes. However, for docs, instead of unit tests and integration tests, you run prek hook, spell checks, and visual inspection of your changes in a documentation build.
 
 1. **Decide to edit in GitHub UI or locally** - Depending on the size and type of docs update you want to make, it might be easier to work in the UI or to make your edits in a local fork.
 2. **Find the source files to edit** - While you can access most of the docs source files using the **Suggest a change on this page** button or by searching for a string in the ``/docs/`` file directory, in some cases, the source strings might be located in different provider docs or in the source code itself.
-3. **If editing locally, run spellcheck and the build to identify any blocking errors** - Docs require build, spellcheck, and precommit CI/CD tests to pass before they can merge. This means that if you have a pull request with docs changes, a docs build error can prevent your code merge. Checking the build and spelling locally first can help speed up reviews. If you made formatting changes, checking a local build of your docs allows you to make sure you correctly formatted elements like tables, text styling, and line breaks.
+3. **If editing locally, run the docs build to identify any blocking errors** - The build also checks spelling. Docs require the build and prek CI/CD checks to pass before they can merge. This means that if you have a pull request with docs changes, a docs build error can prevent your code merge. Checking the build and spelling locally first can help speed up reviews. If you made formatting changes, checking a local build of your docs allows you to make sure you correctly formatted elements like tables, text styling, and line breaks.
 4. **Make your pull request** - When you make a PR, GitHub automatically assigns reviewers and runs CI/CD tests.
 5. **Fix any build errors or spelling mistakes** - Your PR can't be merged if there are any spelling or build errors. Check to see which builds are failing and click **Show details**. The output of the tests share the errors, location of the problems, and suggest resolutions. Common Docs failures occur due to incorrect formatting and whitespace.
 
@@ -90,30 +90,14 @@ Building documentation
 
 To generate a local version of the docs you can use `<../dev/breeze/doc/README.rst>`_.
 
-The documentation build consists of verifying consistency of documentation and two steps:
-
-* spell checking
-* building documentation
-
-You can choose to run the complete build, to build all the docs and run spellcheck. Or, you can use package names and the optional flags, ``--spellcheck-only`` or ``--docs-only`` to choose the scope of the build.
+Spelling is checked while the documentation is built, so one build reports both build and spelling errors.
+You can use package names to limit the build.
 
 Build all docs and spell check them:
 
 .. code-block:: bash
 
     breeze build-docs
-
-Just run spellcheck:
-
-.. code-block:: bash
-
-     breeze build-docs --spellcheck-only
-
-Build docs without checking spelling:
-
-.. code-block:: bash
-
-     breeze build-docs --docs-only
 
 Build documentation of just one provider package by calling the ``PACKAGE_ID``.
 
@@ -234,7 +218,7 @@ Docs troubleshooting
 ``example_dags`` Apache license
 -------------------------------
 
-If you are creating ``example_dags`` directory, you need to create an ``example_dags/__init__.py`` file. You can leave the file empty and the pre-commit processing
+If you are creating ``example_dags`` directory, you need to create an ``example_dags/__init__.py`` file. You can leave the file empty and the prek processing
 adds the license automatically. Otherwise, you can add a file with the Apache license or copy another ``__init__.py`` file that contains the necessary license.
 
 Common Docs build errors
@@ -270,6 +254,25 @@ In this example error, You should change the line with error so that the whole p
 
     Incorrect Spelling: 'BaseAsyncSessionFactory'
     Line with Error: ' airflow.providers.amazon.aws.hook.base_aws.BaseAsyncSessionFactory has been deprecated'
+
+mermaid diagram fails to render
+*******************************
+
+The ``.. mermaid::`` diagrams are drawn into SVG files during the docs build by mermaid-cli (``mmdc``).
+They are not drawn in the reader's browser: airflow.apache.org is served with the
+`ASF Content-Security-Policy <https://infra.apache.org/csp.html>`__, which blocks the mermaid script the
+browser would otherwise load from a CDN.
+
+When a package you build contains a diagram, ``breeze build-docs`` first installs mermaid-cli and the
+Chromium it drives into its container. Packages without diagrams skip this step.
+
+A diagram with a syntax error fails the build with ``Mermaid exited with error`` followed by mermaid's
+own message, which names the line it could not parse. If you build the docs outside breeze without
+``mmdc`` on your ``PATH``, every diagram fails the build with:
+
+.. code-block:: text
+
+    WARNING: command 'mmdc' cannot be run (needed for mermaid output), check the mermaid_cmd setting
 
 Support
 ========

@@ -16,18 +16,19 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Heading, VStack } from "@chakra-ui/react";
-import { useDisclosure } from "@chakra-ui/react";
-import { FiPlusCircle } from "react-icons/fi";
+import { Button, useDisclosure } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
+import { MdAdd } from "react-icons/md";
 
-import { Dialog } from "src/components/ui";
-import ActionButton from "src/components/ui/ActionButton";
+import { Modal } from "src/system-components";
+
 import { useAddConnection } from "src/queries/useAddConnection";
 
 import ConnectionForm from "./ConnectionForm";
 import type { ConnectionBody } from "./Connections";
 
 const AddConnectionButton = () => {
+  const { t: translate } = useTranslation("admin");
   const { onClose, onOpen, open } = useDisclosure();
   const { addConnection, error, isPending } = useAddConnection({ onSuccessConfirm: onClose });
   const initialConnection: ConnectionBody = {
@@ -40,40 +41,24 @@ const AddConnectionButton = () => {
     password: "",
     port: "",
     schema: "",
+    team_name: "",
   };
 
   return (
-    <Box>
-      <ActionButton
-        actionName="Add Connection"
-        colorPalette="blue"
-        icon={<FiPlusCircle />}
-        onClick={onOpen}
-        text="Add Connection"
-        variant="solid"
-      />
+    <>
+      <Button onClick={onOpen}>
+        <MdAdd /> {translate("connections.add")}
+      </Button>
 
-      <Dialog.Root lazyMount onOpenChange={onClose} open={open} size="xl" unmountOnExit>
-        <Dialog.Content backdrop>
-          <Dialog.Header paddingBottom={0}>
-            <VStack align="start" gap={4}>
-              <Heading size="xl">Add Connection</Heading>
-            </VStack>
-          </Dialog.Header>
-
-          <Dialog.CloseTrigger />
-
-          <Dialog.Body>
-            <ConnectionForm
-              error={error}
-              initialConnection={initialConnection}
-              isPending={isPending}
-              mutateConnection={addConnection}
-            />
-          </Dialog.Body>
-        </Dialog.Content>
-      </Dialog.Root>
-    </Box>
+      <Modal lazyMount onOpenChange={onClose} open={open} title={translate("connections.add")} unmountOnExit>
+        <ConnectionForm
+          error={error}
+          initialConnection={initialConnection}
+          isPending={isPending}
+          mutateConnection={addConnection}
+        />
+      </Modal>
+    </>
   );
 };
 

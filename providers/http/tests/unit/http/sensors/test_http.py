@@ -23,20 +23,19 @@ from unittest.mock import patch
 import pytest
 import requests
 
-from airflow.exceptions import AirflowException, AirflowSensorTimeout, TaskDeferred
 from airflow.models.dag import DAG
+from airflow.providers.common.compat.sdk import AirflowException, AirflowSensorTimeout, TaskDeferred, timezone
 from airflow.providers.http.operators.http import HttpOperator
 from airflow.providers.http.sensors.http import HttpSensor
 from airflow.providers.http.triggers.http import HttpSensorTrigger
 from airflow.sensors.base import PokeReturnValue
-from airflow.utils.timezone import datetime
 
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 
 pytestmark = pytest.mark.db_test
 
 
-DEFAULT_DATE = datetime(2015, 1, 1)
+DEFAULT_DATE = timezone.datetime(2015, 1, 1)
 DEFAULT_DATE_ISO = DEFAULT_DATE.isoformat()
 TEST_DAG_ID = "unit_test_dag"
 
@@ -62,7 +61,6 @@ class TestHttpSensor:
             endpoint="",
             request_params={},
             response_check=resp_check,
-            timeout=5,
             poke_interval=1,
         )
         with pytest.raises(AirflowException, match="AirflowException raised here!"):
@@ -90,7 +88,6 @@ class TestHttpSensor:
             endpoint="",
             request_params={},
             response_check=resp_check,
-            timeout=5,
             poke_interval=1,
         )
         assert task.execute(context={}) == "somedata"
@@ -120,7 +117,6 @@ class TestHttpSensor:
             method="HEAD",
             response_check=resp_check,
             extra_options={"check_response": False},
-            timeout=5,
             poke_interval=1,
         )
 
@@ -141,7 +137,6 @@ class TestHttpSensor:
             request_params={},
             method="HEAD",
             response_check=resp_check,
-            timeout=5,
             poke_interval=1,
         )
 
@@ -155,7 +150,7 @@ class TestHttpSensor:
         assert prep_request.method, received_request.method
 
     @patch("airflow.providers.http.hooks.http.Session.send")
-    def test_poke_context(self, mock_session_send, create_task_instance_of_operator):
+    def test_poke_context(self, mock_session_send, dag_maker, create_task_instance_of_operator):
         response = requests.Response()
         response.status_code = 200
         mock_session_send.return_value = response
@@ -173,11 +168,10 @@ class TestHttpSensor:
             endpoint="",
             request_params={},
             response_check=resp_check,
-            timeout=5,
             poke_interval=1,
         )
 
-        task_instance.task.execute(task_instance.get_template_context())
+        dag_maker.dag.get_task(task_instance.task_id).execute(task_instance.get_template_context())
 
     @patch("airflow.providers.http.hooks.http.Session.send")
     def test_logging_head_error_request(self, mock_session_send, create_task_of_operator):
@@ -199,7 +193,6 @@ class TestHttpSensor:
             request_params={},
             method="HEAD",
             response_check=resp_check,
-            timeout=5,
             poke_interval=1,
         )
 
@@ -260,11 +253,20 @@ class TestHttpSensor:
             request_params={},
             method="GET",
             response_check=resp_check,
-            timeout=5,
             poke_interval=1,
         )
         with pytest.raises(AirflowException, match="500:Internal Server Error"):
             task.execute(context={})
+
+    def test_http_conn_id_is_templated(self):
+        sensor = HttpSensor(
+            task_id="test_http_sensor",
+            endpoint="/health",
+            http_conn_id="{{ conn_id }}",
+        )
+        assert "http_conn_id" in sensor.template_fields
+        sensor.render_template_fields({"conn_id": "http_staging"})
+        assert sensor.http_conn_id == "http_staging"
 
 
 class FakeSession:
@@ -272,6 +274,10 @@ class FakeSession:
         self.response = requests.Response()
         self.response.status_code = 200
         self.response._content = "apache/airflow".encode("ascii", "ignore")
+        self.proxies = None
+        self.stream = None
+        self.verify = False
+        self.cert = None
 
     def send(self, *args, **kwargs):
         return self.response
@@ -289,11 +295,6 @@ class FakeSession:
 
 
 class TestHttpOpSensor:
-    def setup_method(self):
-        args = {"owner": "airflow", "start_date": DEFAULT_DATE_ISO}
-        dag = DAG(TEST_DAG_ID, schedule=None, default_args=args)
-        self.dag = dag
-
     @mock.patch("airflow.providers.http.hooks.http.Session", FakeSession)
     def test_get(self):
         op = HttpOperator(
@@ -302,9 +303,8 @@ class TestHttpOpSensor:
             endpoint="/search",
             data={"client": "ubuntu", "q": "airflow"},
             headers={},
-            dag=self.dag,
         )
-        op.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
+        op.execute({})
 
     @mock.patch("airflow.providers.http.hooks.http.Session", FakeSession)
     def test_get_response_check(self):
@@ -313,11 +313,10 @@ class TestHttpOpSensor:
             method="GET",
             endpoint="/search",
             data={"client": "ubuntu", "q": "airflow"},
-            response_check=lambda response: ("apache/airflow" in response.text),
+            response_check=lambda response: "apache/airflow" in response.text,
             headers={},
-            dag=self.dag,
         )
-        op.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
+        op.execute({})
 
     @pytest.mark.skipif(not AIRFLOW_V_3_0_PLUS, reason="Test only for Airflow 3.0+")
     @mock.patch("airflow.providers.http.hooks.http.Session", FakeSession)
@@ -331,13 +330,16 @@ class TestHttpOpSensor:
             response_check=lambda response: f"apache/airflow/{DEFAULT_DATE:%Y-%m-%d}" in response.text,
             poke_interval=5,
             timeout=15,
-            dag=self.dag,
         )
-        run_task(sensor)
+        run_task(sensor, logical_date=DEFAULT_DATE)
+
+        assert run_task.state == "success"
+        assert run_task.error is None
 
     @pytest.mark.skipif(AIRFLOW_V_3_0_PLUS, reason="Test only for Airflow < 3.0")
     @mock.patch("airflow.providers.http.hooks.http.Session", FakeSession)
     def test_sensor_af2(self):
+        dag = DAG(TEST_DAG_ID, schedule=None)
         sensor = HttpSensor(
             task_id="http_sensor_check",
             http_conn_id="http_default",
@@ -347,7 +349,7 @@ class TestHttpOpSensor:
             response_check=lambda response: f"apache/airflow/{DEFAULT_DATE:%Y-%m-%d}" in response.text,
             poke_interval=5,
             timeout=15,
-            dag=self.dag,
+            dag=dag,
         )
         sensor.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
 
@@ -390,7 +392,11 @@ class TestHttpSensorAsync:
         assert isinstance(exc.value.trigger, HttpSensorTrigger), "Trigger is not a HttpTrigger"
 
     @mock.patch("airflow.providers.http.sensors.http.HttpSensor.defer")
-    @mock.patch("airflow.sensors.base.BaseSensorOperator.execute")
+    @mock.patch(
+        "airflow.sdk.bases.sensor.BaseSensorOperator.execute"
+        if AIRFLOW_V_3_0_PLUS
+        else "airflow.sensors.base.BaseSensorOperator.execute"
+    )
     def test_execute_not_defer_when_response_check_is_not_none(self, mock_execute, mock_defer):
         task = HttpSensor(
             task_id="run_now",

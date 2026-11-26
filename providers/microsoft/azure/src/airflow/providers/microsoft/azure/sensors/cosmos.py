@@ -20,11 +20,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 from airflow.providers.microsoft.azure.hooks.cosmos import AzureCosmosDBHook
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class AzureCosmosDocumentSensor(BaseSensorOperator):
@@ -48,7 +48,12 @@ class AzureCosmosDocumentSensor(BaseSensorOperator):
         :ref:`Azure CosmosDB connection<howto/connection:azure_cosmos>`.
     """
 
-    template_fields: Sequence[str] = ("database_name", "collection_name", "document_id")
+    template_fields: Sequence[str] = (
+        "database_name",
+        "collection_name",
+        "document_id",
+        "azure_cosmos_conn_id",
+    )
 
     def __init__(
         self,

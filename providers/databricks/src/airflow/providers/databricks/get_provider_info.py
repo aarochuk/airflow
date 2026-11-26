@@ -26,59 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-databricks",
         "name": "Databricks",
         "description": "`Databricks <https://databricks.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477806,
-        "versions": [
-            "7.2.2",
-            "7.2.1",
-            "7.2.0",
-            "7.0.0",
-            "6.13.0",
-            "6.12.0",
-            "6.11.0",
-            "6.10.0",
-            "6.9.0",
-            "6.8.0",
-            "6.7.0",
-            "6.6.0",
-            "6.5.0",
-            "6.4.0",
-            "6.3.0",
-            "6.2.0",
-            "6.1.0",
-            "6.0.0",
-            "5.0.1",
-            "5.0.0",
-            "4.7.0",
-            "4.6.0",
-            "4.5.0",
-            "4.4.0",
-            "4.3.3",
-            "4.3.2",
-            "4.3.1",
-            "4.3.0",
-            "4.2.0",
-            "4.1.0",
-            "4.0.1",
-            "4.0.0",
-            "3.4.0",
-            "3.3.0",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.7.0",
-            "2.6.0",
-            "2.5.0",
-            "2.4.0",
-            "2.3.0",
-            "2.2.0",
-            "2.1.0",
-            "2.0.2",
-            "2.0.1",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Databricks",
@@ -89,6 +36,9 @@ def get_provider_info():
                     "/docs/apache-airflow-providers-databricks/operators/submit_run.rst",
                     "/docs/apache-airflow-providers-databricks/operators/run_now.rst",
                     "/docs/apache-airflow-providers-databricks/operators/task.rst",
+                    "/docs/apache-airflow-providers-databricks/operators/agent.rst",
+                    "/docs/apache-airflow-providers-databricks/operators/genie.rst",
+                    "/docs/apache-airflow-providers-databricks/operators/genie_operator.rst",
                 ],
                 "logo": "/docs/integration-logos/Databricks.png",
                 "tags": ["service"],
@@ -98,7 +48,10 @@ def get_provider_info():
                 "external-doc-url": "https://databricks.com/product/databricks-sql",
                 "how-to-guide": [
                     "/docs/apache-airflow-providers-databricks/operators/sql.rst",
+                    "/docs/apache-airflow-providers-databricks/operators/sql_statements.rst",
+                    "/docs/apache-airflow-providers-databricks/operators/warehouse.rst",
                     "/docs/apache-airflow-providers-databricks/operators/copy_into.rst",
+                    "/docs/apache-airflow-providers-databricks/operators/delta_table_producer.rst",
                 ],
                 "tags": ["service"],
             },
@@ -118,15 +71,28 @@ def get_provider_info():
                 "how-to-guide": ["/docs/apache-airflow-providers-databricks/operators/workflow.rst"],
                 "tags": ["service"],
             },
+            {
+                "integration-name": "Databricks Unity Gateway",
+                "external-doc-url": "https://docs.databricks.com/aws/en/unity-gateway/concepts",
+                "tags": ["service"],
+            },
         ],
         "operators": [
             {
                 "integration-name": "Databricks",
-                "python-modules": ["airflow.providers.databricks.operators.databricks"],
+                "python-modules": [
+                    "airflow.providers.databricks.operators.databricks",
+                    "airflow.providers.databricks.operators.agent",
+                    "airflow.providers.databricks.operators.genie",
+                ],
             },
             {
                 "integration-name": "Databricks SQL",
-                "python-modules": ["airflow.providers.databricks.operators.databricks_sql"],
+                "python-modules": [
+                    "airflow.providers.databricks.operators.databricks_sql",
+                    "airflow.providers.databricks.operators.delta_table",
+                    "airflow.providers.databricks.operators.warehouse",
+                ],
             },
             {
                 "integration-name": "Databricks Repos",
@@ -137,12 +103,31 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.databricks.operators.databricks_workflow"],
             },
         ],
+        "asset-uris": [
+            {
+                "schemes": ["databricks"],
+                "handler": "airflow.providers.databricks.assets.databricks.sanitize_uri",
+                "factory": "airflow.providers.databricks.assets.databricks.create_asset",
+                "to_openlineage_converter": "airflow.providers.databricks.assets.databricks.convert_asset_to_openlineage",
+            }
+        ],
+        "dataset-uris": [
+            {
+                "schemes": ["databricks"],
+                "handler": "airflow.providers.databricks.assets.databricks.sanitize_uri",
+                "factory": "airflow.providers.databricks.assets.databricks.create_asset",
+                "to_openlineage_converter": "airflow.providers.databricks.assets.databricks.convert_asset_to_openlineage",
+            }
+        ],
         "hooks": [
             {
                 "integration-name": "Databricks",
                 "python-modules": [
                     "airflow.providers.databricks.hooks.databricks",
                     "airflow.providers.databricks.hooks.databricks_base",
+                    "airflow.providers.databricks.hooks.agent",
+                    "airflow.providers.databricks.hooks.genie",
+                    "airflow.providers.databricks.hooks.model_serving",
                 ],
             },
             {
@@ -153,13 +138,18 @@ def get_provider_info():
         "triggers": [
             {
                 "integration-name": "Databricks",
-                "python-modules": ["airflow.providers.databricks.triggers.databricks"],
+                "python-modules": [
+                    "airflow.providers.databricks.triggers.databricks",
+                    "airflow.providers.databricks.triggers.agent",
+                    "airflow.providers.databricks.triggers.genie",
+                ],
             }
         ],
         "sensors": [
             {
                 "integration-name": "Databricks",
                 "python-modules": [
+                    "airflow.providers.databricks.sensors.databricks",
                     "airflow.providers.databricks.sensors.databricks_sql",
                     "airflow.providers.databricks.sensors.databricks_partition",
                 ],
@@ -168,8 +158,39 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.databricks.hooks.databricks.DatabricksHook",
+                "hook-name": "Databricks",
                 "connection-type": "databricks",
-            }
+            },
+            {
+                "hook-class-name": "airflow.providers.databricks.hooks.model_serving.PydanticAIDatabricksHook",
+                "hook-name": "Pydantic AI (Databricks Model Serving)",
+                "connection-type": "pydanticai_databricks",
+                "external-services": ["Databricks Model Serving"],
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema", "port", "login", "host", "password"],
+                    "relabeling": {},
+                    "placeholders": {
+                        "extra": '{"model": "my-serving-endpoint", "databricks_conn_id": "databricks_default"}'
+                    },
+                },
+                "conn-fields": {
+                    "model": {
+                        "label": "Model",
+                        "description": "Serving endpoint name (e.g. my-serving-endpoint)",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "fallback_conn_ids": {
+                        "label": "Fallback Connections",
+                        "description": "Connection IDs to fail over to, in order, while this provider is unavailable.",
+                        "schema": {"type": ["array", "null"], "items": {"type": "string"}},
+                    },
+                    "databricks_conn_id": {
+                        "label": "Databricks Connection ID",
+                        "description": "Connection ID of an existing Databricks connection to source credentials from.",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                },
+            },
         ],
         "plugins": [
             {
@@ -178,21 +199,4 @@ def get_provider_info():
             }
         ],
         "extra-links": ["airflow.providers.databricks.operators.databricks.DatabricksJobRunLink"],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-common-sql>=1.20.0",
-            "requests>=2.31.0,<3",
-            "databricks-sql-connector>=3.0.0",
-            "aiohttp>=3.9.2, <4",
-            "mergedeep>=1.3.4",
-            "pandas>=2.1.2,<2.2",
-            "pyarrow>=14.0.1",
-        ],
-        "optional-dependencies": {
-            "sdk": ["databricks-sdk==0.10.0"],
-            "azure-identity": ["azure-identity>=1.3.1"],
-            "fab": ["apache-airflow-providers-fab"],
-            "standard": ["apache-airflow-providers-standard"],
-        },
-        "devel-dependencies": ["deltalake>=0.12.0"],
     }

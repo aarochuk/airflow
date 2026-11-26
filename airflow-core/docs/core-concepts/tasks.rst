@@ -22,13 +22,13 @@ A Task is the basic unit of execution in Airflow. Tasks are arranged into :doc:`
 
 There are three basic kinds of Task:
 
-* :doc:`operators`, predefined task templates that you can string together quickly to build most parts of your dags.
+* :doc:`operators`, predefined task templates that you can string together quickly to build most parts of your Dags.
 
 * :doc:`sensors`, a special subclass of Operators which are entirely about waiting for an external event to happen.
 
 * A :doc:`taskflow`-decorated ``@task``, which is a custom Python function packaged up as a Task.
 
-Internally, these are all actually subclasses of Airflow's ``BaseOperator``, and the concepts of Task and Operator are somewhat interchangeable, but it's useful to think of them as separate concepts - essentially, Operators and Sensors are *templates*, and when you call one in a DAG file, you're making a Task.
+Internally, these are all actually subclasses of Airflow's ``BaseOperator``, and the concepts of Task and Operator are somewhat interchangeable, but it's useful to think of them as separate concepts - essentially, Operators and Sensors are *templates*, and when you call one in a Dag file, you're making a Task.
 
 
 Relationships
@@ -63,9 +63,9 @@ Tasks don't pass information to each other by default, and run entirely independ
 Task Instances
 --------------
 
-Much in the same way that a DAG is instantiated into a :ref:`DAG Run <concepts-dag-run>` each time it runs, the tasks under a DAG are instantiated into *Task Instances*.
+Much in the same way that a Dag is instantiated into a :ref:`Dag Run <concepts-dag-run>` each time it runs, the tasks under a Dag are instantiated into *Task Instances*.
 
-An instance of a Task is a specific run of that task for a given DAG (and thus for a given data interval). They are also the representation of a Task that has *state*, representing what stage of the lifecycle it is in.
+An instance of a Task is a specific run of that task for a given Dag (and thus for a given data interval). They are also the representation of a Task that has *state*, representing what stage of the lifecycle it is in.
 
 .. _concepts:task-states:
 
@@ -78,16 +78,38 @@ The possible states for a Task Instance are:
 * ``success``: The task finished running without errors
 * ``restarting``: The task was externally requested to restart when it was running
 * ``failed``: The task had an error during execution and failed to run
-* ``skipped``: The task was skipped due to branching, LatestOnly, or similar.
+* ``skipped``: The task was skipped due to branching, LatestOnly, or similar, or was :ref:`marked as skipped manually <concepts:task-mark-as-skipped>`.
 * ``upstream_failed``: An upstream task failed and the :ref:`Trigger Rule <concepts:trigger-rules>` says we needed it
 * ``up_for_retry``: The task failed, but has retry attempts left and will be rescheduled.
-* ``up_for_reschedule``: The task is a :doc:`Sensor <sensors>` that is in ``reschedule`` mode
+* ``up_for_reschedule``: The task is a :doc:`Sensor <sensors>` in ``reschedule`` mode, or its :ref:`retry policy rescheduled it <concepts:retry-policies-reschedule>`, and will run again later
 * ``deferred``: The task has been :doc:`deferred to a trigger <../authoring-and-scheduling/deferring>`
-* ``removed``: The task has vanished from the DAG since the run started
+* ``awaiting_input``: The task is a :doc:`Human-in-the-loop <../tutorial/hitl>` task waiting for a human response. It is managed by the scheduler and uses neither a worker slot nor the triggerer.
+* ``removed``: The task has vanished from the Dag since the run started
 
 .. image:: /img/diagram_task_lifecycle.png
 
 Ideally, a task should flow from ``none``, to ``scheduled``, to ``queued``, to ``running``, and finally to ``success``.
+
+.. _concepts:task-mark-as-skipped:
+
+Marking a Task Instance as skipped
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+From the UI, an operator can mark a Task Instance as ``skipped`` to record that it was intentionally not
+run for a Dag Run, for example during incident recovery when an input it waits for is known to never
+arrive. Unlike marking it as ``success``, this does not suggest the task's work was done.
+
+Keep the following in mind:
+
+* Only Task Instances that have not started running can be marked as skipped: those with no state, or in
+  the ``scheduled``, ``up_for_retry`` or ``up_for_reschedule`` state.
+* Only the selected Task Instance is affected; upstream, downstream, past and future Task Instances are
+  not changed.
+* Marking a task as skipped does not bypass the Dag's dependencies. Downstream tasks are still evaluated
+  according to their :ref:`trigger rules <concepts:trigger-rules>`. With the default ``all_success`` rule,
+  the skip cascades and downstream tasks are skipped as well. For downstream tasks to still run, they need
+  a trigger rule that tolerates skipped upstream tasks, such as ``none_failed`` or
+  ``none_failed_min_one_success``.
 
 When any custom Task (Operator) is running, it will get a copy of the task instance passed to it; as well as being able to inspect task metadata, it also contains methods for things like :doc:`xcoms`.
 
@@ -101,9 +123,9 @@ Firstly, it can have *upstream* and *downstream* tasks::
 
     task1 >> task2 >> task3
 
-When a DAG runs, it will create instances for each of these tasks that are upstream/downstream of each other, but which all have the same data interval.
+When a Dag runs, it will create instances for each of these tasks that are upstream/downstream of each other, but which all have the same data interval.
 
-There may also be instances of the *same task*, but for different data intervals - from other runs of the same DAG. We call these *previous* and *next* - it is a different relationship to *upstream* and *downstream*!
+There may also be instances of the *same task*, but for different data intervals - from other runs of the same Dag. We call these *previous* and *next* - it is a different relationship to *upstream* and *downstream*!
 
 .. note::
 
@@ -118,7 +140,10 @@ Timeouts
 If you want a task to have a maximum runtime, set its ``execution_timeout`` attribute to a ``datetime.timedelta`` value
 that is the maximum permissible runtime. This applies to all Airflow tasks, including sensors. ``execution_timeout`` controls the
 maximum time allowed for every execution. If ``execution_timeout`` is breached, the task times out and
-``AirflowTaskTimeout`` is raised.
+``AirflowTaskTimeout`` is raised. The task supervisor also enforces the timeout from outside the task process:
+if the task has not stopped within ``[core] killed_task_cleanup_time`` seconds after ``execution_timeout`` elapses
+(for example because it is blocked in native code), the supervisor sends it SIGTERM, and SIGKILL after the same
+period again. Tasks run by a language SDK do not raise ``AirflowTaskTimeout`` and are stopped only this way.
 
 In addition, sensors have a ``timeout`` parameter. This only matters for sensors in ``reschedule`` mode. ``timeout`` controls the maximum
 time allowed for the sensor to succeed. If ``timeout`` is breached, ``AirflowSensorTimeout`` will be raised and the sensor fails immediately
@@ -153,7 +178,7 @@ is periodically executed and rescheduled until it succeeds.
 SLAs
 ----
 
-The SLA feature from Airflow 2 has been removed in 3.0 and will be replaced with a new implementation in Airflow 3.1
+The SLA feature from Airflow 2 has been removed in 3.0 and was replaced in Airflow 3.1 with :doc:`Deadlines Alerts <../howto/deadline-alerts>`.
 
 Special Exceptions
 ------------------
@@ -164,6 +189,297 @@ If you want to control your task's state from within custom Task/Operator code, 
 * ``AirflowFailException`` will mark the current task as failed *ignoring any remaining retry attempts*
 
 These can be useful if your code has extra knowledge about its environment and wants to fail/skip faster - e.g., skipping when it knows there's no data available, or fast-failing when it detects its API key is invalid (as that will not be fixed by a retry).
+
+.. _concepts:retry-policies:
+
+Retry Policies
+--------------
+
+By default, Airflow retries failed tasks with a fixed count and delay regardless of the error type.
+A **retry policy** lets you configure per-exception retry behaviour as a parameter on any task or operator,
+without modifying task code.
+
+Define a policy with rules that map exception types to actions, then apply it to a task:
+
+.. exampleinclude:: /../src/airflow/example_dags/example_retry_policy.py
+    :language: python
+    :start-after: [START retry_policy_definition]
+    :end-before: [END retry_policy_definition]
+
+.. exampleinclude:: /../src/airflow/example_dags/example_retry_policy.py
+    :language: python
+    :start-after: [START retry_policy_on_task]
+    :end-before: [END retry_policy_on_task]
+
+How it works
+~~~~~~~~~~~~
+
+The policy runs in the **task worker process** (never the scheduler) between catching the
+exception and deciding the task's next state. A decision that has a reason is logged in the
+task logs as ``Retry policy decision action=<action> reason=<reason>``. A matching
+``RetryRule`` always gives one (its ``reason``, or ``Matched rule for <exception type>``), and
+so does ``ChainRetryPolicy``. When no rule matches, or a custom policy returns a decision
+without a reason, no line is logged.
+
+When a task fails, the policy evaluates the exception and returns one of four actions:
+
+* **RETRY** -- retry the task, optionally with a custom delay that overrides ``retry_delay``.
+  The retry is still subject to the task's ``retries`` count -- a policy can fail earlier but
+  cannot extend past the configured maximum.
+* **FAIL** -- fail immediately, skipping any remaining retries.
+* **RESCHEDULE** -- run the task again later without using a retry, within bounds the policy
+  sets. See :ref:`concepts:retry-policies-reschedule`.
+* **DEFAULT** -- fall through to the standard retry logic (``retries`` count and ``retry_delay``).
+
+Rules are evaluated in order; the first matching rule wins.
+If no rule matches, the policy returns **DEFAULT** (standard retry behaviour).
+
+Exception matching
+~~~~~~~~~~~~~~~~~~
+
+Exception types can be specified as Python classes or dotted import path strings
+(e.g. ``"requests.exceptions.HTTPError"``). String paths are validated at DAG parse
+time -- a path without a dot raises ``ValueError`` immediately, and unresolvable paths
+produce a warning.
+
+By default, rules use ``isinstance`` matching, so a rule for ``OSError`` also matches
+``ConnectionError`` (a subclass). Set ``match_subclasses=False`` for exact type matching:
+
+.. code-block:: python
+
+    RetryRule(exception=OSError, match_subclasses=False)  # only OSError, not subclasses
+
+Composition with existing parameters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Parameter
+     - Behaviour when ``retry_policy`` is set
+   * - ``retries``
+     - Still the maximum retry count. Policy can fail earlier but not exceed it. A
+       reschedule leaves the retry count unchanged.
+   * - ``retry_delay`` / ``retry_exponential_backoff`` / ``max_retry_delay``
+     - Used when the policy returns DEFAULT or when ``RetryDecision.retry_delay`` is None.
+       A reschedule without its own delay waits ``retry_delay``, without backoff.
+   * - ``on_retry_callback``
+     - Fires on retries only, including policy-driven retries.
+   * - ``AirflowFailException``, ``AirflowSensorTimeout``, ``AirflowTaskTerminated``
+     - Always take precedence. The task fails without consulting the policy.
+
+.. _concepts:retry-policies-reschedule:
+
+Rescheduling without using a retry
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 3.4.0
+
+Some failures mean "not yet" rather than "this went wrong": the system the task drives is
+out of capacity, such as a Kubernetes namespace whose resource quota is full or a warehouse
+with no free slots. Retrying spends the task's ``retries`` on waiting, so a real failure
+later has none left, and ``on_retry_callback`` fires every time.
+
+**RESCHEDULE** puts the task in ``up_for_reschedule`` instead, the same state a sensor in
+``mode="reschedule"`` uses between pokes. The try number and ``retries`` stay as they are, and
+it works with ``retries=0``. Like a sensor's reschedule, it counts as waiting rather than
+failing, so ``on_retry_callback``, ``on_failure_callback``, the ``on_task_instance_failed``
+listener hook, ``email_on_retry`` and the ``ti_failures`` and ``operator_failures`` metrics
+wait until a bound is reached. The failure then goes through the standard retry logic, and
+they run as they would for any retry or failure.
+
+.. exampleinclude:: /../src/airflow/example_dags/example_retry_policy.py
+    :language: python
+    :start-after: [START retry_policy_reschedule]
+    :end-before: [END retry_policy_reschedule]
+
+A RESCHEDULE always has a bound, so a rule matching a broad exception cannot loop forever:
+
+* ``max_reschedules`` -- how many times the try may be rescheduled.
+* ``reschedule_timeout`` -- how long after the first reschedule the try may keep being
+  rescheduled.
+
+Set either or both; a ``RetryRule`` or ``RetryDecision`` with RESCHEDULE and neither bound
+raises ``ValueError`` when it is created. For a ``RetryRule`` that is when the Dag is parsed. A
+custom policy creates its decision when the task fails, so there the error is logged and the
+task falls back to the standard retry logic, as it does for any policy that raises.
+
+Both bounds count every reschedule of this try, including a sensor's pokes, so a retry starts
+them afresh. Once a bound is reached, the failure goes through the standard retry logic, and
+the task's ``retry_reason`` says which bound stopped it, for example
+``Reschedule limit reached (reschedule_timeout=4:00:00): Warehouse busy``. A RESCHEDULE that
+goes ahead writes its reason to the task log.
+
+Use RESCHEDULE when an external system the task drives is not ready yet. The policy runs in
+the worker and sees only the exception the task raised, so a disruption of the Airflow worker
+itself, such as a preempted worker pod, follows the normal retry path.
+
+Telling "out of capacity" apart from a real failure often needs more than the exception type.
+A custom policy can look at the exception itself; for example, a Kubernetes API rejection for
+a full namespace quota:
+
+.. code-block:: python
+
+    from datetime import timedelta
+
+    from kubernetes.client.exceptions import ApiException
+
+    from airflow.sdk import RetryDecision, RetryPolicy
+
+
+    class NamespaceQuotaPolicy(RetryPolicy):
+        """Wait for quota to free up instead of spending retries on it."""
+
+        def evaluate(self, exception, try_number, max_tries, context=None):
+            if (
+                isinstance(exception, ApiException)
+                and exception.status == 403
+                and "exceeded quota" in (exception.body or "")
+            ):
+                return RetryDecision.reschedule(
+                    timedelta(minutes=10),
+                    reschedule_timeout=timedelta(hours=4),
+                    reason="Namespace quota full",
+                )
+            return RetryDecision.default()
+
+Reusable policies
+~~~~~~~~~~~~~~~~~
+
+Define a policy once and share it across DAGs via ``default_args`` or a shared module:
+
+.. exampleinclude:: /../src/airflow/example_dags/example_retry_policy.py
+    :language: python
+    :start-after: [START retry_policy_reusable]
+    :end-before: [END retry_policy_reusable]
+
+Mapped tasks
+~~~~~~~~~~~~
+
+Policies work with task mapping. The policy applies per mapped task
+instance -- if instance 2 of 10 hits FAIL, the other 9 continue independently. Using
+``STANDARD_RETRY_POLICY`` from the previous example:
+
+.. code-block:: python
+
+    from airflow.sdk import task
+
+
+    @task(retry_policy=STANDARD_RETRY_POLICY)
+    def my_mapped_task(input): ...
+
+
+    my_mapped_task.expand(input=[1, 2, 3])
+
+For a classic operator, pass the policy to ``.partial()``:
+
+.. code-block:: python
+
+    from airflow.providers.standard.operators.bash import BashOperator
+
+    BashOperator.partial(task_id="run", retry_policy=STANDARD_RETRY_POLICY).expand(
+        bash_command=["echo 1", "echo 2", "echo 3"],
+    )
+
+The policy is set once on the task, in ``@task(...)`` or ``.partial()``; all
+mapped instances share one policy. Per-index variation is not supported on
+``.expand()``, but the policy's ``evaluate()`` method receives the exception,
+``try_number``, and full context, so per-index branching can be done inside the
+policy if needed.
+
+Chaining policies
+~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 3.4.0
+
+``ChainRetryPolicy`` consults policies in order. The first RETRY, FAIL, or RESCHEDULE wins; a
+policy that returns DEFAULT has nothing to add and the next one is asked. When every
+policy returns DEFAULT, the task's own ``retries`` and ``retry_delay`` apply. Every
+policy sees the original task exception.
+
+.. exampleinclude:: /../src/airflow/example_dags/example_retry_policy.py
+    :language: python
+    :start-after: [START retry_policy_chain]
+    :end-before: [END retry_policy_chain]
+
+This is how to put a cheap, deterministic policy in front of a slow or costly one, or
+to give a policy that can fail on its own (one that calls a model, for instance) a
+deterministic floor behind it. The policies need not know about each other, and they can
+come from different packages.
+
+Two consequences of "DEFAULT means next" to keep in mind:
+
+* A ``RetryRule`` with ``action=RetryAction.DEFAULT`` passes control on rather than
+  ending the chain. Its ``retry_delay`` is dropped, as it is on any DEFAULT.
+* An ``ExceptionRetryPolicy`` with ``default=RetryAction.FAIL`` fails every exception
+  its rules do not match, so it ends the chain wherever it sits.
+
+A policy that raises an ordinary exception, or returns something other than a
+``RetryDecision``, is logged and treated as DEFAULT, so one broken policy does not take the
+rules after it down with it. The winning decision's reason names the policy that decided and
+then what the earlier ones said, for example ``HTTPStatusRetryPolicy: HTTP 404 (after
+ExceptionRetryPolicy: no decision)``. A decision with no reason of its own shows its action
+instead, such as ``HTTPStatusRetryPolicy: retry``. That string is the task's ``retry_reason``
+on a FAIL as well as a RETRY; when no policy decided, it appears only in the task log as the
+``Retry policy decision`` line.
+
+Custom retry policies
+~~~~~~~~~~~~~~~~~~~~~
+
+For advanced cases, subclass :class:`~airflow.sdk.definitions.retry_policy.RetryPolicy`
+and implement ``evaluate()``. Subclassing is the right choice when you need to inspect
+exception *attributes* (status codes, response headers, payloads) that the declarative
+``ExceptionRetryPolicy`` rules cannot capture. The method receives the exception, try
+number, max tries, and the full Airflow context (``dag_run``, ``params``, etc.):
+
+.. code-block:: python
+
+    from datetime import timedelta
+
+    import requests
+
+    from airflow.sdk import RetryDecision, RetryPolicy
+
+
+    class HTTPStatusRetryPolicy(RetryPolicy):
+        """Route retry decisions by HTTP status code, honouring Retry-After on 429s."""
+
+        def evaluate(self, exception, try_number, max_tries, context=None):
+            if isinstance(exception, requests.HTTPError) and exception.response is not None:
+                status = exception.response.status_code
+                if status == 429:  # rate limited -- honour Retry-After header
+                    retry_after = int(exception.response.headers.get("Retry-After", 60))
+                    return RetryDecision.retry(delay=timedelta(seconds=retry_after))
+                if 500 <= status < 600:  # server error -- worth retrying
+                    return RetryDecision.retry()
+                if 400 <= status < 500:  # client error -- not retryable
+                    return RetryDecision.fail(reason=f"HTTP {status}")
+            return RetryDecision.default()
+
+A second pattern uses the run ``context`` to make decisions based on how the
+DAG was triggered:
+
+.. code-block:: python
+
+    from airflow.sdk import RetryDecision, RetryPolicy
+
+
+    class BackfillAwareRetryPolicy(RetryPolicy):
+        """Fail fast during backfills so historical errors surface immediately."""
+
+        def evaluate(self, exception, try_number, max_tries, context=None):
+            if context and context["dag_run"].run_type == "backfill":
+                return RetryDecision.fail(reason="Backfill run -- not retrying")
+            return RetryDecision.default()
+
+A retry policy only decides whether and when a task gets another attempt. It
+receives the full run ``context``, so it can inspect checkpointed progress
+through ``context["task_state_store"]`` when making that decision, but it
+never persists or restores that progress itself -- resuming from a checkpoint
+is the task's own work. For a task that also needs to resume from where it
+left off, pair a retry policy with the task state store described in
+:ref:`concepts-resumable-tasks-retry-policies`.
 
 .. _concepts:task-instance-heartbeat-timeout:
 
@@ -196,11 +512,11 @@ If you'd like to reproduce task instance heartbeat timeouts for development/test
     export AIRFLOW__SCHEDULER__TASK_INSTANCE_HEARTBEAT_TIMEOUT_DETECTION_INTERVAL=5
 
 
-2. Have a DAG with a task that takes about 10 minutes to complete(i.e. a long-running task). For example, you could use the below DAG:
+2. Have a Dag with a task that takes about 10 minutes to complete(i.e. a long-running task). For example, you could use the below Dag:
 
 .. code-block:: python
 
-    from airflow.decorators import dag
+    from airflow.sdk import dag
     from airflow.providers.standard.operators.bash import BashOperator
     from datetime import datetime
 
@@ -216,7 +532,7 @@ If you'd like to reproduce task instance heartbeat timeouts for development/test
     sleep_dag()
 
 
-Run the above DAG and wait for a while. The ``TaskInstance`` will be marked failed after <task_instance_heartbeat_timeout> seconds.
+Run the above Dag and wait for a while. The ``TaskInstance`` will be marked failed after <task_instance_heartbeat_timeout> seconds.
 
 
 

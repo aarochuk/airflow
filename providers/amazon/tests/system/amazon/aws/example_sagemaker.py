@@ -24,10 +24,8 @@ from tempfile import NamedTemporaryFile
 from textwrap import dedent
 
 import boto3
+from botocore.exceptions import ClientError
 
-from airflow.decorators import task
-from airflow.models.baseoperator import chain
-from airflow.models.dag import DAG
 from airflow.providers.amazon.aws.operators.s3 import (
     S3CreateBucketOperator,
     S3CreateObjectOperator,
@@ -51,8 +49,22 @@ from airflow.providers.amazon.aws.sensors.sagemaker import (
     SageMakerTransformSensor,
     SageMakerTuningSensor,
 )
-from airflow.providers.standard.operators.python import get_current_context
-from airflow.utils.trigger_rule import TriggerRule
+
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import DAG, chain, task
+else:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
+    from airflow.models.baseoperator import chain  # type: ignore[attr-defined,no-redef]
+    from airflow.models.dag import DAG  # type: ignore[attr-defined,no-redef,assignment]
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.amazon.aws.utils import ENV_ID_KEY, SystemTestContextBuilder, prune_logs
 
@@ -81,6 +93,8 @@ SAMPLE_SIZE = 600
 PREPROCESS_SCRIPT_TEMPLATE = dedent("""
     import numpy as np
     import pandas as pd
+    import json
+    import os
 
     def main():
         # Load the dataset from {input_path}/input.csv, split it into train/test
@@ -100,11 +114,51 @@ PREPROCESS_SCRIPT_TEMPLATE = dedent("""
         data_train.to_csv('{output_path}/train.csv', index=False, header=False)
         data_test.to_csv('{output_path}/test.csv', index=False, header=False)
 
+        # Write evaluation metrics for output_files_to_xcom testing
+        evaluation_dir = '{output_path}/evaluation'
+        os.makedirs(evaluation_dir, exist_ok=True)
+        metrics = {{"metrics": {{"mse": {{"value": 5.332878}}, "rmse": {{"value": 2.309302}}}}}}
+        with open(os.path.join(evaluation_dir, 'evaluation.json'), 'w') as f:
+            json.dump(metrics, f)
+
         print('Preprocessing Done.')
 
     if __name__ == "__main__":
         main()
 """)
+
+
+def _install_aws_cli_if_needed():
+    """
+    Check if the AWS CLI tool is installed and install it if needed.
+
+    The AmazonLinux image has flip-flopped a couple of times on whether this is included in the base image
+    or not, so to future-proof this we are going to check if it's installed and install if necessary.
+    """
+    check = subprocess.Popen(
+        "aws --version",
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _, stderr = check.communicate()
+
+    if check.returncode == 0:
+        logger.info("AWS CLI tool is installed.")
+        return
+
+    if "aws: not found" in str(stderr):
+        logger.info("AWS CLI tool not found; installing.")
+        subprocess.Popen(
+            """
+                curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+                unzip awscliv2.zip
+                sudo ./aws/install
+            """,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).communicate()
 
 
 def _create_ecr_repository(repo_name):
@@ -249,7 +303,16 @@ def set_up(env_id, role_arn):
                         "S3UploadMode": "EndOfJob",
                     },
                     "AppManaged": False,
-                }
+                },
+                {
+                    "OutputName": "evaluation",
+                    "S3Output": {
+                        "S3Uri": f"s3://{bucket_name}/{env_id}/evaluation",
+                        "LocalPath": f"{processing_local_output_path}/evaluation",
+                        "S3UploadMode": "EndOfJob",
+                    },
+                    "AppManaged": False,
+                },
             ]
         },
         "ProcessingResources": {
@@ -261,6 +324,14 @@ def set_up(env_id, role_arn):
         },
         "RoleArn": role_arn,
     }
+
+    output_files_to_xcom_config = [
+        {
+            "result_name": "EvaluationReport",
+            "output_name": "evaluation",
+            "file_name": "evaluation.json",
+        }
+    ]
 
     training_data_source = {
         "CompressionType": "None",
@@ -383,7 +454,15 @@ def set_up(env_id, role_arn):
     preprocess_script = PREPROCESS_SCRIPT_TEMPLATE.format(
         input_path=processing_local_input_path, output_path=processing_local_output_path
     )
+    _install_aws_cli_if_needed()
     _build_and_upload_docker_image(preprocess_script, ecr_repository_uri)
+
+    from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+    if AIRFLOW_V_3_0_PLUS:
+        from airflow.sdk import get_current_context
+    else:
+        from airflow.operators.python import get_current_context  # type: ignore[attr-defined,no-redef]
 
     ti = get_current_context()["ti"]
     ti.xcom_push(key="docker_image", value=ecr_repository_uri)
@@ -391,6 +470,7 @@ def set_up(env_id, role_arn):
     ti.xcom_push(key="raw_data_s3_key", value=raw_data_s3_key)
     ti.xcom_push(key="ecr_repository_name", value=ecr_repository_name)
     ti.xcom_push(key="processing_config", value=processing_config)
+    ti.xcom_push(key="output_files_to_xcom_config", value=output_files_to_xcom_config)
     ti.xcom_push(key="processing_job_name", value=processing_job_name)
     ti.xcom_push(key="input_data_uri", value=input_data_uri)
     ti.xcom_push(key="output_data_uri", value=f"s3://{bucket_name}/{training_output_s3_key}")
@@ -407,6 +487,23 @@ def set_up(env_id, role_arn):
     ti.xcom_push(key="tuning_job_name", value=tuning_job_name)
     ti.xcom_push(key="transform_config", value=transform_config)
     ti.xcom_push(key="transform_job_name", value=transform_job_name)
+
+
+@task(trigger_rule=TriggerRule.ALL_DONE)
+def stop_automl_job(job_name: str):
+    try:
+        logger.info("Stopping AutoML job: %s", job_name)
+        boto3.client("sagemaker").stop_auto_ml_job(AutoMLJobName=job_name)
+    except ClientError as e:
+        # If the job has already completed, boto will raise a ValidationException.
+        # In this case, consider that a successful result.
+        if (
+            e.response["Error"]["Code"] == "ValidationException"
+            and "already reached a terminal state" in e.response["Error"]["Message"]
+        ):
+            logger.info("AutoML job %s already completed.", job_name)
+        else:
+            raise e
 
 
 @task(trigger_rule=TriggerRule.ALL_DONE)
@@ -467,7 +564,6 @@ with DAG(
     dag_id=DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),
-    tags=["example"],
     catchup=False,
 ) as dag:
     test_context = sys_test_context_task()
@@ -531,6 +627,27 @@ with DAG(
         task_id="await_preprocess", job_name=test_setup["processing_job_name"]
     )
     # [END howto_sensor_sagemaker_processing]
+
+    # [START howto_operator_sagemaker_processing_output_files]
+    preprocess_with_output_files = SageMakerProcessingOperator(
+        task_id="preprocess_with_output_files",
+        config=test_setup["processing_config"],
+        output_files_to_xcom=test_setup["output_files_to_xcom_config"],
+    )
+    # [END howto_operator_sagemaker_processing_output_files]
+
+    @task
+    def validate_output_files(xcom_result):
+        """Verify output files were read from S3 and included in XCom."""
+        assert "OutputFiles" in xcom_result, (
+            f"OutputFiles missing from XCom. Got keys: {list(xcom_result.keys())}"
+        )
+        evaluation_report = xcom_result["OutputFiles"]["EvaluationReport"]
+        assert "metrics" in evaluation_report, f"metrics key missing. Got: {evaluation_report}"
+        assert evaluation_report["metrics"]["mse"]["value"] == 5.332878
+        assert evaluation_report["metrics"]["rmse"]["value"] == 2.309302
+
+    validate_pf = validate_output_files(preprocess_with_output_files.output)
 
     # [START howto_operator_sagemaker_training]
     train_model = SageMakerTrainingOperator(
@@ -635,6 +752,8 @@ with DAG(
         create_experiment,
         preprocess_raw_data,
         await_preprocess,
+        preprocess_with_output_files,
+        validate_pf,
         train_model,
         await_training,
         create_model,
@@ -648,6 +767,7 @@ with DAG(
         delete_model_group(test_setup["model_package_group_name"], register_model.output),
         delete_model,
         delete_bucket,
+        stop_automl_job(test_setup["auto_ml_job_name"]),
         delete_experiments(
             [
                 test_setup["experiment_name"],
@@ -667,5 +787,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

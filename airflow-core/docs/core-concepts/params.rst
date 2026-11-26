@@ -20,27 +20,26 @@
 Params
 ======
 
-Params enable you to provide runtime configuration to tasks. You can configure default Params in your DAG
-code and supply additional Params, or overwrite Param values, at runtime when you trigger a DAG.
-:class:`~airflow.sdk.definitions.param.Param` values are validated with JSON Schema. For scheduled DAG runs,
+Params enable you to provide runtime configuration to tasks. You can configure default Params in your Dag
+code and supply additional Params, or overwrite Param values, at runtime when you trigger a Dag.
+:class:`~airflow.sdk.definitions.param.Param` values are validated with JSON Schema. For scheduled Dag runs,
 default :class:`~airflow.sdk.definitions.param.Param` values are used.
 
 Also defined Params are used to render a nice UI when triggering manually.
-When you trigger a DAG manually, you can modify its Params before the dagrun starts.
-If the user-supplied values don't pass validation, Airflow shows a warning instead of creating the dagrun.
+When you trigger a Dag manually, you can modify its Params before the Dag run starts.
+If the user-supplied values don't pass validation, Airflow shows a warning instead of creating the Dag run.
 
-DAG-level Params
+Dag-level Params
 ----------------
 
-To add Params to a :class:`~airflow.models.dag.DAG`, initialize it with the ``params`` kwarg.
+To add Params to a :class:`~airflow.sdk.DAG`, initialize it with the ``params`` kwarg.
 Use a dictionary that maps Param names to either a :class:`~airflow.sdk.definitions.param.Param` or an object indicating the parameter's default value.
 
 .. code-block::
    :emphasize-lines: 7-10
 
-    from airflow import DAG
-    from airflow.decorators import task
-    from airflow.sdk import Param
+    from airflow.sdk import DAG, task, Param, get_current_context
+    import logging
 
     with DAG(
         "the_dag",
@@ -51,15 +50,18 @@ Use a dictionary that maps Param names to either a :class:`~airflow.sdk.definiti
     ) as dag:
 
         @task.python
-        def example_task(params: dict):
+        def example_task():
+            ctx = get_current_context()
+            logger = logging.getLogger("airflow.task")
+
             # This will print the default value, 6:
-            dag.log.info(dag.params['my_int_param'])
+            logger.info(ctx["dag"].params["my_int_param"])
 
             # This will print the manually-provided value, 42:
-            dag.log.info(params['my_int_param'])
+            logger.info(ctx["params"]["my_int_param"])
 
             # This will print the default value, 5, since it wasn't provided manually:
-            dag.log.info(params['x'])
+            logger.info(ctx["params"]["x"])
 
         example_task()
 
@@ -70,9 +72,9 @@ Use a dictionary that maps Param names to either a :class:`~airflow.sdk.definiti
 
 .. note::
 
-   DAG-level parameters are the default values passed on to tasks. These should not be confused with values manually
+   Dag-level parameters are the default values passed on to tasks. These should not be confused with values manually
    provided through the UI form or CLI, which exist solely within the context of a :class:`~airflow.models.dagrun.DagRun`
-   and a :class:`~airflow.models.taskinstance.TaskInstance`. This distinction is crucial for TaskFlow dags, which may
+   and a :class:`~airflow.models.taskinstance.TaskInstance`. This distinction is crucial for TaskFlow Dags, which may
    include logic within the ``with DAG(...) as dag:`` block. In such cases, users might try to access the manually-provided
    parameter values using the ``dag`` object, but this will only ever contain the default values. To ensure that the
    manually-provided values are accessed, use a template variable such as ``params`` or ``ti`` within your task.
@@ -93,7 +95,7 @@ You can also add Params to individual tasks.
         python_callable=print_my_int_param,
     )
 
-Task-level params take precedence over DAG-level params, and user-supplied params (when triggering the DAG)
+Task-level params take precedence over Dag-level params, and user-supplied params (when triggering the Dag)
 take precedence over task-level params.
 
 Referencing Params in a Task
@@ -115,7 +117,7 @@ Params can be referenced in :ref:`templated strings <templates-ref>` under ``par
     )
 
 Even though Params can use a variety of types, the default behavior of templates is to provide your task with a string.
-You can change this by setting ``render_template_as_native_obj=True`` while initializing the :class:`~airflow.models.dag.DAG`.
+You can change this by setting ``render_template_as_native_obj=True`` while initializing the :class:`~airflow.sdk.DAG`.
 
 .. code-block::
    :emphasize-lines: 4
@@ -142,6 +144,11 @@ This way, the :class:`~airflow.sdk.definitions.param.Param`'s type is respected 
             lambda my_int_param: print(type(my_int_param))
         ),
     )
+
+Because ``render_template_as_native_obj=True`` uses Jinja's native rendering, values that look like
+Python literals can also be converted. For example, a string value of ``"42"`` may be rendered as the
+integer ``42``. Leave native rendering disabled, use a callable template field, or quote the value
+explicitly when the task must receive a string.
 
 Another way to access your param is via a task's ``context`` kwarg.
 
@@ -189,9 +196,9 @@ JSON Schema Validation
     ):
 
 .. note::
-    If ``schedule`` is defined for a DAG, params with defaults must be valid. This is validated during DAG parsing.
-    If ``schedule=None`` then params are not validated during DAG parsing but before triggering a DAG.
-    This is useful in cases where the DAG author does not want to provide defaults but wants to force users provide valid parameters
+    If ``schedule`` is defined for a Dag, params with defaults must be valid. This is validated during Dag parsing.
+    If ``schedule=None`` then params are not validated during Dag parsing but before triggering a Dag.
+    This is useful in cases where the Dag author does not want to provide defaults but wants to force users provide valid parameters
     at time of trigger.
 
 .. note::
@@ -203,15 +210,15 @@ Use Params to Provide a Trigger UI Form
 
 .. versionadded:: 2.6.0
 
-:class:`~airflow.models.dag.DAG` level params are used to render a user friendly trigger form.
-This form is provided when a user clicks on the "Trigger DAG" button.
+:class:`~airflow.sdk.DAG` level params are used to render a user friendly trigger form.
+This form is provided when a user clicks on the "Trigger Dag" button.
 
-The Trigger UI Form is rendered based on the pre-defined DAG Params. If the DAG has no params defined, the trigger form is skipped.
+The Trigger UI Form is rendered based on the pre-defined Dag Params. If the Dag has no params defined, the trigger form is skipped.
 The form elements can be defined with the :class:`~airflow.sdk.definitions.param.Param` class and attributes define how a form field is displayed.
 
 The following features are supported in the Trigger UI Form:
 
-- Direct scalar values (boolean, int, string, lists, dicts) from top-level DAG params are auto-boxed into :class:`~airflow.sdk.definitions.param.Param` objects.
+- Direct scalar values (boolean, int, string, lists, dicts) from top-level Dag params are auto-boxed into :class:`~airflow.sdk.definitions.param.Param` objects.
   From the native Python data type the ``type`` attribute is auto detected. So these simple types render to a corresponding field type.
   The name of the parameter is used as label and no further validation is made, all values are treated as optional.
 - If you use the :class:`~airflow.sdk.definitions.param.Param` class as definition of the parameter value, the following attributes can be added:
@@ -220,7 +227,7 @@ The following features are supported in the Trigger UI Form:
     If no ``title`` is defined the parameter name/key is used instead.
   - The :class:`~airflow.sdk.definitions.param.Param` attribute ``description`` is rendered below an entry field as help text in gray color.
     If you want to provide special formatting or links you need to use the Param attribute
-    ``description_md``. See tutorial DAG :ref:`Params UI example DAG <params-ui-tutorial>` for an example.
+    ``description_md``. See tutorial Dag :ref:`Params UI example Dag <params-ui-tutorial>` for an example.
   - The :class:`~airflow.sdk.definitions.param.Param` attribute ``type`` influences how a field is rendered. The following types are supported:
 
       .. list-table::
@@ -238,11 +245,26 @@ The following features are supported in the Trigger UI Form:
             * | ``format="date"``: Generate a date-picker
               | with calendar pop-up
             * | ``format="date-time"``: Generate a date and
-              | time-picker with calendar pop-up
+              | time-picker with calendar pop-up. Values should be
+              | RFC 3339 strings with a timezone offset, e.g.
+              | ``2024-01-01T00:00:00+00:00``. Other ISO 8601
+              | date-times are deprecated. Only the Task SDK
+              | warns about them, when it validates the value in
+              | Dag parsing or at task start. The API server and
+              | the scheduler accept them without a warning.
+              | Anything else is rejected.
             * ``format="time"``: Generate a time-picker
+            * | ``format="duration"``: Generate a duration
+              | input field accepting ISO 8601 duration
+              | strings (e.g. ``P1D``, ``PT15M``, ``PT2H``)
             * ``format="multiline"``: Generate a multi-line textarea
             * | ``enum=["a", "b", "c"]``: Generates a
               | drop-down select list for scalar values.
+              | If the choices come from an external config file,
+              | read that file while the Dag is parsed and pass the
+              | resulting list to ``enum``; the trigger form reads
+              | the serialized Dag Params and does not call dynamic
+              | choice providers when the form opens.
               | As of JSON validation, a value must be
               | selected or the field must be marked as
               | optional explicit. See also details inside
@@ -260,7 +282,7 @@ The following features are supported in the Trigger UI Form:
 
             | Also see
             | `further JSON Schema string type validation options <https://json-schema.org/understanding-json-schema/reference/string.html>`_
-            | which are checked before DAG trigger in the backend.
+            | which are checked before Dag trigger in the backend.
           - ``Param("default", type="string", maxLength=10)``
 
             ``Param(f"{datetime.date.today()}", type="string", format="date")``
@@ -280,7 +302,7 @@ The following features are supported in the Trigger UI Form:
 
             | Also see
             | `further JSON Schema numeric type validation options <https://json-schema.org/understanding-json-schema/reference/numeric.html>`_
-            | which are checked before DAG trigger in the backend.
+            | which are checked before Dag trigger in the backend.
           - ``Param(42, type="integer", minimum=14, multipleOf=7)``
 
         * - ``boolean``
@@ -315,11 +337,22 @@ The following features are supported in the Trigger UI Form:
         * - ``object``
           - | Generates a JSON entry field with
             | text validation.
-          - | The HTML form does only validate the syntax of the
-            | JSON input. In order to validate the content for
-            | specific structures take a look to the
-            | `JSON Schema Object details <https://json-schema.org/understanding-json-schema/reference/object.html>`_.
+          - * | The HTML form does only validate the syntax of the
+              | JSON input. In order to validate the content for
+              | specific structures take a look to the
+              | `JSON Schema Object details <https://json-schema.org/understanding-json-schema/reference/object.html>`_.
+            * | ``enum=[{"name": "dev"}, {"name": "prod"}]``:
+              | Generates a drop-down select list of objects;
+              | the selected object is passed as-is.
+            * | ``values_display={json.dumps({"name": "dev"}): "Development"}``:
+              | Labels for object choices are keyed by the
+              | JSON text of the object. Spacing and key
+              | order do not matter, so ``json.dumps()`` of
+              | the enum entry is the easiest way to write
+              | the key.
           - ``Param({"key": "value"}, type=["object", "null"])``
+
+            ``Param({"name": "dev"}, type="object", enum=[{"name": "dev"}, {"name": "prod"}])``
 
         * - ``null``
           - | Specifies that no content is expected.
@@ -334,31 +367,63 @@ The following features are supported in the Trigger UI Form:
             | input - because of JSON validation.
             | If you want to have a field value being
             | added optional only, you must allow
-            | JSON schema validation allowing null
-            | values.
+            | the null type in the JSON schema
+            | validation.
           -
           - ``Param(None, type=["null", "string"])``
 
+        * - Multiple non-null types
+
+            e.g. ``["string", "object"]``,
+            ``["integer", "string"]``
+          - | Generates a plain multi-line textarea.
+            | The stored value type is resolved at
+            | input time: the input is first parsed as
+            | JSON; if the parsed type matches one of
+            | the declared schema types it is stored as
+            | that type, otherwise the raw string is
+            | stored. This means:
+            |
+            | * ``"nightly"`` → always stored as a string
+            |   (JSON parse fails).
+            | * ``"45"`` with ``["string", "object"]`` →
+            |   stored as the string ``"45"`` (number is
+            |   not in the schema).
+            | * ``"45"`` with ``["integer", "string"]`` →
+            |   stored as the integer ``45`` (number
+            |   matches ``"integer"``).
+            | * ``'{"key": "val"}'`` with
+            |   ``["string", "object"]`` → stored as an
+            |   object.
+
+            .. note::
+
+               If the schema also defines ``enum`` or
+               ``examples``, the normal dropdown or
+               multi-select widget is used instead of
+               the textarea, because the set of valid
+               values is already constrained.
+          - none.
+          - ``Param("nightly", type=["string", "object"])``
+
+            ``Param(5, type=["integer", "string"])``
+
 - If a form field is left empty, it is passed as ``None`` value to the params dict.
-- Form fields are rendered in the order of definition of ``params`` in the DAG.
+- Form fields are rendered in the order of definition of ``params`` in the Dag.
 - If you want to add sections to the Form, add the attribute ``section`` to each field. The text will be used as section label.
   Fields w/o ``section`` will be rendered in the default area.
   Additional sections will be collapsed per default.
 - If you want to have params not being displayed, use the ``const`` attribute. These Params will be submitted but hidden in the Form.
   The ``const`` value must match the default value to pass `JSON Schema validation <https://json-schema.org/understanding-json-schema/reference/generic.html#constant-values>`_.
 - On the bottom of the form the generated JSON configuration can be expanded.
-  If you want to change values manually, the JSON configuration can be adjusted. Changes are overridden when form fields change.
-- To pre-populate values in the form when publishing a link to the trigger form you can call the trigger URL ``/dags/<dag_name>/trigger``
-  and add query parameter to the URL in the form ``name=value``, for example ``/dags/example_params_ui_tutorial/trigger?required_field=some%20text``.
-  To pre-define the run id of the DAG run, use the URL parameter ``run_id``.
+  If you want to change values manually, the JSON configuration can be adjusted. Changes in the JSON will be reflected in the form fields.
 - Fields can be required or optional. Typed fields are required by default to ensure they pass JSON schema validation. To make typed fields optional, you must allow the "null" type.
-- Fields without a "section" will be rendered in the default area. Additional sections will be collapsed by default.
 
 .. note::
-    If the field is required the default value must be valid according to the schema as well. If the DAG is defined with
+    If the field is required the default value must be valid according to the schema as well. If the Dag is defined with
     ``schedule=None`` the parameter value validation is made at time of trigger.
 
-For examples, please take a look at the two example dags provided: :ref:`Params trigger example DAG <params-trigger-ui>` and :ref:`Params UI example DAG <params-ui-tutorial>`.
+For examples, please take a look at the two example dags provided: :ref:`Params trigger example Dag <params-trigger-ui>` and :ref:`Params UI example Dag <params-ui-tutorial>`.
 
 .. _params-trigger-ui:
 .. exampleinclude:: /../src/airflow/example_dags/example_params_trigger_ui.py
@@ -386,27 +451,27 @@ For examples, please take a look at the two example dags provided: :ref:`Params 
 The Params UI Tutorial is rendered in 4 sections with the most common examples. The first section shows the basic usage without
 ``Param`` class.
 
-.. image:: ../img/trigger-dag-tutorial-form-1.png
+.. image:: ../img/ui-dark/trigger-dag-tutorial-form-1.png
 
 The second section shows how to use the ``Param`` class to define more attributes.
 
-.. image:: ../img/trigger-dag-tutorial-form-2.png
+.. image:: ../img/ui-dark/trigger-dag-tutorial-form-2.png
 
 The third section shows how to model selection lists and drop-downs.
 
-.. image:: ../img/trigger-dag-tutorial-form-3.png
+.. image:: ../img/ui-dark/trigger-dag-tutorial-form-3.png
 
 Finally the fourth section shows advanced form elements.
 
-.. image:: ../img/trigger-dag-tutorial-form-4.png
+.. image:: ../img/ui-dark/trigger-dag-tutorial-form-4.png
 
 .. versionchanged:: 3.0.0
     By default custom HTML is not allowed to prevent injection of scripts or other malicious HTML code. The previous field named
-    ``description_html`` is now super-seeded with the attribute ``description_md``. ``description_html`` is not supported anymore.
+    ``description_html`` is now superseded with the attribute ``description_md``. ``description_html`` is not supported anymore.
     Custom form elements using the attribute ``custom_html_form`` was deprecated in version 2.8.0 and support was removed in 3.0.0.
 
 Disabling Runtime Param Modification
 ------------------------------------
 
-The ability to update params while triggering a DAG depends on the flag ``core.dag_run_conf_overrides_params``.
+The ability to update params while triggering a Dag depends on the flag ``core.dag_run_conf_overrides_params``.
 Setting this config to ``False`` will effectively turn your default params into constants.

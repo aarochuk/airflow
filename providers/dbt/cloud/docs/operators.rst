@@ -65,7 +65,7 @@ configurations or overrides for the job run such as ``threads_override``, ``gene
 
 The below examples demonstrate how to instantiate DbtCloudRunJobOperator tasks with both synchronous and
 asynchronous waiting for run termination, respectively. To note, the ``account_id`` for the operators is
-referenced within the ``default_args`` of the example DAG.
+referenced within the ``default_args`` of the example Dag.
 
 .. exampleinclude:: /../tests/system/dbt/cloud/example_dbt_cloud.py
     :language: python
@@ -87,6 +87,58 @@ by providing the ``project_name``, ``environment_name``, and ``job_name``.
 Please note that it will only work if the above three parameters uniquely identify a job in your account
 (i.e. you cannot have two jobs with the same name in the same project and environment).
 
+Durable execution
+"""""""""""""""""
+
+On Airflow 3.3 and later, when ``wait_for_termination`` is True, the operator stores the dbt Cloud run
+id in the :doc:`task state store <apache-airflow:core-concepts/task-state-store>` before it waits. If
+the worker dies and the task retries, the operator checks that run instead of triggering a new one:
+
+* If the run is still queued, starting or running, the operator waits on it again, in deferrable mode
+  too.
+* If the run succeeded, the operator returns its run id without triggering anything.
+* If the run errored, was cancelled or no longer exists, the operator triggers a new run as before,
+  which respects ``retry_from_failure``.
+
+The run id is saved right after the run is triggered. If the worker dies between the two, the retry
+finds nothing and triggers a second run. On reconnect, ``timeout`` starts counting again from zero.
+
+Clearing the task instance from the UI or the REST API discards the stored run id by default, so the
+next try triggers a new run. This is what you want after fixing upstream data. To keep the stored run
+id instead, tick "keep task state" in the clear dialog or pass ``keep_task_state=true`` to the clear
+endpoint. The next try then treats the stored run like a retry does.
+
+Before Airflow 3.5, clearing the whole Dag run, marking a task as success or failed, and
+``airflow tasks clear`` / ``airflow dags clear`` keep the stored run id. So if you clear the whole Dag
+run after fixing upstream data, a task whose run succeeded returns without running dbt again. Clear
+the task instance itself instead. From Airflow 3.5, every way of clearing discards the stored run id
+by default.
+
+Clearing a task that is waiting on the worker cancels its run first, so the next try triggers a new
+run either way. Only a deferred task's run keeps going. See
+:ref:`apache-airflow:concepts-resumable-tasks` for details.
+
+Below Airflow 3.3 the operator always triggers a new run on retry. Set ``durable=False`` to get that
+behavior on any version:
+
+.. code-block:: python
+
+    DbtCloudRunJobOperator(task_id="run_job", job_id=48617, durable=False)
+
+Linking dbt Cloud runs to the triggering Airflow task
+""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+Setting ``openlineage_inject_parent_job_info`` to True replaces the triggered run's ``cause`` field
+with the Airflow task's OpenLineage parent (and root) run identifiers as JSON. A consumer that reads
+dbt Cloud runs can then parse this JSON and attach a ``ParentRunFacet``, linking the dbt Cloud run back
+to the Airflow task that triggered it. This overwrites the ``trigger_reason``.
+
+The parameter defaults to the ``openlineage.spark_inject_parent_job_info`` configuration value. Because
+the dbt Cloud ``cause`` has a length limit, the injected payload is trimmed to fit: the essential
+``parent`` link is always kept, the ``root`` block is dropped if the two together do not fit, and if
+even the parent identifiers alone do not fit, injection is skipped and the original ``cause`` is left
+unchanged.
+
 .. exampleinclude:: /../tests/system/dbt/cloud/example_dbt_cloud.py
     :language: python
     :dedent: 4
@@ -104,7 +156,7 @@ functionality available with the :class:`~airflow.sensors.base.BaseSensorOperato
 
 In the example below, the ``run_id`` value in the example below comes from the output of a previous
 DbtCloudRunJobOperator task by utilizing the ``.output`` property exposed for all operators. Also, to note,
-the ``account_id`` for the task is referenced within the ``default_args`` of the example DAG.
+the ``account_id`` for the task is referenced within the ``default_args`` of the example Dag.
 
 .. exampleinclude:: /../tests/system/dbt/cloud/example_dbt_cloud.py
     :language: python
@@ -162,3 +214,24 @@ For more information on dbt Cloud list jobs, reference
     :dedent: 4
     :start-after: [START howto_operator_dbt_cloud_list_jobs]
     :end-before: [END howto_operator_dbt_cloud_list_jobs]
+
+
+.. _howto/operator:DbtCloudListJobRunsOperator:
+
+List job runs
+~~~~~~~~~~~~~
+
+Use the :class:`~airflow.providers.dbt.cloud.operators.dbt.DbtCloudListJobRunsOperator` to list
+all job runs tied to a specified dbt Cloud account. The ``account_id`` must be supplied either
+through the connection or supplied as a parameter to the task.
+
+If a ``job_id`` is supplied, only job runs pertaining to this job will be retrieved.
+
+For more information on dbt Cloud list jobs, reference
+`this documentation <https://docs.getdbt.com/dbt-cloud/api-v2#tag/Jobs/operation/listJobRunsForAccount>`__.
+
+.. exampleinclude:: /../tests/system/dbt/cloud/example_dbt_cloud.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_dbt_cloud_list_job_runs]
+    :end-before: [END howto_operator_dbt_cloud_list_job_runs]

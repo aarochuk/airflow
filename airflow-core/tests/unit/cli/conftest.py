@@ -21,12 +21,16 @@ import sys
 
 import pytest
 
+from airflow.dag_processing.dagbag import DagBag
 from airflow.executors import local_executor
-from airflow.models.dagbag import DagBag
 from airflow.providers.celery.executors import celery_executor
 from airflow.providers.cncf.kubernetes.executors import kubernetes_executor
 
 from tests_common.test_utils.config import conf_vars
+from tests_common.test_utils.stream_capture_manager import (
+    StderrCaptureManager,
+    StdoutCaptureManager,
+)
 
 # Create custom executors here because conftest is imported first
 custom_executor_module = type(sys)("custom_executor")
@@ -50,7 +54,7 @@ def load_examples():
 
 @pytest.fixture(scope="session")
 def dagbag():
-    return DagBag(include_examples=True)
+    return DagBag()
 
 
 @pytest.fixture(scope="session")
@@ -58,3 +62,21 @@ def parser():
     from airflow.cli import cli_parser
 
     return cli_parser.get_parser()
+
+
+# The "*_capture" fixtures all ensure that the `caplog` fixture is loaded so that they don't get polluted with
+# log messages
+
+
+@pytest.fixture
+def stdout_capture(request):
+    """Fixture that captures stdout only."""
+    request.getfixturevalue("caplog")
+    return StdoutCaptureManager()
+
+
+@pytest.fixture
+def stderr_capture(request):
+    """Fixture that captures stderr only."""
+    request.getfixturevalue("caplog")
+    return StderrCaptureManager()

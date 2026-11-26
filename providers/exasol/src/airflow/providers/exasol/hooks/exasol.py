@@ -17,19 +17,60 @@
 # under the License.
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import closing
-from typing import TYPE_CHECKING, Any, Callable, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 import pyexasol
 from pyexasol import ExaConnection, ExaStatement
 
-from airflow.providers.common.sql.hooks.sql import DbApiHook, return_single_query_results
+try:
+    from sqlalchemy.engine import URL
+except ImportError:
+    URL = None  # type: ignore[assignment,misc]
+
+from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException
+from airflow.providers.common.sql.hooks.handlers import return_single_query_results
+from airflow.providers.common.sql.hooks.lineage import send_sql_hook_lineage
+from airflow.providers.common.sql.hooks.sql import DbApiHook
 
 if TYPE_CHECKING:
     import pandas as pd
 
 T = TypeVar("T")
+
+
+def _to_query_params(parameters: Iterable | Mapping[str, Any] | None) -> dict | None:
+    """
+    Adapt DB-API parameters to what pyexasol accepts.
+
+    pyexasol substitutes named placeholders only, so ``query_params`` has to be a
+    mapping (or ``None``). Positional sequences never reached the driver intact,
+    so reject them with an actionable message instead of a driver-internal error.
+    """
+    if parameters is None:
+        return None
+    if isinstance(parameters, Mapping):
+        return dict(parameters)
+    raise TypeError(
+        f"Exasol supports named query parameters only, got {type(parameters).__name__}. "
+        "Pass a mapping such as {'name': value} and reference it as {name} in the statement."
+    )
+
+
+def _to_single_statement(sql: str | list[str]) -> str:
+    """
+    Return the single statement ``ExaConnection.execute`` accepts.
+
+    :class:`~airflow.providers.common.sql.hooks.sql.DbApiHook` allows a list of
+    statements, but ``execute`` runs exactly one, so a list never worked here.
+    """
+    if isinstance(sql, str):
+        return sql
+    raise TypeError(
+        f"Exasol executes a single statement here, got a list of {len(sql)}. "
+        "Use ExasolHook.run() to execute several statements."
+    )
 
 
 class ExasolHook(DbApiHook):
@@ -50,29 +91,77 @@ class ExasolHook(DbApiHook):
     conn_type = "exasol"
     hook_name = "Exasol"
     supports_autocommit = True
+    DEFAULT_SQLALCHEMY_SCHEME = "exa+websocket"  # sqlalchemy-exasol dialect
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, sqlalchemy_scheme: str | None = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.schema = kwargs.pop("schema", None)
+        self._sqlalchemy_scheme = sqlalchemy_scheme
 
     def get_conn(self) -> ExaConnection:
-        conn_id = self.get_conn_id()
-        conn = self.get_connection(conn_id)
+        airflow_conn = self.get_connection(self.get_conn_id())
         conn_args = {
-            "dsn": f"{conn.host}:{conn.port}",
-            "user": conn.login,
-            "password": conn.password,
-            "schema": self.schema or conn.schema,
+            "dsn": f"{airflow_conn.host}:{airflow_conn.port}",
+            "user": airflow_conn.login,
+            "password": airflow_conn.password,
+            "schema": self.schema or airflow_conn.schema,
         }
-        # check for parameters in conn.extra
-        for arg_name, arg_val in conn.extra_dejson.items():
+        # check for parameters in airflow_conn.extra
+        for arg_name, arg_val in airflow_conn.extra_dejson.items():
             if arg_name in ["compression", "encryption", "json_lib", "client_name"]:
                 conn_args[arg_name] = arg_val
 
-        conn = pyexasol.connect(**conn_args)
-        return conn
+        return pyexasol.connect(**conn_args)
 
-    def get_pandas_df(
+    @property
+    def sqlalchemy_scheme(self) -> str:
+        """Sqlalchemy scheme either from constructor, connection extras or default."""
+        extra_scheme = self.connection is not None and self.connection_extra_lower.get("sqlalchemy_scheme")
+        sqlalchemy_scheme = self._sqlalchemy_scheme or extra_scheme or self.DEFAULT_SQLALCHEMY_SCHEME
+        if sqlalchemy_scheme not in ["exa+websocket", "exa+pyodbc", "exa+turbodbc"]:
+            raise ValueError(
+                f"sqlalchemy_scheme in connection extra should be one of 'exa+websocket', 'exa+pyodbc' or 'exa+turbodbc', "
+                f"but got '{sqlalchemy_scheme}'. See https://github.com/exasol/sqlalchemy-exasol?tab=readme-ov-file#using-sqlalchemy-with-exasol-db for more details."
+            )
+        return sqlalchemy_scheme
+
+    @property
+    def sqlalchemy_url(self) -> URL:
+        """
+        Return a Sqlalchemy.engine.URL object from the connection.
+
+        :return: the extracted sqlalchemy.engine.URL object.
+        """
+        if URL is None:
+            raise AirflowOptionalProviderFeatureException(
+                "The 'sqlalchemy' library is required to use 'sqlalchemy_url'."
+            )
+        connection = self.connection
+        query = connection.extra_dejson
+        query = {k: v for k, v in query.items() if k.lower() != "sqlalchemy_scheme"}
+        return URL.create(
+            drivername=self.sqlalchemy_scheme,
+            username=connection.login,
+            password=connection.password,
+            host=connection.host,
+            port=connection.port,
+            database=self.schema or connection.schema,
+            query=query,
+        )
+
+    def get_uri(self) -> str:
+        """
+        Extract the URI from the connection.
+
+        :return: the extracted uri.
+        """
+        if URL is None:
+            raise AirflowOptionalProviderFeatureException(
+                "The 'sqlalchemy' library is required to render the connection URI."
+            )
+        return self.sqlalchemy_url.render_as_string(hide_password=False)
+
+    def _get_pandas_df(
         self, sql, parameters: Iterable | Mapping[str, Any] | None = None, **kwargs
     ) -> pd.DataFrame:
         """
@@ -86,8 +175,16 @@ class ExasolHook(DbApiHook):
         ``pyexasol.ExaConnection.export_to_pandas``.
         """
         with closing(self.get_conn()) as conn:
-            df = conn.export_to_pandas(sql, query_params=parameters, **kwargs)
+            df = conn.export_to_pandas(sql, query_params=_to_query_params(parameters), **kwargs)
             return df
+
+    def _get_polars_df(
+        self,
+        sql,
+        parameters: list | tuple | Mapping[str, Any] | None = None,
+        **kwargs,
+    ):
+        raise NotImplementedError("Polars is not supported for Exasol")
 
     def get_records(
         self,
@@ -101,7 +198,16 @@ class ExasolHook(DbApiHook):
             sql statements to execute
         :param parameters: The parameters to render the SQL query with.
         """
-        with closing(self.get_conn()) as conn, closing(conn.execute(sql, parameters)) as cur:
+        with (
+            closing(self.get_conn()) as conn,
+            closing(conn.execute(_to_single_statement(sql), _to_query_params(parameters))) as cur,
+        ):
+            send_sql_hook_lineage(
+                context=self,
+                sql=sql,
+                sql_parameters=parameters,
+                cur=cur,
+            )
             return cur.fetchall()
 
     def get_first(self, sql: str | list[str], parameters: Iterable | Mapping[str, Any] | None = None) -> Any:
@@ -112,7 +218,16 @@ class ExasolHook(DbApiHook):
             sql statements to execute
         :param parameters: The parameters to render the SQL query with.
         """
-        with closing(self.get_conn()) as conn, closing(conn.execute(sql, parameters)) as cur:
+        with (
+            closing(self.get_conn()) as conn,
+            closing(conn.execute(_to_single_statement(sql), _to_query_params(parameters))) as cur,
+        ):
+            send_sql_hook_lineage(
+                context=self,
+                sql=sql,
+                sql_parameters=parameters,
+                cur=cur,
+            )
             return cur.fetchone()
 
     def export_to_file(
@@ -168,7 +283,7 @@ class ExasolHook(DbApiHook):
             )
         return cols
 
-    @overload  # type: ignore[override]
+    @overload
     def run(
         self,
         sql: str | Iterable[str],
@@ -188,7 +303,7 @@ class ExasolHook(DbApiHook):
         handler: Callable[[Any], T] = ...,
         split_statements: bool = ...,
         return_last: bool = ...,
-    ) -> tuple | list[tuple] | list[list[tuple] | tuple] | None: ...
+    ) -> tuple | list[tuple] | list[list[tuple] | tuple | None] | None: ...
 
     def run(
         self,
@@ -198,7 +313,7 @@ class ExasolHook(DbApiHook):
         handler: Callable[[Any], T] | None = None,
         split_statements: bool = False,
         return_last: bool = True,
-    ) -> tuple | list[tuple] | list[list[tuple] | tuple] | None:
+    ) -> tuple | list[tuple] | list[list[tuple] | tuple | None] | None:
         """
         Run a command or a list of commands.
 
@@ -235,11 +350,10 @@ class ExasolHook(DbApiHook):
             results = []
             for sql_statement in sql_list:
                 self.log.info("Running statement: %s, parameters: %s", sql_statement, parameters)
-                with closing(conn.execute(sql_statement, parameters)) as exa_statement:
+                with closing(conn.execute(sql_statement, _to_query_params(parameters))) as exa_statement:
                     if handler is not None:
-                        result = self._make_common_data_structure(  # type: ignore[attr-defined]
-                            handler(exa_statement)
-                        )
+                        result = self._make_common_data_structure(handler(exa_statement))
+
                         if return_single_query_results(sql, return_last, split_statements):
                             _last_result = result
                             _last_columns = self.get_description(exa_statement)
@@ -247,6 +361,13 @@ class ExasolHook(DbApiHook):
                             results.append(result)
                             self.descriptions.append(self.get_description(exa_statement))
                     self.log.info("Rows affected: %s", exa_statement.rowcount())
+                    rc = exa_statement.rowcount()
+                    send_sql_hook_lineage(
+                        context=self,
+                        sql=sql_statement,
+                        sql_parameters=parameters,
+                        row_count=rc if rc is not None and rc >= 0 else None,
+                    )
 
             # If autocommit was set to False or db does not support autocommit, we do a manual commit.
             if not self.get_autocommit(conn):
@@ -257,8 +378,7 @@ class ExasolHook(DbApiHook):
         if return_single_query_results(sql, return_last, split_statements):
             self.descriptions = [_last_columns]
             return _last_result
-        else:
-            return results
+        return results
 
     def set_autocommit(self, conn, autocommit: bool) -> None:
         """

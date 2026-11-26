@@ -22,14 +22,15 @@ Example Airflow DAG for testing Google Dataflow Beam Pipeline Operator with Asyn
 
 from __future__ import annotations
 
+import logging
 import os
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable
 
-from airflow.exceptions import AirflowException
 from airflow.models.dag import DAG
 from airflow.providers.apache.beam.hooks.beam import BeamRunnerType
 from airflow.providers.apache.beam.operators.beam import BeamRunPythonPipelineOperator
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks.dataflow import DataflowJobStatus
 from airflow.providers.google.cloud.operators.gcs import GCSCreateBucketOperator, GCSDeleteBucketOperator
 from airflow.providers.google.cloud.sensors.dataflow import (
@@ -38,7 +39,13 @@ from airflow.providers.google.cloud.sensors.dataflow import (
     DataflowJobMetricsSensor,
     DataflowJobStatusSensor,
 )
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.providers.standard.operators.python import PythonOperator
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 DAG_ID = "dataflow_native_python_async"
@@ -58,6 +65,18 @@ default_args = {
         "stagingLocation": GCS_STAGING,
     }
 }
+log = logging.getLogger(__name__)
+
+
+def _assert_sensors_pushed_xcom(ti):
+    """Check that each sensor pushed its callback result to XCom while running in poke mode."""
+    for task_id in (
+        "wait_for_python_job_async_metric",
+        "wait_for_python_job_async_message",
+        "wait_for_python_job_async_autoscaling_event",
+    ):
+        assert ti.xcom_pull(task_ids=task_id) is not None, f"{task_id} did not push a value to XCom"
+
 
 with DAG(
     DAG_ID,
@@ -77,14 +96,17 @@ with DAG(
         py_options=[],
         pipeline_options={
             "output": GCS_OUTPUT,
+            "machine_type": "e2-standard-2",
+            "worker_zone": "europe-west3-a",
         },
-        py_requirements=["apache-beam[gcp]==2.59.0"],
+        py_requirements=["apache-beam[gcp]==2.67.0"],
         py_interpreter="python3",
         py_system_site_packages=False,
         dataflow_config={
             "job_name": "start_python_job_async",
             "location": LOCATION,
             "wait_until_finished": False,
+            "max_num_workers": 1,
         },
     )
     # [END howto_operator_start_python_job_async]
@@ -103,7 +125,7 @@ with DAG(
         """Check is metric greater than equals to given value."""
 
         def callback(metrics: list[dict]) -> bool:
-            dag.log.info("Looking for '%s' >= %d", metric_name, value)
+            log.info("Looking for '%s' >= %d", metric_name, value)
             for metric in metrics:
                 context = metric.get("name", {}).get("context", {})
                 original_name = context.get("original_name", "")
@@ -157,6 +179,10 @@ with DAG(
     )
     # [END howto_sensor_wait_for_job_autoscaling_event]
 
+    assert_sensors_pushed_xcom = PythonOperator(
+        task_id="assert_sensors_pushed_xcom", python_callable=_assert_sensors_pushed_xcom
+    )
+
     delete_bucket = GCSDeleteBucketOperator(
         task_id="delete_bucket", bucket_name=BUCKET_NAME, trigger_rule=TriggerRule.ALL_DONE
     )
@@ -172,6 +198,7 @@ with DAG(
             wait_for_python_job_async_message,
             wait_for_python_job_async_autoscaling_event,
         ]
+        >> assert_sensors_pushed_xcom
         # TEST TEARDOWN
         >> delete_bucket
     )
@@ -185,5 +212,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

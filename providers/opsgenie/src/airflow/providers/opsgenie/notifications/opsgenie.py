@@ -25,13 +25,8 @@ from airflow.providers.common.compat.notifier import BaseNotifier
 from airflow.providers.opsgenie.hooks.opsgenie import OpsgenieAlertHook
 
 if TYPE_CHECKING:
+    from airflow.providers.common.compat.sdk import Context
     from airflow.providers.opsgenie.typing.opsgenie import CreateAlertPayload
-
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
 
 
 class OpsgenieNotifier(BaseNotifier):
@@ -53,7 +48,10 @@ class OpsgenieNotifier(BaseNotifier):
     :param opsgenie_conn_id: Optional. The name of the Opsgenie connection to use. Default conn_id is opsgenie_default
     """
 
-    template_fields: Sequence[str] = ("payload",)
+    template_fields: Sequence[str] = (
+        "payload",
+        "opsgenie_conn_id",
+    )
 
     def __init__(
         self,

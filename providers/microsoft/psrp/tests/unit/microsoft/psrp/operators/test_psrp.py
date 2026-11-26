@@ -24,8 +24,7 @@ import pytest
 from jinja2.nativetypes import NativeEnvironment
 from pypsrp.powershell import Command, PowerShell
 
-from airflow.exceptions import AirflowException
-from airflow.models.baseoperator import BaseOperator
+from airflow.providers.common.compat.sdk import AirflowException, BaseOperator
 from airflow.providers.microsoft.psrp.operators.psrp import PsrpOperator
 from airflow.settings import json
 
@@ -40,18 +39,54 @@ class ExecuteParameter(NamedTuple):
 
 
 class TestPsrpOperator:
-    def test_no_command_or_powershell(self):
-        exception_msg = "Must provide exactly one of 'command', 'powershell', or 'cmdlet'"
-        with pytest.raises(ValueError, match=exception_msg):
-            PsrpOperator(task_id="test_task_id", psrp_conn_id=CONNECTION_ID)
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            pytest.param({}, "exactly one", id="no-option"),
+            pytest.param({"command": "", "powershell": "Get-Bar"}, "exactly one", id="two-options-one-empty"),
+            pytest.param({"command": "x", "powershell": "x"}, "exactly one", id="two-equal-options"),
+            pytest.param(
+                {"command": "hostname", "arguments": ["x"]}, "Arguments only allowed", id="arguments"
+            ),
+            pytest.param(
+                {"command": "hostname", "parameters": {"k": "v"}}, "Parameters only allowed", id="parameters"
+            ),
+        ],
+    )
+    def test_invalid_option_combination(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            PsrpOperator(task_id="test_task_id", psrp_conn_id=CONNECTION_ID, **kwargs)
 
-    def test_cmdlet_task_id_default(self):
-        operator = PsrpOperator(cmdlet="Invoke-Foo", psrp_conn_id=CONNECTION_ID)
-        assert operator.task_id == "Invoke-Foo"
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            pytest.param({"command": ""}, id="empty-command"),
+            pytest.param({"powershell": "", "arguments": ["a"]}, id="arguments"),
+            pytest.param({"powershell": "", "parameters": {"k": "v"}}, id="parameters"),
+        ],
+    )
+    def test_empty_option_counts_as_provided(self, kwargs):
+        PsrpOperator(task_id="test_task_id", psrp_conn_id=CONNECTION_ID, **kwargs)
+
+    def test_cmdlet_requires_explicit_task_id(self):
+        with pytest.raises(TypeError, match="task_id"):
+            PsrpOperator(cmdlet="Invoke-Foo", psrp_conn_id=CONNECTION_ID)
+
+    @patch(f"{PsrpOperator.__module__}.PsrpHook")
+    def test_command_rendering_to_empty_dispatches_as_command(self, hook_impl):
+        op = PsrpOperator(task_id="test", psrp_conn_id=CONNECTION_ID, command="{{ '' }}")
+        op.render_template_fields({})
+        assert op.command == ""
+        ps = Mock(spec=PowerShell, output=[], had_errors=False, runspace_pool=Mock(host=Mock(rc=0)))
+        hook_impl.configure_mock(
+            **{"return_value.__enter__.return_value.invoke.return_value.__enter__.return_value": ps}
+        )
+        op.execute(None)
+        ps.add_script.assert_called_once_with("cmd.exe /c @'\n\n'@")
 
     @pytest.mark.parametrize("do_xcom_push", [True, False])
     @pytest.mark.parametrize(
-        "had_errors, rc", [(False, 0), (False, None), (True, None), (False, 1), (True, 1)]
+        ("had_errors", "rc"), [(False, 0), (False, None), (True, None), (False, 1), (True, 1)]
     )
     @pytest.mark.parametrize(
         "parameter",
@@ -100,7 +135,7 @@ class TestPsrpOperator:
         else:
             output = op.execute(None)
             assert output == [json.loads(output) for output in ps.output] if do_xcom_push else ps.output
-            is_logged = hook_impl.call_args.kwargs["on_output_callback"] == op.log.info
+            is_logged = hook_impl.call_args.kwargs["on_output_callback"] is not None
             assert do_xcom_push ^ is_logged
         expected_ps_calls = [
             call.add_command(psrp_session_init),
@@ -117,14 +152,14 @@ class TestPsrpOperator:
         assert ps.mock_calls == expected_ps_calls
 
     def test_securestring_sandboxed(self):
-        op = PsrpOperator(psrp_conn_id=CONNECTION_ID, cmdlet="test")
+        op = PsrpOperator(task_id="test", psrp_conn_id=CONNECTION_ID, cmdlet="test")
         template = op.get_template_env().from_string("{{ 'foo' | securestring }}")
         with pytest.raises(AirflowException):
             template.render()
 
     @patch.object(BaseOperator, "get_template_env")
     def test_securestring_native(self, get_template_env):
-        op = PsrpOperator(psrp_conn_id=CONNECTION_ID, cmdlet="test")
+        op = PsrpOperator(task_id="test", psrp_conn_id=CONNECTION_ID, cmdlet="test")
         get_template_env.return_value = NativeEnvironment()
         template = op.get_template_env().from_string("{{ 'foo' | securestring }}")
         rendered = template.render()

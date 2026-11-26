@@ -28,9 +28,6 @@ from datetime import datetime
 import boto3
 from sqlalchemy import Column, MetaData, String, Table, create_engine
 
-from airflow.decorators import task
-from airflow.models.baseoperator import chain
-from airflow.models.dag import DAG
 from airflow.providers.amazon.aws.operators.dms import (
     DmsCreateReplicationConfigOperator,
     DmsDeleteReplicationConfigOperator,
@@ -42,7 +39,22 @@ from airflow.providers.amazon.aws.operators.rds import (
     RdsDeleteDbInstanceOperator,
 )
 from airflow.providers.amazon.aws.operators.s3 import S3CreateBucketOperator, S3DeleteBucketOperator
-from airflow.utils.trigger_rule import TriggerRule
+
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import DAG, chain, task
+else:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
+    from airflow.models.baseoperator import chain  # type: ignore[attr-defined,no-redef]
+    from airflow.models.dag import DAG  # type: ignore[attr-defined,no-redef,assignment]
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.amazon.aws.utils import ENV_ID_KEY, SystemTestContextBuilder
 
@@ -56,8 +68,20 @@ documentation.
 
 DAG_ID = "example_dms_serverless"
 ROLE_ARN_KEY = "ROLE_ARN"
+# Optional externally fetched variables. When provided, the RDS instance and the serverless
+# replication are placed in the given subnet groups / security group.
+SUBNET_GROUP_KEY = "SUBNET_GROUP"
+SECURITY_GROUP_KEY = "SECURITY_GROUP"
+REPLICATION_SUBNET_GROUP_KEY = "REPLICATION_SUBNET_GROUP"
 
-sys_test_context_task = SystemTestContextBuilder().add_variable(ROLE_ARN_KEY).build()
+sys_test_context_task = (
+    SystemTestContextBuilder()
+    .add_variable(ROLE_ARN_KEY)
+    .add_variable(SUBNET_GROUP_KEY, optional=True)
+    .add_variable(SECURITY_GROUP_KEY, optional=True)
+    .add_variable(REPLICATION_SUBNET_GROUP_KEY, default_value="default")
+    .build()
+)
 
 # Config values for setting up the "Source" database.
 CA_CERT_ID = "rds-ca-rsa2048-g1"
@@ -86,6 +110,30 @@ def _get_rds_instance_endpoint(instance_name: str):
 
 
 @task
+def build_rds_kwargs(
+    db_name: str, security_group_id: str | None = None, subnet_group: str | None = None
+) -> dict:
+    """
+    Assemble the kwargs for RdsCreateDbInstanceOperator at runtime.
+
+    When a DB subnet group / security group are provided via the test context, the instance is placed in
+    them (e.g. private subnets reachable by the test runner), otherwise it lands in the default VPC.
+    """
+    rds_kwargs = {
+        "DBName": db_name,
+        "AllocatedStorage": 20,
+        "MasterUsername": RDS_USERNAME,
+        "MasterUserPassword": RDS_PASSWORD,
+        "PubliclyAccessible": False,
+    }
+    if security_group_id:
+        rds_kwargs["VpcSecurityGroupIds"] = [security_group_id]
+    if subnet_group:
+        rds_kwargs["DBSubnetGroupName"] = subnet_group
+    return rds_kwargs
+
+
+@task
 def create_sample_table(instance_name: str, db_name: str, table_name: str):
     print("Creating sample table.")
 
@@ -97,14 +145,14 @@ def create_sample_table(instance_name: str, db_name: str, table_name: str):
 
     table = Table(
         table_name,
-        MetaData(engine),
+        MetaData(),
         Column(TABLE_HEADERS[0], String, primary_key=True),
         Column(TABLE_HEADERS[1], String),
     )
 
     with engine.connect() as connection:
         # Create the Table.
-        table.create()
+        table.create(bind=connection)
         load_data = table.insert().values(SAMPLE_DATA)
         connection.execute(load_data)
 
@@ -187,6 +235,9 @@ with DAG(
     test_context = sys_test_context_task()
     env_id = test_context[ENV_ID_KEY]
     role_arn = test_context[ROLE_ARN_KEY]
+    subnet_group = test_context[SUBNET_GROUP_KEY]
+    security_group = test_context[SECURITY_GROUP_KEY]
+    replication_subnet_group = test_context[REPLICATION_SUBNET_GROUP_KEY]
 
     bucket_name = f"{env_id}-dms-serverless-bucket"
     rds_instance_name = f"{env_id}-instance"
@@ -203,13 +254,7 @@ with DAG(
         db_instance_identifier=rds_instance_name,
         db_instance_class="db.t3.micro",
         engine=RDS_ENGINE,
-        rds_kwargs={
-            "DBName": rds_db_name,
-            "AllocatedStorage": 20,
-            "MasterUsername": RDS_USERNAME,
-            "MasterUserPassword": RDS_PASSWORD,
-            "PubliclyAccessible": True,
-        },
+        rds_kwargs=build_rds_kwargs(rds_db_name, security_group, subnet_group),
     )
 
     # Sample data.
@@ -266,7 +311,7 @@ with DAG(
             "MaxCapacityUnits": 4,
             "MinCapacityUnits": 1,
             "MultiAZ": False,
-            "ReplicationSubnetGroupId": "default",
+            "ReplicationSubnetGroupId": replication_subnet_group,
         },
         replication_type="full-load",
         table_mappings=json.dumps(table_mappings),
@@ -368,5 +413,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

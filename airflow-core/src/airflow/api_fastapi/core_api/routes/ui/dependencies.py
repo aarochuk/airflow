@@ -17,17 +17,29 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import Depends, status
 from fastapi.exceptions import HTTPException
 
-from airflow.api_fastapi.auth.managers.models.resource_details import DagAccessEntity
+from airflow.api_fastapi.auth.managers.models.resource_details import AssetDetails, DagAccessEntity
 from airflow.api_fastapi.common.db.common import SessionDep
 from airflow.api_fastapi.common.router import AirflowRouter
 from airflow.api_fastapi.core_api.datamodels.ui.common import BaseGraphResponse
 from airflow.api_fastapi.core_api.openapi.exceptions import create_openapi_http_exception_doc
-from airflow.api_fastapi.core_api.security import requires_access_dag
-from airflow.api_fastapi.core_api.services.ui.dependencies import extract_single_connected_component
-from airflow.models.serialized_dag import SerializedDagModel
+from airflow.api_fastapi.core_api.security import (
+    AuthManagerDep,
+    GetUserDep,
+    ReadableAssetsFilterDep,
+    ReadableDagsFilterDep,
+    requires_access_dag,
+)
+from airflow.api_fastapi.core_api.services.ui.dependencies import (
+    add_asset_watcher_nodes,
+    extract_single_connected_component,
+    get_data_dependencies,
+    get_scheduling_dependencies,
+)
 
 dependencies_router = AirflowRouter(tags=["Dependencies"])
 
@@ -36,54 +48,65 @@ dependencies_router = AirflowRouter(tags=["Dependencies"])
     "/dependencies",
     responses=create_openapi_http_exception_doc(
         [
+            status.HTTP_400_BAD_REQUEST,
             status.HTTP_404_NOT_FOUND,
         ]
     ),
     dependencies=[Depends(requires_access_dag("GET", DagAccessEntity.DEPENDENCIES))],
 )
-def get_dependencies(session: SessionDep, node_id: str | None = None) -> BaseGraphResponse:
+def get_dependencies(
+    session: SessionDep,
+    readable_dags_filter: ReadableDagsFilterDep,
+    readable_assets_filter: ReadableAssetsFilterDep,
+    user: GetUserDep,
+    auth_manager: AuthManagerDep,
+    node_id: str | None = None,
+    dependency_type: Literal["scheduling", "data"] = "scheduling",
+) -> BaseGraphResponse:
     """Dependencies graph."""
-    nodes_dict: dict[str, dict] = {}
-    edge_tuples: set[tuple[str, str]] = set()
+    # Watchers show on the assets GET /triggers shows them on, gated the same way, but from this request's
+    # readable assets: its trigger filter would look up every readable Dag and asset a second time.
+    watcher_asset_ids = (
+        (readable_assets_filter.value or set())
+        if auth_manager.is_authorized_asset(method="GET", details=AssetDetails(id=None), user=user)
+        else set()
+    )
+    if dependency_type == "data":
+        if node_id is None or not node_id.startswith("asset:"):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "Data dependencies require an asset node_id (e.g., 'asset:123')"
+            )
 
-    for dag, dependencies in sorted(SerializedDagModel.get_dag_dependencies().items()):
-        dag_node_id = f"dag:{dag}"
-        if dag_node_id not in nodes_dict:
-            for dep in dependencies:
-                # Add nodes
-                nodes_dict[dag_node_id] = {"id": dag_node_id, "label": dag, "type": "dag"}
-                if dep.node_id not in nodes_dict:
-                    nodes_dict[dep.node_id] = {
-                        "id": dep.node_id,
-                        "label": dep.label,
-                        "type": dep.dependency_type,
-                    }
+        try:
+            asset_id = int(node_id.replace("asset:", ""))
+        except ValueError:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid asset node_id: {node_id}")
 
-                # Add edges
-                # not start dep
-                if dep.source != dep.dependency_type:
-                    source = dep.source if ":" in dep.source else f"dag:{dep.source}"
-                    target = dep.node_id
-                    edge_tuples.add((source, target))
+        data = get_data_dependencies(
+            asset_id,
+            session,
+            readable_dag_ids=readable_dags_filter.value,
+            readable_asset_ids=readable_assets_filter.value or set(),
+        )
+        if not data["nodes"]:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Asset with id {asset_id} was not found")
+        return BaseGraphResponse(
+            **add_asset_watcher_nodes(data, readable_asset_ids=watcher_asset_ids, session=session)
+        )
 
-                # not end dep
-                if dep.target != dep.dependency_type:
-                    source = dep.node_id
-                    target = dep.target if ":" in dep.target else f"dag:{dep.target}"
-                    edge_tuples.add((source, target))
-
-    nodes = list(nodes_dict.values())
-    edges = [{"source_id": source, "target_id": target} for source, target in sorted(edge_tuples)]
-
-    data = {
-        "nodes": nodes,
-        "edges": edges,
-    }
+    data = get_scheduling_dependencies(
+        session,
+        readable_dag_ids=readable_dags_filter.value,
+        readable_asset_ids=readable_assets_filter.value or set(),
+    )
 
     if node_id is not None:
         try:
             data = extract_single_connected_component(node_id, data["nodes"], data["edges"])
         except ValueError as e:
-            raise HTTPException(404, str(e))
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
 
-    return BaseGraphResponse(**data)
+    # Added after the component is picked, so a Dag's graph looks up only the watchers of its own assets.
+    return BaseGraphResponse(
+        **add_asset_watcher_nodes(data, readable_asset_ids=watcher_asset_ids, session=session)
+    )

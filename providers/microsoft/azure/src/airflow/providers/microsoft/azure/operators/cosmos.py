@@ -20,11 +20,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.microsoft.azure.hooks.cosmos import AzureCosmosDBHook
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class AzureCosmosInsertDocumentOperator(BaseOperator):
@@ -41,7 +41,7 @@ class AzureCosmosInsertDocumentOperator(BaseOperator):
         :ref:`Azure CosmosDB connection<howto/connection:azure_cosmos>`.
     """
 
-    template_fields: Sequence[str] = ("database_name", "collection_name")
+    template_fields: Sequence[str] = ("database_name", "collection_name", "azure_cosmos_conn_id")
     ui_color = "#e4f0e8"
 
     def __init__(

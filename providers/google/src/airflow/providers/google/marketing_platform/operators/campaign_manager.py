@@ -27,13 +27,13 @@ from typing import TYPE_CHECKING, Any
 
 from googleapiclient import http
 
-from airflow.exceptions import AirflowException
-from airflow.models import BaseOperator
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
 from airflow.providers.google.marketing_platform.hooks.campaign_manager import GoogleCampaignManagerHook
+from airflow.providers.google.version_compat import BaseOperator
+from airflow.utils.helpers import exactly_one
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class GoogleCampaignManagerDeleteReportOperator(BaseOperator):
@@ -42,7 +42,7 @@ class GoogleCampaignManagerDeleteReportOperator(BaseOperator):
 
     .. seealso::
         Check official API docs:
-        `https://developers.google.com/doubleclick-advertisers/rest/v4/reports/delete`
+        `https://developers.google.com/doubleclick-advertisers/rest/v5/reports/delete`
 
     .. seealso::
         For more information on how to use this operator, take a look at the guide:
@@ -51,7 +51,7 @@ class GoogleCampaignManagerDeleteReportOperator(BaseOperator):
     :param profile_id: The DFA user profile ID.
     :param report_name: The name of the report to delete.
     :param report_id: The ID of the report.
-    :param api_version: The version of the api that will be requested, for example 'v4'.
+    :param api_version: The version of the api that will be requested, for example 'v5'.
     :param gcp_conn_id: The connection ID to use when fetching connection info.
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
@@ -78,17 +78,14 @@ class GoogleCampaignManagerDeleteReportOperator(BaseOperator):
         profile_id: str,
         report_name: str | None = None,
         report_id: str | None = None,
-        api_version: str = "v4",
+        api_version: str = "v5",
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        if not (report_name or report_id):
-            raise AirflowException("Please provide `report_name` or `report_id`.")
-        if report_name and report_id:
-            raise AirflowException("Please provide only one parameter `report_name` or `report_id`.")
-
+        if not exactly_one(report_name is not None, report_id is not None):
+            raise ValueError("Please provide exactly one of `report_name` or `report_id`.")
         self.profile_id = profile_id
         self.report_name = report_name
         self.report_id = report_id
@@ -122,7 +119,7 @@ class GoogleCampaignManagerDownloadReportOperator(BaseOperator):
 
     .. seealso::
         Check official API docs:
-        `https://developers.google.com/doubleclick-advertisers/rest/v4/reports/get`
+        `https://developers.google.com/doubleclick-advertisers/rest/v5/reports/get`
 
     .. seealso::
         For more information on how to use this operator, take a look at the guide:
@@ -135,7 +132,7 @@ class GoogleCampaignManagerDownloadReportOperator(BaseOperator):
     :param report_name: The report name to set when uploading the local file.
     :param gzip: Option to compress local file or file data for upload
     :param chunk_size: File will be downloaded in chunks of this many bytes.
-    :param api_version: The version of the api that will be requested, for example 'v4'.
+    :param api_version: The version of the api that will be requested, for example 'v5'.
     :param gcp_conn_id: The connection ID to use when fetching connection info.
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
@@ -169,7 +166,7 @@ class GoogleCampaignManagerDownloadReportOperator(BaseOperator):
         report_name: str | None = None,
         gzip: bool = True,
         chunk_size: int = 10 * 1024 * 1024,
-        api_version: str = "v4",
+        api_version: str = "v5",
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
         **kwargs,
@@ -237,7 +234,7 @@ class GoogleCampaignManagerDownloadReportOperator(BaseOperator):
                 mime_type="text/csv",
             )
 
-        self.xcom_push(context, key="report_name", value=report_name)
+        context["task_instance"].xcom_push(key="report_name", value=report_name)
 
 
 class GoogleCampaignManagerInsertReportOperator(BaseOperator):
@@ -246,7 +243,7 @@ class GoogleCampaignManagerInsertReportOperator(BaseOperator):
 
     .. seealso::
         Check official API docs:
-        `https://developers.google.com/doubleclick-advertisers/rest/v4/reports/insert`
+        `https://developers.google.com/doubleclick-advertisers/rest/v5/reports/insert`
 
     .. seealso::
         For more information on how to use this operator, take a look at the guide:
@@ -254,7 +251,7 @@ class GoogleCampaignManagerInsertReportOperator(BaseOperator):
 
     :param profile_id: The DFA user profile ID.
     :param report: Report to be created.
-    :param api_version: The version of the api that will be requested, for example 'v4'.
+    :param api_version: The version of the api that will be requested, for example 'v5'.
     :param gcp_conn_id: The connection ID to use when fetching connection info.
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
@@ -281,7 +278,7 @@ class GoogleCampaignManagerInsertReportOperator(BaseOperator):
         *,
         profile_id: str,
         report: dict[str, Any],
-        api_version: str = "v4",
+        api_version: str = "v5",
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
         **kwargs,
@@ -308,7 +305,7 @@ class GoogleCampaignManagerInsertReportOperator(BaseOperator):
         self.log.info("Inserting Campaign Manager report.")
         response = hook.insert_report(profile_id=self.profile_id, report=self.report)
         report_id = response.get("id")
-        self.xcom_push(context, key="report_id", value=report_id)
+        context["task_instance"].xcom_push(key="report_id", value=report_id)
         self.log.info("Report successfully inserted. Report id: %s", report_id)
         return response
 
@@ -319,7 +316,7 @@ class GoogleCampaignManagerRunReportOperator(BaseOperator):
 
     .. seealso::
         Check official API docs:
-        `https://developers.google.com/doubleclick-advertisers/rest/v4/reports/run`
+        `https://developers.google.com/doubleclick-advertisers/rest/v5/reports/run`
 
     .. seealso::
         For more information on how to use this operator, take a look at the guide:
@@ -328,7 +325,7 @@ class GoogleCampaignManagerRunReportOperator(BaseOperator):
     :param profile_id: The DFA profile ID.
     :param report_id: The ID of the report.
     :param synchronous: If set and true, tries to run the report synchronously.
-    :param api_version: The version of the api that will be requested, for example 'v4'.
+    :param api_version: The version of the api that will be requested, for example 'v5'.
     :param gcp_conn_id: The connection ID to use when fetching connection info.
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
@@ -355,7 +352,7 @@ class GoogleCampaignManagerRunReportOperator(BaseOperator):
         profile_id: str,
         report_id: str,
         synchronous: bool = False,
-        api_version: str = "v4",
+        api_version: str = "v5",
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
         **kwargs,
@@ -381,7 +378,7 @@ class GoogleCampaignManagerRunReportOperator(BaseOperator):
             synchronous=self.synchronous,
         )
         file_id = response.get("id")
-        self.xcom_push(context, key="file_id", value=file_id)
+        context["task_instance"].xcom_push(key="file_id", value=file_id)
         self.log.info("Report file id: %s", file_id)
         return response
 
@@ -392,7 +389,7 @@ class GoogleCampaignManagerBatchInsertConversionsOperator(BaseOperator):
 
     .. seealso::
         Check official API docs:
-        `https://developers.google.com/doubleclick-advertisers/rest/v4/conversions/batchinsert`
+        `https://developers.google.com/doubleclick-advertisers/rest/v5/conversions/batchinsert`
 
     .. seealso::
         For more information on how to use this operator, take a look at the guide:
@@ -408,7 +405,7 @@ class GoogleCampaignManagerBatchInsertConversionsOperator(BaseOperator):
     :param encryption_source: Describes whether the encrypted cookie was received from ad serving
         (the %m macro) or from Data Transfer.
     :param max_failed_inserts: The maximum number of conversions that failed to be inserted
-    :param api_version: The version of the api that will be requested, for example 'v4'.
+    :param api_version: The version of the api that will be requested, for example 'v5'.
     :param gcp_conn_id: The connection ID to use when fetching connection info.
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
@@ -427,6 +424,7 @@ class GoogleCampaignManagerBatchInsertConversionsOperator(BaseOperator):
         "encryption_entity_id",
         "encryption_source",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -438,7 +436,7 @@ class GoogleCampaignManagerBatchInsertConversionsOperator(BaseOperator):
         encryption_entity_id: int,
         encryption_source: str,
         max_failed_inserts: int = 0,
-        api_version: str = "v4",
+        api_version: str = "v5",
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
         **kwargs,
@@ -477,7 +475,7 @@ class GoogleCampaignManagerBatchUpdateConversionsOperator(BaseOperator):
 
     .. seealso::
         Check official API docs:
-        `https://developers.google.com/doubleclick-advertisers/rest/v4/conversions/batchupdate`
+        `https://developers.google.com/doubleclick-advertisers/rest/v5/conversions/batchupdate`
 
     .. seealso::
         For more information on how to use this operator, take a look at the guide:
@@ -485,7 +483,7 @@ class GoogleCampaignManagerBatchUpdateConversionsOperator(BaseOperator):
 
     :param profile_id: User profile ID associated with this request.
     :param conversions: Conversations to update, should be type of Conversion:
-        https://developers.google.com/doubleclick-advertisers/rest/v4/conversions
+        https://developers.google.com/doubleclick-advertisers/rest/v5/conversions
     :param encryption_entity_type: The encryption entity type. This should match the encryption
         configuration for ad serving or Data Transfer.
     :param encryption_entity_id: The encryption entity ID. This should match the encryption
@@ -493,7 +491,7 @@ class GoogleCampaignManagerBatchUpdateConversionsOperator(BaseOperator):
     :param encryption_source: Describes whether the encrypted cookie was received from ad serving
         (the %m macro) or from Data Transfer.
     :param max_failed_updates: The maximum number of conversions that failed to be updated
-    :param api_version: The version of the api that will be requested, for example 'v4'.
+    :param api_version: The version of the api that will be requested, for example 'v5'.
     :param gcp_conn_id: The connection ID to use when fetching connection info.
     :param impersonation_chain: Optional service account to impersonate using short-term
         credentials, or chained list of accounts required to get the access_token
@@ -512,6 +510,7 @@ class GoogleCampaignManagerBatchUpdateConversionsOperator(BaseOperator):
         "encryption_entity_id",
         "encryption_source",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -523,7 +522,7 @@ class GoogleCampaignManagerBatchUpdateConversionsOperator(BaseOperator):
         encryption_entity_id: int,
         encryption_source: str,
         max_failed_updates: int = 0,
-        api_version: str = "v4",
+        api_version: str = "v5",
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
         **kwargs,

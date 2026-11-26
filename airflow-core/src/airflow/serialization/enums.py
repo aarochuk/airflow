@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 from enum import Enum, unique
+from typing import Any
 
 
 # Fields of an encoded object in serialization.
@@ -29,6 +30,30 @@ class Encoding(str, Enum):
 
     TYPE = "__type"
     VAR = "__var"
+
+
+def stringify_encoding_keys(d: Any) -> Any:
+    """
+    Convert BaseSerialization Encoding enum keys to their string values recursively.
+
+    str(Encoding.TYPE) returns "Encoding.TYPE" instead of "__type" for a ``(str, Enum)``
+    mixin. serde.serialize uses str(k) for dict keys, so without this conversion the
+    encrypted blob ends up with "Encoding.TYPE" keys that neither serde._convert nor the
+    BaseSerialization fallback can read back.
+    """
+    if isinstance(d, dict):
+        return {
+            (k.value if isinstance(k, Encoding) else str(k)): stringify_encoding_keys(v) for k, v in d.items()
+        }
+    if isinstance(d, list):
+        return [stringify_encoding_keys(i) for i in d]
+    if isinstance(d, tuple):
+        converted = [stringify_encoding_keys(i) for i in d]
+        # namedtuples require positional args, not a single list argument
+        if hasattr(d, "_fields"):
+            return type(d)(*converted)
+        return tuple(converted)
+    return d
 
 
 # Supported types for encoding. primitives and list are not encoded.
@@ -44,7 +69,6 @@ class DagAttributeTypes(str, Enum):
     TIMEDELTA = "timedelta"
     TIMEZONE = "timezone"
     RELATIVEDELTA = "relativedelta"
-    BASE_TRIGGER = "base_trigger"
     AIRFLOW_EXC_SER = "airflow_exc_ser"
     BASE_EXC_SER = "base_exc_ser"
     DICT = "dict"
@@ -62,16 +86,10 @@ class DagAttributeTypes(str, Enum):
     ASSET_REF = "asset_ref"
     ASSET_UNIQUE_KEY = "asset_unique_key"
     ASSET_ALIAS_UNIQUE_KEY = "asset_alias_unique_key"
-    SIMPLE_TASK_INSTANCE = "simple_task_instance"
-    BASE_JOB = "Job"
-    TASK_INSTANCE = "task_instance"
-    DAG_RUN = "dag_run"
-    DAG_MODEL = "dag_model"
-    LOG_TEMPLATE = "log_template"
     CONNECTION = "connection"
-    TASK_CONTEXT = "task_context"
     ARG_NOT_SET = "arg_not_set"
     TASK_CALLBACK_REQUEST = "task_callback_request"
     DAG_CALLBACK_REQUEST = "dag_callback_request"
     TASK_INSTANCE_KEY = "task_instance_key"
-    TRIGGER = "trigger"
+    DEADLINE_ALERT = "deadline_alert"
+    MAPPED_ARGUMENT = "mapped_argument"

@@ -23,7 +23,10 @@ XComs
 
 XComs (short for "cross-communications") are a mechanism that let :doc:`tasks` talk to each other, as by default Tasks are entirely isolated and may be running on entirely different machines.
 
-An XCom is identified by a ``key`` (essentially its name), as well as the ``task_id`` and ``dag_id`` it came from. They can have any serializable value (including objects that are decorated with ``@dataclass`` or ``@attr.define``, see :ref:`TaskFlow arguments <concepts:arbitrary-arguments>`:), but they are only designed for small amounts of data; do not use them to pass around large values, like dataframes.
+An XCom is identified by a ``key`` (essentially its name), as well as the ``task_id`` and ``dag_id`` it came from. They can have any serializable value (including objects that are decorated with ``@dataclass`` or ``@attr.define``, see :ref:`TaskFlow arguments <concepts:arbitrary-arguments>`), but they are only designed for small amounts of data; do not use them to pass around large values, like dataframes.
+
+XCom operations should be performed through the Task Context using
+:func:`~airflow.sdk.get_current_context`. Directly updating using XCom database model is not possible.
 
 XComs are explicitly "pushed" and "pulled" to/from their storage using the ``xcom_push`` and ``xcom_pull`` methods on Task Instances.
 
@@ -31,14 +34,14 @@ To push a value within a task called **"task-1"** that will be used by another t
 
 .. code-block:: python
 
-    # pushes data in any_serializable_value into xcom with key "identifier as string"
+    # pushes data in any_serializable_value into XCom with key "identifier as string"
     task_instance.xcom_push(key="identifier as a string", value=any_serializable_value)
 
 To pull the value that was pushed in the code above in a different task:
 
 .. code-block:: python
 
-    # pulls the xcom variable with key "identifier as string" that was pushed from within task-1
+    # pulls the XCom variable with key "identifier as string" that was pushed from within task-1
     task_instance.xcom_pull(key="identifier as string", task_ids="task-1")
 
 Many operators will auto-push their results into an XCom key called ``return_value`` if the ``do_xcom_push`` argument is set to ``True`` (as it is by default), and ``@task`` functions do this as well. ``xcom_pull`` defaults to using ``return_value`` as key if no key is passed to it, meaning it's possible to write code like this::
@@ -46,11 +49,27 @@ Many operators will auto-push their results into an XCom key called ``return_val
     # Pulls the return_value XCOM from "pushing_task"
     value = task_instance.xcom_pull(task_ids='pushing_task')
 
+If you need to pull a value from a specific DAG run (for example, a DAG run triggered by
+``TriggerDagRunOperator``), specify both ``dag_id`` and ``run_id`` explicitly::
+
+    trigger_run_id = task_instance.xcom_pull(task_ids="trigger_child", key="trigger_run_id")
+    child_value = task_instance.xcom_pull(
+        task_ids="child_task",
+        dag_id="child_dag",
+        run_id=trigger_run_id,
+    )
+
+The return_value key (default key with which XComs are pushed) is defined as a constant XCOM_RETURN_KEY in the :class:`~airflow.sdk.bases.xcom.BaseXCom` class and can be accessed as BaseXCom.XCOM_RETURN_KEY.
+
 You can also use XComs in :ref:`templates <concepts:jinja-templating>`::
 
     SELECT * FROM {{ task_instance.xcom_pull(task_ids='foo', key='table_name') }}
 
-XComs are a relative of :doc:`variables`, with the main difference being that XComs are per-task-instance and designed for communication within a DAG run, while Variables are global and designed for overall configuration and value sharing.
+.. note::
+
+  ``xcom_pull()`` without a ``task_ids`` argument pulls only from the current task. In Airflow 2, the same call would search all tasks and return the most recent value. Always specify ``task_ids`` explicitly when pulling from other tasks.
+
+XComs are a relative of :doc:`variables`, with the main difference being that XComs are per-task-instance and designed for communication within a Dag run, while Variables are global and designed for overall configuration and value sharing.
 
 If you want to push multiple XComs at once you can set ``do_xcom_push`` and ``multiple_outputs`` arguments to ``True``, and then return a dictionary of values.
 
@@ -70,14 +89,12 @@ An example of pushing multiple XComs and pulling them individually:
         key1 = context["ti"].xcom_pull(task_ids="push_multiple", key="key1")  # to pull key1
         key2 = context["ti"].xcom_pull(task_ids="push_multiple", key="key2")  # to pull key2
 
-        # Pulling entire xcom data from push_multiple task
+        # Pulling entire XCom data from push_multiple task
         data = context["ti"].xcom_pull(task_ids="push_multiple", key="return_value")
-
-
 
 .. note::
 
-  If the first task run is not succeeded then on every retry task XComs will be cleared to make the task run idempotent.
+  If the first task was not successful then on every retry task XComs will be cleared to make the task run idempotent. XComs therefore can't be used to persist state across task retries or :doc:`./sensors` poke.
 
 
 Object Storage XCom Backend
@@ -89,13 +106,24 @@ The default XCom backend, BaseXCom, stores XComs in the Airflow database, which 
 Custom XCom Backends
 --------------------
 
-The XCom system has interchangeable backends, and you can set which backend is being used via the ``xcom_backend`` configuration option.
+The XCom system has interchangeable backends, and you can set which backend is being used via the ``xcom_backend`` configuration option. A backend is a subclass of :class:`~airflow.sdk.bases.xcom.BaseXCom`.
 
-If you want to implement your own backend, you should subclass :class:`~airflow.models.xcom.BaseXCom`, and override the ``serialize_value`` and ``deserialize_value`` methods.
+A backend that keeps values outside the metadata database overrides ``store_value``, which receives an
+:class:`~airflow.sdk.bases.xcom.XComCoordinate`, stores the value and returns what the XCom row holds, and
+``load_value``, which turns that row value back into the value. ``XComCoordinate.build_path`` builds a storage
+location that is unique per task instance, or per write when the writer cannot know the task instance.
+The key is chosen by the Dag author and can look like a file extension, so pass a ``suffix`` that names the
+stored format if your backend reads the format back from the object name.
 
-There is also an ``orm_deserialize_value`` method that is called whenever the XCom objects are rendered for UI or reporting purposes; if you have large or expensive-to-retrieve values in your XComs, you should override this method to avoid calling that code (and instead return a lighter, incomplete representation) so the UI remains responsive.
+Override ``purge`` to remove the stored data when the Task SDK deletes an XCom, either through ``XCom.delete`` or
+when a task instance clears its XComs as it starts again. ``purge`` is not called when a row is removed through
+the REST API, the UI or ``airflow db clean``, so those leave the stored data behind.
 
-You can also override the ``clear`` method and use it when clearing results for given dags and tasks. This allows the custom XCom backend to process the data lifecycle easier.
+A backend that only overrides ``serialize_value`` and ``deserialize_value`` keeps working, but cannot be used
+with Dags that use task loops: every iteration of a task in a loop is a separate task instance, and only
+``store_value`` can tell them apart.
+
+Tasks written with a language SDK, such as the TypeScript, Go or Java SDK, use the same backend. The worker runs the backend for those tasks, so install the backend and its provider on the worker, as for Python tasks.
 
 Verifying Custom XCom Backend usage in Containers
 -------------------------------------------------
@@ -106,6 +134,6 @@ If you can exec into a terminal in an Airflow container, you can then print out 
 
 .. code-block:: python
 
-    from airflow.models.xcom import XCom
+    from airflow.sdk.execution_time.xcom import XCom
 
     print(XCom.__name__)

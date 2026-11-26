@@ -16,77 +16,77 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Link } from "@chakra-ui/react";
+import { Icon } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 import { FiChevronRight } from "react-icons/fi";
 import { LuPlug } from "react-icons/lu";
 
-import { usePluginServiceGetPlugins } from "openapi/queries";
-import type { AppBuilderMenuItemResponse } from "openapi/requests/types.gen";
-import { Menu } from "src/components/ui";
+import { Menu } from "src/system-components";
+
+import type { NavItemResponse } from "src/utils/types";
 
 import { NavButton } from "./NavButton";
+import { NavMenu } from "./NavMenu";
+import { PluginMenuItem } from "./PluginMenuItem";
 
-export const PluginMenus = () => {
-  const { data } = usePluginServiceGetPlugins();
+export const PluginMenus = ({ navItems }: { readonly navItems: Array<NavItemResponse> }) => {
+  const { t: translate } = useTranslation();
 
-  const menuPlugins = data?.plugins.filter((plugin) => plugin.appbuilder_menu_items.length > 0);
-
-  if (data === undefined || menuPlugins === undefined) {
+  if (navItems.length === 0) {
     return undefined;
   }
 
-  const categories: Record<string, Array<AppBuilderMenuItemResponse>> = {};
-  const buttons: Array<AppBuilderMenuItemResponse> = [];
+  const promotedItems = navItems.filter((item) => item.nav_top_level === true);
+  const remainingItems = navItems.filter((item) => item.nav_top_level !== true);
 
-  menuPlugins.forEach((plugin) => {
-    plugin.appbuilder_menu_items.forEach((mi) => {
-      if (mi.category !== null && mi.category !== undefined) {
-        categories[mi.category] = [...(categories[mi.category] ?? []), mi];
-      } else {
-        buttons.push(mi);
-      }
-    });
+  // Build category structure for remaining items that go into the submenu
+  const remainingCategories: Record<string, Array<NavItemResponse>> = {};
+  const remainingButtons: Array<NavItemResponse> = [];
+
+  remainingItems.forEach((navItem) => {
+    if (navItem.category !== null && navItem.category !== undefined) {
+      remainingCategories[navItem.category] = [...(remainingCategories[navItem.category] ?? []), navItem];
+    } else {
+      remainingButtons.push(navItem);
+    }
   });
 
-  if (!buttons.length && !Object.keys(categories).length) {
-    return undefined;
-  }
+  // Remaining items go into a submenu only when there are 2 or more of them.
+  // A single remaining item is promoted to the toolbar to avoid a one-item submenu.
+  const showRemainingInMenu = remainingItems.length >= 2;
+
+  // Only internal routes (backed by url_route) can match the current pathname; external views never do.
+  const remainingPaths = remainingItems
+    .filter((navItem) => navItem.url_route !== undefined && navItem.url_route !== null)
+    .map((navItem) => `plugin/${navItem.url_route}`);
 
   return (
-    <Menu.Root positioning={{ placement: "right" }}>
-      <Menu.Trigger>
-        <NavButton as={Box} icon={<LuPlug />} title="Plugins" />
-      </Menu.Trigger>
-      <Menu.Content>
-        {buttons.map(({ href, name }) =>
-          href !== null && href !== undefined ? (
-            <Menu.Item asChild key={name} value={name}>
-              <Link aria-label={name} href={href} rel="noopener noreferrer" target="_blank">
-                {name}
-              </Link>
-            </Menu.Item>
-          ) : undefined,
-        )}
-        {Object.entries(categories).map(([key, menuButtons]) => (
-          <Menu.Root key={key} positioning={{ placement: "right" }}>
-            <Menu.TriggerItem display="flex" justifyContent="space-between">
-              {key}
-              <FiChevronRight />
-            </Menu.TriggerItem>
-            <Menu.Content>
-              {menuButtons.map(({ href, name }) =>
-                href !== undefined && href !== null ? (
-                  <Menu.Item asChild key={name} value={name}>
-                    <Link aria-label={name} href={href} rel="noopener noreferrer" target="_blank">
-                      {name}
-                    </Link>
-                  </Menu.Item>
-                ) : undefined,
-              )}
-            </Menu.Content>
-          </Menu.Root>
-        ))}
-      </Menu.Content>
-    </Menu.Root>
+    <>
+      {promotedItems.map((navItem) => (
+        <PluginMenuItem key={navItem.name} {...navItem} topLevel={true} />
+      ))}
+      {showRemainingInMenu ? (
+        <NavMenu trigger={<NavButton icon={LuPlug} title={translate("nav.plugins")} to={remainingPaths} />}>
+          {remainingButtons.map((navItem) => (
+            <PluginMenuItem key={navItem.name} {...navItem} />
+          ))}
+          {Object.entries(remainingCategories).map(([key, menuButtons]) => (
+            <Menu.Root key={key} positioning={{ placement: "right" }}>
+              <Menu.TriggerItem display="flex" justifyContent="space-between">
+                {key}
+                <Icon as={FiChevronRight} boxSize={4} color="fg.muted" />
+              </Menu.TriggerItem>
+              <Menu.Content>
+                {menuButtons.map((navItem) => (
+                  <PluginMenuItem {...navItem} key={navItem.name} />
+                ))}
+              </Menu.Content>
+            </Menu.Root>
+          ))}
+        </NavMenu>
+      ) : (
+        remainingItems.map((navItem) => <PluginMenuItem key={navItem.name} {...navItem} topLevel={true} />)
+      )}
+    </>
   );
 };

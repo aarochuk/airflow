@@ -21,14 +21,10 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from airflow.providers.arangodb.hooks.arangodb import ArangoDBHook
-from airflow.sensors.base import BaseSensorOperator
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class AQLSensor(BaseSensorOperator):
@@ -42,7 +38,10 @@ class AQLSensor(BaseSensorOperator):
     :param arangodb_db: Target ArangoDB name.
     """
 
-    template_fields: Sequence[str] = ("query",)
+    template_fields: Sequence[str] = (
+        "query",
+        "arangodb_conn_id",
+    )
     template_ext: Sequence[str] = (".sql",)
     template_fields_renderers = {"query": "sql"}
 

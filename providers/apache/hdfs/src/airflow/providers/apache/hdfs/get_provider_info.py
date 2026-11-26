@@ -26,40 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-apache-hdfs",
         "name": "Apache HDFS",
         "description": "`Hadoop Distributed File System (HDFS) <https://hadoop.apache.org/docs/r1.2.1/hdfs_design.html>`__\nand `WebHDFS <https://hadoop.apache.org/docs/current/hadoop-project-dist/hadoop-hdfs/WebHDFS.html>`__.\n",
-        "state": "ready",
-        "source-date-epoch": 1743477772,
-        "versions": [
-            "4.7.1",
-            "4.7.0",
-            "4.6.0",
-            "4.5.1",
-            "4.5.0",
-            "4.4.2",
-            "4.4.1",
-            "4.4.0",
-            "4.3.3",
-            "4.3.2",
-            "4.3.1",
-            "4.3.0",
-            "4.2.0",
-            "4.1.1",
-            "4.1.0",
-            "4.0.0",
-            "3.2.1",
-            "3.2.0",
-            "3.1.0",
-            "3.0.1",
-            "3.0.0",
-            "2.2.3",
-            "2.2.2",
-            "2.2.1",
-            "2.2.0",
-            "2.1.1",
-            "2.1.0",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Hadoop Distributed File System (HDFS)",
@@ -80,20 +46,37 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.apache.hdfs.sensors.web_hdfs"],
             }
         ],
+        "asset-uris": [
+            {
+                "schemes": ["hdfs"],
+                "handler": "airflow.providers.apache.hdfs.assets.hdfs.sanitize_uri",
+                "factory": "airflow.providers.apache.hdfs.assets.hdfs.create_asset",
+                "to_openlineage_converter": "airflow.providers.apache.hdfs.assets.hdfs.convert_asset_to_openlineage",
+            }
+        ],
+        "dataset-uris": [
+            {
+                "schemes": ["hdfs"],
+                "handler": "airflow.providers.apache.hdfs.assets.hdfs.sanitize_uri",
+                "factory": "airflow.providers.apache.hdfs.assets.hdfs.create_asset",
+                "to_openlineage_converter": "airflow.providers.apache.hdfs.assets.hdfs.convert_asset_to_openlineage",
+            }
+        ],
         "hooks": [
             {"integration-name": "WebHDFS", "python-modules": ["airflow.providers.apache.hdfs.hooks.webhdfs"]}
+        ],
+        "logging": ["airflow.providers.apache.hdfs.log.hdfs_task_handler.HdfsTaskHandler"],
+        "remote-logging": [
+            {
+                "classpath": "airflow.providers.apache.hdfs.log.hdfs_task_handler.HdfsRemoteLogIO",
+                "scheme": "hdfs",
+            }
         ],
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.apache.hdfs.hooks.webhdfs.WebHDFSHook",
+                "hook-name": "Apache WebHDFS",
                 "connection-type": "webhdfs",
             }
         ],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            'hdfs[avro,dataframe,kerberos]>=2.5.4;python_version<"3.12"',
-            'hdfs[avro,dataframe,kerberos]>=2.7.3;python_version>="3.12"',
-            "pandas>=2.1.2,<2.2",
-        ],
-        "devel-dependencies": [],
     }

@@ -16,14 +16,14 @@
 # under the License.
 from __future__ import annotations
 
+import pickle
 import re
 from unittest import mock
-from unittest.mock import MagicMock
 
 import pendulum
 import pytest
 from dateutil import parser
-from kubernetes.client import ApiClient, models as k8s
+from kubernetes.client import ApiClient, Configuration, models as k8s
 
 from airflow import __version__
 from airflow.exceptions import AirflowConfigException
@@ -106,11 +106,11 @@ class TestPodGenerator:
 
         self.resources = k8s.V1ResourceRequirements(
             requests={
-                "cpu": 1,
+                "cpu": "1",
                 "memory": "1Gi",
                 "ephemeral-storage": "2Gi",
             },
-            limits={"cpu": 2, "memory": "2Gi", "ephemeral-storage": "4Gi", "nvidia.com/gpu": 1},
+            limits={"cpu": "2", "memory": "2Gi", "ephemeral-storage": "4Gi", "nvidia.com/gpu": "1"},
         )
 
         self.k8s_client = ApiClient()
@@ -168,18 +168,13 @@ class TestPodGenerator:
         )
 
     @pytest.mark.parametrize(
-        "content_json, expected",
+        ("content_json", "expected"),
         [
             pytest.param(
                 '{"token":"mock","ti":{"id":"4d828a62-a417-4936-a7a6-2b3fabacecab","task_id":"mock","dag_id":"mock","run_id":"mock","try_number":1,"map_index":-1,"pool_slots":1,"queue":"default","priority_weight":1},"dag_rel_path":"mock.py","bundle_info":{"name":"n/a","version":"no matter"},"log_path":"mock.log","kind":"ExecuteTask"}',
                 '{"token":"mock","ti":{"id":"4d828a62-a417-4936-a7a6-2b3fabacecab","task_id":"mock","dag_id":"mock","run_id":"mock","try_number":1,"map_index":-1,"pool_slots":1,"queue":"default","priority_weight":1},"dag_rel_path":"mock.py","bundle_info":{"name":"n/a","version":"no matter"},"log_path":"mock.log","kind":"ExecuteTask"}',
                 id="regular-input",
-            ),
-            pytest.param(
-                '{"token":"mock","ti":{"id":"4d828a62-a417-4936-a7a6-2b3fabacecab","task_id":"moc\'k","dag_id":"mock","run_id":"mock","try_number":1,"map_index":-1,"pool_slots":1,"queue":"default","priority_weight":1},"dag_rel_path":"mock.py","bundle_info":{"name":"n/a","version":"no matter"},"log_path":"mock.log","kind":"ExecuteTask"}',
-                '{"token":"mock","ti":{"id":"4d828a62-a417-4936-a7a6-2b3fabacecab","task_id":"moc\'"\'"\'k","dag_id":"mock","run_id":"mock","try_number":1,"map_index":-1,"pool_slots":1,"queue":"default","priority_weight":1},"dag_rel_path":"mock.py","bundle_info":{"name":"n/a","version":"no matter"},"log_path":"mock.log","kind":"ExecuteTask"}',
-                id="input-with-single-quote-in-task-id",
-            ),
+            )
         ],
     )
     def test_pod_spec_for_task_sdk_runs(self, content_json, expected, data_file):
@@ -196,38 +191,25 @@ class TestPodGenerator:
                 "python",
                 "-m",
                 "airflow.sdk.execution_time.execute_workload",
-                "/tmp/execute/input.json",
+                "--json-string",
+                content_json,
             ],
             pod_override_object=None,
             base_worker_pod=worker_config,
             namespace="namespace",
             scheduler_job_id="uuid",
-            content_json_for_volume=content_json,
         )
         sanitized_result = self.k8s_client.sanitize_for_serialization(result)
 
-        init_containers = sanitized_result["spec"]["initContainers"]
-        assert len(init_containers) == 1
-        init_container = init_containers[0]
-        assert init_container == {
-            "command": [
-                "/bin/sh",
-                "-c",
-                f"echo '{expected}' > /tmp/execute/input.json",
-            ],
-            "image": "busybox",
-            "name": "init-container",
-            "volumeMounts": [{"mountPath": "/tmp/execute", "name": "execute-volume", "readOnly": False}],
-        }
-
-        volumes = sanitized_result["spec"]["volumes"]
-        assert len(volumes) == 1
-        volume = volumes[0]
-        assert volume == {"emptyDir": {}, "name": "execute-volume"}
-
         main_container = sanitized_result["spec"]["containers"][0]
-        assert main_container["command"] == ["python", "-m", "airflow.sdk.execution_time.execute_workload"]
-        assert main_container["args"] == ["/tmp/execute/input.json"]
+
+        assert main_container["args"] == [
+            "python",
+            "-m",
+            "airflow.sdk.execution_time.execute_workload",
+            "--json-string",
+            expected,
+        ]
 
     def test_from_obj_pod_override_object(self):
         obj = {
@@ -367,14 +349,14 @@ class TestPodGenerator:
         assert result_dict == expected_dict
 
     @pytest.mark.parametrize(
-        "config_image, expected_image",
+        ("config_image", "expected_image"),
         [
             pytest.param("my_image:my_tag", "my_image:my_tag", id="image_in_cfg"),
             pytest.param(None, "busybox", id="no_image_in_cfg"),
         ],
     )
     @pytest.mark.parametrize(
-        "pod_override_object_namespace, expected_namespace",
+        ("pod_override_object_namespace", "expected_namespace"),
         [
             ("new_namespace", "new_namespace"),  # pod_override_object namespace should be used
             (None, "test_namespace"),  # if it is not provided, we use default one
@@ -506,8 +488,7 @@ class TestPodGenerator:
         template_file = data_file("pods/generator_base_with_secrets.yaml").as_posix()
         worker_config = PodGenerator.deserialize_model_file(template_file)
         mock_rand_str.return_value = self.rand_str
-        executor_config = MagicMock()
-        executor_config.side_effect = AttributeError("error")
+        executor_config = object()
 
         with pytest.raises(PodReconciliationError):
             PodGenerator.construct_pod(
@@ -597,11 +578,11 @@ class TestPodGenerator:
     def test_extend_object_field_not_list(self):
         base_obj = k8s.V1Container(name="base_container", image="image")
         client_obj = k8s.V1Container(name="client_container")
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="The chosen field must be a list."):
             extend_object_field(base_obj, client_obj, "image")
         base_obj = k8s.V1Container(name="base_container")
         client_obj = k8s.V1Container(name="client_container", image="image")
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="The chosen field must be a list."):
             extend_object_field(base_obj, client_obj, "image")
 
     def test_extend_object_field(self):
@@ -686,6 +667,21 @@ class TestPodGenerator:
         res = PodGenerator.reconcile_specs(base_spec, client_spec)
         assert res.init_containers == base_spec.init_containers + client_spec.init_containers
 
+    def test_reconcile_specs_init_containers_same_name(self):
+        base_spec = k8s.V1PodSpec(
+            containers=[],
+            init_containers=[k8s.V1Container(name="init1", image="base_image", args=["base_arg"])],
+        )
+        client_spec = k8s.V1PodSpec(
+            containers=[],
+            init_containers=[k8s.V1Container(name="init1", image="client_image")],
+        )
+        res = PodGenerator.reconcile_specs(base_spec, client_spec)
+        assert len(res.init_containers) == 1
+        assert res.init_containers[0].name == "init1"
+        assert res.init_containers[0].image == "client_image"
+        assert res.init_containers[0].args == ["base_arg"]
+
     def test_deserialize_model_file(self, caplog, data_file):
         template_file = data_file("pods/template.yaml").as_posix()
         result = PodGenerator.deserialize_model_file(template_file)
@@ -700,6 +696,31 @@ class TestPodGenerator:
         assert sanitized_res == {}
         assert len(caplog.records) == 1
         assert "non_existent.yaml does not exist" in caplog.text
+
+    def test_deserialize_model_dict_is_picklable_in_cluster(self, monkeypatch):
+        """A deserialized pod must not capture the unpicklable in-cluster Configuration.
+
+        In-cluster, the kubernetes client installs a process-global default ``Configuration`` whose
+        ``refresh_api_key_hook`` is an unpicklable local closure. ``deserialize_model_dict`` must
+        round-trip through a fresh ``Configuration`` so the pod (and every nested model) stays
+        picklable onto the KubernetesExecutor multiprocessing queue.
+        """
+
+        def _refresh_api_key(config):
+            return None
+
+        dirty = Configuration()
+        dirty.refresh_api_key_hook = _refresh_api_key
+        monkeypatch.setattr(Configuration, "_default", dirty, raising=False)
+
+        pod_dict = {
+            "metadata": {"name": "test-pod"},
+            "spec": {"containers": [{"name": "base", "image": "airflow:3"}]},
+        }
+        pod = PodGenerator.deserialize_model_dict(pod_dict)
+
+        assert isinstance(pod, k8s.V1Pod)
+        assert PodGenerator.serialize_pod(pickle.loads(pickle.dumps(pod))) == pod_dict
 
     @pytest.mark.parametrize(
         "input",
@@ -722,7 +743,7 @@ class TestPodGenerator:
         assert re.match(r"^[a-z0-9]{8}$", actual_suffix)
 
     @pytest.mark.parametrize(
-        "pod_id, expected_starts_with",
+        ("pod_id", "expected_starts_with"),
         (
             (
                 "somewhat-long-pod-name-maybe-longer-than-previously-supported-with-hyphen-",
@@ -761,7 +782,7 @@ class TestPodGenerator:
         PodGenerator(pod=k8s.V1Pod())
 
     @pytest.mark.parametrize(
-        "extra, extra_expected",
+        ("extra", "extra_expected"),
         [
             pytest.param(dict(), {}, id="base"),
             pytest.param(dict(airflow_worker=2), {"airflow-worker": "2"}, id="worker"),

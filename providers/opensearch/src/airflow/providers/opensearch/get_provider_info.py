@@ -26,22 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-opensearch",
         "name": "OpenSearch",
         "description": "`OpenSearch <https://opensearch.org/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477861,
-        "versions": [
-            "1.6.2",
-            "1.6.1",
-            "1.6.0",
-            "1.5.0",
-            "1.4.0",
-            "1.3.0",
-            "1.2.1",
-            "1.2.0",
-            "1.1.2",
-            "1.1.1",
-            "1.1.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "OpenSearch",
@@ -66,10 +50,22 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.opensearch.hooks.opensearch.OpenSearchHook",
+                "hook-name": "OpenSearch Hook",
                 "connection-type": "opensearch",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema"],
+                    "relabeling": {"extra": "OpenSearch Configuration"},
+                    "placeholders": {"extra": '{\n  "use_ssl": true,\n  "verify_certs": true\n}'},
+                },
             }
         ],
         "logging": ["airflow.providers.opensearch.log.os_task_handler.OpensearchTaskHandler"],
+        "remote-logging": [
+            {
+                "classpath": "airflow.providers.opensearch.log.os_task_handler.OpensearchRemoteLogIO",
+                "scheme": "opensearch",
+            }
+        ],
         "config": {
             "opensearch": {
                 "description": None,
@@ -125,6 +121,20 @@ def get_provider_info():
                         "type": "string",
                         "example": None,
                         "default": "False",
+                    },
+                    "write_to_os": {
+                        "description": "Write the task logs directly to OpenSearch\n",
+                        "version_added": "1.9.0",
+                        "type": "string",
+                        "example": None,
+                        "default": "False",
+                    },
+                    "target_index": {
+                        "description": "Name of the index to write to when direct OpenSearch log writing is enabled\n",
+                        "version_added": "1.9.0",
+                        "type": "string",
+                        "example": None,
+                        "default": "airflow-logs",
                     },
                     "json_format": {
                         "description": "Instead of the default log formatter, write the log lines as JSON\n",
@@ -218,6 +228,4 @@ def get_provider_info():
                 },
             },
         },
-        "dependencies": ["apache-airflow>=2.9.0", "opensearch-py>=2.2.0"],
-        "devel-dependencies": [],
     }

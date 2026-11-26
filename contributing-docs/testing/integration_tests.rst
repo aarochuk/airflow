@@ -24,7 +24,9 @@ These tests require ``airflow`` Docker image and extra images with integrations 
 The integration tests are all stored in the ``tests/integration`` folder, and similarly to the unit tests they all run
 using `pytest <http://doc.pytest.org/en/latest/>`_, but they are skipped by default unless ``--integration`` flag is passed to pytest.
 
-**The outline for this document in GitHub is available at top-right corner button (with 3-dots and 3 lines).**
+.. contents:: Table of Contents
+   :depth: 2
+   :local:
 
 Enabling Integrations
 ---------------------
@@ -45,51 +47,61 @@ NOTE: Every integration requires a separate container with the corresponding int
 These containers take precious resources on your PC, mainly the memory. The started integrations are not stopped
 until you stop the Breeze environment with the ``breeze down`` command.
 
-While you can run ``breeze`` or ``breeze shell` with one or multiple integrations enabled, some integrations
+While you can run ``breeze`` or ``breeze shell`` with one or multiple integrations enabled, some integrations
 are pure "provider" integrations, and some are "core" integration. Which means that some of the integrations
 have tests defined in the "providers" tests (because they are testing provider features), but other
-integrations are testing core features of Airflow (Fore example executors with CeleryExecutor).
+integrations are testing core features of Airflow (For example executors with CeleryExecutor).
 
-The following integrations are available ("Core tests ?" column indicates if the integration is a
-core or provider type of test.
+The following integrations are available.
 
 .. BEGIN AUTO-GENERATED INTEGRATION LIST
 
-+--------------+-------------------------------------------------------+
-| Identifier   | Description                                           |
-+==============+=======================================================+
-| cassandra    | Integration required for Cassandra hooks.             |
-+--------------+-------------------------------------------------------+
-| celery       | Integration required for Celery executor tests.       |
-+--------------+-------------------------------------------------------+
-| drill        | Integration required for drill operator and hook.     |
-+--------------+-------------------------------------------------------+
-| kafka        | Integration required for Kafka hooks.                 |
-+--------------+-------------------------------------------------------+
-| kerberos     | Integration that provides Kerberos authentication.    |
-+--------------+-------------------------------------------------------+
-| keycloak     | Integration for manual testing of multi-team Airflow. |
-+--------------+-------------------------------------------------------+
-| mongo        | Integration required for MongoDB hooks.               |
-+--------------+-------------------------------------------------------+
-| mssql        | Integration required for mssql hooks.                 |
-+--------------+-------------------------------------------------------+
-| openlineage  | Integration required for Openlineage hooks.           |
-+--------------+-------------------------------------------------------+
-| otel         | Integration required for OTEL/opentelemetry hooks.    |
-+--------------+-------------------------------------------------------+
-| pinot        | Integration required for Apache Pinot hooks.          |
-+--------------+-------------------------------------------------------+
-| qdrant       | Integration required for Qdrant tests.                |
-+--------------+-------------------------------------------------------+
-| redis        | Integration required for Redis tests.                 |
-+--------------+-------------------------------------------------------+
-| statsd       | Integration required for Statsd hooks.                |
-+--------------+-------------------------------------------------------+
-| trino        | Integration required for Trino hooks.                 |
-+--------------+-------------------------------------------------------+
-| ydb          | Integration required for YDB tests.                   |
-+--------------+-------------------------------------------------------+
++---------------+-------------------------------------------------------+
+| Identifier    | Description                                           |
++===============+=======================================================+
+| cassandra     | Integration required for Cassandra hooks.             |
++---------------+-------------------------------------------------------+
+| celery        | Integration required for Celery executor tests.       |
++---------------+-------------------------------------------------------+
+| drill         | Integration required for drill operator and hook.     |
++---------------+-------------------------------------------------------+
+| elasticsearch | Integration required for Elasticsearch hooks.         |
++---------------+-------------------------------------------------------+
+| kafka         | Integration required for Kafka hooks.                 |
++---------------+-------------------------------------------------------+
+| kerberos      | Integration that provides Kerberos authentication.    |
++---------------+-------------------------------------------------------+
+| keycloak      | Integration for manual testing of multi-team Airflow. |
++---------------+-------------------------------------------------------+
+| localstack    | Integration that emulates AWS services locally.       |
++---------------+-------------------------------------------------------+
+| mongo         | Integration required for MongoDB hooks.               |
++---------------+-------------------------------------------------------+
+| mssql         | Integration required for mssql hooks.                 |
++---------------+-------------------------------------------------------+
+| openlineage   | Integration required for Openlineage hooks.           |
++---------------+-------------------------------------------------------+
+| opensearch    | Integration required for OpenSearch hooks.            |
++---------------+-------------------------------------------------------+
+| otel          | Integration required for OTEL/opentelemetry hooks.    |
++---------------+-------------------------------------------------------+
+| pinot         | Integration required for Apache Pinot hooks.          |
++---------------+-------------------------------------------------------+
+| polaris       | Integration required for Apache Polaris tests.        |
++---------------+-------------------------------------------------------+
+| qdrant        | Integration required for Qdrant tests.                |
++---------------+-------------------------------------------------------+
+| redis         | * Integration required for Redis tests.               |
+|               | * Integration required for Redis cluster mode tests.  |
++---------------+-------------------------------------------------------+
+| statsd        | Integration required for Statsd hooks.                |
++---------------+-------------------------------------------------------+
+| tinkerpop     | Integration required for gremlin operator and hook.   |
++---------------+-------------------------------------------------------+
+| trino         | Integration required for Trino hooks.                 |
++---------------+-------------------------------------------------------+
+| ydb           | Integration required for YDB tests.                   |
++---------------+-------------------------------------------------------+
 
 .. END AUTO-GENERATED INTEGRATION LIST'
 
@@ -179,7 +191,7 @@ Running Integration Tests from the Host
 You can also run integration tests using Breeze from the host. Depending on the type of integration,
 you can rum "providers" or "core" integration tests. You can consult the table above to see which
 integration is "core" and which is "provider" one, also by running the
-``breeze providers-integration-tests --help`` or ``breeze core-integration-tests --help`` command
+``breeze testing providers-integration-tests --help`` or ``breeze testing core-integration-tests --help`` command
 you can see the list of available integrations for each type of test.
 
 Runs all core integration tests:
@@ -200,6 +212,14 @@ Runs mongo providers integration tests:
   .. code-block:: bash
 
        breeze testing providers-integration-tests  --db-reset --integration mongo
+
+The ``elasticsearch`` and ``opensearch`` integrations start the latest server version by default. Pick another
+supported version with ``--elasticsearch-version`` or ``--opensearch-version`` (``--help`` lists them).
+CI runs their tests once per supported version.
+
+  .. code-block:: bash
+
+       breeze testing providers-integration-tests  --db-reset --integration elasticsearch --elasticsearch-version <VERSION>
 
 
 Runs kerberos core integration tests:
@@ -296,9 +316,6 @@ Then, create the integration test file under ``tests/integration`` - remember to
 and to use the ``@pytest.mark.integration`` decorator. It is recommended to define setup and teardown methods
 (``setup_method`` and ``teardown_method``, respectively) - you could look at existing integration tests to learn more.
 
-Before pushing to GitHub, make sure to run static checks (``breeze static-checks --only-my-changes``) to apply linters
-on the Python logic, as well as to update the commands images under ``dev/breeze/docs/images``.
-
 When writing integration tests for components that also require Kerberos, you could enforce auto-enabling the latter by
 updating ``compose_file()`` method in ``airflow_breeze.params.shell_params.ShellParams``. For example, to ensure that
 Kerberos is active for ``trino`` integration tests, the following code has been introduced:
@@ -312,6 +329,17 @@ Kerberos is active for ``trino`` integration tests, the following code has been 
             compose_file_list.append(DOCKER_COMPOSE_DIR / "integration-kerberos.yml")
 
 
+
+Performance Harness
+-------------------
+
+``airflow-core/tests/integration/performance`` holds a load harness for the scheduler and the executor
+path. It starts the Airflow components as subprocesses against the ``otel`` and ``redis``
+integrations on Postgres, runs a backlog of fan-out Dag runs to completion and shows the numbers on the
+"Scheduler performance" Grafana dashboard. It never runs in the CI: the folder is collected only when
+its path is named on the pytest command line. See its
+`README <../../airflow-core/tests/integration/performance/README.md>`__ for how to run it and how to
+compare a change with the original code.
 
 -----
 

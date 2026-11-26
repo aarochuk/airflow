@@ -22,15 +22,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 from airflow.providers.imap.hooks.imap import ImapHook
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class ImapAttachmentSensor(BaseSensorOperator):
@@ -47,7 +43,7 @@ class ImapAttachmentSensor(BaseSensorOperator):
     :param imap_conn_id: The :ref:`imap connection id <howto/connection:imap>` to run the sensor against.
     """
 
-    template_fields: Sequence[str] = ("attachment_name", "mail_filter")
+    template_fields: Sequence[str] = ("attachment_name", "mail_filter", "conn_id")
 
     def __init__(
         self,

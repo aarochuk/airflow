@@ -16,27 +16,24 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Text } from "@chakra-ui/react";
-import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { paramPlaceholder, useParamStore } from "src/queries/useParamStore";
 
 import type { FlexibleFormElementProps } from ".";
 import { JsonEditor } from "../JsonEditor";
 
-export const FieldAdvancedArray = ({ name }: FlexibleFormElementProps) => {
-  const { paramsDict, setParamsDict } = useParamStore();
+export const FieldAdvancedArray = ({ name, namespace = "default", onUpdate }: FlexibleFormElementProps) => {
+  const { t: translate } = useTranslation("components");
+  const { disabled, paramsDict, setParamsDict } = useParamStore(namespace);
   const param = paramsDict[name] ?? paramPlaceholder;
-  const [error, setError] = useState<unknown>(undefined);
   // Determine the expected type based on schema
   const expectedType = param.schema.items?.type ?? "object";
 
   const handleChange = (value: string) => {
-    setError(undefined);
     if (value === "") {
       if (paramsDict[name]) {
         // "undefined" values are removed from params, so we set it to null to avoid falling back to DAG defaults.
-        // eslint-disable-next-line unicorn/no-null
         paramsDict[name].value = null;
       }
       setParamsDict(paramsDict);
@@ -45,18 +42,24 @@ export const FieldAdvancedArray = ({ name }: FlexibleFormElementProps) => {
         const parsedValue = JSON.parse(value) as unknown;
 
         if (!Array.isArray(parsedValue)) {
-          throw new TypeError("Value must be an array.");
+          onUpdate(undefined, translate("flexibleForm.validationErrorArrayNotArray"));
+
+          return;
         }
 
         if (expectedType === "number" && !parsedValue.every((item) => typeof item === "number")) {
           // Ensure all elements in the array are numbers
-          throw new TypeError("All elements in the array must be numbers.");
+          onUpdate(undefined, translate("flexibleForm.validationErrorArrayNotNumbers"));
+
+          return;
         } else if (
           expectedType === "object" &&
           !parsedValue.every((item) => typeof item === "object" && item !== null)
         ) {
           // Ensure all elements in the array are objects
-          throw new TypeError("All elements in the array must be objects.");
+          onUpdate(undefined, translate("flexibleForm.validationErrorArrayNotObject"));
+
+          return;
         }
 
         if (paramsDict[name]) {
@@ -64,24 +67,19 @@ export const FieldAdvancedArray = ({ name }: FlexibleFormElementProps) => {
         }
 
         setParamsDict(paramsDict);
+        onUpdate(String(parsedValue));
       } catch (_error) {
-        setError(expectedType === "number" ? String(_error).replace("JSON", "Array") : _error);
+        onUpdate(undefined, expectedType === "number" ? String(_error).replace("JSON", "Array") : _error);
       }
     }
   };
 
   return (
-    <>
-      <JsonEditor
-        id={`element_${name}`}
-        onChange={handleChange}
-        value={JSON.stringify(param.value ?? [], undefined, 2)}
-      />
-      {Boolean(error) ? (
-        <Text color="fg.error" fontSize="xs">
-          {String(error)}
-        </Text>
-      ) : undefined}
-    </>
+    <JsonEditor
+      editable={!Boolean(disabled)}
+      id={`element_${name}`}
+      onChange={handleChange}
+      value={JSON.stringify(param.value ?? [], undefined, 2)}
+    />
   );
 };

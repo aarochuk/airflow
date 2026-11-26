@@ -15,33 +15,46 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""AWS Batch Executor. Each Airflow task gets delegated out to an AWS Batch Job."""
+"""AWS Batch Executor. Each Airflow workload gets delegated out to an AWS Batch Job."""
 
 from __future__ import annotations
 
 import time
 from collections import deque
 from collections.abc import Sequence
-from contextlib import suppress
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from botocore.exceptions import ClientError, NoCredentialsError
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
 from airflow.executors.base_executor import BaseExecutor
 from airflow.providers.amazon.aws.executors.utils.exponential_backoff_retry import (
     calculate_next_attempt_delay,
     exponential_backoff_retry,
 )
 from airflow.providers.amazon.aws.hooks.batch_client import BatchClientHook
-from airflow.stats import Stats
-from airflow.utils import timezone
-from airflow.utils.helpers import merge_dicts
+from airflow.providers.amazon.version_compat import (
+    AIRFLOW_V_3_0_PLUS,
+    AIRFLOW_V_3_1_PLUS,
+    AIRFLOW_V_3_3_PLUS,
+    AIRFLOW_V_3_4_PLUS,
+)
+from airflow.providers.common.compat.sdk import AirflowException, Stats, timezone
+from airflow.utils.helpers import merge_dicts, prune_dict
+
+if AIRFLOW_V_3_4_PLUS:
+    from airflow.executors.workloads.base import WorkloadType
+
+    _SUPPORTED_WORKLOAD_TYPES = frozenset({WorkloadType.EXECUTE_TASK, WorkloadType.EXECUTE_CALLBACK})
 
 if TYPE_CHECKING:
-    from airflow.models.taskinstance import TaskInstance, TaskInstanceKey
+    from sqlalchemy.orm import Session
+
+    from airflow.executors import workloads
+    from airflow.models.taskinstance import TaskInstance
+    from airflow.providers.amazon.aws.executors.batch.utils import BatchJobWorkloadKey
+
+
 from airflow.providers.amazon.aws.executors.batch.boto_schema import (
     BatchDescribeJobsResponseSchema,
     BatchSubmitJobResponseSchema,
@@ -87,12 +100,12 @@ class AwsBatchExecutor(BaseExecutor):
     Airflow TaskInstance's executor_config.
     """
 
-    # Maximum number of retries to submit a Batch Job.
-    MAX_SUBMIT_JOB_ATTEMPTS = conf.get(
-        CONFIG_GROUP_NAME,
-        AllBatchConfigKeys.MAX_SUBMIT_JOB_ATTEMPTS,
-        fallback=CONFIG_DEFAULTS[AllBatchConfigKeys.MAX_SUBMIT_JOB_ATTEMPTS],
-    )
+    supports_multi_team: bool = True
+    supports_task_instance_uuid = hasattr(BaseExecutor, "get_task_key")
+    if AIRFLOW_V_3_4_PLUS:
+        supported_workload_types: frozenset[WorkloadType] = _SUPPORTED_WORKLOAD_TYPES
+    elif AIRFLOW_V_3_3_PLUS:
+        supports_callbacks: bool = True
 
     # AWS only allows a maximum number of JOBs in the describe_jobs function
     DESCRIBE_JOBS_BATCH_SIZE = 99
@@ -101,10 +114,79 @@ class AwsBatchExecutor(BaseExecutor):
         super().__init__(*args, **kwargs)
         self.active_workers = BatchJobCollection()
         self.pending_jobs: deque = deque()
+
+        # Check if self has the ExecutorConf set on the self.conf attribute, and if not, set it to the global
+        # configuration object. This allows the changes to be backwards compatible with older versions of
+        # Airflow.
+        # Can be removed when minimum supported provider version is equal to the version of core airflow
+        # which introduces multi-team configuration.
+        if not hasattr(self, "conf"):
+            from airflow.providers.common.compat.sdk import conf
+
+            self.conf = conf
+        # TODO: Remove this fallback once the min Airflow version for providers is >= 3.1
+        # (BaseExecutor.team_name is always defined from Airflow 3.1 onward).
+        if not hasattr(self, "team_name"):
+            self.team_name = None
         self.attempts_since_last_successful_connection = 0
         self.load_batch_connection(check_connection=False)
         self.IS_BOTO_CONNECTION_HEALTHY = False
         self.submit_job_kwargs = self._load_submit_kwargs()
+
+        # Maximum number of retries to submit a Batch job.
+        self.max_submit_job_attempts = self.conf.get(
+            CONFIG_GROUP_NAME,
+            AllBatchConfigKeys.MAX_SUBMIT_JOB_ATTEMPTS,
+            fallback=CONFIG_DEFAULTS[AllBatchConfigKeys.MAX_SUBMIT_JOB_ATTEMPTS],
+        )
+
+    if not AIRFLOW_V_3_1_PLUS:
+
+        def queue_workload(self, workload: workloads.All, session: Session | None) -> None:
+            from airflow.executors import workloads
+
+            if not isinstance(workload, workloads.ExecuteTask):
+                raise RuntimeError(f"{type(self)} cannot handle workloads of type {type(workload)}")
+            self.queued_tasks[workload.ti.key] = workload
+
+    def _process_workloads(self, workload_items: Sequence[workloads.All]) -> None:
+        from airflow.executors import workloads
+
+        for workload in workload_items:
+            if isinstance(workload, workloads.ExecuteTask):
+                task_command = [workload]
+                task_key = (
+                    self.get_task_key(workload.ti) if self.supports_task_instance_uuid else workload.ti.key
+                )
+                queue = workload.ti.queue
+                executor_config = workload.ti.executor_config or {}
+
+                if AIRFLOW_V_3_4_PLUS:
+                    del self.executor_queues[WorkloadType.EXECUTE_TASK][task_key]
+                else:
+                    del self.queued_tasks[task_key]
+                self.execute_async(
+                    key=task_key,
+                    command=task_command,  # type: ignore[arg-type]
+                    queue=queue,
+                    executor_config=executor_config,
+                )
+                self.running.add(task_key)
+            elif AIRFLOW_V_3_3_PLUS and isinstance(workload, workloads.ExecuteCallback):
+                callback_command = [workload]
+                callback_key = workload.callback.key
+                queue = None
+                if isinstance(workload.callback.data, dict) and "queue" in workload.callback.data:
+                    queue = workload.callback.data["queue"]
+
+                if AIRFLOW_V_3_4_PLUS:
+                    del self.executor_queues[WorkloadType.EXECUTE_CALLBACK][callback_key]
+                else:
+                    del self.queued_callbacks[callback_key]
+                self.execute_async(key=callback_key, command=callback_command, queue=queue)  # type: ignore[arg-type]
+                self.running.add(callback_key)
+            else:
+                raise RuntimeError(f"{type(self)} cannot handle workloads of type {type(workload)}")
 
     def check_health(self):
         """Make a test API call to check the health of the Batch Executor."""
@@ -135,7 +217,7 @@ class AwsBatchExecutor(BaseExecutor):
 
     def start(self):
         """Call this when the Executor is run for the first time by the scheduler."""
-        check_health = conf.getboolean(
+        check_health = self.conf.getboolean(
             CONFIG_GROUP_NAME, AllBatchConfigKeys.CHECK_HEALTH_ON_STARTUP, fallback=False
         )
 
@@ -151,12 +233,12 @@ class AwsBatchExecutor(BaseExecutor):
 
     def load_batch_connection(self, check_connection: bool = True):
         self.log.info("Loading Connection information")
-        aws_conn_id = conf.get(
+        aws_conn_id = self.conf.get(
             CONFIG_GROUP_NAME,
             AllBatchConfigKeys.AWS_CONN_ID,
             fallback=CONFIG_DEFAULTS[AllBatchConfigKeys.AWS_CONN_ID],
         )
-        region_name = conf.get(CONFIG_GROUP_NAME, AllBatchConfigKeys.REGION_NAME, fallback=None)
+        region_name = self.conf.get(CONFIG_GROUP_NAME, AllBatchConfigKeys.REGION_NAME, fallback=None)
         self.batch = BatchClientHook(aws_conn_id=aws_conn_id, region_name=region_name).conn
         self.attempts_since_last_successful_connection += 1
         self.last_connection_reload = timezone.utcnow()
@@ -193,18 +275,45 @@ class AwsBatchExecutor(BaseExecutor):
     def sync_running_jobs(self):
         all_job_ids = self.active_workers.get_all_jobs()
         if not all_job_ids:
-            self.log.debug("No active Airflow tasks, skipping sync")
+            self.log.debug("No active Airflow workloads, skipping sync")
             return
         describe_job_response = self._describe_jobs(all_job_ids)
 
         self.log.debug("Active Workers: %s", describe_job_response)
 
         for job in describe_job_response:
-            if job.get_job_state() == State.FAILED:
-                self._handle_failed_job(job)
-            elif job.get_job_state() == State.SUCCESS:
-                task_key = self.active_workers.pop_by_id(job.job_id)
-                self.success(task_key)
+            # snapshot the key before handling the job: if the error strikes after
+            # pop_by_id() already removed it, the collection can no longer tell us
+            # whose workload it was, and the workload would be left with no terminal state
+            workload_key = self.active_workers.id_to_key.get(job.job_id)
+            try:
+                if job.get_job_state() == State.FAILED:
+                    self._handle_failed_job(job)
+                elif job.get_job_state() == State.SUCCESS:
+                    self.success(self.active_workers.pop_by_id(job.job_id))
+            except (ClientError, NoCredentialsError):
+                # credential problems are executor-wide, not job-specific: let sync() handle them
+                raise
+            except Exception:
+                self.log.exception(
+                    "Evicting Batch job %s after an unexpected error while syncing it.", job.job_id
+                )
+                self._evict_job(job.job_id, workload_key)
+
+    def _evict_job(self, job_id: str, workload_key: BatchJobWorkloadKey | None = None) -> None:
+        """
+        Remove a job from the collection and fail its workload, tolerating corrupted bookkeeping.
+
+        workload_key is the caller's snapshot of the mapping taken before the error;
+        it is the fallback when the job was already removed from the collection.
+        """
+        workload_key = self.active_workers.remove_job(job_id) or workload_key
+        if workload_key is None:
+            return
+        try:
+            self.fail(workload_key)
+        except Exception:
+            self.log.exception("Failed to fail workload %s of evicted Batch job %s", workload_key, job_id)
 
     def _handle_failed_job(self, job):
         """
@@ -217,30 +326,30 @@ class AwsBatchExecutor(BaseExecutor):
         # if the job fails before the Airflow process on the container has started. These failures
         # can be caused by a Batch API failure, container misconfiguration etc.
         # If the container is able to start up and run the Airflow process, any failures after that
-        # (i.e. DAG failures) will not be marked as Failed by AWS Batch, because Batch on assumes
-        # responsibility for ensuring the process started. Failures in the DAG will be caught by
+        # (i.e. Dag failures) will not be marked as Failed by AWS Batch, because Batch on assumes
+        # responsibility for ensuring the process started. Failures in the Dag will be caught by
         # Airflow, which will be handled separately.
         job_info = self.active_workers.id_to_job_info[job.job_id]
-        task_key = self.active_workers.id_to_key[job.job_id]
-        task_cmd = job_info.cmd
+        workload_key = self.active_workers.id_to_key[job.job_id]
+        workload_cmd = job_info.cmd
         queue = job_info.queue
         exec_info = job_info.config
         failure_count = self.active_workers.failure_count_by_id(job_id=job.job_id)
-        if int(failure_count) < int(self.__class__.MAX_SUBMIT_JOB_ATTEMPTS):
+        if int(failure_count) < int(self.max_submit_job_attempts):
             self.log.warning(
-                "Airflow task %s failed due to %s. Failure %s out of %s occurred on %s. Rescheduling.",
-                task_key,
+                "Airflow workload %s failed due to %s. Failure %s out of %s occurred on %s. Rescheduling.",
+                workload_key,
                 job.status_reason,
                 failure_count,
-                self.__class__.MAX_SUBMIT_JOB_ATTEMPTS,
+                self.max_submit_job_attempts,
                 job.job_id,
             )
             self.active_workers.increment_failure_count(job_id=job.job_id)
             self.active_workers.pop_by_id(job.job_id)
             self.pending_jobs.append(
                 BatchQueuedJob(
-                    task_key,
-                    task_cmd,
+                    workload_key,
+                    workload_cmd,
                     queue,
                     exec_info,
                     failure_count + 1,
@@ -249,12 +358,12 @@ class AwsBatchExecutor(BaseExecutor):
             )
         else:
             self.log.error(
-                "Airflow task %s has failed a maximum of %s times. Marking as failed",
-                task_key,
+                "Airflow workload %s has failed a maximum of %s times. Marking as failed",
+                workload_key,
                 failure_count,
             )
             self.active_workers.pop_by_id(job.job_id)
-            self.fail(task_key)
+            self.fail(workload_key)
 
     def attempt_submit_jobs(self):
         """
@@ -267,8 +376,8 @@ class AwsBatchExecutor(BaseExecutor):
         """
         for _ in range(len(self.pending_jobs)):
             batch_job = self.pending_jobs.popleft()
-            key = batch_job.key
-            cmd = batch_job.command
+            workload_key = batch_job.key
+            workload_cmd = batch_job.command
             queue = batch_job.queue
             exec_config = batch_job.executor_config
             attempt_number = batch_job.attempt_number
@@ -277,7 +386,7 @@ class AwsBatchExecutor(BaseExecutor):
                 self.pending_jobs.append(batch_job)
                 continue
             try:
-                submit_job_response = self._submit_job(key, cmd, queue, exec_config or {})
+                submit_job_response = self._submit_job(workload_key, workload_cmd, queue, exec_config or {})
             except NoCredentialsError:
                 self.pending_jobs.append(batch_job)
                 raise
@@ -291,11 +400,11 @@ class AwsBatchExecutor(BaseExecutor):
                 failure_reason = str(e)
 
             if failure_reason:
-                if attempt_number >= int(self.__class__.MAX_SUBMIT_JOB_ATTEMPTS):
+                if attempt_number >= int(self.max_submit_job_attempts):
                     self.log.error(
                         (
                             "This job has been unsuccessfully attempted too many times (%s). "
-                            "Dropping the task. Reason: %s"
+                            "Dropping the workload. Reason: %s"
                         ),
                         attempt_number,
                         failure_reason,
@@ -303,10 +412,10 @@ class AwsBatchExecutor(BaseExecutor):
                     self.log_task_event(
                         event="batch job submit failure",
                         extra=f"This job has been unsuccessfully attempted too many times ({attempt_number}). "
-                        f"Dropping the task. Reason: {failure_reason}",
-                        ti_key=key,
+                        f"Dropping the workload. Reason: {failure_reason}",
+                        ti_key=workload_key,
                     )
-                    self.fail(key=key)
+                    self.fail(key=workload_key)
                 else:
                     batch_job.next_attempt_time = timezone.utcnow() + calculate_next_attempt_delay(
                         attempt_number
@@ -318,17 +427,13 @@ class AwsBatchExecutor(BaseExecutor):
                 job_id = submit_job_response["job_id"]
                 self.active_workers.add_job(
                     job_id=job_id,
-                    airflow_task_key=key,
-                    airflow_cmd=cmd,
+                    airflow_workload_key=workload_key,
+                    airflow_cmd=workload_cmd,
                     queue=queue,
                     exec_config=exec_config,
                     attempt_number=attempt_number,
                 )
-                with suppress(AttributeError):
-                    # TODO: Remove this when min_airflow_version is 2.10.0 or higher in Amazon provider.
-                    # running_state is added in Airflow 2.10 and only needed to support task adoption
-                    # (an optional executor feature).
-                    self.running_state(key, job_id)
+                self.running_state(workload_key, job_id)
 
     def _describe_jobs(self, job_ids) -> list[BatchJob]:
         all_jobs = []
@@ -336,16 +441,28 @@ class AwsBatchExecutor(BaseExecutor):
             batched_job_ids = job_ids[i : i + self.__class__.DESCRIBE_JOBS_BATCH_SIZE]
             if not batched_job_ids:
                 continue
-            boto_describe_tasks = self.batch.describe_jobs(jobs=batched_job_ids)
+            boto_describe_workloads = self.batch.describe_jobs(jobs=batched_job_ids)
 
-            describe_tasks_response = BatchDescribeJobsResponseSchema().load(boto_describe_tasks)
-            all_jobs.extend(describe_tasks_response["jobs"])
+            describe_workloads_response = BatchDescribeJobsResponseSchema().load(boto_describe_workloads)
+            all_jobs.extend(describe_workloads_response["jobs"])
         return all_jobs
 
-    def execute_async(self, key: TaskInstanceKey, command: CommandType, queue=None, executor_config=None):
-        """Save the task to be executed in the next sync using Boto3's RunTask API."""
+    def execute_async(self, key: BatchJobWorkloadKey, command: CommandType, queue=None, executor_config=None):
+        """Save the workload to be executed in the next sync using Boto3's RunTask API."""
         if executor_config and "command" in executor_config:
             raise ValueError('Executor Config should never override "command"')
+
+        if len(command) == 1:
+            from airflow.executors import workloads
+
+            if isinstance(command[0], workloads.ExecuteTask) or (
+                AIRFLOW_V_3_3_PLUS and isinstance(command[0], workloads.ExecuteCallback)
+            ):
+                command = self._serialize_workload_to_command(command[0])
+            else:
+                raise ValueError(
+                    f"BatchExecutor doesn't know how to handle workload of type: {type(command[0])}"
+                )
 
         self.pending_jobs.append(
             BatchQueuedJob(
@@ -359,7 +476,7 @@ class AwsBatchExecutor(BaseExecutor):
         )
 
     def _submit_job(
-        self, key: TaskInstanceKey, cmd: CommandType, queue: str, exec_config: ExecutorConfigType
+        self, key: BatchJobWorkloadKey, cmd: CommandType, queue: str, exec_config: ExecutorConfigType
     ) -> str:
         """
         Override the submit_job_kwargs, and calls the boto3 API submit_job endpoint.
@@ -374,10 +491,10 @@ class AwsBatchExecutor(BaseExecutor):
         return submit_job_response
 
     def _submit_job_kwargs(
-        self, key: TaskInstanceKey, cmd: CommandType, queue: str, exec_config: ExecutorConfigType
+        self, key: BatchJobWorkloadKey, cmd: CommandType, queue: str, exec_config: ExecutorConfigType
     ) -> dict:
         """
-        Override the Airflow command to update the container overrides so kwargs are specific to this task.
+        Override the Airflow command to update the container overrides so kwargs are specific to this workload.
 
         One last chance to modify Boto3's "submit_job" kwarg params before it gets passed into the Boto3
         client. For the latest kwarg parameters:
@@ -394,7 +511,7 @@ class AwsBatchExecutor(BaseExecutor):
         return submit_job_api
 
     def end(self, heartbeat_interval=10):
-        """Wait for all currently running tasks to end and prevent any new jobs from running."""
+        """Wait for all currently running workloads to end and prevent any new jobs from running."""
         try:
             while True:
                 self.sync()
@@ -416,11 +533,10 @@ class AwsBatchExecutor(BaseExecutor):
             # up and kill the scheduler process.
             self.log.exception("Failed to terminate %s", self.__class__.__name__)
 
-    @staticmethod
-    def _load_submit_kwargs() -> dict:
+    def _load_submit_kwargs(self) -> dict:
         from airflow.providers.amazon.aws.executors.batch.batch_executor_config import build_submit_kwargs
 
-        submit_kwargs = build_submit_kwargs()
+        submit_kwargs = build_submit_kwargs(self.conf)
 
         if "containerOverrides" not in submit_kwargs or "command" not in submit_kwargs["containerOverrides"]:
             raise KeyError(
@@ -429,13 +545,48 @@ class AwsBatchExecutor(BaseExecutor):
             )
         return submit_kwargs
 
+    @staticmethod
+    def _serialize_workload_to_command(workload) -> CommandType:
+        """
+        Serialize a workload into a command for the Task SDK.
+
+        :param workload: ExecuteTask or ExecuteCallback workload to serialize
+        :return: Command as list of strings for Task SDK execution
+        """
+        return [
+            "python",
+            "-m",
+            "airflow.sdk.execution_time.execute_workload",
+            "--json-string",
+            workload.model_dump_json(),
+        ]
+
+    def _build_task_command(self, ti: TaskInstance) -> CommandType:
+        """
+        Build task command for execution based on Airflow version.
+
+        For Airflow 3.x+, generates an ExecuteTask workload with JSON serialization.
+        For Airflow 2.x, uses the legacy command_as_list() method.
+
+        :param ti: TaskInstance to build command for
+        :return: Command as list of strings
+        """
+        if AIRFLOW_V_3_0_PLUS:
+            from airflow.executors.workloads import ExecuteTask
+
+            workload = ExecuteTask.make(ti)
+            return self._serialize_workload_to_command(workload)
+        return ti.command_as_list()
+
     def try_adopt_task_instances(self, tis: Sequence[TaskInstance]) -> Sequence[TaskInstance]:
         """
         Adopt task instances which have an external_executor_id (the Batch job ID).
 
         Anything that is not adopted will be cleared by the scheduler and becomes eligible for re-scheduling.
         """
-        with Stats.timer("batch_executor.adopt_task_instances.duration"):
+        with Stats.timer(
+            "batch_executor.adopt_task_instances.duration", tags=prune_dict({"team_name": self.team_name})
+        ):
             adopted_tis: list[TaskInstance] = []
 
             if job_ids := [ti.external_executor_id for ti in tis if ti.external_executor_id]:
@@ -443,10 +594,14 @@ class AwsBatchExecutor(BaseExecutor):
 
                 for batch_job in batch_jobs:
                     ti = next(ti for ti in tis if ti.external_executor_id == batch_job.job_id)
+                    command = self._build_task_command(ti)
+
                     self.active_workers.add_job(
                         job_id=batch_job.job_id,
-                        airflow_task_key=ti.key,
-                        airflow_cmd=ti.command_as_list(),
+                        airflow_workload_key=self.get_task_key(ti)
+                        if self.supports_task_instance_uuid
+                        else ti.key,
+                        airflow_cmd=command,
                         queue=ti.queue,
                         exec_config=ti.executor_config,
                         attempt_number=ti.try_number,
@@ -464,12 +619,3 @@ class AwsBatchExecutor(BaseExecutor):
 
             not_adopted_tis = [ti for ti in tis if ti not in adopted_tis]
             return not_adopted_tis
-
-    def log_task_event(self, *, event: str, extra: str, ti_key: TaskInstanceKey):
-        # TODO: remove this method when min_airflow_version is set to higher than 2.10.0
-        with suppress(AttributeError):
-            super().log_task_event(
-                event=event,
-                extra=extra,
-                ti_key=ti_key,
-            )

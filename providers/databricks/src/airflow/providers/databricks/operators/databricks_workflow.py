@@ -25,20 +25,20 @@ from typing import TYPE_CHECKING, Any
 
 from mergedeep import merge
 
-from airflow.exceptions import AirflowException
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import AirflowException, BaseOperator, TaskGroup
 from airflow.providers.databricks.hooks.databricks import DatabricksHook, RunLifeCycleState
 from airflow.providers.databricks.plugins.databricks_workflow import (
     WorkflowJobRepairAllFailedLink,
     WorkflowJobRunLink,
+    store_databricks_job_run_link,
 )
-from airflow.utils.task_group import TaskGroup
+from airflow.providers.databricks.version_compat import AIRFLOW_V_3_0_PLUS
 
 if TYPE_CHECKING:
     from types import TracebackType
 
     from airflow.models.taskmixin import DAGNode
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 @dataclass
@@ -81,41 +81,84 @@ class _CreateDatabricksWorkflowOperator(BaseOperator):
 
     :param task_id: The task_id of the operator
     :param databricks_conn_id: The connection ID to use when connecting to Databricks.
+    :param access_control_list: List of permissions to set on the job. Array of object
+        (AccessControlRequestForUser) or object (AccessControlRequestForGroup) or object
+        (AccessControlRequestForServicePrincipal).
+
+        .. seealso::
+            The access control list is applied both when creating a new job and when resetting
+            an existing job. If access_control_list != [], the supplied ACL replaces the
+            job's current permissions. Otherwise, the prior ACL stays in place. You can also manage
+            job permissions directly in the Databricks UI.
     :param existing_clusters: A list of existing clusters to use for the workflow.
     :param extra_job_params: A dictionary of extra properties which will override the default Databricks
         Workflow Job definitions.
+    :param jar_params: A list of jar parameters to pass to the workflow. These parameters will be passed to
+        all jar tasks in the workflow.
     :param job_clusters: A list of job clusters to use for the workflow.
     :param max_concurrent_runs: The maximum number of concurrent runs for the workflow.
     :param notebook_params: A dictionary of notebook parameters to pass to the workflow. These parameters
         will be passed to all notebooks in the workflow.
-    :param tasks_to_convert: A list of tasks to convert to a Databricks workflow. This list can also be
+    :param python_params: A list of python parameters to pass to the workflow. These parameters will be
+        passed to all python tasks in the workflow.
+    :param spark_submit_params: A list of spark submit parameters to pass to the workflow. These parameters
+        will be passed to all spark submit tasks.
+    :param tasks_to_convert: A dict of tasks to convert to a Databricks workflow. This list can also be
         populated after instantiation using the `add_task` method.
     """
 
-    operator_extra_links = (WorkflowJobRunLink(), WorkflowJobRepairAllFailedLink())
-    template_fields = ("notebook_params", "job_clusters")
+    template_fields = (
+        "databricks_conn_id",
+        "access_control_list",
+        "existing_clusters",
+        "extra_job_params",
+        "jar_params",
+        "job_clusters",
+        "max_concurrent_runs",
+        "notebook_params",
+        "python_params",
+        "spark_submit_params",
+    )
     caller = "_CreateDatabricksWorkflowOperator"
+    # Conditionally set operator_extra_links based on Airflow version
+    if AIRFLOW_V_3_0_PLUS:
+        # In Airflow 3, disable "Repair All Failed Tasks" since we can't pre-determine failed tasks
+        operator_extra_links = (WorkflowJobRunLink(),)
+    else:
+        # In Airflow 2.x, keep both links
+        operator_extra_links = (  # type: ignore[assignment]
+            WorkflowJobRunLink(),
+            WorkflowJobRepairAllFailedLink(),
+        )
 
     def __init__(
         self,
         task_id: str,
         databricks_conn_id: str,
+        access_control_list: list[dict] | None = None,
         existing_clusters: list[str] | None = None,
         extra_job_params: dict[str, Any] | None = None,
+        jar_params: list[str] | None = None,
         job_clusters: list[dict[str, object]] | None = None,
         max_concurrent_runs: int = 1,
         notebook_params: dict | None = None,
-        tasks_to_convert: list[BaseOperator] | None = None,
+        python_params: list | None = None,
+        spark_submit_params: list | None = None,
+        tasks_to_convert: dict[str, BaseOperator] | None = None,
         **kwargs,
     ):
         self.databricks_conn_id = databricks_conn_id
+        self.access_control_list = access_control_list
         self.existing_clusters = existing_clusters or []
         self.extra_job_params = extra_job_params or {}
+        self.jar_params = jar_params or []
         self.job_clusters = job_clusters or []
         self.max_concurrent_runs = max_concurrent_runs
         self.notebook_params = notebook_params or {}
-        self.tasks_to_convert = tasks_to_convert or []
-        self.relevant_upstreams = [task_id]
+        self.python_params = python_params or []
+        self.spark_submit_params = spark_submit_params or []
+        self.tasks_to_convert = tasks_to_convert or {}
+        self.relevant_upstreams: list[str] = []
         self.workflow_run_metadata: WorkflowRunMetadata | None = None
         super().__init__(task_id=task_id, **kwargs)
 
@@ -129,9 +172,9 @@ class _CreateDatabricksWorkflowOperator(BaseOperator):
     def _hook(self) -> DatabricksHook:
         return self._get_hook(caller=self.caller)
 
-    def add_task(self, task: BaseOperator) -> None:
-        """Add a task to the list of tasks to convert to a Databricks workflow."""
-        self.tasks_to_convert.append(task)
+    def add_task(self, task_id, task: BaseOperator) -> None:
+        """Add a task to the dict of tasks to convert to a Databricks workflow."""
+        self.tasks_to_convert[task_id] = task
 
     @property
     def job_name(self) -> str:
@@ -143,9 +186,9 @@ class _CreateDatabricksWorkflowOperator(BaseOperator):
         """Create a workflow json to be used in the Databricks API."""
         task_json = [
             task._convert_to_databricks_workflow_task(  # type: ignore[attr-defined]
-                relevant_upstreams=self.relevant_upstreams, context=context
+                relevant_upstreams=self.relevant_upstreams, task_dict=self.tasks_to_convert, context=context
             )
-            for task in self.tasks_to_convert
+            for task_id, task in self.tasks_to_convert.items()
         ]
 
         default_json = {
@@ -157,6 +200,10 @@ class _CreateDatabricksWorkflowOperator(BaseOperator):
             "job_clusters": self.job_clusters,
             "max_concurrent_runs": self.max_concurrent_runs,
         }
+
+        if self.access_control_list is not None:
+            default_json["access_control_list"] = self.access_control_list
+
         return merge(default_json, self.extra_job_params)
 
     def _create_or_reset_job(self, context: Context) -> int:
@@ -204,10 +251,10 @@ class _CreateDatabricksWorkflowOperator(BaseOperator):
         run_id = self._hook.run_now(
             {
                 "job_id": job_id,
-                "jar_params": self.task_group.jar_params,
+                "jar_params": self.jar_params,
                 "notebook_params": self.notebook_params,
-                "python_params": self.task_group.python_params,
-                "spark_submit_params": self.task_group.spark_submit_params,
+                "python_params": self.python_params,
+                "spark_submit_params": self.spark_submit_params,
             }
         )
 
@@ -218,6 +265,15 @@ class _CreateDatabricksWorkflowOperator(BaseOperator):
             job_id,
             run_id,
         )
+
+        # Store operator links in XCom for Airflow 3 compatibility
+        if AIRFLOW_V_3_0_PLUS:
+            # Store the job run link
+            store_databricks_job_run_link(
+                context=context,
+                metadata=self.workflow_run_metadata,
+                logger=self.log,
+            )
 
         return {
             "conn_id": self.databricks_conn_id,
@@ -259,6 +315,14 @@ class DatabricksWorkflowTaskGroup(TaskGroup):
 
     :param databricks_conn_id: The name of the databricks connection to use.
     :param existing_clusters: A list of existing clusters to use for this workflow.
+    :param access_control_list: List of permissions to set on the job. Array of object
+        (AccessControlRequestForUser) or object (AccessControlRequestForGroup) or object
+        (AccessControlRequestForServicePrincipal).
+
+        .. seealso::
+            When provided, this is applied when the job is created and when an existing job is
+            reset. Setting this replaces any existing job permissions, unless its value is
+            an empty list. If access_control_list == [], the prior ACL remains in place.
     :param extra_job_params: A dictionary containing properties which will override the default
         Databricks Workflow Job definitions.
     :param jar_params: A list of jar parameters to pass to the workflow. These parameters will be passed to all jar
@@ -281,6 +345,7 @@ class DatabricksWorkflowTaskGroup(TaskGroup):
     def __init__(
         self,
         databricks_conn_id: str,
+        access_control_list: list[dict] | None = None,
         existing_clusters: list[str] | None = None,
         extra_job_params: dict[str, Any] | None = None,
         jar_params: list[str] | None = None,
@@ -293,6 +358,7 @@ class DatabricksWorkflowTaskGroup(TaskGroup):
         **kwargs,
     ):
         self.databricks_conn_id = databricks_conn_id
+        self.access_control_list = access_control_list
         self.existing_clusters = existing_clusters or []
         self.extra_job_params = extra_job_params or {}
         self.jar_params = jar_params or []
@@ -316,27 +382,41 @@ class DatabricksWorkflowTaskGroup(TaskGroup):
             task_group=self,
             task_id="launch",
             databricks_conn_id=self.databricks_conn_id,
+            access_control_list=self.access_control_list,
             existing_clusters=self.existing_clusters,
             extra_job_params=self.extra_job_params,
+            jar_params=self.jar_params,
             job_clusters=self.job_clusters,
             max_concurrent_runs=self.max_concurrent_runs,
             notebook_params=self.notebook_params,
+            python_params=self.python_params,
+            spark_submit_params=self.spark_submit_params,
         )
 
-        for task in tasks:
-            if not (
-                hasattr(task, "_convert_to_databricks_workflow_task")
-                and callable(task._convert_to_databricks_workflow_task)
-            ):
-                raise AirflowException(
-                    f"Task {task.task_id} does not support conversion to databricks workflow task."
-                )
+        try:
+            for task in tasks:
+                if not (
+                    hasattr(task, "_convert_to_databricks_workflow_task")
+                    and callable(task._convert_to_databricks_workflow_task)
+                ):
+                    raise AirflowException(
+                        f"Task {task.task_id} does not support conversion to databricks workflow task."
+                    )
 
-            task.workflow_run_metadata = create_databricks_workflow_task.output
-            create_databricks_workflow_task.relevant_upstreams.append(task.task_id)
-            create_databricks_workflow_task.add_task(task)
+                task.workflow_run_metadata = create_databricks_workflow_task.output
+                create_databricks_workflow_task.relevant_upstreams.append(task.task_id)
+                create_databricks_workflow_task.add_task(task.task_id, task)
 
-        for root_task in roots:
-            root_task.set_upstream(create_databricks_workflow_task)
+            for root_task in roots:
+                root_task.set_upstream(create_databricks_workflow_task)
 
-        super().__exit__(_type, _value, _tb)
+            # When ``>>`` is called before the ``with`` block, the dependency is
+            # recorded on the task group but the launch/leaf tasks don't exist yet.
+            # Transfer those task-group-level dependencies now that the tasks are created.
+            for upstream_id in self.upstream_task_ids:
+                create_databricks_workflow_task.set_upstream(self.dag.get_task(upstream_id))
+            for downstream_id in self.downstream_task_ids:
+                for leaf_task in self.get_leaves():
+                    leaf_task.set_downstream(self.dag.get_task(downstream_id))
+        finally:
+            super().__exit__(_type, _value, _tb)

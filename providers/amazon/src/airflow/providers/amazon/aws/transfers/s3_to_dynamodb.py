@@ -22,12 +22,11 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from botocore.exceptions import ClientError, WaiterError
 
-from airflow.exceptions import AirflowException
-from airflow.models import BaseOperator
 from airflow.providers.amazon.aws.hooks.dynamodb import DynamoDBHook
+from airflow.providers.common.compat.sdk import AirflowException, BaseOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class AttributeDefinition(TypedDict):
@@ -98,6 +97,7 @@ class S3ToDynamoDBOperator(BaseOperator):
         "billing_mode",
         "import_table_kwargs",
         "import_table_creation_kwargs",
+        "aws_conn_id",
     )
     ui_color = "#e2e8f0"
 

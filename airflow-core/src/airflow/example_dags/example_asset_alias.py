@@ -32,18 +32,17 @@ thus update its schedule to the asset "s3://bucket/my-task" and will also be tri
 
 from __future__ import annotations
 
+# [START example_asset_alias]
 import pendulum
 
-from airflow import DAG
-from airflow.decorators import task
-from airflow.sdk.definitions.asset import Asset, AssetAlias
+from airflow.sdk import DAG, Asset, AssetAlias, task
 
 with DAG(
     dag_id="asset_s3_bucket_producer",
     start_date=pendulum.datetime(2021, 1, 1, tz="UTC"),
     schedule=None,
     catchup=False,
-    tags=["producer", "asset"],
+    tags=["example", "producer", "asset"],
 ):
 
     @task(outlets=[Asset("s3://bucket/my-task")])
@@ -57,7 +56,7 @@ with DAG(
     start_date=pendulum.datetime(2021, 1, 1, tz="UTC"),
     schedule=None,
     catchup=False,
-    tags=["producer", "asset-alias"],
+    tags=["example", "producer", "asset-alias"],
 ):
 
     @task(outlets=[AssetAlias("example-alias")])
@@ -73,7 +72,7 @@ with DAG(
     start_date=pendulum.datetime(2021, 1, 1, tz="UTC"),
     schedule=[Asset("s3://bucket/my-task")],
     catchup=False,
-    tags=["consumer", "asset"],
+    tags=["example", "consumer", "asset"],
 ):
 
     @task
@@ -87,7 +86,7 @@ with DAG(
     start_date=pendulum.datetime(2021, 1, 1, tz="UTC"),
     schedule=[AssetAlias("example-alias")],
     catchup=False,
-    tags=["consumer", "asset-alias"],
+    tags=["example", "consumer", "asset-alias"],
 ):
 
     @task(inlets=[AssetAlias("example-alias")])
@@ -96,3 +95,4 @@ with DAG(
             print(event)
 
     consume_asset_event_from_asset_alias()
+# [END example_asset_alias]

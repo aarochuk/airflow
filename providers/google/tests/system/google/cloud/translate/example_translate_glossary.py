@@ -64,7 +64,7 @@ with DAG(
         project_id=PROJECT_ID,
         location=REGION,
         input_config=GLOSSARY_FILE_INPUT,
-        glossary_id=f"glossary_new_{PROJECT_ID}",
+        glossary_id=f"glossary_new_{PROJECT_ID}_{ENV_ID}",
         language_pair={"source_language_code": "en", "target_language_code": "es"},
     )
     # [END howto_operator_translate_create_glossary]
@@ -112,5 +112,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

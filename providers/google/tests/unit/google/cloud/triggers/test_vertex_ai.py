@@ -20,6 +20,7 @@ import asyncio
 from unittest import mock
 
 import pytest
+import pytest_asyncio
 
 # For no Pydantic environment, we need to skip the tests
 pytest.importorskip("google.cloud.aiplatform_v1")
@@ -33,7 +34,7 @@ from google.cloud.aiplatform_v1 import (
     types,
 )
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks.vertex_ai.custom_job import CustomJobAsyncHook
 from airflow.providers.google.cloud.hooks.vertex_ai.pipeline_job import PipelineJobAsyncHook
 from airflow.providers.google.cloud.triggers.vertex_ai import (
@@ -41,6 +42,7 @@ from airflow.providers.google.cloud.triggers.vertex_ai import (
     CreateBatchPredictionJobTrigger,
     CreateHyperparameterTuningJobTrigger,
     CustomContainerTrainingJobTrigger,
+    CustomJobTrigger,
     CustomPythonPackageTrainingJobTrigger,
     CustomTrainingJobTrigger,
     RunPipelineJobTrigger,
@@ -113,23 +115,35 @@ def custom_training_job_trigger():
 
 
 @pytest.fixture
-def custom_job_async_hook():
+def custom_job_trigger():
+    return CustomJobTrigger(
+        gcp_conn_id=TEST_CONN_ID,
+        project_id=TEST_PROJECT_ID,
+        location=TEST_LOCATION,
+        custom_job_id=TEST_HPT_JOB_ID,
+        poll_interval=TEST_POLL_INTERVAL,
+        impersonation_chain=TEST_IMPERSONATION_CHAIN,
+    )
+
+
+@pytest_asyncio.fixture
+async def custom_job_async_hook():
     return CustomJobAsyncHook(
         gcp_conn_id=TEST_CONN_ID,
         impersonation_chain=TEST_IMPERSONATION_CHAIN,
     )
 
 
-@pytest.fixture
-def pipeline_job_async_hook():
+@pytest_asyncio.fixture
+async def pipeline_job_async_hook():
     return PipelineJobAsyncHook(
         gcp_conn_id=TEST_CONN_ID,
         impersonation_chain=TEST_IMPERSONATION_CHAIN,
     )
 
 
-@pytest.fixture
-def pipeline_service_async_client():
+@pytest_asyncio.fixture
+async def pipeline_service_async_client():
     return PipelineServiceAsyncClient(
         credentials=mock.MagicMock(),
     )
@@ -178,7 +192,7 @@ class TestBaseVertexAIJobTrigger:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "job_state, job_name, status, message",
+        ("job_state", "job_name", "status", "message"),
         [
             (
                 JobState.JOB_STATE_CANCELLED,
@@ -222,7 +236,7 @@ class TestBaseVertexAIJobTrigger:
                 mock_wait_job.side_effect = mock.AsyncMock(return_value=mock_job)
 
                 generator = self.trigger.run()
-                event_actual = await generator.asend(None)  # type:ignore[attr-defined]
+                event_actual = await generator.asend(None)
 
         mock_wait_job.assert_awaited_once()
         mock_serialize_job.assert_called_once_with(mock_job)
@@ -243,7 +257,7 @@ class TestBaseVertexAIJobTrigger:
                 mock_wait_job.side_effect = AirflowException(TEST_ERROR_MESSAGE)
 
                 generator = self.trigger.run()
-                event_actual = await generator.asend(None)  # type:ignore[attr-defined]
+                event_actual = await generator.asend(None)
 
         assert event_actual == TriggerEvent(
             {
@@ -413,7 +427,7 @@ class TestRunPipelineJobTrigger:
                 "impersonation_chain": TEST_IMPERSONATION_CHAIN,
             },
         )
-        actual_data == expected_data
+        assert actual_data == expected_data
 
     @pytest.mark.asyncio
     async def test_async_hook(self, run_pipeline_job_trigger):
@@ -553,7 +567,7 @@ class TestCustomTrainingJobTrigger:
                 "impersonation_chain": TEST_IMPERSONATION_CHAIN,
             },
         )
-        actual_data == expected_data
+        assert actual_data == expected_data
 
     @pytest.mark.parametrize(
         "pipeline_state_value",
@@ -703,7 +717,7 @@ class TestCustomContainerTrainingJobTrigger:
                 "impersonation_chain": TEST_IMPERSONATION_CHAIN,
             },
         )
-        actual_data == expected_data
+        assert actual_data == expected_data
 
     @pytest.mark.parametrize(
         "pipeline_state_value",
@@ -858,7 +872,7 @@ class TestCustomPythonPackageTrainingJobTrigger:
                 "impersonation_chain": TEST_IMPERSONATION_CHAIN,
             },
         )
-        actual_data == expected_data
+        assert actual_data == expected_data
 
     @pytest.mark.parametrize(
         "pipeline_state_value",
@@ -997,3 +1011,20 @@ class TestCustomPythonPackageTrainingJobTrigger:
             pipeline_id=custom_python_package_training_job_trigger.job_id,
             poll_interval=custom_python_package_training_job_trigger.poll_interval,
         )
+
+
+class TestCustomJobTrigger:
+    def test_serialize(self, custom_job_trigger):
+        actual_data = custom_job_trigger.serialize()
+        expected_data = (
+            "airflow.providers.google.cloud.triggers.vertex_ai.CustomJobTrigger",
+            {
+                "project_id": TEST_PROJECT_ID,
+                "location": TEST_LOCATION,
+                "custom_job_id": TEST_HPT_JOB_ID,
+                "gcp_conn_id": TEST_CONN_ID,
+                "impersonation_chain": TEST_IMPERSONATION_CHAIN,
+                "poll_interval": TEST_POLL_INTERVAL,
+            },
+        )
+        assert actual_data == expected_data

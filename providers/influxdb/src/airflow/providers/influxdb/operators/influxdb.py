@@ -20,15 +20,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.influxdb.hooks.influxdb import InfluxDBHook
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class InfluxDBOperator(BaseOperator):
@@ -44,7 +40,10 @@ class InfluxDBOperator(BaseOperator):
     :param influxdb_conn_id: Reference to :ref:`Influxdb connection id <howto/connection:influxdb>`.
     """
 
-    template_fields: Sequence[str] = ("sql",)
+    template_fields: Sequence[str] = (
+        "sql",
+        "influxdb_conn_id",
+    )
 
     def __init__(
         self,

@@ -17,9 +17,18 @@
 
 from __future__ import annotations
 
+import inspect
+from datetime import datetime
 from typing import Generic, Literal, TypeVar
 
+from pydantic import computed_field, field_validator
+
+from airflow._shared.timezones import timezone
 from airflow.api_fastapi.core_api.base import BaseModel
+from airflow.api_fastapi.core_api.datamodels.dag_versions import DagVersionResponse
+from airflow.models.trigger import TriggerStatus
+from airflow.utils.state import DagRunState
+from airflow.utils.types import DagRunType
 
 
 class BaseEdgeResponse(BaseModel):
@@ -34,11 +43,73 @@ class BaseNodeResponse(BaseModel):
 
     id: str
     label: str
-    type: Literal["join", "task", "asset-condition", "asset", "asset-alias", "dag", "sensor", "trigger"]
+    type: Literal[
+        "join",
+        "task",
+        "asset-condition",
+        "asset",
+        "asset-alias",
+        "asset-name-ref",
+        "asset-uri-ref",
+        "asset-watcher",
+        "dag",
+        "sensor",
+        "trigger",
+    ]
+    team: str | None = None
+    asset_condition_type: Literal["or-gate", "and-gate"] | None = None
+    trigger_id: int | None = None
+    trigger_status: TriggerStatus | None = None
 
 
 E = TypeVar("E", bound=BaseEdgeResponse)
 N = TypeVar("N", bound=BaseNodeResponse)
+
+
+class GridNodeResponse(BaseModel):
+    """Base Node serializer for responses."""
+
+    id: str
+    label: str
+    children: list[GridNodeResponse] | None = None
+    is_mapped: bool | None
+    is_loop: bool | None = None
+    loop_max_iterations: int | None = None
+    loop_exit_task_id: str | None = None
+    loop_exit_criteria_doc: str | None = None
+    setup_teardown_type: Literal["setup", "teardown"] | None = None
+    doc_md: str | None = None
+
+    @field_validator("doc_md", mode="before")
+    @classmethod
+    def get_doc_md(cls, doc_md: str | None) -> str | None:
+        """Clean indentation in doc md."""
+        if doc_md is None:
+            return None
+        return inspect.cleandoc(doc_md)
+
+
+class GridRunsResponse(BaseModel):
+    """Base Node serializer for responses."""
+
+    dag_id: str
+    run_id: str
+    queued_at: datetime | None
+    start_date: datetime | None
+    end_date: datetime | None
+    run_after: datetime
+    state: DagRunState | None
+    run_type: DagRunType
+    dag_versions: list[DagVersionResponse] = []
+    has_missed_deadline: bool
+    has_note: bool
+
+    @computed_field
+    def duration(self) -> float:
+        if self.start_date:
+            end_date = self.end_date or timezone.utcnow()
+            return (end_date - self.start_date).total_seconds()
+        return 0
 
 
 class BaseGraphResponse(BaseModel, Generic[E, N]):

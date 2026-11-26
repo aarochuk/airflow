@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -20,23 +19,67 @@
 
 GitHub Connection
 ====================
-The GitHub connection type provides connection to a GitHub or GitHub Enterprise.
+The GitHub connection provides two authentication mechanisms:
+  - Token-based authentication
+  - GitHub App authentication
+
+For Token-based authentication, you must provide an access token.
+For GitHub App authentication, you must configure the connection's Extras field with the required GitHub App parameters.
 
 Configuring the Connection
 --------------------------
-Access Token (required)
+Access Token (optional)
     Personal Access token with required permissions.
         - GitHub - Create token - https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token/
         - GitHub Enterprise - Create token - https://docs.github.com/en/enterprise-cloud@latest/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token/
 
 Host (optional)
-    Specify the GitHub Enterprise Url (as string) that can be used for GitHub Enterprise
+    Specify the GitHub Enterprise URL (as a string) that can be used for a GitHub Enterprise
     connection.
 
-    The following Url should be in following format:
+    The URL should be in the following format:
 
-    * ``hostname``: Url for Your GitHub Enterprise Deployment.
+    * ``hostname``: URL for your GitHub Enterprise deployment.
 
     .. code-block::
 
         https://{hostname}/api/v3
+
+GitHub App authentication
+--------------------------------
+
+You can authenticate using a GitHub App installation by setting the extra field of your connection, instead of using a token.
+
+- ``key_path``: Path to the private key file used for GitHub App authentication.
+- ``private_key``: The private key content used for GitHub App authentication. (alternative to ``key_path``)
+- ``app_id``: The application ID.
+- ``installation_id``: The ID of the app installation.
+- ``token_permissions``: A dictionary of permissions. - Properties of permissions - https://docs.github.com/en/rest/apps/apps?apiVersion=2022-11-28#create-an-installation-access-token-for-an-app
+
+Example "extras" field:
+
+.. code-block:: json
+
+    {
+      "key_path": "FAKE_KEY.pem",
+      "app_id": "123456s",
+      "installation_id": 123456789,
+      "token_permissions": {
+        "issues":"write",
+        "contents":"read"
+      }
+    }
+
+Example with embedded private key:
+
+.. code-block:: json
+
+    {
+      "private_key": "-----BEGIN+PRIVATE+KEY-----%0AM...%0A-----END+PRIVATE+KEY-----",
+      "app_id": "123456s",
+      "installation_id": 123456789,
+      "token_permissions": {
+        "issues":"write",
+        "contents":"read"
+      }
+    }

@@ -33,7 +33,12 @@ from airflow.providers.google.cloud.operators.pubsub import (
     PubSubPublishMessageOperator,
 )
 from airflow.providers.google.cloud.sensors.pubsub import PubSubPullSensor
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT", "default")
@@ -73,6 +78,7 @@ with DAG(
         project_id=PROJECT_ID,
         subscription=subscription,
         deferrable=True,
+        return_immediately=False,
     )
     # [END howto_operator_gcp_pubsub_pull_message_with_async_sensor]
 
@@ -110,5 +116,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

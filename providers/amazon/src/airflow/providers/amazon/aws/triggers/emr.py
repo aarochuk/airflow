@@ -16,14 +16,28 @@
 # under the License.
 from __future__ import annotations
 
+import asyncio
 import sys
-from typing import TYPE_CHECKING
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING, Any
+
+from asgiref.sync import sync_to_async
 
 from airflow.providers.amazon.aws.hooks.emr import EmrContainerHook, EmrHook, EmrServerlessHook
 from airflow.providers.amazon.aws.triggers.base import AwsBaseWaiterTrigger
+from airflow.providers.amazon.aws.utils.waiter_with_logging import async_wait
+from airflow.providers.amazon.version_compat import AIRFLOW_V_3_0_PLUS
+from airflow.triggers.base import TriggerEvent
+from airflow.utils.state import TaskInstanceState
 
 if TYPE_CHECKING:
+    from sqlalchemy.orm.session import Session
+
     from airflow.providers.amazon.aws.hooks.base_aws import AwsGenericHook
+
+if not AIRFLOW_V_3_0_PLUS:
+    from airflow.models.taskinstance import TaskInstance
+    from airflow.utils.session import provide_session
 
 
 class EmrAddStepsTrigger(AwsBaseWaiterTrigger):
@@ -35,8 +49,15 @@ class EmrAddStepsTrigger(AwsBaseWaiterTrigger):
     :param waiter_delay: polling period in seconds to check for the status
     :param waiter_max_attempts: The maximum number of attempts to be made
     :param aws_conn_id: Reference to AWS connection id
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
 
     """
+
+    aws_hook_class = EmrHook
 
     def __init__(
         self,
@@ -45,6 +66,9 @@ class EmrAddStepsTrigger(AwsBaseWaiterTrigger):
         waiter_delay: int,
         waiter_max_attempts: int,
         aws_conn_id: str | None = "aws_default",
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
     ):
         super().__init__(
             serialized_fields={"job_flow_id": job_flow_id, "step_ids": step_ids},
@@ -60,10 +84,10 @@ class EmrAddStepsTrigger(AwsBaseWaiterTrigger):
             waiter_delay=waiter_delay,
             waiter_max_attempts=waiter_max_attempts,
             aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
         )
-
-    def hook(self) -> AwsGenericHook:
-        return EmrHook(aws_conn_id=self.aws_conn_id)
 
 
 class EmrCreateJobFlowTrigger(AwsBaseWaiterTrigger):
@@ -74,7 +98,14 @@ class EmrCreateJobFlowTrigger(AwsBaseWaiterTrigger):
     :param waiter_delay: The amount of time in seconds to wait between attempts.
     :param waiter_max_attempts: The maximum number of attempts to be made.
     :param aws_conn_id: The Airflow connection used for AWS credentials.
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
     """
+
+    aws_hook_class = EmrHook
 
     def __init__(
         self,
@@ -82,10 +113,14 @@ class EmrCreateJobFlowTrigger(AwsBaseWaiterTrigger):
         aws_conn_id: str | None = None,
         waiter_delay: int = 30,
         waiter_max_attempts: int = 60,
+        waiter_name: str = "job_flow_waiting",
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
     ):
         super().__init__(
             serialized_fields={"job_flow_id": job_flow_id},
-            waiter_name="job_flow_waiting",
+            waiter_name=waiter_name,
             waiter_args={"ClusterId": job_flow_id},
             failure_message="JobFlow creation failed",
             status_message="JobFlow creation in progress",
@@ -99,10 +134,10 @@ class EmrCreateJobFlowTrigger(AwsBaseWaiterTrigger):
             waiter_delay=waiter_delay,
             waiter_max_attempts=waiter_max_attempts,
             aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
         )
-
-    def hook(self) -> AwsGenericHook:
-        return EmrHook(aws_conn_id=self.aws_conn_id)
 
 
 class EmrTerminateJobFlowTrigger(AwsBaseWaiterTrigger):
@@ -113,7 +148,14 @@ class EmrTerminateJobFlowTrigger(AwsBaseWaiterTrigger):
     :param waiter_delay: The amount of time in seconds to wait between attempts.
     :param waiter_max_attempts: The maximum number of attempts to be made.
     :param aws_conn_id: The Airflow connection used for AWS credentials.
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
     """
+
+    aws_hook_class = EmrHook
 
     def __init__(
         self,
@@ -121,6 +163,9 @@ class EmrTerminateJobFlowTrigger(AwsBaseWaiterTrigger):
         aws_conn_id: str | None = None,
         waiter_delay: int = 30,
         waiter_max_attempts: int = 60,
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
     ):
         super().__init__(
             serialized_fields={"job_flow_id": job_flow_id},
@@ -137,10 +182,10 @@ class EmrTerminateJobFlowTrigger(AwsBaseWaiterTrigger):
             waiter_delay=waiter_delay,
             waiter_max_attempts=waiter_max_attempts,
             aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
         )
-
-    def hook(self) -> AwsGenericHook:
-        return EmrHook(aws_conn_id=self.aws_conn_id)
 
 
 class EmrContainerTrigger(AwsBaseWaiterTrigger):
@@ -152,7 +197,18 @@ class EmrContainerTrigger(AwsBaseWaiterTrigger):
     :param aws_conn_id: Reference to AWS connection id
     :param waiter_delay: polling period in seconds to check for the status
     :param waiter_max_attempts: The maximum number of attempts to be made. Defaults to an infinite wait.
+    :param cancel_on_kill: If True (default), cancel the EMR container job when the user
+        marks the deferred task failed, clears it, or mark-succeeds it. Requires
+        ``apache-airflow`` with ``BaseTrigger.on_kill()`` support; on older versions the
+        hook is silently inert.
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
     """
+
+    aws_hook_class = EmrContainerHook
 
     def __init__(
         self,
@@ -161,9 +217,17 @@ class EmrContainerTrigger(AwsBaseWaiterTrigger):
         aws_conn_id: str | None = "aws_default",
         waiter_delay: int = 30,
         waiter_max_attempts: int = sys.maxsize,
+        cancel_on_kill: bool = True,
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
     ):
         super().__init__(
-            serialized_fields={"virtual_cluster_id": virtual_cluster_id, "job_id": job_id},
+            serialized_fields={
+                "virtual_cluster_id": virtual_cluster_id,
+                "job_id": job_id,
+                "cancel_on_kill": cancel_on_kill,
+            },
             waiter_name="container_job_complete",
             waiter_args={"id": job_id, "virtualClusterId": virtual_cluster_id},
             failure_message="Job failed",
@@ -174,10 +238,36 @@ class EmrContainerTrigger(AwsBaseWaiterTrigger):
             waiter_delay=waiter_delay,
             waiter_max_attempts=waiter_max_attempts,
             aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
         )
+        self.virtual_cluster_id = virtual_cluster_id
+        self.job_id = job_id
+        self.cancel_on_kill = cancel_on_kill
 
-    def hook(self) -> AwsGenericHook:
-        return EmrContainerHook(aws_conn_id=self.aws_conn_id)
+    @property
+    def _hook_parameters(self) -> dict[str, Any]:
+        return {**super()._hook_parameters, "virtual_cluster_id": self.virtual_cluster_id}
+
+    async def on_kill(self) -> None:
+        """Cancel the EMR container job when the user acts on the deferred task."""
+        if not self.cancel_on_kill or not self.job_id:
+            return
+        self.log.info(
+            "Cancelling EMR container job. Virtual Cluster ID: %s, Job ID: %s",
+            self.virtual_cluster_id,
+            self.job_id,
+        )
+        hook: EmrContainerHook = self.hook()  # type: ignore[assignment]
+        try:
+            await sync_to_async(hook.stop_query)(self.job_id)
+            self.log.info("EMR container job %s cancelled.", self.job_id)
+        except Exception:
+            self.log.exception(
+                "Failed to cancel EMR container job %s. The job may still be running.",
+                self.job_id,
+            )
 
 
 class EmrStepSensorTrigger(AwsBaseWaiterTrigger):
@@ -189,7 +279,14 @@ class EmrStepSensorTrigger(AwsBaseWaiterTrigger):
     :param waiter_delay: polling period in seconds to check for the status
     :param waiter_max_attempts: The maximum number of attempts to be made
     :param aws_conn_id: Reference to AWS connection id
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
     """
+
+    aws_hook_class = EmrHook
 
     def __init__(
         self,
@@ -198,6 +295,9 @@ class EmrStepSensorTrigger(AwsBaseWaiterTrigger):
         waiter_delay: int = 30,
         waiter_max_attempts: int = 60,
         aws_conn_id: str | None = "aws_default",
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
     ):
         super().__init__(
             serialized_fields={"job_flow_id": job_flow_id, "step_id": step_id},
@@ -214,10 +314,10 @@ class EmrStepSensorTrigger(AwsBaseWaiterTrigger):
             waiter_delay=waiter_delay,
             waiter_max_attempts=waiter_max_attempts,
             aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
         )
-
-    def hook(self) -> AwsGenericHook:
-        return EmrHook(aws_conn_id=self.aws_conn_id)
 
 
 class EmrServerlessCreateApplicationTrigger(AwsBaseWaiterTrigger):
@@ -228,7 +328,14 @@ class EmrServerlessCreateApplicationTrigger(AwsBaseWaiterTrigger):
     :waiter_delay: polling period in seconds to check for the status
     :param waiter_max_attempts: The maximum number of attempts to be made
     :param aws_conn_id: Reference to AWS connection id
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
     """
+
+    aws_hook_class = EmrServerlessHook
 
     def __init__(
         self,
@@ -236,6 +343,9 @@ class EmrServerlessCreateApplicationTrigger(AwsBaseWaiterTrigger):
         waiter_delay: int = 30,
         waiter_max_attempts: int = 60,
         aws_conn_id: str | None = "aws_default",
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
     ) -> None:
         super().__init__(
             serialized_fields={"application_id": application_id},
@@ -249,10 +359,10 @@ class EmrServerlessCreateApplicationTrigger(AwsBaseWaiterTrigger):
             waiter_delay=waiter_delay,
             waiter_max_attempts=waiter_max_attempts,
             aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
         )
-
-    def hook(self) -> AwsGenericHook:
-        return EmrServerlessHook(self.aws_conn_id)
 
 
 class EmrServerlessStartApplicationTrigger(AwsBaseWaiterTrigger):
@@ -263,7 +373,14 @@ class EmrServerlessStartApplicationTrigger(AwsBaseWaiterTrigger):
     :waiter_delay: polling period in seconds to check for the status
     :param waiter_max_attempts: The maximum number of attempts to be made
     :param aws_conn_id: Reference to AWS connection id
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
     """
+
+    aws_hook_class = EmrServerlessHook
 
     def __init__(
         self,
@@ -271,6 +388,9 @@ class EmrServerlessStartApplicationTrigger(AwsBaseWaiterTrigger):
         waiter_delay: int = 30,
         waiter_max_attempts: int = 60,
         aws_conn_id: str | None = "aws_default",
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
     ) -> None:
         super().__init__(
             serialized_fields={"application_id": application_id},
@@ -284,10 +404,10 @@ class EmrServerlessStartApplicationTrigger(AwsBaseWaiterTrigger):
             waiter_delay=waiter_delay,
             waiter_max_attempts=waiter_max_attempts,
             aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
         )
-
-    def hook(self) -> AwsGenericHook:
-        return EmrServerlessHook(self.aws_conn_id)
 
 
 class EmrServerlessStopApplicationTrigger(AwsBaseWaiterTrigger):
@@ -298,7 +418,14 @@ class EmrServerlessStopApplicationTrigger(AwsBaseWaiterTrigger):
     :waiter_delay: polling period in seconds to check for the status
     :param waiter_max_attempts: The maximum number of attempts to be made
     :param aws_conn_id: Reference to AWS connection id.
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
     """
+
+    aws_hook_class = EmrServerlessHook
 
     def __init__(
         self,
@@ -306,6 +433,9 @@ class EmrServerlessStopApplicationTrigger(AwsBaseWaiterTrigger):
         waiter_delay: int = 30,
         waiter_max_attempts: int = 60,
         aws_conn_id: str | None = "aws_default",
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
     ) -> None:
         super().__init__(
             serialized_fields={"application_id": application_id},
@@ -319,10 +449,86 @@ class EmrServerlessStopApplicationTrigger(AwsBaseWaiterTrigger):
             waiter_delay=waiter_delay,
             waiter_max_attempts=waiter_max_attempts,
             aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
         )
 
-    def hook(self) -> AwsGenericHook:
-        return EmrServerlessHook(self.aws_conn_id)
+
+class EmrServerlessJobSensorTrigger(AwsBaseWaiterTrigger):
+    """
+    Poll an EMR Serverless job run until it reaches a target or failure state.
+
+    :param application_id: The ID of the application the job is running on.
+    :param job_run_id: The ID of the job run.
+    :param target_states: The states that indicate the sensor has succeeded.
+    :param waiter_delay: The time in seconds to wait between polling attempts.
+    :param waiter_max_attempts: The maximum number of attempts to be made. Defaults to an infinite wait.
+    :param aws_conn_id: Reference to the AWS connection ID.
+    :param region_name: The AWS region where the job is running.
+    :param verify: Whether to verify SSL certificates.
+    :param botocore_config: Configuration dictionary for the botocore client.
+    """
+
+    def __init__(
+        self,
+        application_id: str,
+        job_run_id: str,
+        target_states: set[str] | frozenset[str],
+        waiter_delay: int = 60,
+        waiter_max_attempts: int = sys.maxsize,
+        aws_conn_id: str | None = "aws_default",
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
+    ) -> None:
+        normalized_target_states = set(target_states)
+        super().__init__(
+            serialized_fields={
+                "application_id": application_id,
+                "job_run_id": job_run_id,
+                "target_states": normalized_target_states,
+            },
+            waiter_name="serverless_job_completed",
+            waiter_args={"applicationId": application_id, "jobRunId": job_run_id},
+            failure_message="EMR Serverless job failed",
+            status_message="EMR Serverless job status is",
+            status_queries=["jobRun.state", "jobRun.stateDetails"],
+            return_value=None,
+            waiter_delay=waiter_delay,
+            waiter_max_attempts=waiter_max_attempts,
+            waiter_config_overrides={"acceptors": self._build_waiter_acceptors(normalized_target_states)},
+            aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
+        )
+
+    @staticmethod
+    def _build_waiter_acceptors(target_states: set[str]) -> list[dict[str, str]]:
+        acceptors = []
+        for states, waiter_state in (
+            (EmrServerlessHook.JOB_FAILURE_STATES, "failure"),
+            (target_states, "success"),
+        ):
+            for state in states:
+                acceptors.append(
+                    {
+                        "matcher": "path",
+                        "argument": "jobRun.state",
+                        "expected": state,
+                        "state": waiter_state,
+                    }
+                )
+        return acceptors
+
+    def hook(self) -> EmrServerlessHook:
+        return EmrServerlessHook(
+            aws_conn_id=self.aws_conn_id,
+            region_name=self.region_name,
+            verify=self.verify,
+            config=self.botocore_config,
+        )
 
 
 class EmrServerlessStartJobTrigger(AwsBaseWaiterTrigger):
@@ -331,10 +537,18 @@ class EmrServerlessStartJobTrigger(AwsBaseWaiterTrigger):
 
     :param application_id: The ID of the application the job in being run on.
     :param job_id: The ID of the job run.
-    :waiter_delay: polling period in seconds to check for the status
+    :param waiter_delay: polling period in seconds to check for the status
     :param waiter_max_attempts: The maximum number of attempts to be made
     :param aws_conn_id: Reference to AWS connection id
+    :param cancel_on_kill: Flag to indicate whether to cancel the job when the task is killed.
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
     """
+
+    aws_hook_class = EmrServerlessHook
 
     def __init__(
         self,
@@ -343,23 +557,166 @@ class EmrServerlessStartJobTrigger(AwsBaseWaiterTrigger):
         waiter_delay: int = 30,
         waiter_max_attempts: int = 60,
         aws_conn_id: str | None = "aws_default",
+        cancel_on_kill: bool = True,
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
     ) -> None:
         super().__init__(
-            serialized_fields={"application_id": application_id, "job_id": job_id},
+            serialized_fields={
+                "application_id": application_id,
+                "job_id": job_id,
+                "cancel_on_kill": cancel_on_kill,
+            },
             waiter_name="serverless_job_completed",
             waiter_args={"applicationId": application_id, "jobRunId": job_id},
             failure_message="Serverless Job failed",
             status_message="Serverless Job status is",
             status_queries=["jobRun.state", "jobRun.stateDetails"],
-            return_key="job_id",
-            return_value=job_id,
+            return_key="job_details",
+            return_value={"application_id": application_id, "job_id": job_id},
             waiter_delay=waiter_delay,
             waiter_max_attempts=waiter_max_attempts,
             aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
         )
+        self.application_id = application_id
+        self.job_id = job_id
+        self.cancel_on_kill = cancel_on_kill
 
-    def hook(self) -> AwsGenericHook:
-        return EmrServerlessHook(self.aws_conn_id)
+    if not AIRFLOW_V_3_0_PLUS:
+
+        @provide_session
+        def get_task_instance(self, *, session: Session) -> TaskInstance:
+            """Get the task instance for the current trigger (Airflow 2.x compatibility)."""
+            from sqlalchemy import select
+
+            ti = self.task_instance
+            if ti is None:
+                raise RuntimeError("task_instance is not set on the trigger")
+            query = select(TaskInstance).where(
+                TaskInstance.dag_id == ti.dag_id,
+                TaskInstance.task_id == ti.task_id,
+                TaskInstance.run_id == ti.run_id,
+                TaskInstance.map_index == ti.map_index,
+            )
+            task_instance = session.scalars(query).one_or_none()
+            if task_instance is None:
+                raise ValueError(
+                    f"TaskInstance with dag_id: {ti.dag_id}, "
+                    f"task_id: {ti.task_id}, "
+                    f"run_id: {ti.run_id} and "
+                    f"map_index: {ti.map_index} is not found"
+                )
+            return task_instance
+
+    async def get_task_state(self):
+        """Get the current state of the task instance (Airflow 3.x)."""
+        from airflow.sdk.execution_time.task_runner import RuntimeTaskInstance
+
+        task_states_response = await sync_to_async(RuntimeTaskInstance.get_task_states)(
+            dag_id=self.task_instance.dag_id,
+            task_ids=[self.task_instance.task_id],
+            run_ids=[self.task_instance.run_id],
+            map_index=self.task_instance.map_index,
+        )
+        try:
+            task_state = task_states_response[self.task_instance.run_id][self.task_instance.task_id]
+        except Exception:
+            raise ValueError(
+                f"TaskInstance with dag_id: {self.task_instance.dag_id}, "
+                f"task_id: {self.task_instance.task_id}, "
+                f"run_id: {self.task_instance.run_id} and "
+                f"map_index: {self.task_instance.map_index} is not found"
+            )
+        return task_state
+
+    async def safe_to_cancel(self) -> bool:
+        """
+        Whether it is safe to cancel the EMR Serverless job.
+
+        Returns True if task is NOT DEFERRED (user-initiated cancellation).
+        Returns False if task is DEFERRED (triggerer restart - don't cancel job).
+        """
+        if AIRFLOW_V_3_0_PLUS:
+            task_state = await self.get_task_state()
+        else:
+            task_instance = self.get_task_instance()  # type: ignore[call-arg]
+            task_state = task_instance.state
+        return task_state != TaskInstanceState.DEFERRED
+
+    async def run(self) -> AsyncIterator[TriggerEvent]:
+        """
+        Run the trigger and wait for the job to complete.
+
+        If the task is cancelled while waiting, attempt to cancel the EMR Serverless job
+        if cancel_on_kill is enabled and it's safe to do so.
+        """
+        hook = self.hook()
+        try:
+            async with await hook.get_async_conn() as client:
+                waiter = hook.get_waiter(
+                    self.waiter_name,
+                    deferrable=True,
+                    client=client,
+                    config_overrides=self.waiter_config_overrides,
+                )
+                await async_wait(
+                    waiter,
+                    self.waiter_delay,
+                    self.attempts,
+                    self.waiter_args,
+                    self.failure_message,
+                    self.status_message,
+                    self.status_queries,
+                )
+            yield TriggerEvent({"status": "success", self.return_key: self.return_value})
+        except asyncio.CancelledError as e:
+            # TODO: Remove this handler once the minimum supported Airflow version is 3.3+.
+            # On Airflow 3.3+, the triggerer passes a sentinel via task.cancel(msg) for
+            # user-initiated kills and calls on_kill() separately — skip here to avoid
+            # cancelling the job twice. On older Airflow there is no sentinel, so we
+            # handle cancellation here as before.
+            if not (e.args and e.args[0] == "__airflow_user_action__"):
+                if self.job_id and self.cancel_on_kill and await self.safe_to_cancel():
+                    self.log.info(
+                        "Task was cancelled. Cancelling EMR Serverless job. Application ID: %s, Job ID: %s",
+                        self.application_id,
+                        self.job_id,
+                    )
+                    hook.conn.cancel_job_run(applicationId=self.application_id, jobRunId=self.job_id)
+                    self.log.info("EMR Serverless job %s cancelled successfully.", self.job_id)
+                else:
+                    self.log.info(
+                        "Trigger may have shutdown or cancel_on_kill is disabled. "
+                        "Skipping job cancellation. Application ID: %s, Job ID: %s",
+                        self.application_id,
+                        self.job_id,
+                    )
+            raise
+        except Exception as e:
+            yield TriggerEvent({"status": "failure", "message": str(e)})
+
+    async def on_kill(self) -> None:
+        """
+        Cancel the EMR Serverless job when the trigger is cancelled by a user action.
+
+        This hook is available in Airflow 3.3+ via BaseTrigger.on_kill().
+        For older Airflow versions, the CancelledError handler in run() provides
+        the same cancellation behavior.
+        """
+        if self.job_id and self.cancel_on_kill:
+            self.log.info(
+                "Cancelling EMR Serverless job. Application ID: %s, Job ID: %s",
+                self.application_id,
+                self.job_id,
+            )
+            await sync_to_async(self.hook().conn.cancel_job_run)(
+                applicationId=self.application_id, jobRunId=self.job_id
+            )
+            self.log.info("EMR Serverless job %s cancelled successfully.", self.job_id)
 
 
 class EmrServerlessDeleteApplicationTrigger(AwsBaseWaiterTrigger):
@@ -370,7 +727,14 @@ class EmrServerlessDeleteApplicationTrigger(AwsBaseWaiterTrigger):
     :waiter_delay: polling period in seconds to check for the status
     :param waiter_max_attempts: The maximum number of attempts to be made
     :param aws_conn_id: Reference to AWS connection id
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
     """
+
+    aws_hook_class = EmrServerlessHook
 
     def __init__(
         self,
@@ -378,6 +742,9 @@ class EmrServerlessDeleteApplicationTrigger(AwsBaseWaiterTrigger):
         waiter_delay: int = 30,
         waiter_max_attempts: int = 60,
         aws_conn_id: str | None = "aws_default",
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
     ) -> None:
         super().__init__(
             serialized_fields={"application_id": application_id},
@@ -391,10 +758,10 @@ class EmrServerlessDeleteApplicationTrigger(AwsBaseWaiterTrigger):
             waiter_delay=waiter_delay,
             waiter_max_attempts=waiter_max_attempts,
             aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
         )
-
-    def hook(self) -> AwsGenericHook:
-        return EmrServerlessHook(self.aws_conn_id)
 
 
 class EmrServerlessCancelJobsTrigger(AwsBaseWaiterTrigger):
@@ -405,7 +772,14 @@ class EmrServerlessCancelJobsTrigger(AwsBaseWaiterTrigger):
     :param aws_conn_id: Reference to AWS connection id
     :param waiter_delay: Delay in seconds between each attempt to check the status
     :param waiter_max_attempts: Maximum number of attempts to check the status
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
     """
+
+    aws_hook_class = EmrServerlessHook
 
     def __init__(
         self,
@@ -413,6 +787,9 @@ class EmrServerlessCancelJobsTrigger(AwsBaseWaiterTrigger):
         aws_conn_id: str | None,
         waiter_delay: int,
         waiter_max_attempts: int,
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
     ) -> None:
         states = list(EmrServerlessHook.JOB_INTERMEDIATE_STATES.union({"CANCELLING"}))
         super().__init__(
@@ -427,12 +804,108 @@ class EmrServerlessCancelJobsTrigger(AwsBaseWaiterTrigger):
             waiter_delay=waiter_delay,
             waiter_max_attempts=waiter_max_attempts,
             aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
         )
-
-    def hook(self) -> AwsGenericHook:
-        return EmrServerlessHook(self.aws_conn_id)
 
     @property
     def hook_instance(self) -> AwsGenericHook:
         """This property is added for backward compatibility."""
         return self.hook()
+
+
+class EmrServerlessSessionTrigger(AwsBaseWaiterTrigger):
+    """
+    Poll an EMR Serverless interactive session until it reaches a ready state.
+
+    :param application_id: The ID of the EMR Serverless application.
+    :param session_id: The ID of the interactive session being polled.
+    :param waiter_delay: polling period in seconds to check for the status
+    :param waiter_max_attempts: The maximum number of attempts to be made
+    :param aws_conn_id: Reference to AWS connection id
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
+    """
+
+    aws_hook_class = EmrServerlessHook
+
+    def __init__(
+        self,
+        *,
+        application_id: str,
+        session_id: str,
+        waiter_delay: int = 10,
+        waiter_max_attempts: int = 60,
+        aws_conn_id: str | None = "aws_default",
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
+    ) -> None:
+        super().__init__(
+            serialized_fields={"application_id": application_id, "session_id": session_id},
+            waiter_name="serverless_session_ready",
+            waiter_args={"applicationId": application_id, "sessionId": session_id},
+            failure_message="EMR Serverless session failed to start",
+            status_message="EMR Serverless session status is",
+            status_queries=["session.state"],
+            return_key="session_details",
+            return_value={"application_id": application_id, "session_id": session_id},
+            waiter_delay=waiter_delay,
+            waiter_max_attempts=waiter_max_attempts,
+            aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
+        )
+
+
+class EmrServerlessStopSessionTrigger(AwsBaseWaiterTrigger):
+    """
+    Poll an EMR Serverless interactive session until it is terminated.
+
+    :param application_id: The ID of the EMR Serverless application.
+    :param session_id: The ID of the interactive session being polled.
+    :param waiter_delay: polling period in seconds to check for the status
+    :param waiter_max_attempts: The maximum number of attempts to be made
+    :param aws_conn_id: Reference to AWS connection id
+    :param region_name: The AWS region where the resources to watch are.
+    :param verify: Whether or not to verify SSL certificates.
+        See: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/core/session.html
+    :param botocore_config: Configuration dictionary (key-values) for botocore client. See:
+        https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html
+    """
+
+    aws_hook_class = EmrServerlessHook
+
+    def __init__(
+        self,
+        *,
+        application_id: str,
+        session_id: str,
+        waiter_delay: int = 10,
+        waiter_max_attempts: int = 60,
+        aws_conn_id: str | None = "aws_default",
+        region_name: str | None = None,
+        verify: bool | str | None = None,
+        botocore_config: dict | None = None,
+    ) -> None:
+        super().__init__(
+            serialized_fields={"application_id": application_id, "session_id": session_id},
+            waiter_name="serverless_session_terminated",
+            waiter_args={"applicationId": application_id, "sessionId": session_id},
+            failure_message="EMR Serverless session failed to terminate",
+            status_message="EMR Serverless session status is",
+            status_queries=["session.state"],
+            return_key="session_id",
+            return_value=session_id,
+            waiter_delay=waiter_delay,
+            waiter_max_attempts=waiter_max_attempts,
+            aws_conn_id=aws_conn_id,
+            region_name=region_name,
+            verify=verify,
+            botocore_config=botocore_config,
+        )

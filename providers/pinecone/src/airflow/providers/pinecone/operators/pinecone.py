@@ -21,17 +21,18 @@ from collections.abc import Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.pinecone.hooks.pinecone import PineconeHook
 
 if TYPE_CHECKING:
     from pinecone import Vector
+    from pinecone.db_data.types import (
+        VectorTuple,
+        VectorTupleWithMetadata,
+        VectorTypedDict,
+    )
 
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class PineconeIngestOperator(BaseOperator):
@@ -51,14 +52,17 @@ class PineconeIngestOperator(BaseOperator):
     :param upsert_kwargs: .. seealso:: https://docs.pinecone.io/reference/upsert
     """
 
-    template_fields: Sequence[str] = ("index_name", "input_vectors", "namespace")
+    template_fields: Sequence[str] = ("index_name", "input_vectors", "namespace", "conn_id")
 
     def __init__(
         self,
         *,
         conn_id: str = PineconeHook.default_conn_name,
         index_name: str,
-        input_vectors: list[Vector] | list[tuple] | list[dict],
+        input_vectors: list[Vector]
+        | list[VectorTuple]
+        | list[VectorTupleWithMetadata]
+        | list[VectorTypedDict],
         namespace: str = "",
         batch_size: int | None = None,
         upsert_kwargs: dict | None = None,
@@ -111,6 +115,8 @@ class CreatePodIndexOperator(BaseOperator):
     :param metric: The metric to use. Defaults to cosine.
     :param timeout: The timeout to use.
     """
+
+    template_fields: Sequence[str] = ("conn_id",)
 
     def __init__(
         self,
@@ -182,6 +188,8 @@ class CreateServerlessIndexOperator(BaseOperator):
     :param metric: The metric to use.
     :param timeout: The timeout to use.
     """
+
+    template_fields: Sequence[str] = ("conn_id",)
 
     def __init__(
         self,

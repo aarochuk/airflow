@@ -16,12 +16,7 @@
 # under the License.
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 from cov_runner import run_tests
-
-sys.path.insert(0, str(Path(__file__).parent.resolve()))
 
 source_files = [
     "airflow-core/src/airflow/dag_processing",
@@ -63,8 +58,8 @@ files_not_fully_covered = [
 ]
 
 other_tests = [
-    "airflow-core/tests/dag_processing",
-    "airflow-core/tests/jobs",
+    "airflow-core/tests/unit/dag_processing",
+    "airflow-core/tests/unit/jobs",
 ]
 
 """

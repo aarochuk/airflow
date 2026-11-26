@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -36,12 +35,14 @@ written by the community, so you can release and share those providers with othe
 If you want to learn how to build your own custom provider, you can find all the information about it at
 :doc:`/howto/create-custom-providers`.
 
+.. note::
 
-The full list of all the community managed providers is available at
-`Providers Index <https://airflow.apache.org/docs/#providers-packages-docs-apache-airflow-providers-index-html>`_.
+  The full list of all the community managed providers is available at
+  `Providers Index <https://airflow.apache.org/docs/#providers-packages>`_.
 
-You can also see index of all the community provider's operators and hooks in
-:doc:`/operators-and-hooks-ref/index`
+  You can also see index of all the community provider's operators and hooks in
+  :doc:`/operators-and-hooks-ref/index`
+
 
 Extending Airflow core functionality
 ------------------------------------
@@ -63,6 +64,18 @@ Providers can have their own configuration options which allow you to configure 
 
 You can see all community-managed providers with their own configuration in
 :doc:`/core-extensions/configurations`
+
+Command Line Interface
+''''''''''''''''''''''
+
+.. note::
+   The Airflow Core version must be ``3.2.0`` or newer to be able to use CLI commands provided by providers.
+
+Providers can add their own custom CLI commands to Airflow CLI. Those commands will be available
+once you install the provider package.
+
+You can see all community-managed providers with their own CLI commands in
+:doc:`/core-extensions/cli-commands`.
 
 Custom connections
 ''''''''''''''''''
@@ -114,6 +127,17 @@ You can see all the notifications available via community-managed providers in
 :doc:`/core-extensions/notifications`.
 
 
+Email backends
+''''''''''''''
+
+Airflow can send email (for example, task success/failure/retry callbacks) through a pluggable
+``email_backend`` instead of the default SMTP implementation. Providers can add email backends that
+send that email through a third-party service's API.
+
+You can see all the email backends available via community-managed providers in
+:doc:`/core-extensions/email-backends`.
+
+
 Installing and upgrading providers
 ----------------------------------
 
@@ -155,8 +179,8 @@ Details will vary per-provider and if there is a limitation for particular versi
 constraining the Airflow version used, it will be included as limitation of dependencies in the provider
 package.
 
-Each community provider has corresponding extra which can be used when installing airflow to install the
-provider together with ``Apache Airflow`` - for example you can install airflow with those extras:
+Each community provider has corresponding extra which can be used when installing Airflow to install the
+provider together with ``Apache Airflow`` - for example you can install Airflow with those extras:
 ``apache-airflow[google,amazon]`` (with correct constraints -see :doc:`apache-airflow:installation/index`) and you
 will install the appropriate versions of the ``apache-airflow-providers-amazon`` and
 ``apache-airflow-providers-google`` packages together with ``Apache Airflow``.

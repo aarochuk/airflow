@@ -18,12 +18,11 @@
 from __future__ import annotations
 
 from unittest import mock
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import botocore.client
 import pytest
 
-from airflow.exceptions import AirflowException, TaskDeferred
 from airflow.providers.amazon.aws.hooks.batch_client import BatchClientHook
 from airflow.providers.amazon.aws.operators.batch import BatchCreateComputeEnvironmentOperator, BatchOperator
 
@@ -32,6 +31,12 @@ from airflow.providers.amazon.aws.triggers.batch import (
     BatchCreateComputeEnvironmentTrigger,
     BatchJobTrigger,
 )
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred
+
+from tests_common.test_utils.task_state import get_non_reserved_task_state_writes
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_3_PLUS
+from unit.amazon.aws.utils.test_deferral import expect_deferral_warning
+from unit.amazon.aws.utils.test_template_fields import validate_template_fields
 
 AWS_REGION = "eu-west-1"
 AWS_ACCESS_KEY_ID = "airflow_dummy_key"
@@ -88,7 +93,7 @@ class TestBatchOperator:
         assert self.batch.job_id is None
         self.batch.job_id = JOB_ID
 
-        self.mock_context = mock.MagicMock()
+        self.mock_context = {"ti": mock.MagicMock()}
 
     def test_init(self):
         assert self.batch.job_id == JOB_ID
@@ -139,42 +144,30 @@ class TestBatchOperator:
         assert batch_job.share_identifier is None
         assert batch_job.scheduling_priority_override is None
         assert batch_job.hook.region_name is None
-        assert batch_job.hook.aws_conn_id is None
         assert issubclass(type(batch_job.hook.client), botocore.client.BaseClient)
         assert batch_job.tags == {}
         assert batch_job.wait_for_completion is True
         assert batch_job.submit_job_timeout is None
 
     def test_template_fields_overrides(self):
-        assert self.batch.template_fields == (
-            "job_id",
-            "job_name",
-            "job_definition",
-            "job_queue",
-            "container_overrides",
-            "array_properties",
-            "ecs_properties_override",
-            "eks_properties_override",
-            "node_overrides",
-            "parameters",
-            "retry_strategy",
-            "waiters",
-            "tags",
-            "wait_for_completion",
-            "awslogs_enabled",
-            "awslogs_fetch_interval",
-        )
+        validate_template_fields(self.batch)
 
+    @mock.patch.object(BatchClientHook, "get_job_all_awslogs_info")
     @mock.patch.object(BatchClientHook, "get_job_description")
     @mock.patch.object(BatchClientHook, "wait_for_job")
     @mock.patch.object(BatchClientHook, "check_job_success")
-    def test_execute_without_failures(self, check_mock, wait_mock, job_description_mock):
+    def test_execute_without_failures(
+        self, check_mock, wait_mock, job_description_mock, get_job_all_awslogs_info_mock
+    ):
         # JOB_ID is in RESPONSE_WITHOUT_FAILURES
         self.client_mock.submit_job.return_value = RESPONSE_WITHOUT_FAILURES
         self.batch.job_id = None
         self.batch.waiters = None  # use default wait
+        get_job_all_awslogs_info_mock.return_value = []
+        # Use a real dict so "ti" in context works correctly for link persistence
+        context = {"ti": mock.MagicMock()}
 
-        self.batch.execute(self.mock_context)
+        self.batch.execute(context)
 
         self.client_mock.submit_job.assert_called_once_with(
             jobQueue="queue",
@@ -191,9 +184,10 @@ class TestBatchOperator:
         wait_mock.assert_called_once_with(JOB_ID)
         check_mock.assert_called_once_with(JOB_ID)
 
-        # First Call: Retrieve Batch Queue and Job Definition
-        # Second Call: Retrieve CloudWatch information
-        assert job_description_mock.call_count == 2
+        # get_job_description called once in _persist_links
+        assert job_description_mock.call_count == 1
+        # get_job_all_awslogs_info called once in _persist_cloudwatch_link
+        get_job_all_awslogs_info_mock.assert_called_once_with(JOB_ID)
 
     def test_execute_with_failures(self):
         self.client_mock.submit_job.side_effect = Exception()
@@ -426,7 +420,7 @@ class TestBatchOperator:
             wait_for_completion=False,
         )
 
-        batch.execute(None)
+        batch.execute({})
 
         expected_args = {
             "jobQueue": "queue",
@@ -459,9 +453,10 @@ class TestBatchOperator:
                 container_overrides={"a": "b"},
             )
 
+    @pytest.mark.parametrize("wait_for_completion", [True, False])
     @mock.patch.object(BatchClientHook, "get_job_description")
     @mock.patch("airflow.providers.amazon.aws.hooks.batch_client.AwsBaseHook.get_client_type")
-    def test_defer_if_deferrable_param_set(self, mock_client, mock_get_job_description):
+    def test_defer_if_deferrable_param_set(self, mock_client, mock_get_job_description, wait_for_completion):
         mock_get_job_description.return_value = {"status": "SUBMITTED"}
 
         batch = BatchOperator(
@@ -471,15 +466,19 @@ class TestBatchOperator:
             job_definition="hello-world",
             do_xcom_push=False,
             deferrable=True,
+            wait_for_completion=wait_for_completion,
         )
 
-        with pytest.raises(TaskDeferred) as exc:
+        with (
+            expect_deferral_warning(deferrable=True, wait_for_completion=wait_for_completion),
+            pytest.raises(TaskDeferred) as exc,
+        ):
             batch.execute(self.mock_context)
         assert isinstance(exc.value.trigger, BatchJobTrigger)
 
     @mock.patch("airflow.providers.amazon.aws.hooks.batch_client.AwsBaseHook.get_client_type")
     def test_defer_but_failed_due_to_job_id_not_found(self, mock_client):
-        """Test that an AirflowException is raised if job_id is not set before deferral."""
+        """Test that a ValueError is raised if job_id is not set before deferral."""
         mock_client.return_value.submit_job.return_value = {
             "jobName": JOB_NAME,
             "jobId": None,
@@ -493,9 +492,8 @@ class TestBatchOperator:
             do_xcom_push=False,
             deferrable=True,
         )
-        with pytest.raises(AirflowException) as exc:
+        with pytest.raises(ValueError, match="AWS Batch job - job_id was not found"):
             batch.execute(self.mock_context)
-        assert "AWS Batch job - job_id was not found" in str(exc.value)
 
     @mock.patch.object(BatchClientHook, "get_job_description")
     @mock.patch("airflow.providers.amazon.aws.hooks.batch_client.AwsBaseHook.get_client_type")
@@ -559,9 +557,325 @@ class TestBatchOperator:
         wait_mock.assert_called_once()
         assert len(wait_mock.call_args) == 2
 
+    @patch.object(BatchOperator, "log", new_callable=MagicMock)
+    @patch("airflow.providers.amazon.aws.operators.batch.validate_execute_complete_event")
+    @patch.object(BatchClientHook, "check_job_success")
+    @patch.object(BatchClientHook, "get_job_awslogs_info")
+    @patch.object(BatchClientHook, "get_job_all_awslogs_info")
+    @mock.patch("airflow.providers.amazon.aws.hooks.batch_client.AwsBaseHook.get_client_type")
+    def test_execute_complete_success_with_logs(
+        self,
+        mock_client,
+        mock_get_job_all_awslogs_info,
+        mock_get_job_awslogs_info,
+        mock_check_job_success,
+        mock_validate,
+        mock_log,
+    ):
+        # Setup
+        mock_validate.return_value = {"status": "success", "job_id": "12345"}
+        mock_get_job_awslogs_info.return_value = {
+            "awslogs_region": "us-east-1",
+            "awslogs_group": "/aws/batch/job",
+            "awslogs_stream_name": "stream1",
+        }
+        mock_get_job_all_awslogs_info.return_value = [
+            {"awslogs_group": "/aws/batch/job", "awslogs_stream_name": "stream1"}
+        ]
+        batch = BatchOperator(
+            task_id="test_task",
+            job_name=JOB_NAME,
+            job_queue="dummy_queue",
+            job_definition="dummy_definition",
+            deferrable=True,
+            awslogs_enabled=True,
+            do_xcom_push=True,  # Enable xcom push so _persist_cloudwatch_link runs
+        )
+        # Add task instance to context
+        context = {"ti": mock.MagicMock()}
+
+        # Mock the log fetcher
+        with patch("airflow.providers.amazon.aws.operators.batch.AwsTaskLogFetcher") as mock_log_fetcher:
+            mock_fetcher_instance = mock.MagicMock()
+            mock_fetcher_instance.get_last_log_messages.return_value = ["log line 1", "log line 2"]
+            mock_log_fetcher.return_value = mock_fetcher_instance
+
+            result = batch.execute_complete(context=context, event={"dummy": "event"})
+
+            # Assertion - verify logs were fetched
+            mock_get_job_awslogs_info.assert_called_once_with("12345")
+            mock_log_fetcher.assert_called_once()
+            mock_fetcher_instance.get_last_log_messages.assert_called_once_with(10000)
+
+        assert result == "12345"
+        mock_get_job_all_awslogs_info.assert_called_once_with("12345")
+        mock_check_job_success.assert_called_once_with("12345")
+        mock_log.info.assert_called_with("Job completed successfully for job_id: %s", "12345")
+
+    @patch.object(BatchOperator, "log", new_callable=MagicMock)
+    @patch("airflow.providers.amazon.aws.operators.batch.validate_execute_complete_event")
+    @patch.object(BatchClientHook, "check_job_success")
+    @patch.object(BatchClientHook, "get_job_awslogs_info")
+    @patch.object(BatchClientHook, "get_job_all_awslogs_info")
+    @mock.patch("airflow.providers.amazon.aws.hooks.batch_client.AwsBaseHook.get_client_type")
+    def test_execute_complete_success_without_logs(
+        self,
+        mock_client,
+        mock_get_job_all_awslogs_info,
+        mock_get_job_awslogs_info,
+        mock_check_job_success,
+        mock_validate,
+        mock_log,
+    ):
+        # Setup
+        mock_validate.return_value = {"status": "success", "job_id": "12345"}
+        mock_get_job_all_awslogs_info.return_value = []
+        batch = BatchOperator(
+            task_id="test_task",
+            job_name=JOB_NAME,
+            job_queue="dummy_queue",
+            job_definition="dummy_definition",
+            deferrable=True,
+            awslogs_enabled=False,
+            do_xcom_push=True,  # Enable xcom push so _persist_cloudwatch_link runs
+        )
+        # Add task instance to context
+        context = {"ti": mock.MagicMock()}
+
+        # Mock the log fetcher to ensure it's not called
+        with patch("airflow.providers.amazon.aws.operators.batch.AwsTaskLogFetcher") as mock_log_fetcher:
+            result = batch.execute_complete(context=context, event={"dummy": "event"})
+
+            # Verify logs were NOT fetched when awslogs_enabled=False
+            mock_get_job_awslogs_info.assert_not_called()
+            mock_log_fetcher.assert_not_called()
+
+        # Assertions
+        assert result == "12345"
+        mock_get_job_all_awslogs_info.assert_called_once_with("12345")
+        mock_check_job_success.assert_called_once_with("12345")
+        mock_log.info.assert_called_with("Job completed successfully for job_id: %s", "12345")
+
+    @patch("airflow.providers.amazon.aws.operators.batch.validate_execute_complete_event")
+    @patch.object(BatchClientHook, "get_job_awslogs_info")
+    @patch.object(BatchClientHook, "get_job_all_awslogs_info")
+    @mock.patch("airflow.providers.amazon.aws.hooks.batch_client.AwsBaseHook.get_client_type")
+    def test_execute_complete_failure(
+        self, mock_client, mock_get_job_all_awslogs_info, mock_get_job_awslogs_info, mock_validate
+    ):
+        # Setup
+        mock_validate.return_value = {"status": "failed", "job_id": "12345"}
+        mock_get_job_awslogs_info.return_value = {
+            "awslogs_region": "us-east-1",
+            "awslogs_group": "/aws/batch/job",
+            "awslogs_stream_name": "stream1",
+        }
+        mock_get_job_all_awslogs_info.return_value = [
+            {"awslogs_group": "/aws/batch/job", "awslogs_stream_name": "stream1"}
+        ]
+        batch = BatchOperator(
+            task_id="test_task",
+            job_name=JOB_NAME,
+            job_queue="dummy_queue",
+            job_definition="dummy_definition",
+            deferrable=True,
+            awslogs_enabled=True,
+        )
+
+        # Assertions - even on failure, logs should be fetched before raising
+        context = {"ti": mock.MagicMock()}
+        with patch("airflow.providers.amazon.aws.operators.batch.AwsTaskLogFetcher") as mock_log_fetcher:
+            mock_fetcher_instance = mock.MagicMock()
+            mock_fetcher_instance.get_last_log_messages.return_value = ["error log 1", "error log 2"]
+            mock_log_fetcher.return_value = mock_fetcher_instance
+
+            with pytest.raises(AirflowException, match="Error while running job"):
+                batch.execute_complete(context=context, event={"dummy": "event"})
+
+            # Verify logs were fetched even on failure
+            mock_get_job_awslogs_info.assert_called_once_with("12345")
+            mock_fetcher_instance.get_last_log_messages.assert_called_once_with(10000)
+
+    @patch("airflow.providers.amazon.aws.operators.batch.validate_execute_complete_event")
+    @patch.object(BatchClientHook, "get_job_awslogs_info")
+    @patch.object(BatchClientHook, "get_job_all_awslogs_info")
+    @mock.patch("airflow.providers.amazon.aws.hooks.batch_client.AwsBaseHook.get_client_type")
+    def test_execute_complete_failure_without_logs(
+        self, mock_client, mock_get_job_all_awslogs_info, mock_get_job_awslogs_info, mock_validate
+    ):
+        # Setup
+        mock_validate.return_value = {"status": "failed", "job_id": "12345"}
+        mock_get_job_all_awslogs_info.return_value = [
+            {"awslogs_group": "/aws/batch/job", "awslogs_stream_name": "stream1"}
+        ]
+        batch = BatchOperator(
+            task_id="test_task",
+            job_name=JOB_NAME,
+            job_queue="dummy_queue",
+            job_definition="dummy_definition",
+            deferrable=True,
+            awslogs_enabled=False,  # Logs disabled
+            do_xcom_push=True,  # Enable xcom push so _persist_cloudwatch_link runs
+        )
+
+        # Assertions - CloudWatch links should still be persisted even on failure without logs
+        context = {"ti": mock.MagicMock()}
+        with patch("airflow.providers.amazon.aws.operators.batch.AwsTaskLogFetcher") as mock_log_fetcher:
+            with pytest.raises(AirflowException, match="Error while running job"):
+                batch.execute_complete(context=context, event={"dummy": "event"})
+
+            # Verify logs were NOT fetched when awslogs_enabled=False
+            mock_get_job_awslogs_info.assert_not_called()
+            mock_log_fetcher.assert_not_called()
+
+            # Verify CloudWatch links were still persisted despite failure
+            mock_get_job_all_awslogs_info.assert_called_once_with("12345")
+
+
+@pytest.mark.skipif(not AIRFLOW_V_3_3_PLUS, reason="durable execution requires Airflow 3.3+")
+class TestBatchOperatorDurable:
+    NEW_JOB_ID = "11111111-2222-3333-4444-555555555555"
+
+    @pytest.fixture
+    def client(self):
+        with mock.patch("airflow.providers.amazon.aws.hooks.batch_client.AwsBaseHook.get_client_type") as m:
+            m.return_value.submit_job.return_value = {"jobName": JOB_NAME, "jobId": self.NEW_JOB_ID}
+            yield m.return_value
+
+    @pytest.fixture
+    def task_store(self):
+        store = mock.MagicMock(spec_set=["get", "set"])
+        store.get.return_value = None
+        return store
+
+    @staticmethod
+    def _make_operator(operator_class=BatchOperator, **kwargs):
+        return operator_class(
+            task_id="task",
+            job_name=JOB_NAME,
+            job_queue="queue",
+            job_definition="hello-world",
+            do_xcom_push=False,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _context(task_store):
+        return {"ti": mock.MagicMock(spec_set=["stats_tags"], stats_tags={}), "task_state_store": task_store}
+
+    @mock.patch("airflow.providers.amazon.aws.links.batch.BatchJobDetailsLink.persist")
+    @mock.patch.object(BatchOperator, "monitor_job", autospec=True)
+    def test_fresh_submit_persists_job_id(self, monitor_mock, link_mock, client, task_store):
+        result = self._make_operator().execute(self._context(task_store))
+
+        client.submit_job.assert_called_once()
+        link_mock.assert_called_once()
+        assert get_non_reserved_task_state_writes(task_store) == [mock.call("batch_job_id", self.NEW_JOB_ID)]
+        monitor_mock.assert_called_once()
+        assert result == self.NEW_JOB_ID
+
+    @pytest.mark.parametrize("status", ["SUBMITTED", "PENDING", "RUNNABLE", "STARTING", "RUNNING"])
+    @mock.patch("airflow.providers.amazon.aws.links.batch.BatchJobDetailsLink.persist")
+    @mock.patch.object(BatchOperator, "monitor_job", autospec=True)
+    def test_reconnects_to_active_job(self, monitor_mock, link_mock, client, task_store, status):
+        task_store.get.return_value = JOB_ID
+        client.describe_jobs.return_value = {"jobs": [{"jobId": JOB_ID, "status": status}]}
+        operator = self._make_operator()
+
+        result = operator.execute(self._context(task_store))
+
+        assert client.describe_jobs.call_args_list[0] == mock.call(jobs=[JOB_ID])
+        client.submit_job.assert_not_called()
+        assert get_non_reserved_task_state_writes(task_store) == []
+        monitor_mock.assert_called_once()
+        assert link_mock.call_args.kwargs["job_id"] == JOB_ID
+        assert operator.job_id == JOB_ID
+        assert result == JOB_ID
+
+    @mock.patch.object(BatchOperator, "_persist_cloudwatch_link", autospec=True)
+    @mock.patch.object(BatchOperator, "_persist_links", autospec=True)
+    @mock.patch("airflow.providers.amazon.aws.links.batch.BatchJobDetailsLink.persist")
+    @mock.patch.object(BatchOperator, "monitor_job", autospec=True)
+    def test_already_succeeded_skips_submit_and_wait(
+        self, monitor_mock, link_mock, persist_links_mock, persist_cloudwatch_mock, client, task_store
+    ):
+        task_store.get.return_value = JOB_ID
+        client.describe_jobs.return_value = {"jobs": [{"jobId": JOB_ID, "status": "SUCCEEDED"}]}
+
+        result = self._make_operator().execute(self._context(task_store))
+
+        client.submit_job.assert_not_called()
+        monitor_mock.assert_not_called()
+        assert link_mock.call_args.kwargs["job_id"] == JOB_ID
+        persist_links_mock.assert_called_once()
+        persist_cloudwatch_mock.assert_called_once()
+        assert result == JOB_ID
+
+    @pytest.mark.parametrize(
+        "describe_response",
+        [
+            pytest.param({"jobs": [{"jobId": JOB_ID, "status": "FAILED"}]}, id="failed"),
+            pytest.param({"jobs": []}, id="not-found"),
+        ],
+    )
+    @mock.patch.object(BatchOperator, "monitor_job", autospec=True)
+    def test_resubmits_when_stored_job_not_active(self, monitor_mock, client, task_store, describe_response):
+        task_store.get.return_value = JOB_ID
+        client.describe_jobs.return_value = describe_response
+
+        result = self._make_operator().execute(self._context(task_store))
+
+        client.submit_job.assert_called_once()
+        assert get_non_reserved_task_state_writes(task_store) == [mock.call("batch_job_id", self.NEW_JOB_ID)]
+        assert result == self.NEW_JOB_ID
+
+    @mock.patch.object(BatchOperator, "monitor_job", autospec=True)
+    def test_durable_false_does_not_use_task_state_store(self, monitor_mock, client, task_store):
+        self._make_operator(durable=False).execute(self._context(task_store))
+
+        client.submit_job.assert_called_once()
+        task_store.get.assert_not_called()
+        assert get_non_reserved_task_state_writes(task_store) == []
+
+    @pytest.mark.parametrize("durable", [True, False])
+    @mock.patch.object(BatchOperator, "monitor_job", autospec=True)
+    def test_submit_job_override_returning_none_keeps_job_id(
+        self, monitor_mock, client, task_store, caplog, durable
+    ):
+        class LegacySubmitBatchOperator(BatchOperator):
+            def submit_job(self, context):
+                super().submit_job(context)
+
+        operator = self._make_operator(operator_class=LegacySubmitBatchOperator, durable=durable)
+
+        result = operator.execute(self._context(task_store))
+
+        monitor_mock.assert_called_once()
+        assert operator.job_id == self.NEW_JOB_ID
+        assert result == self.NEW_JOB_ID
+        assert ("submit_job returned no job id, so a retry will submit a new job" in caplog) is durable
+
 
 class TestBatchCreateComputeEnvironmentOperator:
     warn_message = "The `status_retries` parameter is unused and should be removed"
+
+    def test_template_fields(self):
+        environment_name = "environment_name"
+        compute_resources = {}
+        service_role = "test_role"
+        environment_type = "environment_type"
+        environment_state = "state"
+
+        operator = BatchCreateComputeEnvironmentOperator(
+            task_id="task",
+            compute_environment_name=environment_name,
+            environment_type=environment_type,
+            state=environment_state,
+            compute_resources=compute_resources,
+            service_role=service_role,
+        )
+
+        validate_template_fields(operator)
 
     @mock.patch.object(BatchClientHook, "client")
     def test_execute(self, mock_conn):

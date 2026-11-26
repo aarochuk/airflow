@@ -19,33 +19,16 @@ from __future__ import annotations
 
 import pytest
 
-from airflow.decorators import task
-from airflow.models.dag import DAG
-from airflow.utils.task_group import TaskGroup
+from airflow._shared.timezones import timezone
+from airflow.sdk import DAG, task
 
-from unit.models import DEFAULT_DATE
-
-
-def test_mapped_task_group_id_prefix_task_id():
-    def f(z):
-        pass
-
-    with DAG(dag_id="d", schedule=None, start_date=DEFAULT_DATE) as dag:
-        x1 = dag.task(task_id="t1")(f).expand(z=[])
-        with TaskGroup("g"):
-            x2 = dag.task(task_id="t2")(f).expand(z=[])
-
-    assert x1.operator.task_id == "t1"
-    assert x2.operator.task_id == "g.t2"
-
-    dag.get_task("t1") == x1.operator
-    dag.get_task("g.t2") == x2.operator
+DEFAULT_DATE = timezone.datetime(2025, 1, 1)
 
 
 @pytest.mark.db_test
 def test_mapped_task_with_arbitrary_default_args(dag_maker, session):
     default_args = {"some": "value", "not": "in", "the": "task", "or": "dag"}
-    with dag_maker(session=session, default_args=default_args):
+    with dag_maker(session=session, default_args=default_args, serialized=True):
 
         @task.python(do_xcom_push=True)
         def f(x: int, y: int) -> int:
@@ -57,7 +40,7 @@ def test_mapped_task_with_arbitrary_default_args(dag_maker, session):
     decision = dag_run.task_instance_scheduling_decisions(session=session)
     xcoms = set()
     for ti in decision.schedulable_tis:
-        ti.run(session=session)
+        dag_maker.run_ti(ti.task_id, dag_run, map_index=ti.map_index)
         xcoms.add(ti.xcom_pull(session=session, task_ids=ti.task_id, map_indexes=ti.map_index))
 
     assert xcoms == {11, 12, 13}

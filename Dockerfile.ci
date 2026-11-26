@@ -1,32 +1,52 @@
 # syntax=docker/dockerfile:1.4
-# Licensed to the Apache Software Foundation (ASF) under one or more
-# contributor license agreements.  See the NOTICE file distributed with
-# this work for additional information regarding copyright ownership.
-# The ASF licenses this file to You under the Apache License, Version 2.0
-# (the "License"); you may not use this file except in compliance with
-# the License.  You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-#    http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 #
 # WARNING: THIS DOCKERFILE IS NOT INTENDED FOR PRODUCTION USE OR DEPLOYMENT.
 #
-ARG PYTHON_BASE_IMAGE="python:3.9-slim-bookworm"
+# BASE_IMAGE: the Docker Hardened Image that Python comes from. Both the build stage and the final
+# image are based on it, so Python is never compiled during the build.
+#
+# The default is Airflow's public mirror of the upstream "dhi.io/python" image, so building needs no
+# registry credentials. The upstream image itself requires a "docker login dhi.io". It is pinned to a
+# digest, because the mirror's tags move several times a day: "breeze ci upgrade" moves the pin once
+# the full CI has passed on the new image.
+#
+# The FIPS-validated variants require a paid Docker subscription and cannot be mirrored or made the
+# default, but you can build a FIPS-compliant image by pointing the build at one:
+#   docker build . --build-arg BASE_IMAGE="dhi.io/python:3.14.10-debian13-fips-dev"
+ARG BASE_IMAGE="ghcr.io/apache/airflow/base/python:3.14.10-debian13-dev@sha256:e1c528dee57ce33c3192099679a1690a1541030f5137df3587d3ed0454a172b6"
+
+# CI_OS_DEPS_IMAGE: the image the OS dependencies are installed on. By default that is BASE_IMAGE and
+# the build installs them from the apt repositories. Breeze passes the pinned OS-dependencies image
+# instead - BASE_IMAGE with the OS dependencies already installed by the "ci-os-deps" stage below - so
+# the build does not depend on the live dhi.io apt repository. See "breeze release-management
+# build-os-deps-images".
+ARG CI_OS_DEPS_IMAGE="${BASE_IMAGE}"
 
 ##############################################################################################
 # This is the script image where we keep all inlined bash scripts needed in other segments
-# We use PYTHON_BASE_IMAGE to make sure that the scripts are different for different platforms.
+# We use BASE_IMAGE to make sure that the scripts are different for different platforms.
 ##############################################################################################
-FROM ${PYTHON_BASE_IMAGE} as scripts
+FROM ${BASE_IMAGE} as scripts
 
 ##############################################################################################
 # Please DO NOT modify the inlined scripts manually. The content of those files will be
-# replaced by pre-commit automatically from the "scripts/docker/" folder.
+# replaced by prek automatically from the "scripts/docker/" folder.
 # This is done in order to avoid problems with caching and file permissions and in order to
 # make the PROD Dockerfile standalone
 ##############################################################################################
@@ -37,26 +57,150 @@ COPY <<"EOF" /install_os_dependencies.sh
 set -euo pipefail
 
 if [[ "$#" != 1 ]]; then
-    echo "ERROR! There should be 'runtime' or 'dev' parameter passed as argument.".
+    echo
+    echo "ERROR! There should be 'runtime', 'ci' or 'dev' parameter passed as argument.".
+    echo
+    exit 1
+fi
+
+OS_DEPENDENCIES_SCRIPTS_DIR="$(dirname "${BASH_SOURCE[0]}")"
+OS_DEPENDENCIES_MARKER=/usr/share/airflow/os-dependencies.sha256
+OS_DEPENDENCIES_INPUTS_HASH=$(
+    {
+        echo "${1}"
+        for file in "${BASH_SOURCE[0]}" "${OS_DEPENDENCIES_SCRIPTS_DIR}/common.sh" \
+                "${OS_DEPENDENCIES_SCRIPTS_DIR}/install_mysql.sh" "${OS_DEPENDENCIES_SCRIPTS_DIR}/install_mssql.sh" \
+                "${OS_DEPENDENCIES_SCRIPTS_DIR}/install_postgres.sh" "${OS_DEPENDENCIES_SCRIPTS_DIR}"/keys/*; do
+            sha256sum "${file}" | cut -d ' ' -f 1
+        done
+        for variable in AIRFLOW_IMAGE_FLAVOR AIRFLOW_PYTHON_VERSION PYTHON_HOME \
+                DEV_APT_DEPS ADDITIONAL_DEV_APT_DEPS DEV_APT_COMMAND ADDITIONAL_DEV_APT_COMMAND \
+                ADDITIONAL_DEV_APT_ENV RUNTIME_APT_DEPS ADDITIONAL_RUNTIME_APT_DEPS RUNTIME_APT_COMMAND \
+                ADDITIONAL_RUNTIME_APT_COMMAND ADDITIONAL_RUNTIME_APT_ENV GOLANG_MAJOR_MINOR_VERSION \
+                TEMURIN_VERSION NODEJS_VERSION PNPM_VERSION RUSTUP_DEFAULT_TOOLCHAIN RUSTUP_VERSION \
+                RUSTUP_HOME CARGO_HOME COSIGN_VERSION LDFLAGS EXTRA_CFLAGS DEPENDENCIES_EPOCH_NUMBER \
+                INSTALL_MYSQL_CLIENT INSTALL_MYSQL_CLIENT_TYPE INSTALL_MSSQL_CLIENT INSTALL_POSTGRES_CLIENT; do
+            printf '%s=%s\n' "${variable}" "${!variable-}"
+        done
+    } | sha256sum | cut -d ' ' -f 1
+)
+if [[ -f "${OS_DEPENDENCIES_MARKER}" && "$(cat "${OS_DEPENDENCIES_MARKER}")" == "${OS_DEPENDENCIES_INPUTS_HASH}" ]]; then
+    echo
+    echo "The base image already has the OS dependencies for these inputs (${OS_DEPENDENCIES_INPUTS_HASH}) - nothing to install."
+    echo
+    exit 0
+fi
+
+GOLANG_MAJOR_MINOR_VERSION=${GOLANG_MAJOR_MINOR_VERSION:-1.24.4}
+TEMURIN_VERSION=${TEMURIN_VERSION:-11}
+NODEJS_VERSION=${NODEJS_VERSION:-22.23.1}
+PNPM_VERSION=${PNPM_VERSION:-10.28.1}
+RUSTUP_DEFAULT_TOOLCHAIN=${RUSTUP_DEFAULT_TOOLCHAIN:-stable}
+RUSTUP_VERSION=${RUSTUP_VERSION:-1.29.0}
+AIRFLOW_IMAGE_FLAVOR=${AIRFLOW_IMAGE_FLAVOR:-hardened}
+AIRFLOW_PYTHON_VERSION=${AIRFLOW_PYTHON_VERSION:-}
+COSIGN_VERSION=${COSIGN_VERSION:-3.0.5}
+if [[ "${AIRFLOW_IMAGE_FLAVOR}" == "hardened" ]]; then
+    if ! command -v python3 >/dev/null; then
+        echo
+        echo "ERROR! The hardened flavor takes Python from BASE_IMAGE, but this base image has no python3."
+        echo "Pick a BASE_IMAGE with Python, or set AIRFLOW_IMAGE_FLAVOR to 'legacy' to build on a plain Debian image."
+        echo
+        exit 1
+    fi
+    # The Debian 12 hardened images ship Python under /opt/python, the Debian 13 ones install it as
+    # Debian packages under /usr - so ask the base image's Python where it lives.
+    PYTHON_HOME=${PYTHON_HOME:-$(python3 -c 'import sys; print(sys.base_prefix)')}
+    # Read before apt runs: a package depending on python3 can pull another Python version in.
+    BASE_PYTHON_MAJOR_MINOR=$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
+    if [[ -n "${AIRFLOW_PYTHON_VERSION}" && "${AIRFLOW_PYTHON_VERSION}." != "${BASE_PYTHON_MAJOR_MINOR}."* ]]; then
+        echo
+        echo "ERROR! AIRFLOW_PYTHON_VERSION is ${AIRFLOW_PYTHON_VERSION}, but the base image has Python ${BASE_PYTHON_MAJOR_MINOR}."
+        echo "The hardened flavor takes Python from BASE_IMAGE: leave AIRFLOW_PYTHON_VERSION empty or pick a BASE_IMAGE with that Python."
+        echo
+        exit 1
+    fi
+elif [[ "${AIRFLOW_IMAGE_FLAVOR}" == "legacy" ]]; then
+    PYTHON_HOME=${PYTHON_HOME:-/usr/python}
+else
+    echo
+    echo "ERROR! AIRFLOW_IMAGE_FLAVOR should be 'hardened' or 'legacy', not '${AIRFLOW_IMAGE_FLAVOR}'."
+    echo
     exit 1
 fi
 
 if [[ "${1}" == "runtime" ]]; then
     INSTALLATION_TYPE="RUNTIME"
 elif   [[ "${1}" == "dev" ]]; then
-    INSTALLATION_TYPE="dev"
+    INSTALLATION_TYPE="DEV"
+elif   [[ "${1}" == "ci" ]]; then
+    INSTALLATION_TYPE="CI"
 else
-    echo "ERROR! Wrong argument. Passed ${1} and it should be one of 'runtime' or 'dev'.".
+    echo
+    echo "ERROR! Wrong argument. Passed ${1} and it should be one of 'runtime', 'ci' or 'dev'.".
+    echo
     exit 1
 fi
 
 function get_dev_apt_deps() {
     if [[ "${DEV_APT_DEPS=}" == "" ]]; then
-        DEV_APT_DEPS="apt-transport-https apt-utils build-essential ca-certificates dirmngr \
-freetds-bin freetds-dev git graphviz graphviz-dev krb5-user ldap-utils libev4 libev-dev libffi-dev libgeos-dev \
-libkrb5-dev libldap2-dev libleveldb1d libleveldb-dev libsasl2-2 libsasl2-dev libsasl2-modules \
-libssl-dev libxmlsec1 libxmlsec1-dev locales lsb-release openssh-client pkgconf sasl2-bin \
-software-properties-common sqlite3 sudo unixodbc unixodbc-dev zlib1g-dev"
+        DEV_APT_DEPS="\
+apt-transport-https \
+apt-utils \
+build-essential \
+dirmngr \
+freetds-bin \
+freetds-dev \
+git \
+graphviz \
+graphviz-dev \
+gzip \
+krb5-user \
+ldap-utils \
+libc6-dev \
+libev-dev \
+libev4 \
+libffi-dev \
+libgeos-dev \
+libkrb5-dev \
+libldap2-dev \
+libleveldb-dev \
+libleveldb1d \
+libsasl2-2 \
+libsasl2-dev \
+libsasl2-modules \
+libssl-dev \
+libxmlsec1 \
+libxmlsec1-dev \
+locales \
+openssh-client \
+openssl \
+pkg-config \
+pkgconf \
+sasl2-bin \
+sqlite3 \
+sudo \
+tdsodbc \
+unixodbc \
+unixodbc-dev \
+wget \
+xz-utils \
+zlib1g-dev \
+"
+        if [[ "${AIRFLOW_IMAGE_FLAVOR}" == "legacy" ]]; then
+            # Needed only to compile Python from sources - without them it builds, but silently
+            # lacks modules such as sqlite3, lzma or readline.
+            local debian_version
+            # shellcheck disable=SC1091
+            debian_version=$(. /etc/os-release; printf '%s\n' "$VERSION_CODENAME")
+            if [[ "${debian_version}" == "bookworm" ]]; then
+                DEV_APT_DEPS+="lcov libbluetooth-dev libbz2-dev libdb-dev libgdbm-compat-dev libgdbm-dev \
+liblzma-dev libncurses5-dev libreadline6-dev libsqlite3-dev libzstd-dev lzma lzma-dev tk-dev uuid-dev"
+            else
+                DEV_APT_DEPS+="lcov libbluetooth-dev libbz2-dev libdb-dev libgdbm-compat-dev libgdbm-dev \
+liblzma-dev libncurses-dev libreadline-dev libsqlite3-dev libzstd-dev tk-dev uuid-dev"
+            fi
+        fi
         export DEV_APT_DEPS
     fi
 }
@@ -70,15 +214,58 @@ function get_runtime_apt_deps() {
     echo
     echo "DEBIAN CODENAME: ${debian_version}"
     echo
-    debian_version_apt_deps="libffi8 libldap-2.5-0 libssl3 netcat-openbsd"
+    if [[ "${debian_version}" == "bookworm" ]]; then
+        debian_version_apt_deps="\
+libffi8 \
+libldap-2.5-0 \
+libssl3 \
+netcat-openbsd\
+"
+    else
+        # trixie renamed the libraries that moved to a 64-bit time_t (libssl3 -> libssl3t64) and
+        # dropped the soname from the LDAP library package name.
+        debian_version_apt_deps="\
+libffi8 \
+libldap2 \
+libssl3t64 \
+netcat-openbsd\
+"
+    fi
     echo
     echo "APPLIED INSTALLATION CONFIGURATION FOR DEBIAN VERSION: ${debian_version}"
     echo
+    # libxmlsec1-openssl was added because libxmlsec1 ships no crypto engine of its own - the engines
+    # are separate packages - so the "xmlsec" module (pulled in by python3-saml) imported with
+    # "libxmlsec1-openssl.so.1: cannot open shared object file" without it.
     if [[ "${RUNTIME_APT_DEPS=}" == "" ]]; then
-        RUNTIME_APT_DEPS="apt-transport-https apt-utils ca-certificates \
-curl dumb-init freetds-bin krb5-user libev4 libgeos-dev \
-ldap-utils libsasl2-2 libsasl2-modules libxmlsec1 locales ${debian_version_apt_deps} \
-lsb-release openssh-client python3-selinux rsync sasl2-bin sqlite3 sudo unixodbc"
+        RUNTIME_APT_DEPS="\
+${debian_version_apt_deps} \
+apt-transport-https \
+apt-utils \
+curl \
+dumb-init \
+freetds-bin \
+git \
+gnupg \
+iputils-ping \
+krb5-user \
+ldap-utils \
+libev4 \
+libgeos-dev \
+libsasl2-2 \
+libsasl2-modules \
+libxmlsec1 \
+libxmlsec1-openssl \
+locales \
+openssh-client \
+rsync \
+sasl2-bin \
+sqlite3 \
+sudo \
+tdsodbc \
+unixodbc \
+wget\
+"
         export RUNTIME_APT_DEPS
     fi
 }
@@ -87,7 +274,7 @@ function install_docker_cli() {
     apt-get update
     apt-get install ca-certificates curl
     install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    curl -fsSL --retry 3 --retry-delay 5 https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
     chmod a+r /etc/apt/keyrings/docker.asc
     # shellcheck disable=SC1091
     echo \
@@ -98,10 +285,147 @@ function install_docker_cli() {
     apt-get install -y --no-install-recommends docker-ce-cli
 }
 
+function keep_image_conffiles() {
+    # The hardened base images ship a modified /etc/debian_version, so any apt run that upgrades
+    # base-files stops at dpkg's interactive conffile prompt and fails a non-interactive build. Making
+    # dpkg keep the image's copy by default covers every apt run - this build's and those of images
+    # extending it - so no install command has to remember the flags.
+    mkdir -p /etc/dpkg/dpkg.cfg.d
+    printf '%s\n' force-confdef force-confold > /etc/dpkg/dpkg.cfg.d/airflow-keep-conffiles
+}
+
+function prefer_hardened_apt_repository() {
+    # The hardened base images take their packages from dhi.io, but stock Debian's sources stay
+    # configured beside it and apt installs whichever repository offers the higher version. Debian's
+    # build of a package then replaces Docker's, and its dependencies no longer match the packages the
+    # image ships (docker-hardened-images/catalog#610). Ranking dhi.io above the default priority of
+    # 500 makes apt take Docker's build whenever dhi.io publishes the package, and fall back to Debian
+    # only when it does not.
+    # The priority stays below 1000 so the preference never forces a downgrade: apt still favors
+    # dhi.io's build of a package it publishes, but may take a newer version from another repository
+    # when a dependency requires it - for example PGDG's libpq5, which postgresql-client-18 needs at
+    # ">= 18.6" and dhi.io does not carry. The renumbered builds that sort below the image's own copy
+    # are handled by align_image_packages_with_hardened_repository instead.
+    # The preference covers every apt run - this build's and those of images extending it.
+    mkdir -p /etc/apt/preferences.d
+    printf 'Package: *\nPin: origin "dhi.io"\nPin-Priority: 999\n' > /etc/apt/preferences.d/airflow-prefer-dhi
+}
+
+function align_image_packages_with_hardened_repository() {
+    # The dhi.io apt repository is live, so it moves on even under a base image pinned to a digest.
+    # Docker renumbered its builds ("14.2.0-19+dhi5" became "14.2.0-19+deb13u0+dhi5", which sorts
+    # lower) and the repository dropped the old numbers, while the image still ships them. Packages
+    # depending on the exact new version (gcc-14 on gcc-14-base, libgmp-dev on libgmp10) are then
+    # uninstallable, because apt will not downgrade the image's copy at a priority below 1000
+    # (docker-hardened-images/catalog#689). Only installed versions no repository offers any more
+    # ("local" ones) are moved to dhi.io's build, so newer packages from other repositories - such as
+    # PGDG's libpq5 - are left alone.
+    local package
+    local dhi_version
+    local -a downgrades=()
+    while read -r package; do
+        dhi_version=$(apt-cache madison "${package}" | awk -F' [|] ' '$3 ~ /dhi\.io/ {print $2; exit}')
+        if [[ -n "${dhi_version}" ]]; then
+            downgrades+=("${package}=${dhi_version}")
+        fi
+    done < <(apt list --installed 2>/dev/null | awk -F/ '/\[installed,local\]/ {print $1}')
+    if (( ${#downgrades[@]} )); then
+        echo "Aligning image packages with the dhi.io repository: ${downgrades[*]}"
+        apt-get install -y --no-install-recommends --allow-downgrades "${downgrades[@]}"
+    fi
+}
+
+function refresh_ldconfig_after_dpkg() {
+    # The hardened base images ship libc-bin without its dpkg trigger, so installing a shared library
+    # does not refresh the ldconfig cache and ctypes.util.find_library() - which reads that cache -
+    # cannot find it (for example pyenchant's "The 'enchant' C library was not found"). The hook covers
+    # every apt run - this build's and those of images extending it.
+    mkdir -p /etc/apt/apt.conf.d
+    echo 'DPkg::Post-Invoke { "if [ -x /sbin/ldconfig ]; then /sbin/ldconfig; fi"; };' \
+        > /etc/apt/apt.conf.d/99airflow-ldconfig
+}
+
+function restore_debian_base_files() {
+    # The hardened base images ship a minimal /etc, but Debian maintainer scripts assume the files
+    # a stock Debian has: sasl2-bin chowns its run directory to the "sasl" group from base-passwd,
+    # and tmux registers its shell with add-shell, which reads /etc/shells. The base-passwd package
+    # only ships the reference copies of the account files - update-passwd is what merges them
+    # into /etc.
+    # libpam-runtime generates the /etc/pam.d/common-* files that the PAM configs already in the
+    # image "@include" - without them "adduser --gecos" aborts with a PAM error from chfn.
+    # Debian Policy lets a maintainer script rely on any essential package without declaring it, and
+    # libgcrypt20 takes that up: its postinst runs a helper with a "#!/bin/dash" shebang. The hardened
+    # images ship /bin/sh as a symlink to bash and no dash at all, so configuring the package aborts
+    # with exit 127 and takes the whole apt transaction with it. Installing it first restores the
+    # assumption, and hands /bin/sh back to dash the way a stock Debian has it.
+    apt-get install -y --no-install-recommends dash
+    apt-get install -y --no-install-recommends base-passwd libpam-runtime
+    update-passwd
+    # The Debian 13 hardened images strip /etc/pam.d further: libpam-runtime and passwd are already
+    # installed there, so installing them generates nothing, and passwd, chpasswd and chfn abort with
+    # "pam_start() failed". Reinstalling passwd brings back its deleted PAM configs, and
+    # pam-auth-update - which treats the deleted common-* files as local changes - needs --force.
+    apt-get install -y --no-install-recommends --reinstall -o Dpkg::Options::=--force-confmiss passwd
+    if [[ ! -e /etc/pam.d/common-auth ]]; then
+        pam-auth-update --package --force
+    fi
+    if [[ ! -e /etc/shells ]]; then
+        printf '%s\n' "# /etc/shells: valid login shells" /bin/sh /bin/bash > /etc/shells
+    fi
+    align_perl_base_with_perl
+}
+
+function align_perl_base_with_perl() {
+    # The hardened images ship their own build of perl-base, but the hardened apt repository does not
+    # always publish the matching perl - while it still publishes packages that depend on perl, such
+    # as git. Debian's perl depends on exactly its own perl-base version, so apt refuses to install
+    # git at all. Moving perl-base to the version of the perl apt can install keeps the two in step;
+    # when the repository does publish a matching perl, the versions already agree and this does nothing.
+    local perl_version
+    local perl_base_version
+    perl_version=$(apt-cache policy perl | awk '/Candidate:/ {print $2}')
+    perl_base_version=$(dpkg-query -W -f='${Version}' perl-base 2>/dev/null || true)
+    if [[ -n "${perl_version}" && "${perl_version}" != "(none)" && -n "${perl_base_version}" \
+            && "${perl_base_version}" != "${perl_version}" ]]; then
+        apt-get install -y --no-install-recommends --allow-downgrades "perl-base=${perl_version}"
+    fi
+}
+
+function install_apt_utils() {
+    # apt-utils depends on exactly its own apt version. The hardened images can ship an apt newer than
+    # the one dhi.io publishes, and with dhi.io preferred apt then picks an apt-utils it cannot install
+    # beside the image's apt, so ask for the version matching apt whenever a repository carries it.
+    local apt_version apt_utils_package apt_utils_log
+    apt_version=$(dpkg-query -W -f='${Version}' apt)
+    apt_utils_package="apt-utils"
+    if apt-cache madison apt-utils | awk -v version="${apt_version}" '$3 == version {found = 1} END {exit !found}'; then
+        apt_utils_package="apt-utils=${apt_version}"
+    fi
+    apt_utils_log=$(mktemp)
+    if ! apt-get install -yqq --no-install-recommends "${apt_utils_package}" > "${apt_utils_log}" 2>&1; then
+        echo
+        echo "ERROR! Installing ${apt_utils_package} failed. Output:"
+        echo
+        cat "${apt_utils_log}"
+        rm -f "${apt_utils_log}"
+        exit 1
+    fi
+    rm -f "${apt_utils_log}"
+}
+
 function install_debian_dev_dependencies() {
+    if [[ "${AIRFLOW_IMAGE_FLAVOR}" == "hardened" ]]; then
+        keep_image_conffiles
+        prefer_hardened_apt_repository
+        refresh_ldconfig_after_dpkg
+    fi
     apt-get update
-    apt-get install -yqq --no-install-recommends apt-utils >/dev/null 2>&1
-    apt-get install -y --no-install-recommends curl gnupg2 lsb-release
+    install_apt_utils
+    if [[ "${AIRFLOW_IMAGE_FLAVOR}" == "hardened" ]]; then
+        align_image_packages_with_hardened_repository
+        restore_debian_base_files
+    fi
+    apt-get install -y --no-install-recommends wget curl gnupg2 ca-certificates
     # shellcheck disable=SC2086
     export ${ADDITIONAL_DEV_APT_ENV?}
     if [[ ${DEV_APT_COMMAND} != "" ]]; then
@@ -120,13 +444,285 @@ function install_debian_dev_dependencies() {
     echo "DEBIAN CODENAME: ${debian_version}"
     echo
     # shellcheck disable=SC2086
-    apt-get install -y --no-install-recommends ${DEV_APT_DEPS} ${ADDITIONAL_DEV_APT_DEPS}
+    apt-get install -y --no-install-recommends ${DEV_APT_DEPS}
+}
+
+function install_additional_dev_dependencies() {
+    if [[ "${ADDITIONAL_DEV_APT_DEPS=}" != "" ]]; then
+        # shellcheck disable=SC2086
+        apt-get install -y --no-install-recommends ${ADDITIONAL_DEV_APT_DEPS}
+    fi
+}
+
+function link_python() {
+    # Airflow images have always exposed Python under /usr/python - documentation, volume mounts and
+    # user customizations refer to that path - while the hardened base images ship it in /opt/python
+    # (Debian 12) or /usr (Debian 13), so keep the historical location working as a symlink.
+    if [[ ! -e /usr/python ]]; then
+        ln -sv "${PYTHON_HOME}" /usr/python
+    fi
+    # The hardened base images have no /usr/local tree at all
+    mkdir -p /usr/local/bin /usr/local/lib
+    # link python binaries to /usr/local/bin and /usr/python/bin with and without 3 suffix
+    # Links in /usr/local/bin are needed for tools that expect python to be there
+    # Links in /usr/python/bin are needed for tools that are detecting home of python installation including
+    # lib/site-packages. The /usr/python/bin should be first in PATH in order to help with the last part.
+    for dst in pip3 python3 python3-config; do
+        src="$(echo "${dst}" | tr -d 3)"
+        if [[ ! -e "/usr/python/bin/${dst}" ]]; then
+            continue
+        fi
+        echo "Linking ${dst} in /usr/local/bin and /usr/python/bin"
+        ln -sfv "/usr/python/bin/${dst}" "/usr/local/bin/${dst}"
+        for dir in /usr/local/bin /usr/python/bin; do
+            if [[ ! -e "${dir}/${src}" ]]; then
+                echo "Creating ${src} - > ${dst} link in ${dir}"
+                ln -sv "${dir}/${dst}" "${dir}/${src}"
+            fi
+        done
+    done
+    # A Python installed under /usr already has its libraries where the dynamic linker looks, and
+    # linking all of /usr/lib into /usr/local/lib would only shadow the system libraries.
+    if [[ "$(readlink -f "${PYTHON_HOME}")" != "/usr" ]]; then
+        for dst in /usr/python/lib/*
+        do
+            src="/usr/local/lib/$(basename "${dst}")"
+            if [[ -e "${src}" ]]; then
+                rm -rf "${src}"
+            fi
+            echo "Linking ${dst} to ${src}"
+            ln -sv "${dst}" "${src}"
+        done
+    fi
+    ldconfig
+}
+
+function restore_thread_stack_size() {
+    # The hardened base images build Python with -DTHREAD_STACK_SIZE=0x100000, so every thread Python
+    # starts gets a 1 MiB stack instead of glibc's default (the 8 MiB "ulimit -s" the previous images
+    # used). On Python 3.12 and 3.13 the C recursion guard is a fixed depth count sized for the larger
+    # stack, so deeply nested input - e.g. a JSON body parsed in a web server worker thread - overflows
+    # the stack and kills the process instead of raising RecursionError. A .pth file runs at every
+    # interpreter start-up without taking the sitecustomize module name users may already rely on.
+    local site_packages
+    site_packages="$(/usr/python/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+    echo "Restoring the 8 MiB default thread stack size in ${site_packages}"
+    echo "import threading; threading.stack_size(8 * 1024 * 1024)" > "${site_packages}/airflow-thread-stack-size.pth"
+}
+
+function compile_python_stdlib() {
+    # The hardened base images ship the standard library with no .pyc files at all. Python then misses
+    # the bytecode cache on every stdlib import, and in a read-only or non-writable directory it cannot
+    # create one - each miss leaves a negative dentry in the kernel, which grows without bound in a
+    # long-running container and can exhaust memory on the host. Compiling the standard library here
+    # restores what the previously compiled-in-image Python shipped.
+    # See https://github.com/apache/airflow/pull/58944 and https://lwn.net/Articles/814535/
+    local stdlib
+    stdlib="$(/usr/python/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["stdlib"])')"
+    echo "Compiling Python standard library in ${stdlib}"
+    # compileall exits non-zero when any file fails to compile, and the standard library ships files
+    # that are meant not to compile (deliberately broken syntax used by the test suite).
+    /usr/python/bin/python -m compileall -q -j "$(nproc)" -o 0 -o 1 -o 2 "${stdlib}" || true
+}
+
+function hold_hardened_python() {
+    # The Debian 13 hardened images install their Python as packages that conflict with Debian's own
+    # python3. A package depending on python3 - for example NodeSource's nodejs - therefore makes apt
+    # remove the image's Python and install Debian's, without asking. Holding the packages turns that
+    # into an apt error instead, in this build and in images extending it.
+    local packages
+    packages=$(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'python-3.*' 'libpython-3.*' 2>/dev/null \
+        | awk '$1 == "ii" {print $2}' || true)
+    if [[ -n "${packages}" ]]; then
+        # shellcheck disable=SC2086
+        apt-mark hold ${packages}
+    fi
+}
+
+function check_no_system_python() {
+    # Python - from the hardened base image or compiled from sources - must stay the only Python in the
+    # image. A system Python pulled in as a dependency of an apt package shares its shared libraries
+    # with ours and leads to errors such as:
+    # /usr/python/lib/python3.11/lib-dynload/_ssl.cpython-311-aarch64-linux-gnu.so: undefined symbol: _PyModule_Add
+    # Debian names its Python libraries "libpython3.13". The trixie hardened images register their own
+    # Python with dpkg as "libpython-3.13", which is the Python we want, so it must not match.
+    # Debian 13 hardened images package their Python as "python-3.13" and serve other versions from
+    # their apt repository, so a package depending on python3 can also pull in a hardened Python of a
+    # different version than the image's own.
+    local other_hardened_python=""
+    if [[ -n "${BASE_PYTHON_MAJOR_MINOR=}" ]]; then
+        other_hardened_python=$(dpkg -l | awk '/^ii  (lib)?python-3\.[0-9]+/ {print $2}' \
+            | grep -v -E "python-${BASE_PYTHON_MAJOR_MINOR//./\\.}(-|:|$)" || true)
+    fi
+    if [[ -n "${other_hardened_python}" ]]; then
+        echo
+        echo "ERROR! A Python other than the image's ${BASE_PYTHON_MAJOR_MINOR} was installed: ${other_hardened_python//$'\n'/ }"
+        echo
+        apt-get install -yqq aptitude >/dev/null
+        aptitude why "$(echo "${other_hardened_python}" | head -1 | cut -d: -f1)"
+        echo
+        exit 1
+    fi
+    if dpkg -l | grep -E '^ii  libpython3\.[0-9]+' >/dev/null; then
+        echo
+        echo "ERROR! System python is installed by one of the previous steps"
+        echo
+        echo "Please make sure that no python packages are installed by default. Displaying the reason why libpython is installed:"
+        echo
+        apt-get install -yqq aptitude >/dev/null
+        aptitude why "$(dpkg -l | grep -E '^ii  libpython3\.[0-9]+' | head -1 | awk '{print $2}')"
+        echo
+        exit 1
+    else
+        echo
+        echo "GOOD! System python is not installed - OK"
+        echo
+    fi
+}
+
+function install_cosign() {
+    local arch
+    arch="$(dpkg --print-architecture)"
+    declare -A cosign_sha256s=(
+        # https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign_checksums.txt
+        [amd64]="db15cc99e6e4837daabab023742aaddc3841ce57f193d11b7c3e06c8003642b2"
+        [arm64]="d098f3168ae4b3aa70b4ca78947329b953272b487727d1722cb3cb098a1a20ab"
+    )
+    local cosign_sha256="${cosign_sha256s[${arch}]}"
+    if [[ -z "${cosign_sha256}" ]]; then
+        echo "Unsupported architecture for cosign: ${arch}"
+        exit 1
+    fi
+    curl -fsSL --retry 3 --retry-delay 5 \
+        "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-${arch}" \
+        -o /tmp/cosign
+    echo "${cosign_sha256}  /tmp/cosign" | sha256sum --check
+    chmod +x /tmp/cosign
+}
+
+function resolve_python_version() {
+    if [[ -z "${AIRFLOW_PYTHON_VERSION}" ]]; then
+        echo
+        echo "ERROR! The legacy flavor compiles Python from sources, so AIRFLOW_PYTHON_VERSION has to name it:"
+        echo "MAJOR.MINOR for the latest release of that line, or MAJOR.MINOR.PATCH."
+        echo
+        exit 1
+    fi
+    if [[ ! "${AIRFLOW_PYTHON_VERSION}" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        return
+    fi
+    # A release directory appears on python.org with its first pre-release, so take the newest one
+    # that already holds the final tarball.
+    local candidate
+    for candidate in $(wget --tries=3 --waitretry=5 -qO- https://www.python.org/ftp/python/ \
+            | grep -oE "href=\"${AIRFLOW_PYTHON_VERSION//./\\.}\.[0-9]+/\"" \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -V -r); do
+        if wget --tries=3 --waitretry=5 -q --spider \
+                "https://www.python.org/ftp/python/${candidate}/Python-${candidate}.tar.xz"; then
+            echo "Python ${AIRFLOW_PYTHON_VERSION} resolved to its latest release ${candidate}"
+            AIRFLOW_PYTHON_VERSION="${candidate}"
+            return
+        fi
+    done
+    echo
+    echo "ERROR! No release of Python ${AIRFLOW_PYTHON_VERSION} found on python.org."
+    echo
+    exit 1
+}
+
+function install_python() {
+    # Only the legacy image flavor compiles Python - the hardened flavor gets it from the base image.
+    resolve_python_version
+    wget --tries=3 --waitretry=5 -O python.tar.xz "https://www.python.org/ftp/python/${AIRFLOW_PYTHON_VERSION%%[a-z]*}/Python-${AIRFLOW_PYTHON_VERSION}.tar.xz"
+    local major_minor_version
+    major_minor_version="${AIRFLOW_PYTHON_VERSION%.*}"
+    echo "Verifying Python ${AIRFLOW_PYTHON_VERSION} (${major_minor_version})"
+    # Sigstore verification (PEP 761)
+    declare -A sigstore_identities=(
+        # https://peps.python.org/pep-0664/#release-manager-and-crew
+        [3.11]="pablogsal@python.org"
+        # https://peps.python.org/pep-0693/#release-manager-and-crew
+        [3.12]="thomas@python.org"
+        # https://peps.python.org/pep-0719/#release-manager-and-crew
+        [3.13]="thomas@python.org"
+        # https://peps.python.org/pep-0745/#release-manager-and-crew
+        [3.14]="hugo@python.org"
+        # https://peps.python.org/pep-0790/#release-manager-and-crew
+        [3.15]="hugo@python.org"
+    )
+    declare -A sigstore_issuers=(
+        [3.11]="https://accounts.google.com"
+        [3.12]="https://accounts.google.com"
+        [3.13]="https://accounts.google.com"
+        [3.14]="https://github.com/login/oauth"
+        [3.15]="https://github.com/login/oauth"
+    )
+    wget --tries=3 --waitretry=5 -O python.tar.xz.sigstore \
+        "https://www.python.org/ftp/python/${AIRFLOW_PYTHON_VERSION%%[a-z]*}/Python-${AIRFLOW_PYTHON_VERSION}.tar.xz.sigstore"
+    install_cosign
+    local identity="${sigstore_identities[${major_minor_version}]}"
+    local issuer="${sigstore_issuers[${major_minor_version}]}"
+    /tmp/cosign verify-blob \
+        --bundle python.tar.xz.sigstore \
+        --certificate-identity "${identity}" \
+        --certificate-oidc-issuer "${issuer}" \
+        python.tar.xz
+    rm -f python.tar.xz.sigstore /tmp/cosign
+    mkdir -p /usr/src/python
+    tar --extract --directory /usr/src/python --strip-components=1 --file python.tar.xz
+    rm python.tar.xz
+    cd /usr/src/python
+    arch="$(dpkg --print-architecture)"; arch="${arch##*-}"
+    gnuArch="$(dpkg-architecture --query DEB_BUILD_GNU_TYPE)"
+    EXTRA_CFLAGS="$(dpkg-buildflags --get CFLAGS)"
+    EXTRA_CFLAGS="${EXTRA_CFLAGS:-} -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer";
+    LDFLAGS="$(dpkg-buildflags --get LDFLAGS)"
+    LDFLAGS="${LDFLAGS:--Wl},--strip-all"
+    local build_log
+    build_log=$(mktemp)
+    echo "Building Python ${AIRFLOW_PYTHON_VERSION} from source..."
+    if ! (
+        ./configure --enable-optimizations --prefix=/usr/python/ --with-ensurepip --build="$gnuArch" \
+            --enable-loadable-sqlite-extensions --enable-option-checking=fatal \
+                --enable-shared --with-lto && \
+        make -s -j "$(nproc)" "EXTRA_CFLAGS=${EXTRA_CFLAGS:-}" \
+            "LDFLAGS=${LDFLAGS:--Wl},-rpath='\$\$ORIGIN/../lib'" python && \
+        make -s -j "$(nproc)" install
+    ) > "${build_log}" 2>&1; then
+        echo
+        echo "ERROR! Python build failed. Build output:"
+        echo
+        cat "${build_log}"
+        rm -f "${build_log}"
+        exit 1
+    fi
+    rm -f "${build_log}"
+    # CPython builds without the optional modules whose -dev packages are missing, so check them here
+    # rather than finding out from a broken image.
+    /usr/python/bin/python3 -c "import bz2, ctypes, dbm.gnu, lzma, readline, sqlite3, ssl, uuid, zlib"
+    cd /
+    rm -rf /usr/src/python
+    find /usr/python -depth \
+      \( \
+        \( -type d -a \( -name test -o -name tests -o -name idle_test \) \) \
+        -o \( -type f -a \( -name 'libpython*.a' \) \) \
+    \) -exec rm -rf '{}' +
+    link_python
 }
 
 function install_debian_runtime_dependencies() {
+    if [[ "${AIRFLOW_IMAGE_FLAVOR}" == "hardened" ]]; then
+        keep_image_conffiles
+        prefer_hardened_apt_repository
+        refresh_ldconfig_after_dpkg
+    fi
     apt-get update
-    apt-get install --no-install-recommends -yqq apt-utils >/dev/null 2>&1
-    apt-get install -y --no-install-recommends curl gnupg2 lsb-release
+    install_apt_utils
+    if [[ "${AIRFLOW_IMAGE_FLAVOR}" == "hardened" ]]; then
+        align_image_packages_with_hardened_repository
+        restore_debian_base_files
+    fi
+    apt-get install -y --no-install-recommends wget curl gnupg2 ca-certificates
     # shellcheck disable=SC2086
     export ${ADDITIONAL_RUNTIME_APT_ENV?}
     if [[ "${RUNTIME_APT_COMMAND}" != "" ]]; then
@@ -140,6 +736,120 @@ function install_debian_runtime_dependencies() {
     apt-get install -y --no-install-recommends ${RUNTIME_APT_DEPS} ${ADDITIONAL_RUNTIME_APT_DEPS}
     apt-get autoremove -yqq --purge
     apt-get clean
+    check_no_system_python
+    link_python
+    if [[ "${AIRFLOW_IMAGE_FLAVOR}" == "hardened" ]]; then
+        hold_hardened_python
+        restore_thread_stack_size
+        compile_python_stdlib
+    fi
+    rm -rf /var/lib/apt/lists/* /var/log/*
+}
+
+function install_golang() {
+    curl --retry 3 --retry-delay 5 "https://dl.google.com/go/go${GOLANG_MAJOR_MINOR_VERSION}.linux-$(dpkg --print-architecture).tar.gz" -o "go${GOLANG_MAJOR_MINOR_VERSION}.linux.tar.gz"
+    rm -rf /usr/local/go && tar -C /usr/local -xzf go"${GOLANG_MAJOR_MINOR_VERSION}".linux.tar.gz
+    rm -f go"${GOLANG_MAJOR_MINOR_VERSION}".linux.tar.gz
+}
+
+function install_jdk() {
+    # Install Eclipse Temurin JDK from the Adoptium apt repository (https://adoptium.net/installation/linux/).
+    apt-get update -qq
+    apt-get install -y --no-install-recommends wget gnupg apt-transport-https ca-certificates
+    mkdir -p /etc/apt/keyrings
+    wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \
+        | tee /etc/apt/keyrings/adoptium.asc > /dev/null
+    # shellcheck disable=SC1091
+    DISTRO_CODENAME=$(. /etc/os-release; echo "${VERSION_CODENAME}")
+    echo "deb [signed-by=/etc/apt/keyrings/adoptium.asc] \
+https://packages.adoptium.net/artifactory/deb ${DISTRO_CODENAME} main" \
+        | tee /etc/apt/sources.list.d/adoptium.list > /dev/null
+    apt-get update -qq
+    apt-get install -y --no-install-recommends "temurin-${TEMURIN_VERSION}-jdk"
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+}
+
+function install_nodejs() {
+    local arch
+    arch="$(dpkg --print-architecture)"
+    declare -A nodejs_targets=(
+        [amd64]="linux-x64"
+        [arm64]="linux-arm64"
+    )
+    declare -A nodejs_sha256s=(
+        # https://nodejs.org/dist/v${NODEJS_VERSION}/SHASUMS256.txt
+        [amd64]="9749e988f437343b7fa832c69ded82a312e41a03116d766797ac14f6f9eee578"
+        [arm64]="0294e8b915ab75f92c7513d2fcb830ae06e10684e6c603e99a87dbf8835389c1"
+    )
+    local target="${nodejs_targets[${arch}]}"
+    local nodejs_sha256="${nodejs_sha256s[${arch}]}"
+    if [[ -z "${target}" ]]; then
+        echo "Unsupported architecture for nodejs: ${arch}"
+        exit 1
+    fi
+    curl --retry 3 --retry-delay 5 \
+        "https://nodejs.org/dist/v${NODEJS_VERSION}/node-v${NODEJS_VERSION}-${target}.tar.xz" \
+        -o /tmp/nodejs.tar.xz
+    echo "${nodejs_sha256}  /tmp/nodejs.tar.xz" | sha256sum --check
+    tar -xJf /tmp/nodejs.tar.xz --strip-components=1 -C /usr/local --no-same-owner
+    rm -f /tmp/nodejs.tar.xz
+    corepack enable --install-directory /usr/local/bin
+    # corepack enable only writes shims; prepare downloads and caches the pnpm binary into the
+    # image so it is available offline and matches the version ts-sdk pins.
+    corepack prepare "pnpm@${PNPM_VERSION}" --activate
+}
+
+function install_rustup() {
+    local arch
+    arch="$(dpkg --print-architecture)"
+    declare -A rustup_targets=(
+        [amd64]="x86_64-unknown-linux-gnu"
+        [arm64]="aarch64-unknown-linux-gnu"
+    )
+    declare -A rustup_sha256s=(
+        # https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/{target}/rustup-init.sha256
+        [amd64]="4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10"
+        [arm64]="9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792"
+    )
+    local target="${rustup_targets[${arch}]}"
+    local rustup_sha256="${rustup_sha256s[${arch}]}"
+    if [[ -z "${target}" ]]; then
+        echo "Unsupported architecture for rustup: ${arch}"
+        exit 1
+    fi
+    curl --proto '=https' --tlsv1.2 -sSf --retry 3 --retry-delay 5 \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${target}/rustup-init" \
+        -o /tmp/rustup-init
+    echo "${rustup_sha256}  /tmp/rustup-init" | sha256sum --check
+    chmod +x /tmp/rustup-init
+    # Building wheels from source needs only rustc and cargo. The default profile also adds
+    # rust-docs, clippy and rustfmt, which add tens of thousands of files to the image.
+    /tmp/rustup-init -y --profile minimal --default-toolchain "${RUSTUP_DEFAULT_TOOLCHAIN}"
+    rm -f /tmp/rustup-init
+}
+
+function install_database_clients() {
+    # Part of the OS dependencies, so the pinned OS-dependencies images carry the clients too and an
+    # image built on one does not install them from the live apt repositories. They run in the same
+    # order as before they moved here: after the rest of the OS dependencies, each cleaning up after apt.
+    if [[ "${INSTALLATION_TYPE}" == "RUNTIME" ]]; then
+        bash "${OS_DEPENDENCIES_SCRIPTS_DIR}/install_mysql.sh" prod
+        bash "${OS_DEPENDENCIES_SCRIPTS_DIR}/install_mssql.sh" prod
+        bash "${OS_DEPENDENCIES_SCRIPTS_DIR}/install_postgres.sh" prod
+        return
+    fi
+    # The CI image runs Airflow from the sources as well, so it also gets the MySQL runtime client.
+    if [[ "${INSTALLATION_TYPE}" == "CI" ]]; then
+        bash "${OS_DEPENDENCIES_SCRIPTS_DIR}/install_mysql.sh" prod
+    fi
+    bash "${OS_DEPENDENCIES_SCRIPTS_DIR}/install_mysql.sh" dev
+    bash "${OS_DEPENDENCIES_SCRIPTS_DIR}/install_mssql.sh" dev
+    bash "${OS_DEPENDENCIES_SCRIPTS_DIR}/install_postgres.sh" dev
+}
+
+function apt_clean() {
+    apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false
     rm -rf /var/lib/apt/lists/* /var/log/*
 }
 
@@ -147,11 +857,36 @@ if [[ "${INSTALLATION_TYPE}" == "RUNTIME" ]]; then
     get_runtime_apt_deps
     install_debian_runtime_dependencies
     install_docker_cli
-
+    apt_clean
 else
     get_dev_apt_deps
     install_debian_dev_dependencies
+    check_no_system_python
+    if [[ "${AIRFLOW_IMAGE_FLAVOR}" == "hardened" ]]; then
+        link_python
+        hold_hardened_python
+        restore_thread_stack_size
+        compile_python_stdlib
+    else
+        install_python
+    fi
+    install_additional_dev_dependencies
+    install_rustup
+    if [[ "${INSTALLATION_TYPE}" == "CI" ]]; then
+        install_golang
+        install_jdk
+        install_nodejs
+    fi
     install_docker_cli
+    apt_clean
+fi
+install_database_clients
+
+mkdir -p "$(dirname "${OS_DEPENDENCIES_MARKER}")"
+echo "${OS_DEPENDENCIES_INPUTS_HASH}" > "${OS_DEPENDENCIES_MARKER}"
+OS_DEPENDENCIES_BASE_IMAGE_FILE="$(dirname "${OS_DEPENDENCIES_MARKER}")/os-dependencies.base-image"
+if [[ ! -f "${OS_DEPENDENCIES_BASE_IMAGE_FILE}" ]]; then
+    echo "${BASE_IMAGE:-unknown}" > "${OS_DEPENDENCIES_BASE_IMAGE_FILE}"
 fi
 EOF
 
@@ -165,51 +900,66 @@ set -euo pipefail
 common::get_colors
 declare -a packages
 
-readonly MYSQL_LTS_VERSION="8.0"
-readonly MARIADB_LTS_VERSION="10.11"
 
 : "${INSTALL_MYSQL_CLIENT:?Should be true or false}"
 : "${INSTALL_MYSQL_CLIENT_TYPE:-mariadb}"
 
-install_mysql_client() {
-    if [[ "${1}" == "dev" ]]; then
-        packages=("libmysqlclient-dev" "mysql-client")
-    elif [[ "${1}" == "prod" ]]; then
-        # `libmysqlclientXX` where XX is number, and it should be increased every new GA MySQL release, for example
-        # 18 - MySQL 5.6.48
-        # 20 - MySQL 5.7.42
-        # 21 - MySQL 8.0.34
-        # 22 - MySQL 8.1
-        packages=("libmysqlclient21" "mysql-client")
-    else
-        echo
-        echo "${COLOR_RED}Specify either prod or dev${COLOR_RESET}"
-        echo
-        exit 1
-    fi
-
-    common::import_trusted_gpg "B7B3B788A8D3785C" "mysql"
-
+if [[ "${INSTALL_MYSQL_CLIENT}" != "true" && "${INSTALL_MYSQL_CLIENT}" != "false" ]]; then
     echo
-    echo "${COLOR_BLUE}Installing Oracle MySQL client version ${MYSQL_LTS_VERSION}: ${1}${COLOR_RESET}"
+    echo "${COLOR_RED}INSTALL_MYSQL_CLIENT must be either true or false${COLOR_RESET}"
     echo
+    exit 1
+fi
 
-    echo "deb http://repo.mysql.com/apt/debian/ $(lsb_release -cs) mysql-${MYSQL_LTS_VERSION}" > \
-        /etc/apt/sources.list.d/mysql.list
-    apt-get update
-    apt-get install --no-install-recommends -y "${packages[@]}"
-    apt-get autoremove -yqq --purge
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+if [[ "${INSTALL_MYSQL_CLIENT_TYPE}" != "mysql" && "${INSTALL_MYSQL_CLIENT_TYPE}" != "mariadb" ]]; then
+    echo
+    echo "${COLOR_RED}INSTALL_MYSQL_CLIENT_TYPE must be either mysql or mariadb${COLOR_RESET}"
+    echo
+    exit 1
+fi
 
-    # Remove mysql repository from sources.list.d as MySQL repos have a basic flaw that they put expiry
-    # date on their GPG signing keys and they sign their repo with those keys. This means that after a
-    # certain date, the GPG key becomes invalid and if you have the repository added in your sources.list
-    # then you will not be able to install anything from any other repository. This id unlike any other
-    # repository we have seen (for example Postgres, MariaDB, MsSQL - all have non-expiring signing keys)
-    rm /etc/apt/sources.list.d/mysql.list
+if [[ "${INSTALL_MYSQL_CLIENT_TYPE}" == "mysql" ]]; then
+    echo
+    echo "${COLOR_RED}The 'mysql' client type is not supported any more. Use 'mariadb' instead.${COLOR_RESET}"
+    echo
+    echo "The MySQL drivers are wrongly packaged and released by Oracle with an expiration date on their GPG keys,"
+    echo "which causes builds to fail after the expiration date. MariaDB client is protocol-compatible with MySQL client."
+    echo ""
+    echo "Every two years the MySQL packages fail and Oracle team is always surprised and struggling"
+    echo "with fixes and re-signing the packages which lasts few days"
+    echo "See https://bugs.mysql.com/bug.php?id=113432 for more details."
+    echo "As a community we are not able to support this broken packaging practice from Oracle"
+    echo "Feel free however to install MySQL drivers on your own as extension of the image."
+    echo
+    exit 1
+fi
+
+retry() {
+    local retries=3
+    local count=0
+    # adding delay of 10 seconds
+    local delay=10
+    until "$@"; do
+        exit_code=$?
+        count=$((count + 1))
+        if [[ $count -lt $retries ]]; then
+            echo "Command failed. Attempt $count/$retries. Retrying in ${delay}s..."
+            sleep $delay
+        else
+            echo "Command failed after $retries attempts."
+            return $exit_code
+        fi
+    done
 }
 
 install_mariadb_client() {
+    # https://mariadb.org/about/#maintenance-policy
+    # MariaDB publishes each LTS series only for the Debian releases current when it came out - 10.11
+    # has no trixie repository and 11.8 is the first LTS that does.
+    local mariadb_lts_version="10.11"
+    if [[ "$(common::debian_codename)" != "bookworm" ]]; then
+        mariadb_lts_version="11.8"
+    fi
     # List of compatible package Oracle MySQL -> MariaDB:
     # `mysql-client` -> `mariadb-client` or `mariadb-client-compat` (11+)
     # `libmysqlclientXX` (where XX is a number) -> `libmariadb3-compat`
@@ -229,42 +979,30 @@ install_mariadb_client() {
         echo
         exit 1
     fi
+    if [[ "${mariadb_lts_version%%.*}" -ge 11 ]]; then
+        # From 11.0 mariadb-client no longer ships the "mysql" named commands
+        packages+=("mariadb-client-compat")
+    fi
 
     common::import_trusted_gpg "0xF1656F24C74CD1D8" "mariadb"
 
     echo
-    echo "${COLOR_BLUE}Installing MariaDB client version ${MARIADB_LTS_VERSION}: ${1}${COLOR_RESET}"
+    echo "${COLOR_BLUE}Installing MariaDB client version ${mariadb_lts_version}: ${1}${COLOR_RESET}"
     echo "${COLOR_YELLOW}MariaDB client protocol-compatible with MySQL client.${COLOR_RESET}"
     echo
 
-    echo "deb [arch=amd64,arm64] https://archive.mariadb.org/mariadb-${MARIADB_LTS_VERSION}/repo/debian/ $(lsb_release -cs) main" > \
+    echo "deb [arch=amd64,arm64] https://archive.mariadb.org/mariadb-${mariadb_lts_version}/repo/debian/ $(common::debian_codename) main" > \
         /etc/apt/sources.list.d/mariadb.list
     # Make sure that dependencies from MariaDB repo are preferred over Debian dependencies
     printf "Package: *\nPin: release o=MariaDB\nPin-Priority: 999\n" > /etc/apt/preferences.d/mariadb
-    apt-get update
-    apt-get install --no-install-recommends -y "${packages[@]}"
+    retry apt-get update
+    retry apt-get install --no-install-recommends -y "${packages[@]}"
     apt-get autoremove -yqq --purge
     apt-get clean && rm -rf /var/lib/apt/lists/*
 }
 
 if [[ ${INSTALL_MYSQL_CLIENT:="true"} == "true" ]]; then
-    if [[ $(uname -m) == "arm64" || $(uname -m) == "aarch64" ]]; then
-        INSTALL_MYSQL_CLIENT_TYPE="mariadb"
-        echo
-        echo "${COLOR_YELLOW}Client forced to mariadb for ARM${COLOR_RESET}"
-        echo
-    fi
-
-    if [[ "${INSTALL_MYSQL_CLIENT_TYPE}" == "mysql" ]]; then
-        install_mysql_client "${@}"
-    elif [[ "${INSTALL_MYSQL_CLIENT_TYPE}" == "mariadb" ]]; then
-        install_mariadb_client "${@}"
-    else
-        echo
-        echo "${COLOR_RED}Specify either mysql or mariadb, got ${INSTALL_MYSQL_CLIENT_TYPE}${COLOR_RESET}"
-        echo
-        exit 1
-    fi
+    install_mariadb_client "${@}"
 fi
 EOF
 
@@ -292,12 +1030,14 @@ function install_mssql_client() {
     packages=("msodbcsql18")
 
     common::import_trusted_gpg "EB3E94ADBE1229CF" "microsoft"
+    # The Debian 13 repository is signed with Microsoft's newer key, the older releases with the one above.
+    common::import_trusted_gpg "EE4D7792F748182B" "microsoft-2025"
 
     echo
     echo "${COLOR_BLUE}Installing mssql client${COLOR_RESET}"
     echo
 
-    echo "deb [arch=amd64,arm64] https://packages.microsoft.com/debian/$(lsb_release -rs)/prod $(lsb_release -cs) main" > \
+    echo "deb [arch=amd64,arm64] https://packages.microsoft.com/debian/$(common::debian_release)/prod $(common::debian_codename) main" > \
         /etc/apt/sources.list.d/mssql-release.list &&
     mkdir -p /opt/microsoft/msodbcsql18 &&
     touch /opt/microsoft/msodbcsql18/ACCEPT_EULA &&
@@ -341,8 +1081,14 @@ install_postgres_client() {
 
     common::import_trusted_gpg "7FCC7D46ACCC4CF8" "postgres"
 
-    echo "deb [arch=amd64,arm64] https://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > \
+    echo "deb [arch=amd64,arm64] https://apt.postgresql.org/pub/repos/apt/ $(common::debian_codename)-pgdg main" > \
         /etc/apt/sources.list.d/pgdg.list
+    # The hardened image's airflow-prefer-dhi pin outranks Debian's default, so apt would otherwise keep
+    # dhi.io's libpq (e.g. 17.11) and postgresql-client (which needs a matching, newer libpq5) could not
+    # install. PostgreSQL's own repository is the authority for its packages - rank it above the dhi.io
+    # preference so apt takes libpq from PGDG.
+    mkdir -p /etc/apt/preferences.d
+    printf 'Package: *\nPin: origin "apt.postgresql.org"\nPin-Priority: 1001\n' > /etc/apt/preferences.d/airflow-prefer-pgdg
     apt-get update
     apt-get install --no-install-recommends -y "${packages[@]}"
     apt-get autoremove -yqq --purge
@@ -394,22 +1140,39 @@ function common::get_packaging_tool() {
         echo
         export PACKAGING_TOOL="uv"
         export PACKAGING_TOOL_CMD="uv pip"
-        export EXTRA_INSTALL_FLAGS="--group=dev"
+        # --no-binary  is needed in order to avoid libxml and xmlsec using different version of libxml2
+         # (binary lxml embeds its own libxml2, while xmlsec uses system one).
+         # See https://bugs.launchpad.net/lxml/+bug/2110068
+         if [[ ${AIRFLOW_INSTALLATION_METHOD=} == "." && -f "./pyproject.toml" ]]; then
+            # for uv only install dev group when we install from sources
+            export EXTRA_INSTALL_FLAGS="--group=dev --no-binary lxml --no-binary xmlsec"
+        else
+            export EXTRA_INSTALL_FLAGS="--no-binary lxml --no-binary xmlsec"
+        fi
         export EXTRA_UNINSTALL_FLAGS=""
         export UPGRADE_TO_HIGHEST_RESOLUTION="--upgrade --resolution highest"
         export UPGRADE_IF_NEEDED="--upgrade"
         UV_CONCURRENT_DOWNLOADS=$(nproc --all)
         export UV_CONCURRENT_DOWNLOADS
+        if [[ ${INCLUDE_PRE_RELEASE=} == "true" ]]; then
+            EXTRA_INSTALL_FLAGS="${EXTRA_INSTALL_FLAGS} --prerelease if-necessary"
+        fi
     else
         echo
         echo "${COLOR_BLUE}Using 'pip' to install Airflow${COLOR_RESET}"
         echo
         export PACKAGING_TOOL="pip"
         export PACKAGING_TOOL_CMD="pip"
-        export EXTRA_INSTALL_FLAGS="--root-user-action ignore"
+        # --no-binary  is needed in order to avoid libxml and xmlsec using different version of libxml2
+        # (binary lxml embeds its own libxml2, while xmlsec uses system one).
+        # See https://bugs.launchpad.net/lxml/+bug/2110068
+        export EXTRA_INSTALL_FLAGS="--root-user-action ignore --no-binary lxml,xmlsec"
         export EXTRA_UNINSTALL_FLAGS="--yes"
         export UPGRADE_TO_HIGHEST_RESOLUTION="--upgrade --upgrade-strategy eager"
         export UPGRADE_IF_NEEDED="--upgrade --upgrade-strategy only-if-needed"
+        if [[ ${INCLUDE_PRE_RELEASE=} == "true" ]]; then
+            EXTRA_INSTALL_FLAGS="${EXTRA_INSTALL_FLAGS} --pre"
+        fi
     fi
 }
 
@@ -422,9 +1185,19 @@ function common::get_airflow_version_specification() {
 }
 
 function common::get_constraints_location() {
+    # When installing from sources without upgrade, generate constraints from uv.lock
+    if [[ ${AIRFLOW_INSTALLATION_METHOD=} == "." && -z "${UPGRADE_RANDOM_INDICATOR_STRING=}" ]]; then
+        echo
+        echo "${COLOR_BLUE}Installing from sources with uv.lock - generating constraints from uv.lock${COLOR_RESET}"
+        echo
+        uv export --frozen --no-hashes --no-emit-project --no-editable --no-header \
+            --no-annotate > "${HOME}/constraints.txt" 2>/dev/null || true
+        return
+    fi
+
     # auto-detect Airflow-constraint reference and location
     if [[ -z "${AIRFLOW_CONSTRAINTS_REFERENCE=}" ]]; then
-        if  [[ ${AIRFLOW_VERSION} =~ v?2.* && ! ${AIRFLOW_VERSION} =~ .*dev.* ]]; then
+        if  [[ ${AIRFLOW_VERSION} =~ v?2.* || ${AIRFLOW_VERSION} =~ v?3.* ]]; then
             AIRFLOW_CONSTRAINTS_REFERENCE=constraints-${AIRFLOW_VERSION}
         else
             AIRFLOW_CONSTRAINTS_REFERENCE=${DEFAULT_CONSTRAINTS_BRANCH}
@@ -442,7 +1215,15 @@ function common::get_constraints_location() {
         echo
         echo "${COLOR_BLUE}Downloading constraints from ${AIRFLOW_CONSTRAINTS_LOCATION} to ${HOME}/constraints.txt ${COLOR_RESET}"
         echo
-        curl -sSf -o "${HOME}/constraints.txt" "${AIRFLOW_CONSTRAINTS_LOCATION}"
+        if ! curl -sSf -o "${HOME}/constraints.txt" "${AIRFLOW_CONSTRAINTS_LOCATION}"; then
+            echo
+            echo "${COLOR_YELLOW}Constraints file not found at ${AIRFLOW_CONSTRAINTS_LOCATION} (new Python version being bootstrapped?).${COLOR_RESET}"
+            echo "${COLOR_YELLOW}Falling back to no-constraints installation.${COLOR_RESET}"
+            echo
+            AIRFLOW_CONSTRAINTS_LOCATION=""
+            # Create an empty constraints file so --constraint flag still works
+            touch "${HOME}/constraints.txt"
+        fi
     else
         echo
         echo "${COLOR_BLUE}Copying constraints from ${AIRFLOW_CONSTRAINTS_LOCATION} to ${HOME}/constraints.txt ${COLOR_RESET}"
@@ -453,12 +1234,12 @@ function common::get_constraints_location() {
 
 function common::show_packaging_tool_version_and_location() {
    echo "PATH=${PATH}"
-   echo "Installed pip: $(pip --version): $(which pip)"
+   echo "Installed pip: $(pip --version): $(command -v pip)"
    if [[ ${PACKAGING_TOOL} == "pip" ]]; then
        echo "${COLOR_BLUE}Using 'pip' to install Airflow${COLOR_RESET}"
    else
        echo "${COLOR_BLUE}Using 'uv' to install Airflow${COLOR_RESET}"
-       echo "Installed uv: $(uv --version 2>/dev/null || echo "Not installed yet"): $(which uv 2>/dev/null)"
+       echo "Installed uv: $(uv --version 2>/dev/null || echo "Not installed yet"): $(command -v uv 2>/dev/null)"
    fi
 }
 
@@ -470,7 +1251,7 @@ function common::install_packaging_tools() {
         echo
     else
         echo
-        echo "${COLOR_BLUE}Checking packaging tools for system Python installation: $(which python)${COLOR_RESET}"
+        echo "${COLOR_BLUE}Checking packaging tools for system Python installation: $(command -v python)${COLOR_RESET}"
         echo
     fi
     if [[ ${AIRFLOW_PIP_VERSION=} == "" ]]; then
@@ -516,23 +1297,32 @@ function common::install_packaging_tools() {
             pip install --root-user-action ignore --disable-pip-version-check "uv==${AIRFLOW_UV_VERSION}"
         fi
     fi
-    if  [[ ${AIRFLOW_PRE_COMMIT_VERSION=} == "" ]]; then
+    if  [[ ${AIRFLOW_PREK_VERSION=} == "" ]]; then
         echo
-        echo "${COLOR_BLUE}Installing latest pre-commit with pre-commit-uv uv${COLOR_RESET}"
+        echo "${COLOR_BLUE}Installing latest prek, uv${COLOR_RESET}"
         echo
-        uv tool install pre-commit --with pre-commit-uv --with uv
+        uv tool install prek --with uv
         # make sure that the venv/user in .local exists
         mkdir -p "${HOME}/.local/bin"
     else
         echo
-        echo "${COLOR_BLUE}Installing predefined versions of pre-commit with pre-commit-uv and uv:${COLOR_RESET}"
-        echo "${COLOR_BLUE}pre_commit(${AIRFLOW_PRE_COMMIT_VERSION}) uv(${AIRFLOW_UV_VERSION}) pre_commit-uv(${AIRFLOW_PRE_COMMIT_UV_VERSION})${COLOR_RESET}"
+        echo "${COLOR_BLUE}Installing predefined versions of prek, uv:${COLOR_RESET}"
+        echo "${COLOR_BLUE}prek(${AIRFLOW_PREK_VERSION}) uv(${AIRFLOW_UV_VERSION})${COLOR_RESET}"
         echo
-        uv tool install "pre-commit==${AIRFLOW_PRE_COMMIT_VERSION}" \
-            --with "uv==${AIRFLOW_UV_VERSION}" --with "pre-commit-uv==${AIRFLOW_PRE_COMMIT_UV_VERSION}"
+        uv tool install "prek==${AIRFLOW_PREK_VERSION}" --with "uv==${AIRFLOW_UV_VERSION}"
         # make sure that the venv/user in .local exists
         mkdir -p "${HOME}/.local/bin"
     fi
+}
+
+function common::debian_codename() {
+    # shellcheck disable=SC1091
+    (. /etc/os-release; printf '%s\n' "${VERSION_CODENAME}")
+}
+
+function common::debian_release() {
+    # shellcheck disable=SC1091
+    (. /etc/os-release; printf '%s\n' "${VERSION_ID}")
 }
 
 function common::import_trusted_gpg() {
@@ -540,29 +1330,10 @@ function common::import_trusted_gpg() {
 
     local key=${1:?${COLOR_RED}First argument expects OpenPGP Key ID${COLOR_RESET}}
     local name=${2:?${COLOR_RED}Second argument expected trust storage name${COLOR_RESET}}
-    # Please note that not all servers could be used for retrieve keys
-    #  sks-keyservers.net: Unmaintained and DNS taken down due to GDPR requests.
-    #  keys.openpgp.org: User ID Mandatory, not suitable for APT repositories
-    #  keyring.debian.org: Only accept keys in Debian keyring.
-    #  pgp.mit.edu: High response time.
-    local keyservers=(
-        "hkps://keyserver.ubuntu.com"
-        "hkps://pgp.surf.nl"
-    )
+    local key_file="/scripts/docker/keys/${name}.asc"
 
-    GNUPGHOME="$(mktemp -d)"
-    export GNUPGHOME
-    set +e
-    for keyserver in $(shuf -e "${keyservers[@]}"); do
-        echo "${COLOR_BLUE}Try to receive GPG public key ${key} from ${keyserver}${COLOR_RESET}"
-        gpg --keyserver "${keyserver}" --recv-keys "${key}" 2>&1 && break
-        echo "${COLOR_YELLOW}Unable to receive GPG public key ${key} from ${keyserver}${COLOR_RESET}"
-    done
-    set -e
-    gpg --export "${key}" > "/etc/apt/trusted.gpg.d/${name}.gpg"
-    gpgconf --kill all
-    rm -rf "${GNUPGHOME}"
-    unset GNUPGHOME
+    echo "${COLOR_BLUE}Installing GPG public key ${key} from ${key_file}${COLOR_RESET}"
+    gpg --dearmor < "${key_file}" > "/etc/apt/trusted.gpg.d/${name}.gpg"
 }
 EOF
 
@@ -573,9 +1344,20 @@ COPY <<"EOF" /install_airflow_when_building_images.sh
 . "$( dirname "${BASH_SOURCE[0]}" )/common.sh"
 
 function install_from_sources() {
-    local installation_command_flags
-    local fallback_no_constraints_installation
-    fallback_no_constraints_installation="false"
+    local extra_sync_flags
+    extra_sync_flags=""
+    if [[ ${VIRTUAL_ENV=} != "" ]]; then
+        extra_sync_flags="--active"
+    fi
+    if [[ ${INSTALL_LOCKED_THIRD_PARTY_ONLY=} == "true" ]]; then
+        if [[ "${UPGRADE_RANDOM_INDICATOR_STRING=}" != "" ]]; then
+            echo
+            echo "${COLOR_YELLOW}Upgrade builds resolve dependencies anew; skipping the locked third-party installation.${COLOR_RESET}"
+            echo
+            return
+        fi
+        extra_sync_flags="${extra_sync_flags} --no-install-workspace"
+    fi
     if [[ "${UPGRADE_RANDOM_INDICATOR_STRING=}" != "" ]]; then
         if [[ ${PACKAGING_TOOL_CMD} == "pip" ]]; then
             set +x
@@ -588,66 +1370,58 @@ function install_from_sources() {
         echo
         echo "${COLOR_BLUE}Attempting to upgrade all packages to highest versions.${COLOR_RESET}"
         echo
+        # --no-binary  is needed in order to avoid libxml and xmlsec using different version of libxml2
+        # (binary lxml embeds its own libxml2, while xmlsec uses system one).
+        # See https://bugs.launchpad.net/lxml/+bug/2110068
         set -x
-        uv sync --all-packages --resolution highest --group dev --group doc --group doc-gen --group leveldb
+        uv sync --all-packages --resolution highest --group ci-image \
+            ${extra_sync_flags} --no-binary-package lxml --no-binary-package xmlsec \
+            --no-python-downloads --no-managed-python
     else
-        # We only use uv here but Installing using constraints is not supported with `uv sync`, so we
-        # do not use ``uv sync`` because we are not committing and using uv.lock yet.
-        # Once we switch to uv.lock (with the workflow that dependabot will update it
-        # and constraints will be generated from it, we should be able to simply use ``uv sync`` here)
-        # So for now when we are installing with constraints we need to install airflow distributions first and
-        # separately each provider that has some extra development dependencies - otherwise `dev`
-        # dependency groups will not be installed  because ``uv pip install --editable .`` only installs dev
-        # dependencies for the "top level" pyproject.toml
+        # Use uv sync --frozen to install exactly what is pinned in uv.lock without re-resolving.
+        # --no-binary-package is needed in order to avoid libxml and xmlsec using different version of
+        # libxml2 (binary lxml embeds its own libxml2, while xmlsec uses system one).
+        # See https://bugs.launchpad.net/lxml/+bug/2110068
+        # shellcheck disable=SC2206 # extra_sync_flags holds several flags
+        local -a frozen_sync=(uv sync --all-packages --frozen --group ci-image
+            ${extra_sync_flags} --no-binary-package lxml --no-binary-package xmlsec
+            --no-python-downloads --no-managed-python)
         set +x
-        echo
-        echo
-        echo "${COLOR_BLUE}Installing first airflow distribution with constraints.${COLOR_RESET}"
-        echo
-        installation_command_flags=" --editable .[${AIRFLOW_EXTRAS}] \
-              --editable ./airflow-core --editable ./task-sdk --editable ./airflow-ctl \
-              --editable ./kubernetes-tests --editable ./docker-tests --editable ./helm-tests \
-              --editable ./devel-common[all] --editable ./dev \
-              --group dev --group doc --group doc-gen --group leveldb"
-        local -a projects_with_devel_dependencies
-        while IFS= read -r -d '' pyproject_toml_file; do
-             project_folder=$(dirname ${pyproject_toml_file})
-             echo "${COLOR_BLUE}Checking provider ${project_folder} for development dependencies ${COLOR_RESET}"
-             first_line_of_devel_deps=$(grep -A 1 "# Additional devel dependencies (do not remove this line and add extra development dependencies)" ${project_folder}/pyproject.toml | tail -n 1)
-             if [[ "$first_line_of_devel_deps" != "]" ]]; then
-                projects_with_devel_dependencies+=("${project_folder}")
-             fi
-             installation_command_flags+=" --editable ${project_folder}"
-        done < <(find "providers" -name "pyproject.toml" -print0 | sort -z)
-        set -x
-        if ! ${PACKAGING_TOOL_CMD} install ${EXTRA_INSTALL_FLAGS} ${ADDITIONAL_PIP_INSTALL_FLAGS} ${installation_command_flags} --constraint "${HOME}/constraints.txt"; then
-            fallback_no_constraints_installation="true"
-        else
-            # For production image, we do not add devel dependencies in prod image
-            if [[ ${AIRFLOW_IMAGE_TYPE=} == "ci" ]]; then
-                set +x
-                echo
-                echo "${COLOR_BLUE}Installing all providers with development dependencies.${COLOR_RESET}"
-                echo
-                for project_folder in "${projects_with_devel_dependencies[@]}"; do
-                    echo "${COLOR_BLUE}Installing provider ${project_folder} with development dependencies.${COLOR_RESET}"
-                    set -x
-                    if ! uv pip install --editable .  --directory "${project_folder}" --constraint "${HOME}/constraints.txt" --group dev; then
-                        fallback_no_constraints_installation="true"
-                    fi
-                    set +x
-                done
-            fi
+        # Without the workspace sources a lock that does not match the manifests cannot be re-resolved;
+        # the installation that adds the workspace packages does that later.
+        if [[ ${INSTALL_LOCKED_THIRD_PARTY_ONLY=} == "true" ]] && ! "${frozen_sync[@]}" --dry-run; then
+            echo
+            echo "${COLOR_YELLOW}uv.lock does not match the dependency manifests; skipping the locked third-party installation.${COLOR_RESET}"
+            echo
+            return
         fi
-        set +x
-        if [[ ${fallback_no_constraints_installation} == "true" ]]; then
+        echo
+        echo "${COLOR_BLUE}Installing all packages from uv.lock (frozen).${COLOR_RESET}"
+        echo
+        set -x
+        if ! "${frozen_sync[@]}"; then
+            set +x
+            if [[ ${INSTALL_LOCKED_THIRD_PARTY_ONLY=} == "true" ]]; then
+                echo
+                echo "${COLOR_RED}Failing because the locked third-party installation failed although uv.lock matches the dependency manifests.${COLOR_RESET}"
+                echo
+                exit 1
+            fi
+            if [[ ${AIRFLOW_FALLBACK_NO_CONSTRAINTS_INSTALLATION} != "true" ]]; then
+                echo
+                echo "${COLOR_RED}Failing because frozen uv.lock installation failed and fallback is disabled.${COLOR_RESET}"
+                echo
+                exit 1
+            fi
             echo
-            echo "${COLOR_YELLOW}Likely pyproject.toml has new dependencies conflicting with constraints.${COLOR_RESET}"
+            echo "${COLOR_YELLOW}Likely pyproject.toml has new dependencies not reflected in uv.lock.${COLOR_RESET}"
             echo
-            echo "${COLOR_BLUE}Falling back to no-constraints installation.${COLOR_RESET}"
+            echo "${COLOR_BLUE}Falling back to re-resolving dependencies (uv sync without --frozen).${COLOR_RESET}"
             echo
             set -x
-            uv sync --all-packages --group dev --group doc --group doc-gen --group leveldb
+            uv sync --all-packages --group ci-image \
+                ${extra_sync_flags} --no-binary-package lxml --no-binary-package xmlsec \
+                --no-python-downloads --no-managed-python
             set +x
         fi
     fi
@@ -657,13 +1431,11 @@ function install_from_external_spec() {
      local installation_command_flags
     if [[ ${AIRFLOW_INSTALLATION_METHOD} == "apache-airflow" ]]; then
         installation_command_flags="apache-airflow[${AIRFLOW_EXTRAS}]${AIRFLOW_VERSION_SPECIFICATION}"
-    elif [[ ${AIRFLOW_INSTALLATION_METHOD} == apache-airflow\ @\ * ]]; then
-        installation_command_flags="apache-airflow[${AIRFLOW_EXTRAS}] @ ${AIRFLOW_VERSION_SPECIFICATION/apache-airflow @//}"
     else
         echo
-        echo "${COLOR_RED}The '${INSTALLATION_METHOD}' installation method is not supported${COLOR_RESET}"
+        echo "${COLOR_RED}The '${AIRFLOW_INSTALLATION_METHOD}' installation method is not supported${COLOR_RESET}"
         echo
-        echo "${COLOR_YELLOW}Supported methods are ('.', 'apache-airflow', 'apache-airflow @ URL')${COLOR_RESET}"
+        echo "${COLOR_YELLOW}Supported methods are ('.', 'apache-airflow')${COLOR_RESET}"
         echo
         exit 1
     fi
@@ -687,6 +1459,12 @@ function install_from_external_spec() {
         set -x
         if ! ${PACKAGING_TOOL_CMD} install ${EXTRA_INSTALL_FLAGS} ${ADDITIONAL_PIP_INSTALL_FLAGS} ${installation_command_flags} --constraint "${HOME}/constraints.txt"; then
             set +x
+            if [[ ${AIRFLOW_FALLBACK_NO_CONSTRAINTS_INSTALLATION} != "true" ]]; then
+                echo
+                echo "${COLOR_RED}Failing because constraints installation failed and fallback is disabled.${COLOR_RESET}"
+                echo
+                exit 1
+            fi
             echo
             echo "${COLOR_YELLOW}Likely pyproject.toml has new dependencies conflicting with constraints.${COLOR_RESET}"
             echo
@@ -718,10 +1496,15 @@ function install_airflow_when_building_images() {
         install_from_external_spec
     fi
     set +x
+    if [[ ${INSTALL_LOCKED_THIRD_PARTY_ONLY=} == "true" ]]; then
+        # Packaging tools and 'pip check' are handled by the installation that adds the workspace packages
+        return
+    fi
     common::install_packaging_tools
     echo
     echo "${COLOR_BLUE}Running 'pip check'${COLOR_RESET}"
     echo
+    # We use pip check here to make sure that whatever `uv` installs, is also "correct" according to `pip`
     pip check
 }
 
@@ -757,6 +1540,7 @@ function install_additional_dependencies() {
         echo
         echo "${COLOR_BLUE}Running 'pip check'${COLOR_RESET}"
         echo
+        # We use pip check here to make sure that whatever `uv` installs, is also "correct" according to `pip`
         pip check
     else
         echo
@@ -771,6 +1555,7 @@ function install_additional_dependencies() {
         echo
         echo "${COLOR_BLUE}Running 'pip check'${COLOR_RESET}"
         echo
+        # We use pip check here to make sure that whatever `uv` installs, is also "correct" according to `pip`
         pip check
     fi
 }
@@ -787,11 +1572,15 @@ EOF
 # The content below is automatically copied from scripts/docker/entrypoint_ci.sh
 COPY <<"EOF" /entrypoint_ci.sh
 #!/usr/bin/env bash
-if [[ ${VERBOSE_COMMANDS:="false"} == "true" ]]; then
-    set -x
-fi
+function set_verbose() {
+    if [[ ${VERBOSE_COMMANDS:="false"} == "true" ]]; then
+        set -x
+    else
+        set +x
+    fi
+}
 
-
+set_verbose
 . "${AIRFLOW_SOURCES:-/opt/airflow}"/scripts/in_container/_in_container_script_init.sh
 
 LD_PRELOAD="/usr/lib/$(uname -m)-linux-gnu/libstdc++.so.6"
@@ -801,13 +1590,17 @@ chmod 1777 /tmp
 
 AIRFLOW_SOURCES=$(cd "${IN_CONTAINER_DIR}/../.." || exit 1; pwd)
 
-PYTHON_MAJOR_MINOR_VERSION=${PYTHON_MAJOR_MINOR_VERSION:=3.9}
+PYTHON_MAJOR_MINOR_VERSION=${PYTHON_MAJOR_MINOR_VERSION:=3.11}
 
 export AIRFLOW_HOME=${AIRFLOW_HOME:=${HOME}}
 
 mkdir "${AIRFLOW_HOME}/sqlite" -p || true
 
 ASSET_COMPILATION_WAIT_MULTIPLIER=${ASSET_COMPILATION_WAIT_MULTIPLIER:=1}
+
+if [[ "${CI=}" == "true" ]]; then
+    export COLUMNS="202"
+fi
 
 . "${IN_CONTAINER_DIR}/check_connectivity.sh"
 
@@ -868,6 +1661,11 @@ function environment_initialization() {
         echo "  * ${COLOR_BLUE}Airflow backend:${COLOR_RESET} MySQL: ${MYSQL_VERSION}"
     elif [[ ${BACKEND=} == "sqlite" ]]; then
         echo "  * ${COLOR_BLUE}Airflow backend:${COLOR_RESET} Sqlite"
+    elif [[ ${BACKEND=} == "custom" ]]; then
+        local _conn_url="${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:-}"
+        local _masked_url
+        _masked_url=$(echo "${_conn_url}" | sed -E 's|://([^:]+):([^@]+)@|://\1:***@|')
+        echo "  * ${COLOR_BLUE}Airflow backend:${COLOR_RESET} Custom (${_masked_url})"
     fi
     echo
 
@@ -882,7 +1680,7 @@ function environment_initialization() {
     CI=${CI:="false"}
 
     # Added to have run-tests on path
-    export PATH=${PATH}:${AIRFLOW_SOURCES}
+    export PATH=${PATH}:${AIRFLOW_SOURCES}:/usr/local/go/bin/
 
     mkdir -pv "${AIRFLOW_HOME}/logs/"
 
@@ -890,6 +1688,11 @@ function environment_initialization() {
     export AIRFLOW__CELERY__WORKER_CONCURRENCY=8
 
     set +e
+
+    # shellcheck source=scripts/in_container/configure_environment.sh
+    . "${IN_CONTAINER_DIR}/configure_environment.sh"
+    # shellcheck source=scripts/in_container/run_init_script.sh
+    . "${IN_CONTAINER_DIR}/run_init_script.sh"
 
     "${IN_CONTAINER_DIR}/check_environment.sh"
     ENVIRONMENT_EXIT_CODE=$?
@@ -900,44 +1703,97 @@ function environment_initialization() {
         echo
         exit ${ENVIRONMENT_EXIT_CODE}
     fi
+
     mkdir -p /usr/lib/google-cloud-sdk/bin
     touch /usr/lib/google-cloud-sdk/bin/gcloud
     ln -s -f /usr/bin/gcloud /usr/lib/google-cloud-sdk/bin/gcloud
 
     if [[ ${SKIP_SSH_SETUP="false"} == "false" ]]; then
-        # Set up ssh keys
-        echo 'yes' | ssh-keygen -t rsa -C your_email@youremail.com -m PEM -P '' -f ~/.ssh/id_rsa \
-            >"${AIRFLOW_HOME}/logs/ssh-keygen.log" 2>&1
+        # Set up the ssh-to-localhost plumbing used by the SSH/SFTP provider tests under a
+        # dedicated directory instead of ~/.ssh: `breeze --forward-credentials` bind-mounts
+        # the host's ~/.ssh at /root/.ssh and container startup must never modify it.
+        breeze_ssh_dir="/root/.breeze-ssh"
+        mkdir -p "${breeze_ssh_dir}"
+        chmod 700 "${breeze_ssh_dir}"
+        if [[ ! -f "${breeze_ssh_dir}/id_rsa" ]]; then
+            ssh-keygen -t rsa -C airflow-breeze-internal-key -m PEM -P '' -f "${breeze_ssh_dir}/id_rsa" \
+                >"${AIRFLOW_HOME}/logs/ssh-keygen.log" 2>&1
+        fi
+        cp "${breeze_ssh_dir}/id_rsa.pub" "${breeze_ssh_dir}/authorized_keys"
+        chmod 600 "${breeze_ssh_dir}/id_rsa" "${breeze_ssh_dir}/authorized_keys"
+        echo "AuthorizedKeysFile ${breeze_ssh_dir}/authorized_keys .ssh/authorized_keys" \
+            > /etc/ssh/sshd_config.d/airflow-breeze.conf
+        # The heredoc delimiter must not be "EOF": Dockerfile.ci inlines this script inside
+        # a COPY <<"EOF" heredoc and a bare EOF line would terminate it early.
+        cat > /etc/ssh/ssh_config.d/airflow-breeze.conf <<SSH_CONFIG
+Host localhost 127.0.0.1 ::1
+    IdentityFile ${breeze_ssh_dir}/id_rsa
+    UserKnownHostsFile ${breeze_ssh_dir}/known_hosts
+    StrictHostKeyChecking accept-new
+SSH_CONFIG
+        # Paramiko-based hooks do not read /etc/ssh/ssh_config.d but try ssh-agent keys by
+        # default, so expose the key through an agent. The fixed socket path lets shells
+        # entered via entrypoint_exec.sh (breeze exec) pick up the same agent.
+        rm -f "${breeze_ssh_dir}/agent.sock"
+        eval "$(ssh-agent -s -a "${breeze_ssh_dir}/agent.sock")" >/dev/null
+        ssh-add "${breeze_ssh_dir}/id_rsa" >>"${AIRFLOW_HOME}/logs/ssh-keygen.log" 2>&1
 
-        cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
-        ln -s -f ~/.ssh/authorized_keys ~/.ssh/authorized_keys2
-        chmod 600 ~/.ssh/*
-
-        # SSH Service
         sudo service ssh restart >/dev/null 2>&1
 
-        # Sometimes the server is not quick enough to load the keys!
-        while [[ $(ssh-keyscan -H localhost 2>/dev/null | wc -l) != "3" ]] ; do
+        # Sometimes the server is not quick enough to load the keys! OpenSSH 10 also prints a
+        # "# localhost:22 SSH-2.0-..." comment line per connection to stdout, so count only the keys.
+        while [[ $(ssh-keyscan -H localhost 2>/dev/null | grep -cv '^#') != "3" ]] ; do
             echo "Not all keys yet loaded by the server"
             sleep 0.05
         done
 
-        ssh-keyscan -H localhost >> ~/.ssh/known_hosts 2>/dev/null
+        ssh-keyscan -H localhost > "${breeze_ssh_dir}/known_hosts" 2>/dev/null
     fi
 
-    # shellcheck source=scripts/in_container/configure_environment.sh
-    . "${IN_CONTAINER_DIR}/configure_environment.sh"
+    if [[ ${INTEGRATION_LOCALSTACK:-"false"} == "true" ]]; then
+        echo
+        echo "${COLOR_BLUE}Configuring LocalStack integration${COLOR_RESET}"
+        echo
 
-    # shellcheck source=scripts/in_container/run_init_script.sh
-    . "${IN_CONTAINER_DIR}/run_init_script.sh"
+        # Define LocalStack AWS configuration
+        declare -A localstack_config=(
+            ["AWS_ENDPOINT_URL"]="http://localstack:4566"
+            ["AWS_ACCESS_KEY_ID"]="test"
+            ["AWS_SECRET_ACCESS_KEY"]="test"
+            ["AWS_DEFAULT_REGION"]="us-east-1"
+        )
+
+        # Export each configuration variable and log it
+        for key in "${!localstack_config[@]}"; do
+            export "$key"="${localstack_config[$key]}"
+            echo "  * ${COLOR_BLUE}${key}:${COLOR_RESET} ${localstack_config[$key]}"
+        done
+        echo
+    fi
 
     cd "${AIRFLOW_SOURCES}"
 
+    # Temporarily add /opt/airflow/providers/standard/tests to PYTHONPATH in order to see example dags
+    # in the UI when testing in Breeze. This might be solved differently in the future
+    if [[ -d /opt/airflow/providers/standard/tests  ]]; then
+        export PYTHONPATH=${PYTHONPATH=}:/opt/airflow/providers/standard/tests
+    fi
+
     if [[ ${START_AIRFLOW:="false"} == "true" || ${START_AIRFLOW} == "True" ]]; then
+        if [[ ${BREEZE_DEBUG_CELERY_WORKER=} == "true" ]]; then
+            export AIRFLOW__CELERY__POOL=${AIRFLOW__CELERY__POOL:-solo}
+        fi
         export AIRFLOW__CORE__LOAD_EXAMPLES=${LOAD_EXAMPLES}
-        wait_for_asset_compilation
-        # shellcheck source=scripts/in_container/bin/run_tmux
-        exec run_tmux
+        if [[ ${SKIP_ASSETS_COMPILATION:="false"} == "false" ]]; then
+            wait_for_asset_compilation
+        fi
+        if [[ ${TERMINAL_MULTIPLEXER:="mprocs"} == "mprocs" ]]; then
+            # shellcheck source=scripts/in_container/bin/run_mprocs
+            exec run_mprocs
+        else
+            # shellcheck source=scripts/in_container/bin/run_tmux
+            exec run_tmux
+        fi
     fi
 }
 
@@ -946,13 +1802,13 @@ function handle_mount_sources() {
         echo
         echo "${COLOR_BLUE}Mounted sources are removed, cleaning up mounted dist-info files${COLOR_RESET}"
         echo
-        rm -rf /usr/local/lib/python${PYTHON_MAJOR_MINOR_VERSION}/site-packages/apache_airflow*.dist-info/
+        rm -rf /usr/local/lib/python"${PYTHON_MAJOR_MINOR_VERSION}"/site-packages/apache_airflow*.dist-info/
     fi
 }
 
 function determine_airflow_to_use() {
     USE_AIRFLOW_VERSION="${USE_AIRFLOW_VERSION:=""}"
-    if [[ ${USE_AIRFLOW_VERSION} == "" && ${USE_DISTRIBUTIONS_FROM_DIST=} != "true" ]]; then
+    if [[ "${USE_AIRFLOW_VERSION}" == "" && "${USE_DISTRIBUTIONS_FROM_DIST=}" != "true" ]]; then
         export PYTHONPATH=${AIRFLOW_SOURCES}
         echo
         echo "${COLOR_BLUE}Using airflow version from current sources${COLOR_RESET}"
@@ -968,7 +1824,7 @@ function determine_airflow_to_use() {
             echo "${COLOR_BLUE}Uninstalling all packages first${COLOR_RESET}"
             echo
             # shellcheck disable=SC2086
-            ${PACKAGING_TOOL_CMD} freeze | grep -ve "^-e" | grep -ve "^#" | grep -ve "^uv" | \
+            ${PACKAGING_TOOL_CMD} freeze | grep -ve "^-e" | grep -ve "^#" | grep -ve "^uv" | grep -v "@" | \
                 xargs ${PACKAGING_TOOL_CMD} uninstall ${EXTRA_UNINSTALL_FLAGS}
             # Now install rich ad click first to use the installation script
             # shellcheck disable=SC2086
@@ -978,10 +1834,18 @@ function determine_airflow_to_use() {
         echo
         echo "${COLOR_BLUE}Reinstalling all development dependencies${COLOR_RESET}"
         echo
-        # Use uv run to install necessary dependencies automatically
-        # in the future we will be able to use uv sync when `uv.lock` is supported
-        uv run /opt/airflow/scripts/in_container/install_development_dependencies.py \
-           --constraint https://raw.githubusercontent.com/apache/airflow/constraints-main/constraints-${PYTHON_MAJOR_MINOR_VERSION}.txt
+        # Generate constraints from uv.lock and use them to install development dependencies
+        # via the Python script. --no-cache is needed - otherwise there is possibility of
+        # overriding temporary environments by multiple parallel processes
+        # --all-packages: without it the export only covers the root project's dependencies.
+        # Anything that only a workspace member's dependency group pulls in, such
+        # as mcp through common.ai's pydantic-ai-slim[mcp], stays unpinned and resolves fresh
+        # from PyPI instead of following uv.lock.
+        local constraint_file="/tmp/constraints-from-lock.txt"
+        uv export --frozen --no-hashes --no-emit-project --no-emit-workspace --no-editable --no-header \
+            --no-annotate --all-packages > "${constraint_file}" 2>/dev/null || true
+        uv run --no-cache /opt/airflow/scripts/in_container/install_development_dependencies.py \
+           --constraint "${constraint_file}"
         # Some packages might leave legacy typing module which causes test issues
         # shellcheck disable=SC2086
         ${PACKAGING_TOOL_CMD} uninstall ${EXTRA_UNINSTALL_FLAGS} typing || true
@@ -1008,12 +1872,24 @@ function check_boto_upgrade() {
     echo
     echo "${COLOR_BLUE}Upgrading boto3, botocore to latest version to run Amazon tests with them${COLOR_RESET}"
     echo
-    set -x
     # shellcheck disable=SC2086
     ${PACKAGING_TOOL_CMD} uninstall ${EXTRA_UNINSTALL_FLAGS} aiobotocore s3fs || true
+
+    # Urllib 2.6.0 broke kubernetes client by removing getheaders() (restored in 2.6.1+).
+    # Exclude exactly 2.6.0; any other version is fine.
+    # Tracked in https://github.com/kubernetes-client/python/issues/2477
     # shellcheck disable=SC2086
-    ${PACKAGING_TOOL_CMD} install ${EXTRA_INSTALL_FLAGS} --upgrade boto3 botocore
-    set +x
+    ${PACKAGING_TOOL_CMD} install ${EXTRA_INSTALL_FLAGS} --upgrade "boto3" "botocore" "urllib3!=2.6.0"
+}
+
+function check_upgrade_sqlalchemy() {
+    if [[ "${UPGRADE_SQLALCHEMY=}" != "true" ]]; then
+        return
+    fi
+    echo
+    echo "${COLOR_BLUE}Upgrading sqlalchemy to the latest version to run tests with it${COLOR_RESET}"
+    echo
+    uv sync --all-packages --resolution highest --no-python-downloads --no-managed-python
 }
 
 function check_downgrade_sqlalchemy() {
@@ -1021,12 +1897,16 @@ function check_downgrade_sqlalchemy() {
         return
     fi
     local min_sqlalchemy_version
-    min_sqlalchemy_version=$(grep "sqlalchemy>=" airflow-core/pyproject.toml | sed "s/.*>=\([0-9\.]*\).*/\1/" | xargs)
+    min_sqlalchemy_version=$(grep "sqlalchemy\[asyncio\]>=" airflow-core/pyproject.toml | sed "s/.*>=\([0-9\.]*\).*/\1/" | xargs)
     echo
     echo "${COLOR_BLUE}Downgrading sqlalchemy to minimum supported version: ${min_sqlalchemy_version}${COLOR_RESET}"
     echo
     # shellcheck disable=SC2086
-    ${PACKAGING_TOOL_CMD} install ${EXTRA_INSTALL_FLAGS} "sqlalchemy==${min_sqlalchemy_version}"
+    ${PACKAGING_TOOL_CMD} install ${EXTRA_INSTALL_FLAGS} "sqlalchemy[asyncio]==${min_sqlalchemy_version}"
+    echo
+    echo "${COLOR_BLUE}Running 'pip check'${COLOR_RESET}"
+    echo
+    # We use pip check here to make sure that whatever `uv` installs, is also "correct" according to `pip`
     pip check
 }
 
@@ -1041,6 +1921,10 @@ function check_downgrade_pendulum() {
     echo
     # shellcheck disable=SC2086
     ${PACKAGING_TOOL_CMD} install ${EXTRA_INSTALL_FLAGS} "pendulum==${min_pendulum_version}"
+    echo
+    echo "${COLOR_BLUE}Running 'pip check'${COLOR_RESET}"
+    echo
+    # We use pip check here to make sure that whatever `uv` installs, is also "correct" according to `pip`
     pip check
 }
 
@@ -1049,18 +1933,55 @@ function check_run_tests() {
         return
     fi
 
-    if [[ ${REMOVE_ARM_PACKAGES:="false"} == "true" ]]; then
-        # Test what happens if we do not have ARM packages installed.
-        # This is useful to see if pytest collection works without ARM packages which is important
-        # for the MacOS M1 users running tests in their ARM machines with `breeze testing *-tests` command
-        python "${IN_CONTAINER_DIR}/remove_arm_packages.py"
-    fi
-
     if [[ ${TEST_GROUP:=""} == "system" ]]; then
         exec "${IN_CONTAINER_DIR}/run_system_tests.sh" "${@}"
     else
         exec "${IN_CONTAINER_DIR}/run_ci_tests.sh" "${@}"
     fi
+}
+
+function reinstall_shared_distributions() {
+    # The shared distributions under shared/<name>/ are workspace members that are not
+    # transitively required by airflow-core or any provider, so the lowest-direct
+    # `uv sync` above wipes them out from the environment. Re-install them with
+    # --no-deps so that the `airflow_shared.*` namespace used by devel-common test
+    # utils resolves at test collection time without disturbing the lowest-direct
+    # resolution that was just applied.
+    echo
+    echo "${COLOR_BLUE}Re-installing shared distributions (airflow_shared.*) after uv sync${COLOR_RESET}"
+    echo
+    # shellcheck disable=SC2046
+    uv pip install --no-deps $(ls -d /opt/airflow/shared/*/)
+}
+
+PROVIDERS_NEEDING_PRE_EXTRAS_INSTALL=()
+
+LOWEST_DEPENDENCIES_EXCLUDED_EXTRAS=("common.ai:llamaindex")
+
+function run_pre_extras_install_if_registered() {
+    local provider_id="${1}"
+    local registered_provider
+    for registered_provider in "${PROVIDERS_NEEDING_PRE_EXTRAS_INSTALL[@]}"; do
+        if [[ "${registered_provider}" == "${provider_id}" ]]; then
+            echo
+            echo "${COLOR_BLUE}Running pre-extras install manifest for ${provider_id}${COLOR_RESET}"
+            echo
+            local env_file
+            env_file=$(mktemp)
+            if ! python "${AIRFLOW_SOURCES}/scripts/in_container/run_pre_extras_install.py" \
+                    "${provider_id}" --emit-env-to "${env_file}"; then
+                rm -f "${env_file}"
+                echo "${COLOR_RED}Pre-extras install failed for ${provider_id}${COLOR_RESET}"
+                exit 1
+            fi
+            if [[ -s "${env_file}" ]]; then
+                # shellcheck disable=SC1090
+                source "${env_file}"
+            fi
+            rm -f "${env_file}"
+            return
+        fi
+    done
 }
 
 function check_force_lowest_dependencies() {
@@ -1071,6 +1992,8 @@ function check_force_lowest_dependencies() {
         local provider_id
         # shellcheck disable=SC2001
         provider_id=$(echo "${TEST_TYPE}" | sed 's/Providers\[\(.*\)\]/\1/')
+        # A split provider's test type names one part of its tests: Providers[<id>:<part>]
+        provider_id=${provider_id%%:*}
         echo
         echo "${COLOR_BLUE}Forcing dependencies to lowest versions for provider: ${provider_id}${COLOR_RESET}"
         echo
@@ -1081,14 +2004,53 @@ function check_force_lowest_dependencies() {
             exit 0
         fi
         cd "${AIRFLOW_SOURCES}/providers/${provider_id/.//}" || exit 1
-        uv sync --resolution lowest-direct
+        run_pre_extras_install_if_registered "${provider_id}"
+        # Every extra of the provider is named instead of passing --all-extras: uv rejects
+        # --all-extras whenever a [tool.uv] conflicts group is reachable, even through another
+        # workspace provider (amazon -> common.ai), and --no-extra only accepts the provider's
+        # own extras. Both install the same packages.
+        local -a extra_flags=()
+        local extra
+        while IFS= read -r extra; do
+            if [[ -n "${extra}" && " ${LOWEST_DEPENDENCIES_EXCLUDED_EXTRAS[*]} " != *" ${provider_id}:${extra} "* ]]; then
+                extra_flags+=(--extra "${extra}")
+            fi
+        done < <(python -c 'import tomllib; print("\n".join(tomllib.load(open("pyproject.toml", "rb"))["project"].get("optional-dependencies", {})))')
+        # --no-binary  is needed in order to avoid libxml and xmlsec using different version of libxml2
+        # (binary lxml embeds its own libxml2, while xmlsec uses system one).
+        # See https://bugs.launchpad.net/lxml/+bug/2110068
+
+        local sync_successful="false"
+        for attempt in 1 2 3; do
+            echo "Attempt ${attempt} of syncing to lowest dependencies"
+            set -x
+            if UV_LOCK_TIMEOUT=200 uv sync --resolution lowest-direct --no-binary-package lxml --no-binary-package xmlsec \
+                "${extra_flags[@]}" --no-python-downloads --no-managed-python; then
+                set +x
+                sync_successful="true"
+                break
+            fi
+            set +x
+            echo "Sleeping 30s"
+            sleep 30
+            echo "Attempt ${attempt} failed. Retrying..."
+        done
+        if [[ "${sync_successful}" != "true" ]]; then
+            echo "${COLOR_RED}Failed to sync lowest dependencies after 3 attempts.${COLOR_RESET}"
+            exit 1
+        fi
     else
         echo
         echo "${COLOR_BLUE}Forcing dependencies to lowest versions for Airflow.${COLOR_RESET}"
         echo
         cd "${AIRFLOW_SOURCES}/airflow-core"
-        uv sync --resolution lowest-direct
+        # --no-binary  is needed in order to avoid libxml and xmlsec using different version of libxml2
+        # (binary lxml embeds its own libxml2, while xmlsec uses system one).
+        # See https://bugs.launchpad.net/lxml/+bug/2110068
+        uv sync --resolution lowest-direct --no-binary-package lxml --no-binary-package xmlsec --all-extras \
+            --no-python-downloads --no-managed-python
     fi
+    reinstall_shared_distributions
 }
 
 function check_airflow_python_client_installation() {
@@ -1098,21 +2060,32 @@ function check_airflow_python_client_installation() {
     python "${IN_CONTAINER_DIR}/install_airflow_python_client.py"
 }
 
+function initialize_db() {
+    # If we are going to start the api server OR we are a system test (which may or may not start the api server,
+    # depending on the Airflow version being used to run the tests), then migrate the DB.
+    if [[ ${START_API_SERVER_WITH_EXAMPLES=} == "true" || ${TEST_GROUP:=""} == "system" ]]; then
+        echo
+        echo "${COLOR_BLUE}Initializing database${COLOR_RESET}"
+        echo
+        airflow db migrate
+        echo
+        echo "${COLOR_BLUE}Database initialized${COLOR_RESET}"
+    fi
+}
+
 function start_api_server_with_examples(){
-    if [[ ${START_API_SERVER_WITH_EXAMPLES=} != "true" ]]; then
+    USE_AIRFLOW_VERSION="${USE_AIRFLOW_VERSION:=""}"
+    # Do not start the api server if either START_API_SERVER_WITH_EXAMPLES is false or the TEST_GROUP env var is not
+    # equal to "system".
+    if [[ ${START_API_SERVER_WITH_EXAMPLES=} != "true" && ${TEST_GROUP:=""} != "system" ]]; then
+        return
+    fi
+    # If the use Airflow version is set and it is <= 3.0.0 (which does not have the API server anyway) also return
+    if [[ ${USE_AIRFLOW_VERSION} != "" && ${USE_AIRFLOW_VERSION} < "3.0.0" ]]; then
         return
     fi
     export AIRFLOW__CORE__LOAD_EXAMPLES=True
-    export AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
-    echo
-    echo "${COLOR_BLUE}Initializing database${COLOR_RESET}"
-    echo
-    airflow db migrate
-    echo
-    echo "${COLOR_BLUE}Database initialized${COLOR_RESET}"
-    echo
-    echo "${COLOR_BLUE}Parsing example dags${COLOR_RESET}"
-    echo
+    export AIRFLOW__API__EXPOSE_CONFIG=True
     airflow dags reserialize
     echo "Example dags parsing finished"
     if airflow config get-value core auth_manager | grep -q "FabAuthManager"; then
@@ -1125,7 +2098,11 @@ function start_api_server_with_examples(){
     echo
     echo "${COLOR_BLUE}Starting airflow api server${COLOR_RESET}"
     echo
-    airflow api-server --port 8080 --daemon
+    if [[ ${START_API_SERVER_DAEMON:-"true"} == "false" ]]; then
+        airflow api-server --port 8080 &
+    else
+        airflow api-server --port 8080 --daemon
+    fi
     echo
     echo "${COLOR_BLUE}Waiting for api-server to start${COLOR_RESET}"
     echo
@@ -1145,10 +2122,12 @@ handle_mount_sources
 determine_airflow_to_use
 environment_initialization
 check_boto_upgrade
+check_upgrade_sqlalchemy
 check_downgrade_sqlalchemy
 check_downgrade_pendulum
 check_force_lowest_dependencies
 check_airflow_python_client_installation
+initialize_db
 start_api_server_with_examples
 check_run_tests "${@}"
 
@@ -1164,26 +2143,51 @@ COPY <<"EOF" /entrypoint_exec.sh
 
 . /opt/airflow/scripts/in_container/run_init_script.sh
 
+if [[ -S /root/.breeze-ssh/agent.sock ]]; then
+    export SSH_AUTH_SOCK="/root/.breeze-ssh/agent.sock"
+fi
+
 exec /bin/bash "${@}"
 EOF
 
-FROM ${PYTHON_BASE_IMAGE} as main
+# Extract manifests separately so COPY below depends on their contents, not all source files.
+FROM ${BASE_IMAGE} as dependency-manifests
+WORKDIR /source
+SHELL ["/bin/bash", "-o", "pipefail", "-o", "errexit", "-o", "nounset", "-o", "nolog", "-c"]
+RUN --mount=type=bind,target=/source \
+    manifest_list="$(mktemp)" && \
+    trap 'rm -f "${manifest_list}"' EXIT && \
+    find . -name pyproject.toml -type f -print0 > "${manifest_list}" && \
+    mkdir -p /dependency-manifests && \
+    while IFS= read -r -d '' manifest; do \
+        relative_path="${manifest#./}"; \
+        mkdir -p "/dependency-manifests/$(dirname "${relative_path}")" || exit 1; \
+        cp "${manifest}" "/dependency-manifests/${relative_path}" || exit 1; \
+    done < "${manifest_list}" && \
+    if [ -f uv.lock ]; then cp uv.lock /dependency-manifests/ || exit 1; fi
+
+FROM ${CI_OS_DEPS_IMAGE} as ci-os-deps
 
 # Nolog bash flag is currently ignored - but you can replace it with other flags (for example
 # xtrace - to show commands executed)
 SHELL ["/bin/bash", "-o", "pipefail", "-o", "errexit", "-o", "nounset", "-o", "nolog", "-c"]
 
-ARG PYTHON_BASE_IMAGE
-ARG AIRFLOW_IMAGE_REPOSITORY="https://github.com/apache/airflow"
+ARG BASE_IMAGE
+
+# BASE_IMAGE is the base image the build was given. When CI_OS_DEPS_IMAGE names a pinned OS-dependencies
+# image, the OS dependencies and Python come from that image instead - it may be built on an older digest
+# of the base image, which /usr/share/airflow/os-dependencies.base-image records.
+ARG CI_OS_DEPS_IMAGE
+ENV AIRFLOW_OS_DEPS_IMAGE=${CI_OS_DEPS_IMAGE}
 
 # By increasing this number we can do force build of all dependencies.
 # NOTE! When you want to make sure dependencies are installed from scratch in your PR after removing
 # some dependencies, you also need to set "disable image cache" in your PR to make sure the image is
 # not built using the "main" version of those dependencies.
-ARG DEPENDENCIES_EPOCH_NUMBER="14"
+ARG DEPENDENCIES_EPOCH_NUMBER="15"
 
 # Make sure noninteractive debian install is used and language variables set
-ENV PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE} \
+ENV BASE_IMAGE=${BASE_IMAGE} \
     DEBIAN_FRONTEND=noninteractive LANGUAGE=C.UTF-8 LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     LC_CTYPE=C.UTF-8 LC_MESSAGES=C.UTF-8 \
     DEPENDENCIES_EPOCH_NUMBER=${DEPENDENCIES_EPOCH_NUMBER} \
@@ -1193,15 +2197,25 @@ ENV PYTHON_BASE_IMAGE=${PYTHON_BASE_IMAGE} \
     PIP_CACHE_DIR=/root/.cache/pip \
     UV_CACHE_DIR=/root/.cache/uv
 
+# GCC 14 in trixie turns incompatible-pointer-types, int-conversion and implicit function declarations
+# into errors, and the hardened Python passes -Werror=implicit-function-declaration on to C extensions.
+# The lowest-dependency tests build old sdists (for example xmlsec 1.3.14 or ibm-db 3.2.0) that only
+# compiled because those were warnings - extensions append CFLAGS after Python's own flags, so this
+# turns them back into warnings for every build in the CI image.
+ENV CFLAGS="-Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration"
 
-RUN echo "Base image version: ${PYTHON_BASE_IMAGE}"
+
+RUN echo "Base image version: ${BASE_IMAGE}"
 
 ARG DEV_APT_COMMAND=""
 ARG ADDITIONAL_DEV_APT_COMMAND=""
 ARG ADDITIONAL_DEV_ENV_VARS=""
-ARG ADDITIONAL_DEV_APT_DEPS="bash-completion dumb-init git graphviz krb5-user \
-    less libenchant-2-2 libgcc-11-dev libgeos-dev libpq-dev net-tools netcat-openbsd \
-    openssh-server postgresql-client software-properties-common rsync tmux unzip vim xxd"
+# No libenchant-2-dev: pyenchant finds libenchant-2-2 through the ldconfig cache, and on trixie the
+# -dev package's build dependencies pull in a second Python from the hardened images' repository.
+ARG ADDITIONAL_DEV_APT_DEPS="bash-completion dumb-init git gdb graphviz krb5-user \
+    less libenchant-2-2 libgeos-dev libpq-dev net-tools \
+    netcat-openbsd openssh-server postgresql-client rsync tmux \
+    unzip vim xxd"
 
 ARG ADDITIONAL_DEV_APT_ENV=""
 
@@ -1209,50 +2223,80 @@ ENV DEV_APT_COMMAND=${DEV_APT_COMMAND} \
     ADDITIONAL_DEV_APT_DEPS=${ADDITIONAL_DEV_APT_DEPS} \
     ADDITIONAL_DEV_APT_COMMAND=${ADDITIONAL_DEV_APT_COMMAND}
 
-COPY --from=scripts install_os_dependencies.sh /scripts/docker/
-RUN bash /scripts/docker/install_os_dependencies.sh dev
 
-COPY --from=scripts common.sh /scripts/docker/
+# Empty takes the Python of BASE_IMAGE, breeze passes the patchlevel of the image it builds on.
+ARG AIRFLOW_PYTHON_VERSION=""
+ENV AIRFLOW_PYTHON_VERSION=${AIRFLOW_PYTHON_VERSION}
+ENV GOLANG_MAJOR_MINOR_VERSION="1.27.3"
+ENV TEMURIN_VERSION="11"
+ENV NODEJS_VERSION="22.23.1"
+# keep this in sync with package.json files
+ENV PNPM_VERSION="10.28.1"
+ENV RUSTUP_HOME="/usr/local/rustup"
+ENV CARGO_HOME="/usr/local/cargo"
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
 
-# Only copy mysql/mssql installation scripts for now - so that changing the other
-# scripts which are needed much later will not invalidate the docker layer here.
-COPY --from=scripts install_mysql.sh install_mssql.sh install_postgres.sh /scripts/docker/
+ARG INSTALL_MYSQL_CLIENT_TYPE="mariadb"
+ENV INSTALL_MYSQL_CLIENT_TYPE=${INSTALL_MYSQL_CLIENT_TYPE}
+
+# The database clients are part of the OS dependencies - install_os_dependencies.sh runs their
+# scripts, and its marker covers them, so the pinned OS-dependencies images carry them too.
+COPY --from=scripts install_os_dependencies.sh common.sh install_mysql.sh install_mssql.sh \
+    install_postgres.sh /scripts/docker/
+COPY scripts/docker/keys/ /scripts/docker/keys/
+
+RUN bash /scripts/docker/install_os_dependencies.sh ci
+
+FROM ci-os-deps as main
+
+SHELL ["/bin/bash", "-o", "pipefail", "-o", "errexit", "-o", "nounset", "-o", "nolog", "-c"]
+
+ARG AIRFLOW_IMAGE_REPOSITORY="https://github.com/apache/airflow"
+
+# In case system python is installed, setting LD_LIBRARY_PATH prevents any case the system python
+# libraries will be accidentally used before the library installed from sources (which is newer and
+# python interpreter might break if accidentally the old system libraries are used.
+ENV LD_LIBRARY_PATH="/usr/python/lib"
 
 ARG HOME=/root
 ARG AIRFLOW_IMAGE_TYPE="ci"
 ARG AIRFLOW_HOME=/root/airflow
 ARG AIRFLOW_SOURCES=/opt/airflow
-ARG INSTALL_MYSQL_CLIENT_TYPE="mysql"
 
 ENV HOME=${HOME} \
     AIRFLOW_IMAGE_TYPE=${AIRFLOW_IMAGE_TYPE} \
     AIRFLOW_HOME=${AIRFLOW_HOME} \
-    AIRFLOW_SOURCES=${AIRFLOW_SOURCES} \
-    INSTALL_MYSQL_CLIENT_TYPE=${INSTALL_MYSQL_CLIENT_TYPE}
+    AIRFLOW_SOURCES=${AIRFLOW_SOURCES}
 
-# We run scripts with bash here to make sure we can execute the scripts. Changing to +x might have an
-# unexpected result - the cache for Dockerfiles might get invalidated in case the host system
-# had different umask set and group x bit was not set. In Azure the bit might be not set at all.
-# That also protects against AUFS Docker backend problem where changing the executable bit required sync
-RUN bash /scripts/docker/install_mysql.sh prod \
-    && bash /scripts/docker/install_mysql.sh dev \
-    && bash /scripts/docker/install_mssql.sh dev \
-    && bash /scripts/docker/install_postgres.sh dev \
-    # The user is added to allow ssh debugging (you can connect with airflow/airflow over ssh)
-    && adduser --gecos "First Last,RoomNumber,WorkPhone,HomePhone" --disabled-password \
+# The user is added to allow ssh debugging (you can connect with airflow/airflow over ssh)
+RUN adduser --gecos "First Last,RoomNumber,WorkPhone,HomePhone" --disabled-password \
     --quiet "airflow" --home "/home/airflow" \
     && echo -e "airflow\nairflow" | passwd airflow 2>&1 \
     && echo "airflow ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/airflow \
     && chmod 0440 /etc/sudoers.d/airflow
 
 # Install Helm
-ARG HELM_VERSION="v3.16.4"
+ARG HELM_VERSION="v3.19.0"
 
 RUN SYSTEM=$(uname -s | tr '[:upper:]' '[:lower:]') \
     && PLATFORM=$([ "$(uname -m)" = "aarch64" ] && echo "arm64" || echo "amd64" ) \
     && HELM_URL="https://get.helm.sh/helm-${HELM_VERSION}-${SYSTEM}-${PLATFORM}.tar.gz" \
-    && curl --silent --location "${HELM_URL}" | tar -xz -O "${SYSTEM}-${PLATFORM}/helm" > /usr/local/bin/helm \
+    && curl --silent --location --fail --retry 3 --retry-delay 5 -o /tmp/helm.tar.gz "${HELM_URL}" \
+    && tar -xzf /tmp/helm.tar.gz -O "${SYSTEM}-${PLATFORM}/helm" > /usr/local/bin/helm \
+    && rm -f /tmp/helm.tar.gz \
     && chmod +x /usr/local/bin/helm
+
+# Install mprocs - a modern process manager for managing multiple Airflow components
+ARG MPROCS_VERSION="0.10.3"
+
+RUN SYSTEM=$(uname -s | tr '[:upper:]' '[:lower:]') \
+    && PLATFORM="$(uname -m)" \
+    && MPROCS_URL="https://github.com/pvolok/dekit/releases/download/v${MPROCS_VERSION}/dekit-${PLATFORM}-unknown-${SYSTEM}-musl.tar.gz" \
+    && echo "Downloading mprocs from ${MPROCS_URL}" \
+    && curl --silent --location --fail --retry 3 --retry-delay 5 -o /tmp/mprocs.tar.gz "${MPROCS_URL}" \
+    && tar -xzf /tmp/mprocs.tar.gz -O dekit > /usr/local/bin/mprocs \
+    && rm -f /tmp/mprocs.tar.gz \
+    && chmod +x /usr/local/bin/mprocs
 
 WORKDIR ${AIRFLOW_SOURCES}
 
@@ -1271,11 +2315,13 @@ ARG AIRFLOW_CONSTRAINTS_MODE="constraints-source-providers"
 ARG AIRFLOW_CONSTRAINTS_REFERENCE=""
 ARG AIRFLOW_CONSTRAINTS_LOCATION=""
 ARG DEFAULT_CONSTRAINTS_BRANCH="constraints-main"
+# By default fallback to installation without constraints because in CI image it should always be tried
+ARG AIRFLOW_FALLBACK_NO_CONSTRAINTS_INSTALLATION="true"
+
 # By changing the epoch we can force reinstalling Airflow and pip all dependencies
 # It can also be overwritten manually by setting the AIRFLOW_CI_BUILD_EPOCH environment variable.
 ARG AIRFLOW_CI_BUILD_EPOCH="10"
 # Setup PIP
-ARG UV_HTTP_TIMEOUT="300"
 # By default PIP has progress bar but you can disable it.
 ARG PIP_PROGRESS_BAR="on"
 # Optimizing installation of Cassandra driver (in case there are no prebuilt wheels which is the
@@ -1300,13 +2346,13 @@ ENV AIRFLOW_REPO=${AIRFLOW_REPO}\
     AIRFLOW_CONSTRAINTS_MODE=${AIRFLOW_CONSTRAINTS_MODE} \
     AIRFLOW_CONSTRAINTS_REFERENCE=${AIRFLOW_CONSTRAINTS_REFERENCE} \
     AIRFLOW_CONSTRAINTS_LOCATION=${AIRFLOW_CONSTRAINTS_LOCATION} \
+    AIRFLOW_FALLBACK_NO_CONSTRAINTS_INSTALLATION=${AIRFLOW_FALLBACK_NO_CONSTRAINTS_INSTALLATION} \
     DEFAULT_CONSTRAINTS_BRANCH=${DEFAULT_CONSTRAINTS_BRANCH} \
     AIRFLOW_CI_BUILD_EPOCH=${AIRFLOW_CI_BUILD_EPOCH} \
     AIRFLOW_VERSION=${AIRFLOW_VERSION} \
     AIRFLOW_PIP_VERSION=${AIRFLOW_PIP_VERSION} \
     AIRFLOW_UV_VERSION=${AIRFLOW_UV_VERSION} \
     AIRFLOW_USE_UV=${AIRFLOW_USE_UV} \
-    UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT} \
     UV_SYSTEM_PYTHON="true" \
     UV_PROJECT_ENVIRONMENT="/usr/local" \
     INSTALL_MYSQL_CLIENT="true" \
@@ -1317,6 +2363,7 @@ ENV AIRFLOW_REPO=${AIRFLOW_REPO}\
     AIRFLOW_VERSION_SPECIFICATION="" \
     PIP_PROGRESS_BAR=${PIP_PROGRESS_BAR} \
     ADDITIONAL_PIP_INSTALL_FLAGS=${ADDITIONAL_PIP_INSTALL_FLAGS} \
+    INCLUDE_PRE_RELEASE="true" \
     CASS_DRIVER_BUILD_CONCURRENCY=${CASS_DRIVER_BUILD_CONCURRENCY} \
     CASS_DRIVER_NO_CYTHON=${CASS_DRIVER_NO_CYTHON}
 
@@ -1334,34 +2381,43 @@ COPY --from=scripts common.sh install_packaging_tools.sh install_additional_depe
 # You can swap comments between those two args to test pip from the main version
 # When you attempt to test if the version of `pip` from specified branch works for our builds
 # Also use `force pip` label on your PR to swap all places we use `uv` to `pip`
-ARG AIRFLOW_PIP_VERSION=25.0.1
+ARG AIRFLOW_PIP_VERSION=26.3
 # ARG AIRFLOW_PIP_VERSION="git+https://github.com/pypa/pip.git@main"
-ARG AIRFLOW_UV_VERSION=0.6.10
-# TODO(potiuk): automate with upgrade check (possibly)
-ARG AIRFLOW_PRE_COMMIT_VERSION="4.2.0"
-ARG AIRFLOW_PRE_COMMIT_UV_VERSION="4.1.4"
+ARG AIRFLOW_UV_VERSION=0.13.7
+ARG AIRFLOW_PREK_VERSION="0.5.10"
 
+# UV_LINK_MODE=copy is needed since we are using cache mounted from the host
 ENV AIRFLOW_PIP_VERSION=${AIRFLOW_PIP_VERSION} \
     AIRFLOW_UV_VERSION=${AIRFLOW_UV_VERSION} \
-    # This is needed since we are using cache mounted from the host
     UV_LINK_MODE=copy \
-    AIRFLOW_PRE_COMMIT_VERSION=${AIRFLOW_PRE_COMMIT_VERSION}
+    AIRFLOW_PREK_VERSION=${AIRFLOW_PREK_VERSION}
 
-# The PATH is needed for PIPX to find the tools installed
-ENV PATH="/root/.local/bin:${PATH}"
-
+# The PATH is needed for python to find installed and cargo to build the wheels
+ENV PATH="/usr/python/bin:/root/.local/bin:${PATH}"
 # Useful for creating a cache id based on the underlying architecture, preventing the use of cached python packages from
 # an incorrect architecture.
 ARG TARGETARCH
 # Value to be able to easily change cache id and therefore use a bare new cache
-ARG DEPENDENCY_CACHE_EPOCH="0"
+ARG DEPENDENCY_CACHE_EPOCH="2"
 
 # Install useful command line tools in their own virtualenv so that they do not clash with
 # dependencies installed in Airflow also reinstall PIP and UV to make sure they are installed
 # in the version specified above
+
 RUN bash /scripts/docker/install_packaging_tools.sh
 
 COPY --from=scripts install_airflow_when_building_images.sh /scripts/docker/
+
+COPY --from=dependency-manifests /dependency-manifests/ ${AIRFLOW_SOURCES}/
+ARG UPGRADE_RANDOM_INDICATOR_STRING=""
+# Only preinstall locked third-party dependencies, with the same uv sync as the full installation.
+# A uv.lock that does not match the manifests only skips this warm-up: the full sync after COPY still
+# installs workspace packages from the current checkout and retains its resolution fallback. Any other
+# failure would fail the full sync as well, so it fails the build here.
+RUN --mount=type=cache,id=ci-$TARGETARCH-$DEPENDENCY_CACHE_EPOCH,target=/root/.cache/ \
+    if [[ -z "${UPGRADE_RANDOM_INDICATOR_STRING}" ]]; then \
+        INSTALL_LOCKED_THIRD_PARTY_ONLY="true" bash /scripts/docker/install_airflow_when_building_images.sh; \
+    fi
 
 # We can copy everything here. The Context is filtered by dockerignore. This makes sure we are not
 # copying over stuff that is accidentally generated or that we do not need (such as egg-info)
@@ -1369,11 +2425,10 @@ COPY --from=scripts install_airflow_when_building_images.sh /scripts/docker/
 # add it with ! in .dockerignore next to the airflow, test etc. directories there
 COPY . ${AIRFLOW_SOURCES}/
 
-ARG UPGRADE_RANDOM_INDICATOR_STRING=""
-ARG VERSION_SUFFIX_FOR_PYPI=""
+ARG VERSION_SUFFIX=""
 
 ENV UPGRADE_RANDOM_INDICATOR_STRING=${UPGRADE_RANDOM_INDICATOR_STRING} \
-    VERSION_SUFFIX_FOR_PYPI=${VERSION_SUFFIX_FOR_PYPI}
+    VERSION_SUFFIX=${VERSION_SUFFIX}
 
 # The goal of this line is to install the dependencies from the most current pyproject.toml from sources
 # This will be usually incremental small set of packages in CI optimized build, so it will be very fast
@@ -1401,10 +2456,12 @@ RUN chmod a+x /entrypoint /entrypoint-exec
 
 
 # Install autocomplete for airflow and kubectl
+# hadolint ignore=SC2028
 RUN if command -v airflow; then \
     register-python-argcomplete airflow >> ~/.bashrc ; \
     fi; \
-    echo "source /etc/bash_completion" >> ~/.bashrc
+    echo "source /etc/bash_completion" >> ~/.bashrc ; \
+    echo 'export PS1="\[\033[1;36m\][Breeze:\$(python --version 2>&1 | cut -d\" \" -f2)]\[\033[0m\] \[\033[1;32m\]\u@\h\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]\$ "' >> ~/.bashrc
 
 WORKDIR ${AIRFLOW_SOURCES}
 
@@ -1434,6 +2491,7 @@ LABEL org.apache.airflow.distro="debian" \
     org.apache.airflow.component="airflow" \
     org.apache.airflow.image="airflow-ci" \
     org.apache.airflow.version="${AIRFLOW_VERSION}" \
+    org.apache.airflow.python.version="${AIRFLOW_PYTHON_VERSION}" \
     org.apache.airflow.uid="0" \
     org.apache.airflow.gid="0" \
     org.apache.airflow.build-id="${BUILD_ID}" \

@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import subprocess
 import time
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from airflow_breeze.global_constants import (
     ALLOWED_PYTHON_MAJOR_MINOR_VERSIONS,
@@ -28,7 +29,7 @@ from airflow_breeze.global_constants import (
 from airflow_breeze.params.build_ci_params import BuildCiParams
 from airflow_breeze.params.shell_params import ShellParams
 from airflow_breeze.utils.ci_group import ci_group
-from airflow_breeze.utils.console import Output, get_console
+from airflow_breeze.utils.console import Output, console_print, get_console
 from airflow_breeze.utils.mark_image_as_refreshed import mark_image_as_rebuilt
 from airflow_breeze.utils.parallel import (
     DOCKER_PULL_PROGRESS_REGEXP,
@@ -69,8 +70,7 @@ def run_pull_in_parallel(
             def get_right_method() -> Callable[..., tuple[int, str]]:
                 if verify:
                     return run_pull_and_verify_image
-                else:
-                    return run_pull_image
+                return run_pull_image
 
             def get_kwds(index: int, image_param: BuildCiParams | BuildProdParams):
                 d = {
@@ -89,7 +89,7 @@ def run_pull_in_parallel(
             ]
     check_async_run_results(
         results=results,
-        success="All images pulled",
+        success_message="All images pulled",
         outputs=outputs,
         include_success_outputs=include_success_outputs,
         skip_cleanup=skip_cleanup,
@@ -166,11 +166,10 @@ def run_pull_image(
                 )
                 return 1, f"Image Python {image_params.python}"
             continue
-        else:
-            get_console(output=output).print(
-                f"\n[error]There was an error pulling the image {image_params.python}. Failing.[/]\n"
-            )
-            return command_result.returncode, f"Image Python {image_params.python}"
+        get_console(output=output).print(
+            f"\n[error]There was an error pulling the image {image_params.python}. Failing.[/]\n"
+        )
+        return command_result.returncode, f"Image Python {image_params.python}"
 
 
 def run_pull_and_verify_image(
@@ -208,7 +207,7 @@ def just_pull_ci_image(github_repository, python_version: str) -> tuple[ShellPar
         skip_image_upgrade_check=True,
         quiet=True,
     )
-    get_console().print(f"[info]Pulling {shell_params.airflow_image_name}.[/]")
+    console_print(f"[info]Pulling {shell_params.airflow_image_name}.[/]")
     pull_command_result = run_command(
         ["docker", "pull", shell_params.airflow_image_name],
         check=True,
@@ -242,7 +241,7 @@ def find_available_ci_image(github_repository: str) -> ShellParams:
     for python_version in ALLOWED_PYTHON_MAJOR_MINOR_VERSIONS:
         shell_params, inspect_command_result = check_if_ci_image_available(github_repository, python_version)
         if inspect_command_result.returncode == 0:
-            get_console().print(f"[info]Running fix_ownership with {shell_params.airflow_image_name}.[/]")
+            console_print(f"[info]Running fix_ownership with {shell_params.airflow_image_name}.[/]")
             return shell_params
     shell_params, _ = just_pull_ci_image(github_repository, DEFAULT_PYTHON_MAJOR_MINOR_VERSION)
     return shell_params

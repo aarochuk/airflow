@@ -21,9 +21,9 @@ from collections.abc import Sequence
 from tempfile import NamedTemporaryFile
 from typing import Any
 
-from airflow.models import BaseOperator
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
 from airflow.providers.google.suite.hooks.sheets import GSheetsHook
+from airflow.providers.google.version_compat import BaseOperator
 
 
 class GCSToGoogleSheetsOperator(BaseOperator):
@@ -55,6 +55,7 @@ class GCSToGoogleSheetsOperator(BaseOperator):
         "object_name",
         "spreadsheet_range",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(

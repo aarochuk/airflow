@@ -15,8 +15,8 @@
     specific language governing permissions and limitations
     under the License.
 
-Image build arguments reference
--------------------------------
+Image build arguments
+---------------------
 
 The following build arguments (``--build-arg`` in docker build command) can be used for production images.
 Those arguments are used when you want to customize the image. You can see some examples of it in
@@ -27,61 +27,110 @@ Basic arguments
 
 Those are the most common arguments that you use when you want to build a custom image.
 
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| Build argument                           | Default value                            | Description                                 |
-+==========================================+==========================================+=============================================+
-| ``PYTHON_BASE_IMAGE``                    | ``python:3.9-slim-bookworm``             | Base python image.                          |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``AIRFLOW_VERSION``                      | :subst-code:`|airflow-version|`          | version of Airflow.                         |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``AIRFLOW_EXTRAS``                       | (see below the table)                    | Default extras with which airflow is        |
-|                                          |                                          | installed.                                  |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``ADDITIONAL_AIRFLOW_EXTRAS``            |                                          | Optional additional extras with which       |
-|                                          |                                          | airflow is installed.                       |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``AIRFLOW_HOME``                         | ``/opt/airflow``                         | Airflow's HOME (that's where logs and       |
-|                                          |                                          | SQLite databases are stored).               |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``AIRFLOW_USER_HOME_DIR``                | ``/home/airflow``                        | Home directory of the Airflow user.         |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``AIRFLOW_PIP_VERSION``                  | ``<LATEST_AVAILABLE_IN_PYPI>``           |  PIP version used.                          |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``AIRFLOW_UV_VERSION``                   | ``<LATEST_AVAILABLE_IN_PYPI>``           |  UV version used.                           |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``AIRFLOW_USE_UV``                       | ``false``                                |  Whether to use UV to build the image.      |
-|                                          |                                          |  This is an experimental feature.           |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``UV_HTTP_TIMEOUT``                      | ``300``                                  |  Timeout in seconds for UV pull requests.   |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``ADDITIONAL_PIP_INSTALL_FLAGS``         |                                          | additional ``pip`` flags passed to the      |
-|                                          |                                          | installation commands (except when          |
-|                                          |                                          | reinstalling ``pip`` itself)                |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``PIP_PROGRESS_BAR``                     | ``on``                                   | Progress bar for PIP installation           |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``AIRFLOW_UID``                          | ``50000``                                | Airflow user UID.                           |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``AIRFLOW_CONSTRAINTS``                  | ``constraints``                          | Type of constraints to build the image.     |
-|                                          |                                          | This can be ``constraints`` for regular     |
-|                                          |                                          | images or ``constraints-no-providers`` for  |
-|                                          |                                          | slim images.                                |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
-| ``AIRFLOW_CONSTRAINTS_REFERENCE``        |                                          | Reference (branch or tag) from GitHub       |
-|                                          |                                          | where constraints file is taken from        |
-|                                          |                                          | It can be ``constraints-main`` or           |
-|                                          |                                          | ``constraints-2-0`` for                     |
-|                                          |                                          | 2.0.* installation. In case of building     |
-|                                          |                                          | specific version you want to point it       |
-|                                          |                                          | to specific tag, for example                |
-|                                          |                                          | :subst-code:`constraints-|airflow-version|`.|
-|                                          |                                          | Auto-detected if empty.                     |
-+------------------------------------------+------------------------------------------+---------------------------------------------+
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| Build argument                           | Default value                             | Description                                 |
++==========================================+===========================================+=============================================+
+| ``AIRFLOW_VERSION``                      | :subst-code:`|airflow-version|`           | Version of Airflow.                         |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``AIRFLOW_IMAGE_FLAVOR``                 | ``hardened``                              | ``hardened`` takes Python from              |
+|                                          |                                           | ``BASE_IMAGE``. ``legacy`` compiles         |
+|                                          |                                           | ``AIRFLOW_PYTHON_VERSION`` from sources on  |
+|                                          |                                           | a plain Debian ``BASE_IMAGE`` (see below    |
+|                                          |                                           | the table).                                 |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``AIRFLOW_PYTHON_VERSION``               |                                           | Python version recorded, as passed, in the  |
+|                                          |                                           | image labels (the published images record   |
+|                                          |                                           | the full patch release). In the hardened    |
+|                                          |                                           | flavor Python comes from ``BASE_IMAGE``:    |
+|                                          |                                           | leave it empty, and a version that does not |
+|                                          |                                           | match ``BASE_IMAGE`` fails the build. In    |
+|                                          |                                           | the legacy flavor it is                     |
+|                                          |                                           | the version compiled from sources:          |
+|                                          |                                           | ``MAJOR.MINOR`` builds the latest release   |
+|                                          |                                           | of that line.                               |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``BASE_IMAGE``                           | (see below the table)                     | Airflow's public mirror of the Docker       |
+|                                          |                                           | Hardened Image that Python comes from.      |
+|                                          |                                           | Point it at a ``dhi.io`` ``-fips-`` variant |
+|                                          |                                           | to build a FIPS-compliant image.            |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``DEV_OS_DEPS_IMAGE``                    | ``BASE_IMAGE``                            | The image the build stage installs its OS   |
+|                                          |                                           | dependencies on. Airflow's CI and release   |
+|                                          |                                           | builds pass a pinned image that already has |
+|                                          |                                           | them, built from ``BASE_IMAGE`` by the      |
+|                                          |                                           | ``dev-os-deps`` stage. Any other image runs |
+|                                          |                                           | the installation. The OS dependencies       |
+|                                          |                                           | include the database clients the            |
+|                                          |                                           | ``INSTALL_*_CLIENT`` args select.           |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``RUNTIME_OS_DEPS_IMAGE``                | ``BASE_IMAGE``                            | The image the final image installs its OS   |
+|                                          |                                           | dependencies on - like                      |
+|                                          |                                           | ``DEV_OS_DEPS_IMAGE``, for the              |
+|                                          |                                           | ``runtime-os-deps`` stage.                  |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``AIRFLOW_EXTRAS``                       | (see below the table)                     | Default extras with which Airflow is        |
+|                                          |                                           | installed.                                  |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``ADDITIONAL_AIRFLOW_EXTRAS``            |                                           | Optional additional extras with which       |
+|                                          |                                           | Airflow is installed.                       |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``AIRFLOW_HOME``                         | ``/opt/airflow``                          | Airflow's HOME (that's where logs and       |
+|                                          |                                           | SQLite databases are stored).               |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``AIRFLOW_USER_HOME_DIR``                | ``/home/airflow``                         | Home directory of the Airflow user.         |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``AIRFLOW_PIP_VERSION``                  | ``<LATEST_AVAILABLE_IN_PYPI>``            |  PIP version used.                          |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``AIRFLOW_UV_VERSION``                   | ``<LATEST_AVAILABLE_IN_PYPI>``            |  UV version used.                           |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``AIRFLOW_USE_UV``                       | ``false``                                 |  Whether to use UV to build the image.      |
+|                                          |                                           |  This is an experimental feature.           |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``ADDITIONAL_PIP_INSTALL_FLAGS``         |                                           | additional ``pip`` flags passed to the      |
+|                                          |                                           | installation commands (except when          |
+|                                          |                                           | reinstalling ``pip`` itself)                |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``PIP_PROGRESS_BAR``                     | ``on``                                    | Progress bar for PIP installation           |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``AIRFLOW_UID``                          | ``50000``                                 | Airflow user UID.                           |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``AIRFLOW_CONSTRAINTS``                  | ``constraints``                           | Type of constraints to build the image.     |
+|                                          |                                           | This can be ``constraints`` for regular     |
+|                                          |                                           | images or ``constraints-no-providers`` for  |
+|                                          |                                           | slim images.                                |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
+| ``AIRFLOW_CONSTRAINTS_REFERENCE``        |                                           | Reference (branch or tag) from GitHub       |
+|                                          |                                           | where constraints file is taken from        |
+|                                          |                                           | It can be ``constraints-main`` or           |
+|                                          |                                           | ``constraints-3-X`` for                     |
+|                                          |                                           | 3.X.* installation. In case of building     |
+|                                          |                                           | specific version you want to point it       |
+|                                          |                                           | to specific tag, for example                |
+|                                          |                                           | :subst-code:`constraints-|airflow-version|`.|
+|                                          |                                           | Auto-detected if empty.                     |
++------------------------------------------+-------------------------------------------+---------------------------------------------+
 
 .. note::
 
     Before Airflow 2.2, the image also had ``AIRFLOW_GID`` parameter, but it did not provide any additional
     functionality - only added confusion - so it has been removed.
+
+The default ``BASE_IMAGE`` is Airflow's public mirror of the `Docker Hardened Image <https://dhi.io>`_ for
+Python - for Airflow |airflow-version| that is ``ghcr.io/apache/airflow/base/python:3.14.10-debian13-dev``,
+pinned to the digest the Airflow CI last passed on (see :ref:`the hardened base images <image-hardened-base>`). Pulling the mirror needs no
+credentials; pulling ``dhi.io`` directly requires a ``docker login dhi.io``.
+
+In the default ``hardened`` flavor ``BASE_IMAGE`` has to provide Python, so the build fails on a plain Debian
+image such as ``debian:trixie-slim``. Use the ``legacy`` flavor below to build on one.
+
+For the 3.4.x line Airflow also publishes ``legacy`` images, built the way all images were built before
+3.4.0: Python is downloaded from python.org, its signature verified and compiled on a ``debian:bookworm-slim``
+base. They are deprecated and will be removed in Airflow 3.5.0. To build one yourself, set these arguments:
+
+.. code-block:: bash
+
+    docker build . --build-arg AIRFLOW_IMAGE_FLAVOR="legacy" --build-arg BASE_IMAGE="debian:bookworm-slim" \
+      --build-arg AIRFLOW_PYTHON_VERSION="3.13"
 
 List of default extras in the production Dockerfile:
 
@@ -93,10 +142,12 @@ List of default extras in the production Dockerfile:
 * celery
 * cncf-kubernetes
 * common-io
+* common-messaging
 * docker
 * elasticsearch
 * fab
 * ftp
+* git
 * google
 * google-auth
 * graphviz
@@ -108,6 +159,7 @@ List of default extras in the production Dockerfile:
 * mysql
 * odbc
 * openlineage
+* opensearch
 * pandas
 * postgres
 * redis
@@ -198,13 +250,13 @@ Those parameters are useful only if you want to install Airflow using different 
 (installing from PyPI packages).
 
 This is usually only useful if you have your own fork of Airflow and want to build the images locally from
-those sources - either locally or directly from GitHub sources. This way you do not need to release your
-Airflow and Providers via PyPI - they can be installed directly from sources or from GitHub repository.
+those sources - either locally or from packages. This way you do not need to release your
+Airflow and Providers via PyPI - they can be installed directly from sources.
+
 Another option of installation is to build Airflow from previously prepared binary Python packages which might
 be useful if you need to build Airflow in environments that require high levels of security.
 
 You can see some examples of those in:
-  * :ref:`Building from GitHub<image-build-github>`,
   * :ref:`Using custom installation sources<image-build-custom>`,
   * :ref:`Build images in security restricted environments<image-build-secure-environments>`
 
@@ -213,9 +265,7 @@ You can see some examples of those in:
 +==========================================+==========================================+==========================================+
 | ``AIRFLOW_INSTALLATION_METHOD``          | ``apache-airflow``                       | Installation method of Apache Airflow.   |
 |                                          |                                          | ``apache-airflow`` for installation from |
-|                                          |                                          | PyPI. It can be GitHub repository URL    |
-|                                          |                                          | including branch or tag to install from  |
-|                                          |                                          | that repository or "." to install from   |
+|                                          |                                          | PyPI  or "." to install from             |
 |                                          |                                          | local sources. Installing from sources   |
 |                                          |                                          | requires appropriate values of the       |
 |                                          |                                          | ``AIRFLOW_SOURCES_FROM`` and             |
@@ -261,15 +311,18 @@ You can see some examples of those in:
 Caching dependencies
 ....................
 
-We are using ``--mount-type=cache`` volumes to speed up installation of dependencies for Airflow images. Combined with uv
+We are using ``--mount-type=cache`` volumes to speed up installation of dependencies for Airflow images. Combined with ``uv``
 speed and extensive use of caching, as well as quick restoring of the cache in CI environment, this allows us to build images
 quickly - for both CI and local development purposes. The cache can be easily invalidated by providing a new value of
 ``DEPENDENCY_CACHE_EPOCH`` build argument or changing it inside the Dockerfile.
+See :ref:`build:dependency-caching` for when you need it.
 
 +------------------------------------+------------------------------------------+------------------------------------------+
 | Build argument                     | Default value                            | Description                              |
 +====================================+==========================================+==========================================+
 +------------------------------------+------------------------------------------+------------------------------------------+
-| ``DEPENDENCY_CACHE_EPOCH``         | ``"0"``                                  | Allow to invalidate cache by passing a   |
-|                                    |                                          | new argument.                            |
+| ``DEPENDENCY_CACHE_EPOCH``         | ``"11"``                                 | Part of the id of the cache of           |
+|                                    |                                          | downloaded and built packages. Any new   |
+|                                    |                                          | value starts with an empty cache - see   |
+|                                    |                                          | :ref:`build:dependency-caching`.         |
 +------------------------------------+------------------------------------------+------------------------------------------+

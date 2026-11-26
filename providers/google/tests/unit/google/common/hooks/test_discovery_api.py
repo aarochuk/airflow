@@ -21,17 +21,15 @@ from unittest.mock import call, patch
 
 import pytest
 
-from airflow import models
+from airflow.models import Connection
 from airflow.providers.google.common.hooks.discovery_api import GoogleDiscoveryApiHook
-from airflow.utils import db
-
-pytestmark = pytest.mark.db_test
 
 
 class TestGoogleDiscoveryApiHook:
-    def setup_method(self):
-        db.merge_conn(
-            models.Connection(
+    @pytest.fixture(autouse=True)
+    def setup_connections(self, create_connection_without_db):
+        create_connection_without_db(
+            Connection(
                 conn_id="google_test",
                 conn_type="google_cloud_platform",
                 host="google",
@@ -41,9 +39,10 @@ class TestGoogleDiscoveryApiHook:
             )
         )
 
+    @patch("airflow.providers.google.common.hooks.discovery_api.GoogleDiscoveryApiHook.get_client_options")
     @patch("airflow.providers.google.common.hooks.discovery_api.build")
     @patch("airflow.providers.google.common.hooks.discovery_api.GoogleDiscoveryApiHook._authorize")
-    def test_get_conn(self, mock_authorize, mock_build):
+    def test_get_conn(self, mock_authorize, mock_build, mock_get_client_options):
         google_discovery_api_hook = GoogleDiscoveryApiHook(
             gcp_conn_id="google_test", api_service_name="youtube", api_version="v2"
         )
@@ -55,6 +54,7 @@ class TestGoogleDiscoveryApiHook:
             version=google_discovery_api_hook.api_version,
             http=mock_authorize.return_value,
             cache_discovery=False,
+            client_options=mock_get_client_options.return_value,
         )
 
     @patch("airflow.providers.google.common.hooks.discovery_api.getattr")

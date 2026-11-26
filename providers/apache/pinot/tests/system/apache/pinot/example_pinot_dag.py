@@ -22,8 +22,15 @@ from __future__ import annotations
 from datetime import datetime
 
 from airflow import DAG
-from airflow.decorators import task
 from airflow.providers.apache.pinot.hooks.pinot import PinotAdminHook, PinotDbApiHook
+
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import task
+else:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
 
 with DAG(
     dag_id="example_pinot_hook",
@@ -54,5 +61,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

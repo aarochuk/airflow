@@ -20,11 +20,26 @@ from __future__ import annotations
 import datetime
 import ftplib  # nosec: B402
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from contextlib import suppress
+from typing import Any, cast
 
-from airflow.hooks.base import BaseHook
+from airflow.providers.common.compat.sdk import BaseHook
 
 logger = logging.getLogger(__name__)
+
+
+def _get_passive_mode(extra: dict[str, Any]) -> bool:
+    """
+    Read the ``passive`` connection extra as a boolean.
+
+    Extras parsed from a connection URI (e.g. ``ftp://host?passive=false``) are strings,
+    and a non-empty string such as ``"false"`` is truthy.
+    """
+    passive = extra.get("passive", True)
+    if isinstance(passive, str):
+        return passive.strip().lower() not in ("false", "0", "no", "off")
+    return bool(passive)
 
 
 class FTPHook(BaseHook):
@@ -34,6 +49,7 @@ class FTPHook(BaseHook):
     Errors that may occur throughout but should be handled downstream.
     You can specify mode for data transfers in the extra field of your
     connection as ``{"passive": "true"}``.
+    You can also specify encoding for the FTP connection as ``{"encoding": "cp1251"}``.
 
     :param ftp_conn_id: The :ref:`ftp connection id <howto/connection:ftp>`
         reference.
@@ -48,6 +64,7 @@ class FTPHook(BaseHook):
         super().__init__()
         self.ftp_conn_id = ftp_conn_id
         self.conn: ftplib.FTP | None = None
+        self.encoding: str | None = None
 
     def __enter__(self):
         return self
@@ -60,15 +77,21 @@ class FTPHook(BaseHook):
         """Return an FTP connection object."""
         if self.conn is None:
             params = self.get_connection(self.ftp_conn_id)
-            pasv = params.extra_dejson.get("passive", True)
-            self.conn = ftplib.FTP()  # nosec: B321
+            pasv = _get_passive_mode(params.extra_dejson)
+            encoding = params.extra_dejson.get("encoding")
+            self.encoding = encoding
+            if encoding:
+                self.conn = ftplib.FTP(encoding=encoding)  # nosec: B321
+            else:
+                self.conn = ftplib.FTP()  # nosec: B321
             if params.host:
-                port = ftplib.FTP_PORT
+                port: int = int(ftplib.FTP_PORT)
                 if params.port is not None:
                     port = params.port
                 logger.info("Connecting via FTP to %s:%d", params.host, port)
                 self.conn.connect(params.host, port)
                 if params.login:
+                    params.password = cast("str", params.password)
                     self.conn.login(params.login, params.password)
             self.conn.set_pasv(pasv)
 
@@ -175,6 +198,7 @@ class FTPHook(BaseHook):
         """
         conn = self.get_conn()
         is_path = isinstance(local_full_path_or_buffer, str)
+        output_handle = None
 
         # without a callback, default to writing to a user-provided file or
         # file-like buffer
@@ -186,12 +210,15 @@ class FTPHook(BaseHook):
 
             callback = output_handle.write
 
-        self.log.info("Retrieving file from FTP: %s", remote_full_path)
-        conn.retrbinary(f"RETR {remote_full_path}", callback, block_size)
-        self.log.info("Finished retrieving file from FTP: %s", remote_full_path)
-
-        if is_path and output_handle:
-            output_handle.close()
+        try:
+            self.log.info("Retrieving file from FTP: %s", remote_full_path)
+            conn.retrbinary(f"RETR {remote_full_path}", callback, block_size)
+            self.log.info("Finished retrieving file from FTP: %s", remote_full_path)
+        finally:
+            # Only close handles we opened ourselves; a caller-supplied buffer
+            # must stay open per this method's contract.
+            if is_path and output_handle:
+                output_handle.close()
 
     def store_file(
         self, remote_full_path: str, local_full_path_or_buffer: Any, block_size: int = 8192
@@ -217,10 +244,13 @@ class FTPHook(BaseHook):
         else:
             input_handle = local_full_path_or_buffer
 
-        conn.storbinary(f"STOR {remote_full_path}", input_handle, block_size)
-
-        if is_path:
-            input_handle.close()
+        try:
+            conn.storbinary(f"STOR {remote_full_path}", input_handle, block_size)
+        finally:
+            # Only close handles we opened ourselves; a caller-supplied buffer
+            # must stay open per this method's contract.
+            if is_path:
+                input_handle.close()
 
     def delete_file(self, path: str) -> None:
         """
@@ -264,13 +294,15 @@ class FTPHook(BaseHook):
         """
         conn = self.get_conn()
         size = conn.size(path)
-        return int(size) if size else None
+        return int(size) if size is not None else None
 
     def test_connection(self) -> tuple[bool, str]:
-        """Test the FTP connection by calling path with directory."""
+        """Test the FTP connection by asking the server for the current directory."""
         try:
-            conn = self.get_conn()
-            conn.pwd
+            if not self.get_connection(self.ftp_conn_id).host:
+                return False, "Connection has no host to connect to"
+            # PWD needs a logged-in session on most servers; NOOP would not catch a missing login.
+            self.get_conn().pwd()
             return True, "Connection successfully tested"
         except Exception as e:
             return False, str(e)
@@ -285,14 +317,32 @@ class FTPSHook(FTPHook):
 
         if self.conn is None:
             params = self.get_connection(self.ftp_conn_id)
-            pasv = params.extra_dejson.get("passive", True)
+            pasv = _get_passive_mode(params.extra_dejson)
+            encoding = params.extra_dejson.get("encoding")
+            self.encoding = encoding
 
             if params.port:
                 ftplib.FTP_TLS.port = params.port
 
             # Construct FTP_TLS instance with SSL context to allow certificates to be validated by default
             context = ssl.create_default_context()
-            self.conn = ftplib.FTP_TLS(params.host, params.login, params.password, context=context)  # nosec: B321
-            self.conn.set_pasv(pasv)
+            params.host = cast("str", params.host)
+            params.password = cast("str", params.password)
+            params.login = cast("str", params.login)
+            if encoding:
+                conn = ftplib.FTP_TLS(
+                    params.host, params.login, params.password, context=context, encoding=encoding
+                )  # nosec: B321
+            else:
+                conn = ftplib.FTP_TLS(params.host, params.login, params.password, context=context)  # nosec: B321
+            try:
+                conn.set_pasv(pasv)
+                # Without prot_p() file payloads use cleartext despite TLS on the control connection.
+                conn.prot_p()
+            except BaseException:
+                with suppress(Exception):
+                    conn.close()
+                raise
+            self.conn = conn
 
         return self.conn

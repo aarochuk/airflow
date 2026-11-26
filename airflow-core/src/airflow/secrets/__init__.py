@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """
-Secrets framework provides means of getting connection objects from various sources.
+The Secrets framework provides a means of getting connection objects from various sources.
 
 The following sources are available:
 
@@ -27,15 +27,43 @@ The following sources are available:
 
 from __future__ import annotations
 
-__all__ = ["BaseSecretsBackend", "DEFAULT_SECRETS_SEARCH_PATH", "DEFAULT_SECRETS_SEARCH_PATH_WORKERS"]
+from airflow.utils.deprecation_tools import add_deprecated_classes
 
-from airflow.secrets.base_secrets import BaseSecretsBackend
+__all__ = ["BaseSecretsBackend", "DEFAULT_SECRETS_SEARCH_PATH"]
 
-DEFAULT_SECRETS_SEARCH_PATH = [
-    "airflow.secrets.environment_variables.EnvironmentVariablesBackend",
-    "airflow.secrets.metastore.MetastoreBackend",
-]
+from airflow.secrets.base_secrets import (
+    DEFAULT_SECRETS_SEARCH_PATH as DEFAULT_SECRETS_SEARCH_PATH,
+    BaseSecretsBackend,
+)
 
-DEFAULT_SECRETS_SEARCH_PATH_WORKERS = [
-    "airflow.secrets.environment_variables.EnvironmentVariablesBackend",
-]
+__deprecated_classes = {
+    "cache": {
+        "SecretCache": "airflow.sdk.execution_time.cache.SecretCache",
+    },
+}
+add_deprecated_classes(__deprecated_classes, __name__)
+
+
+def __getattr__(name):
+    if name == "DEFAULT_SECRETS_SEARCH_PATH_WORKERS":
+        import warnings
+
+        from airflow.utils.deprecation_tools import DeprecatedImportWarning
+
+        warnings.warn(
+            "airflow.secrets.DEFAULT_SECRETS_SEARCH_PATH_WORKERS is moved to the Task SDK. "
+            "Use airflow.sdk.execution_time.secrets.DEFAULT_SECRETS_SEARCH_PATH_WORKERS instead.",
+            DeprecatedImportWarning,
+            stacklevel=2,
+        )
+        try:
+            from airflow.sdk.execution_time.secrets import DEFAULT_SECRETS_SEARCH_PATH_WORKERS
+
+            return DEFAULT_SECRETS_SEARCH_PATH_WORKERS
+        except (ImportError, AttributeError):
+            # Back-compat for older Task SDK clients
+            return [
+                "airflow.secrets.environment_variables.EnvironmentVariablesBackend",
+            ]
+
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

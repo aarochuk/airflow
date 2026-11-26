@@ -16,23 +16,46 @@
 # under the License.
 from __future__ import annotations
 
+import re
+import warnings
 import weakref
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest import mock
 
 import pytest
 
-from airflow.exceptions import DuplicateTaskIdFound
+from airflow.sdk import (
+    DAG,
+    Asset,
+    Context,
+    Label,
+    Param,
+    PartitionedAtRuntime,
+    TaskGroup,
+    TriggerRule,
+    dag as dag_decorator,
+    task,
+    task_group,
+)
 from airflow.sdk.bases.operator import BaseOperator
-from airflow.sdk.definitions.dag import DAG, dag as dag_decorator
-from airflow.sdk.definitions.param import DagParam, Param, ParamsDict
+from airflow.sdk.bases.timetable import BaseTimetable
+from airflow.sdk.definitions._internal.loop import create_loop
+from airflow.sdk.definitions.param import DagParam, ParamsDict
+from airflow.sdk.exceptions import (
+    AirflowDagCycleException,
+    DuplicateTaskIdFound,
+    RemovedInAirflow4Warning,
+    TaskGroupCycleDeprecationWarning,
+)
+from airflow.utils.types import DagRunType
 
-DEFAULT_DATE = datetime(2016, 1, 1, tzinfo=timezone.utc)
+DEFAULT_DATE = datetime(2016, 1, 1, tzinfo=UTC)
 
 
 class TestDag:
     @pytest.mark.parametrize(
-        "dag_id, exc_type, exc_value",
+        ("dag_id", "exc_type", "exc_value"),
         [
             pytest.param(
                 123,
@@ -65,8 +88,26 @@ class TestDag:
 
         assert dag.topological_sort() == ()
 
+    def test_dag_topological_sort_task_group_cycle(self):
+        """A TaskGroup that depends on a sibling in a cycle, which check_cycle only warns about, still sorts."""
+        with DAG("dag", schedule=None, start_date=DEFAULT_DATE) as dag:
+            bridge = BaseOperator(task_id="bridge")
+            with TaskGroup("group"):
+                a = BaseOperator(task_id="a")
+                b = BaseOperator(task_id="b")
+            a >> bridge >> b
+        with pytest.warns(TaskGroupCycleDeprecationWarning):
+            dag.check_cycle()
+
+        assert [task.task_id for task in dag.topological_sort()] == ["bridge", "group.a", "group.b"]
+
     def test_dag_naive_start_date_string(self):
         DAG("DAG", schedule=None, default_args={"start_date": "2019-06-01"})
+
+    def test_dag_naive_start_date_constructor_default_args_string(self):
+        dag = DAG("DAG", start_date=DEFAULT_DATE, schedule=None, default_args={"start_date": "2019-06-01"})
+
+        assert dag.start_date == DEFAULT_DATE
 
     def test_dag_naive_start_end_dates_strings(self):
         DAG("DAG", schedule=None, default_args={"start_date": "2019-06-01", "end_date": "2019-06-05"})
@@ -141,6 +182,34 @@ class TestDag:
         assert op8.dag == dag
         assert op9.dag == dag2
 
+    def test_none_or_empty_access_control_does_not_warn(self) -> None:
+        """Ensure that `RemovedInAirflow4Warning` warnings do not arise when `access_control` is `None`."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _ = DAG("test-no-warnings-dag", access_control=None, schedule=None, start_date=DEFAULT_DATE)
+
+    @pytest.mark.parametrize(
+        "role_access_control_entry",
+        [
+            {},
+            {"DAGs": {}},
+            {"DAG Runs": {}},
+            {"DAGs": {}, "DAG Runs": {}},
+            {"DAGs": {"can_read"}},
+            {"DAG Runs": {"can_read"}},
+            {"DAGs": {"can_read"}, "DAG Runs": {"can_read"}},
+        ],
+    )
+    def test_non_empty_access_control_warns(self, role_access_control_entry: dict[str, set[str]]) -> None:
+        """Ensure that `RemovedInAirflow4Warning` warnings are triggered when `access_control` is non-empty."""
+        access_control = (
+            {"fake-role": role_access_control_entry}
+            if len(role_access_control_entry) > 0
+            else role_access_control_entry
+        )
+        with pytest.warns(RemovedInAirflow4Warning, match=re.escape("DAG.access_control is deprecated")):
+            _ = DAG("should-warn-dag", access_control=access_control, schedule=None, start_date=DEFAULT_DATE)
+
     def test_params_not_passed_is_empty_dict(self):
         """
         Test that when 'params' is _not_ passed to a new Dag, that the params
@@ -173,11 +242,15 @@ class TestDag:
         """
         params = {"param1": Param(type="string")}
 
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match="Dag 'my-dag' is not allowed to define a Schedule, "
+            "as there are required params without default values, or the default values are not valid.",
+        ):
             DAG("my-dag", schedule=timedelta(days=1), start_date=DEFAULT_DATE, params=params)
 
     def test_roots(self):
-        """Verify if dag.roots returns the root tasks of a DAG."""
+        """Verify if dag.roots returns the root tasks of a Dag."""
         with DAG("test_dag", schedule=None, start_date=DEFAULT_DATE) as dag:
             op1 = BaseOperator(task_id="t1")
             op2 = BaseOperator(task_id="t2")
@@ -189,7 +262,7 @@ class TestDag:
             assert set(dag.roots) == {op1, op2}
 
     def test_leaves(self):
-        """Verify if dag.leaves returns the leaf tasks of a DAG."""
+        """Verify if dag.leaves returns the leaf tasks of a Dag."""
         with DAG("test_dag", schedule=None, start_date=DEFAULT_DATE) as dag:
             op1 = BaseOperator(task_id="t1")
             op2 = BaseOperator(task_id="t2")
@@ -204,7 +277,7 @@ class TestDag:
         """Verify tasks with Duplicate task_id raises error"""
         with DAG("test_dag", schedule=None, start_date=DEFAULT_DATE) as dag:
             op1 = BaseOperator(task_id="t1")
-            with pytest.raises(DuplicateTaskIdFound, match="Task id 't1' has already been added to the DAG"):
+            with pytest.raises(DuplicateTaskIdFound, match="Task id 't1' has already been added to the Dag"):
                 BaseOperator(task_id="t1")
 
         assert dag.task_dict == {op1.task_id: op1}
@@ -213,7 +286,7 @@ class TestDag:
         """Verify tasks with Duplicate task_id raises error"""
         dag = DAG("test_dag", schedule=None, start_date=DEFAULT_DATE)
         op1 = BaseOperator(task_id="t1", dag=dag)
-        with pytest.raises(DuplicateTaskIdFound, match="Task id 't1' has already been added to the DAG"):
+        with pytest.raises(DuplicateTaskIdFound, match="Task id 't1' has already been added to the Dag"):
             BaseOperator(task_id="t1", dag=dag)
 
         assert dag.task_dict == {op1.task_id: op1}
@@ -277,6 +350,90 @@ class TestDag:
         # Make sure we don't affect the original!
         assert task.task_group.upstream_group_ids is not copied_task.task_group.upstream_group_ids
 
+    def test_partial_subset_with_depth(self):
+        """Test that partial_subset respects the depth parameter for filtering."""
+        with DAG("test_dag", schedule=None, start_date=DEFAULT_DATE) as dag:
+            # Create a linear chain: t1 -> t2 -> t3 -> t4 -> t5
+            t1 = BaseOperator(task_id="t1")
+            t2 = BaseOperator(task_id="t2")
+            t3 = BaseOperator(task_id="t3")
+            t4 = BaseOperator(task_id="t4")
+            t5 = BaseOperator(task_id="t5")
+            t1 >> t2 >> t3 >> t4 >> t5
+
+        # Test downstream with depth=1 (only direct downstream)
+        partial = dag.partial_subset("t3", include_downstream=True, include_upstream=False, depth=1)
+        assert set(partial.task_dict.keys()) == {"t3", "t4"}
+
+        # Test downstream with depth=2
+        partial = dag.partial_subset("t3", include_downstream=True, include_upstream=False, depth=2)
+        assert set(partial.task_dict.keys()) == {"t3", "t4", "t5"}
+
+        # Test upstream with depth=1 (only direct upstream)
+        partial = dag.partial_subset("t3", include_downstream=False, include_upstream=True, depth=1)
+        assert set(partial.task_dict.keys()) == {"t2", "t3"}
+
+        # Test upstream with depth=2
+        partial = dag.partial_subset("t3", include_downstream=False, include_upstream=True, depth=2)
+        assert set(partial.task_dict.keys()) == {"t1", "t2", "t3"}
+
+        # Test both directions with depth=1
+        partial = dag.partial_subset("t3", include_downstream=True, include_upstream=True, depth=1)
+        assert set(partial.task_dict.keys()) == {"t2", "t3", "t4"}
+
+        # Test with depth=None (unlimited, original behavior - should get all upstream/downstream)
+        partial = dag.partial_subset("t3", include_downstream=True, include_upstream=True, depth=None)
+        assert set(partial.task_dict.keys()) == {"t1", "t2", "t3", "t4", "t5"}
+
+    def test_partial_subset_with_depth_branching(self):
+        """Test partial_subset with depth on a branching DAG structure."""
+        with DAG("test_dag", schedule=None, start_date=DEFAULT_DATE) as dag:
+            # Create a diamond pattern:
+            #     t1
+            #    /  \
+            #   t2  t3
+            #    \  /
+            #     t4
+            #     |
+            #     t5
+            t1 = BaseOperator(task_id="t1")
+            t2 = BaseOperator(task_id="t2")
+            t3 = BaseOperator(task_id="t3")
+            t4 = BaseOperator(task_id="t4")
+            t5 = BaseOperator(task_id="t5")
+            t1 >> [t2, t3]
+            [t2, t3] >> t4
+            t4 >> t5
+
+        # From t4, depth=1 upstream should get both t2 and t3
+        partial = dag.partial_subset("t4", include_downstream=False, include_upstream=True, depth=1)
+        assert set(partial.task_dict.keys()) == {"t2", "t3", "t4"}
+
+        # From t4, depth=2 upstream should get t1, t2, t3
+        partial = dag.partial_subset("t4", include_downstream=False, include_upstream=True, depth=2)
+        assert set(partial.task_dict.keys()) == {"t1", "t2", "t3", "t4"}
+
+        # From t1, depth=1 downstream should get t2 and t3
+        partial = dag.partial_subset("t1", include_downstream=True, include_upstream=False, depth=1)
+        assert set(partial.task_dict.keys()) == {"t1", "t2", "t3"}
+
+        # From t1, depth=2 downstream should get t2, t3, and t4
+        partial = dag.partial_subset("t1", include_downstream=True, include_upstream=False, depth=2)
+        assert set(partial.task_dict.keys()) == {"t1", "t2", "t3", "t4"}
+
+    def test_partial_subset_with_negative_depth(self):
+        """Test that partial_subset rejects negative depth values."""
+        with DAG("test_dag", schedule=None, start_date=DEFAULT_DATE) as dag:
+            t1 = BaseOperator(task_id="t1")
+            t2 = BaseOperator(task_id="t2")
+            t1 >> t2
+
+        with pytest.raises(ValueError, match="depth must be non-negative, got -1"):
+            dag.partial_subset("t1", include_downstream=True, depth=-1)
+
+        with pytest.raises(ValueError, match="depth must be non-negative, got -5"):
+            dag.partial_subset("t1", include_upstream=True, depth=-5)
+
     def test_dag_owner_links(self):
         dag = DAG(
             "dag",
@@ -297,7 +454,7 @@ class TestDag:
             dag.validate()
 
     def test_continuous_schedule_linmits_max_active_runs(self):
-        from airflow.timetables.simple import ContinuousTimetable
+        from airflow.sdk.definitions.timetables.simple import ContinuousTimetable
 
         dag = DAG("continuous", start_date=DEFAULT_DATE, schedule="@continuous", max_active_runs=1)
         assert isinstance(dag.timetable, ContinuousTimetable)
@@ -310,10 +467,61 @@ class TestDag:
         with pytest.raises(ValueError, match="ContinuousTimetable requires max_active_runs <= 1"):
             dag = DAG("continuous", start_date=DEFAULT_DATE, schedule="@continuous", max_active_runs=25)
 
+    def test_only_partitioned_at_runtime_has_partitioned_at_runtime_flag(self):
+        """Regression guard: across every BaseTimetable subclass, only PartitionedAtRuntime sets partitioned_at_runtime=True."""
+
+        def all_subclasses(cls):
+            for sub in cls.__subclasses__():
+                yield sub
+                yield from all_subclasses(sub)
+
+        flagged = {c for c in all_subclasses(BaseTimetable) if c.partitioned_at_runtime}
+        assert flagged == {PartitionedAtRuntime}
+
+    def test_dag_add_task_checks_trigger_rule(self):
+        # A non fail stop dag should allow any trigger rule
+        from airflow.sdk.exceptions import FailFastDagInvalidTriggerRule
+
+        class CustomOperator(BaseOperator):
+            def execute(self, context):
+                pass
+
+        task_with_non_default_trigger_rule = CustomOperator(
+            task_id="task_with_non_default_trigger_rule", trigger_rule=TriggerRule.ALWAYS
+        )
+        non_fail_fast_dag = DAG(
+            dag_id="test_dag_add_task_checks_trigger_rule",
+            schedule=None,
+            start_date=DEFAULT_DATE,
+            fail_fast=False,
+        )
+        non_fail_fast_dag.add_task(task_with_non_default_trigger_rule)
+
+        # a fail stop dag should allow default trigger rule
+        from airflow.sdk.definitions._internal.abstractoperator import DEFAULT_TRIGGER_RULE
+
+        fail_fast_dag = DAG(
+            dag_id="test_dag_add_task_checks_trigger_rule",
+            schedule=None,
+            start_date=DEFAULT_DATE,
+            fail_fast=True,
+        )
+        task_with_default_trigger_rule = CustomOperator(
+            task_id="task_with_default_trigger_rule", trigger_rule=DEFAULT_TRIGGER_RULE
+        )
+        fail_fast_dag.add_task(task_with_default_trigger_rule)
+
+        # a fail stop dag should not allow a non-default trigger rule
+        task_with_non_default_trigger_rule = CustomOperator(
+            task_id="task_with_non_default_trigger_rule", trigger_rule=TriggerRule.ALWAYS
+        )
+        with pytest.raises(FailFastDagInvalidTriggerRule):
+            fail_fast_dag.add_task(task_with_non_default_trigger_rule)
+
 
 # Test some of the arg validation. This is not all the validations we perform, just some of them.
 @pytest.mark.parametrize(
-    ["attr", "value"],
+    ("attr", "value"),
     [
         pytest.param("max_consecutive_failed_dag_runs", "not_an_int", id="max_consecutive_failed_dag_runs"),
         pytest.param("dagrun_timeout", "not_an_int", id="dagrun_timeout"),
@@ -326,7 +534,7 @@ def test_invalid_type_for_args(attr: str, value: Any):
 
 
 @pytest.mark.parametrize(
-    "tags, should_pass",
+    ("tags", "should_pass"),
     [
         pytest.param([], True, id="empty tags"),
         pytest.param(["a normal tag"], True, id="one tag"),
@@ -339,12 +547,12 @@ def test__tags_length(tags: list[str], should_pass: bool):
     if should_pass:
         DAG("test-dag", schedule=None, tags=tags)
     else:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="tag cannot be longer than 100 characters"):
             DAG("test-dag", schedule=None, tags=tags)
 
 
 @pytest.mark.parametrize(
-    "input_tags, expected_result",
+    ("input_tags", "expected_result"),
     [
         pytest.param([], set(), id="empty tags"),
         pytest.param(
@@ -369,6 +577,109 @@ def test__tags_duplicates(input_tags: list[str], expected_result: set[str]):
     assert result.tags == expected_result
 
 
+@pytest.mark.parametrize(
+    ("schedule", "input_val", "expected"),
+    [
+        pytest.param("@daily", None, None, id="none"),
+        pytest.param(
+            "@daily",
+            [DagRunType.SCHEDULED],
+            frozenset([DagRunType.SCHEDULED]),
+            id="list_single",
+        ),
+        pytest.param(
+            "@daily",
+            [DagRunType.SCHEDULED, DagRunType.MANUAL],
+            frozenset([DagRunType.SCHEDULED, DagRunType.MANUAL]),
+            id="list_multiple",
+        ),
+        pytest.param(
+            "@daily",
+            {DagRunType.SCHEDULED},
+            frozenset([DagRunType.SCHEDULED]),
+            id="set",
+        ),
+        pytest.param(
+            "@daily",
+            DagRunType.SCHEDULED,
+            frozenset([DagRunType.SCHEDULED]),
+            id="single_enum",
+        ),
+        pytest.param(
+            None,
+            DagRunType.MANUAL,
+            frozenset([DagRunType.MANUAL]),
+            id="no_schedule_single_enum",
+        ),
+        pytest.param(
+            None,
+            [DagRunType.MANUAL, DagRunType.BACKFILL_JOB],
+            frozenset([DagRunType.MANUAL, DagRunType.BACKFILL_JOB]),
+            id="no_schedule_allow_manual_and_backfill",
+        ),
+    ],
+)
+def test_allowed_run_types_converter(schedule, input_val, expected):
+    dag = DAG("test-allowed-types", schedule=schedule, allowed_run_types=input_val)
+    assert dag.allowed_run_types == expected
+
+
+@pytest.mark.parametrize(
+    ("schedule", "allowed_run_types", "match"),
+    [
+        pytest.param(
+            "@daily",
+            [DagRunType.MANUAL],
+            "allowed_run_types must include SCHEDULED",
+            id="scheduled_dag_missing_scheduled",
+        ),
+        pytest.param(
+            "@hourly",
+            [DagRunType.BACKFILL_JOB],
+            "allowed_run_types must include SCHEDULED",
+            id="hourly_dag_missing_scheduled",
+        ),
+        pytest.param(
+            None,
+            [DagRunType.SCHEDULED],
+            "allowed_run_types must include MANUAL",
+            id="no_schedule_missing_manual",
+        ),
+        pytest.param(
+            None,
+            DagRunType.BACKFILL_JOB,
+            "allowed_run_types must include MANUAL",
+            id="no_schedule_single_missing_manual",
+        ),
+    ],
+)
+def test_allowed_run_types_conflicting_schedule(schedule, allowed_run_types, match):
+    with pytest.raises(ValueError, match=match):
+        DAG("test-allowed-conflict", schedule=schedule, allowed_run_types=allowed_run_types)
+
+
+def test_allowed_run_types_asset_triggered_missing_with_asset_schedule():
+    with pytest.raises(ValueError, match="allowed_run_types must include ASSET_TRIGGERED"):
+        DAG(
+            "test-allowed-asset",
+            schedule=[Asset("test")],
+            allowed_run_types=[DagRunType.MANUAL],
+        )
+
+
+def test_allowed_run_types_uses_asset_triggered_behavior():
+    class CustomAssetTriggeredTimetable(BaseTimetable):
+        asset_triggered = True
+        asset_condition = Asset("test")
+
+    with pytest.raises(ValueError, match="allowed_run_types must include ASSET_TRIGGERED"):
+        DAG(
+            "test-allowed-custom-asset",
+            schedule=CustomAssetTriggeredTimetable(),
+            allowed_run_types=[DagRunType.MANUAL],
+        )
+
+
 def test__tags_mutable():
     expected_tags = {"6", "7"}
     test_dag = DAG("test-dag")
@@ -380,17 +691,137 @@ def test__tags_mutable():
 
 
 def test_create_dag_while_active_context():
-    """Test that we can safely create a DAG whilst a DAG is activated via ``with dag1:``."""
+    """Test that we can safely create a Dag whilst a Dag is activated via ``with dag1:``."""
     with DAG(dag_id="simple_dag"):
         DAG(dag_id="dag2")
         # No asserts needed, it just needs to not fail
+
+
+@pytest.mark.parametrize("max_active_runs", [0, 1])
+def test_continuous_schedule_interval_limits_max_active_runs(max_active_runs):
+    from airflow.sdk.definitions.timetables.simple import ContinuousTimetable
+
+    dag = DAG(dag_id="continuous", schedule="@continuous", max_active_runs=max_active_runs)
+    assert isinstance(dag.timetable, ContinuousTimetable)
+    assert dag.max_active_runs == max_active_runs
+
+
+def test_continuous_schedule_interval_limits_max_active_runs_error():
+    with pytest.raises(
+        ValueError, match="Invalid max_active_runs: ContinuousTimetable requires max_active_runs <= 1"
+    ):
+        DAG(dag_id="continuous", schedule="@continuous", max_active_runs=2)
+
+
+def _build_dag_with_loop_and_outside_task():
+    @task_group
+    def body():
+        @task
+        def inner():
+            return 1
+
+        inner()
+
+    @task
+    def outside():
+        return 2
+
+    with DAG("result_with_loop", schedule=None) as dag:
+        create_loop(body, max_iterations=2)
+        outside()
+    return dag
+
+
+def test_add_result_rejects_task_inside_a_loop():
+    dag = _build_dag_with_loop_and_outside_task()
+    inner = dag.get_task("body.inner")
+
+    with pytest.raises(ValueError, match="'body.inner' is inside a loop"):
+        dag.add_result(inner.output)
+
+    assert inner.returns_dag_result is False
+
+
+def test_add_result_accepts_task_outside_a_loop():
+    dag = _build_dag_with_loop_and_outside_task()
+    outside = dag.get_task("outside")
+
+    dag.add_result(outside.output)
+
+    assert outside.returns_dag_result is True
+
+
+@task
+def _consume(value):
+    return value
+
+
+@task_group
+def produce_body():
+    @task
+    def produce():
+        return [1, 2]
+
+    produce()
+
+
+def _expand_task_outside(dag):
+    _consume.expand(value=dag.get_task("produce_body.produce").output)
+
+
+def _expand_group_outside(dag):
+    @task_group
+    def outside_group(value):
+        _consume(value)
+
+    outside_group.expand(value=dag.get_task("produce_body.produce").output)
+
+
+def _expand_in_another_loop(dag):
+    @task_group
+    def other_body():
+        _consume.expand(value=dag.get_task("produce_body.produce").output)
+
+    create_loop(other_body, max_iterations=2)
+
+
+@pytest.mark.parametrize(
+    ("build_consumer", "consumer_id"),
+    [
+        pytest.param(_expand_task_outside, "_consume", id="mapped-task"),
+        pytest.param(_expand_group_outside, "outside_group", id="mapped-task-group"),
+        pytest.param(_expand_in_another_loop, "other_body._consume", id="other-loop"),
+    ],
+)
+def test_validate_rejects_expansion_over_a_loop_task_from_outside_the_loop(build_consumer, consumer_id):
+    with DAG("expand_loop_output", schedule=None) as dag:
+        create_loop(produce_body, max_iterations=2)
+        build_consumer(dag)
+
+    with pytest.raises(ValueError, match=f"'{consumer_id}' cannot expand over 'produce_body.produce'"):
+        dag.validate()
+
+
+def test_validate_accepts_expansion_over_a_loop_task_in_the_same_loop():
+    @task_group
+    def body():
+        @task
+        def produce():
+            return [1, 2]
+
+        _consume.expand(value=produce())
+
+    with DAG("expand_inside_loop", schedule=None) as dag:
+        create_loop(body, max_iterations=2)
+
+    dag.validate()
 
 
 class TestDagDecorator:
     DEFAULT_ARGS = {
         "owner": "test",
         "depends_on_past": True,
-        "start_date": datetime.now(tz=timezone.utc),
+        "start_date": datetime.now(tz=UTC),
         "retries": 1,
         "retry_delay": timedelta(minutes=1),
     }
@@ -414,6 +845,15 @@ class TestDagDecorator:
         assert dag.dag_id == "noop_pipeline"
         assert dag.fileloc == __file__
 
+    def test_bundle_name_defaults_to_none(self):
+        dag = DAG("test_dag", schedule=None)
+        assert dag.bundle_name is None
+
+    def test_bundle_name_can_be_set(self):
+        dag = DAG("test_dag", schedule=None)
+        dag.bundle_name = "my_bundle"
+        assert dag.bundle_name == "my_bundle"
+
     def test_set_dag_id(self):
         """Test that checks you can set dag_id from decorator."""
 
@@ -435,18 +875,18 @@ class TestDagDecorator:
         assert dag.dag_id == "noop_pipeline"
 
     @pytest.mark.parametrize(
-        argnames=["dag_doc_md", "expected_doc_md"],
-        argvalues=[
+        ("dag_doc_md", "expected_doc_md"),
+        [
             pytest.param("dag docs.", "dag docs.", id="use_dag_doc_md"),
-            pytest.param(None, "Regular DAG documentation", id="use_dag_docstring"),
+            pytest.param(None, "Regular Dag documentation", id="use_dag_docstring"),
         ],
     )
     def test_documentation_added(self, dag_doc_md, expected_doc_md):
-        """Test that @dag uses function docs as doc_md for DAG object if doc_md is not explicitly set."""
+        """Test that @dag uses function docs as doc_md for Dag object if doc_md is not explicitly set."""
 
         @dag_decorator(schedule=None, default_args=self.DEFAULT_ARGS, doc_md=dag_doc_md)
         def noop_pipeline():
-            """Regular DAG documentation"""
+            """Regular Dag documentation"""
 
         dag = noop_pipeline()
         assert isinstance(dag, DAG)
@@ -464,26 +904,26 @@ class TestDagDecorator:
             noop_pipeline()
 
     def test_documentation_template_rendered(self):
-        """Test that @dag uses function docs as doc_md for DAG object"""
+        """Test that @dag uses function docs as doc_md for Dag object"""
 
         @dag_decorator(schedule=None, default_args=self.DEFAULT_ARGS)
         def noop_pipeline():
             """
             {% if True %}
-               Regular DAG documentation
+               Regular Dag documentation
             {% endif %}
             """
 
         dag = noop_pipeline()
         assert dag.dag_id == "noop_pipeline"
-        assert "Regular DAG documentation" in dag.doc_md
+        assert "Regular Dag documentation" in dag.doc_md
 
     def test_resolve_documentation_template_file_not_rendered(self, tmp_path):
-        """Test that @dag uses function docs as doc_md for DAG object"""
+        """Test that @dag uses function docs as doc_md for Dag object"""
 
         raw_content = """
         {% if True %}
-            External Markdown DAG documentation
+            External Markdown Dag documentation
         {% endif %}
         """
 
@@ -499,7 +939,6 @@ class TestDagDecorator:
 
     def test_dag_param_resolves(self):
         """Test that dag param is correctly resolved by operator"""
-        from airflow.decorators import task
 
         @dag_decorator(schedule=None, default_args=self.DEFAULT_ARGS)
         def xcom_pass_to_op(value=self.VALUE):
@@ -515,3 +954,438 @@ class TestDagDecorator:
         assert isinstance(self.operator.op_args[0], DagParam)
         self.operator.render_template_fields({})
         assert self.operator.op_args[0] == 42
+
+    def test_ignore_function_result(self, monkeypatch):
+        monkeypatch.setattr(DAG, "add_result", mock.create_autospec(DAG.add_result))
+
+        @dag_decorator
+        def d():
+            @task
+            def return_num(num):
+                return num
+
+            return_num(123)
+            return 123
+
+        dag = d()
+        assert dag.get_task("return_num").returns_dag_result is False
+        assert DAG.add_result.mock_calls == []
+
+    def test_function_result_set_to_xcom_arg(self):
+        @dag_decorator
+        def d():
+            @task
+            def return_num(num):
+                return num
+
+            return return_num(123)
+
+        dag = d()
+        assert dag.get_task("return_num").returns_dag_result is True
+
+
+class DoNothingOperator(BaseOperator):
+    """
+    An operator that does nothing.
+    Used to test Dag cycle detection.
+    """
+
+    def execute(self, context: Context) -> None:
+        pass
+
+
+def _add_sibling_groups_cycle():
+    with TaskGroup("group1"):
+        a1 = DoNothingOperator(task_id="a1")
+        a2 = DoNothingOperator(task_id="a2")
+    with TaskGroup("group2"):
+        b1 = DoNothingOperator(task_id="b1")
+        b2 = DoNothingOperator(task_id="b2")
+    a1 >> b1
+    b2 >> a2
+    return [a1, b2], [a2, b1]
+
+
+def _make_sibling_groups_cycle_dag():
+    with DAG("dag", schedule=None) as dag:
+        firsts, lasts = _add_sibling_groups_cycle()
+        DoNothingOperator(task_id="start") >> firsts
+        lasts >> DoNothingOperator(task_id="end")
+    return dag
+
+
+def _make_group_bridged_by_outside_task_dag():
+    with DAG("dag", schedule=None) as dag:
+        with TaskGroup("group"):
+            a = DoNothingOperator(task_id="a")
+            b = DoNothingOperator(task_id="b")
+        a >> DoNothingOperator(task_id="bridge") >> b
+    return dag
+
+
+def _make_group_reentered_after_in_group_upstream_dag():
+    with DAG("dag", schedule=None) as dag:
+        with TaskGroup("group"):
+            a = DoNothingOperator(task_id="a")
+            b = DoNothingOperator(task_id="b")
+            a >> b
+        a >> DoNothingOperator(task_id="bridge") >> b
+    return dag
+
+
+def _make_sibling_groups_cycle_through_non_roots_dag():
+    with DAG("dag", schedule=None) as dag:
+        with TaskGroup("group1"):
+            a1 = DoNothingOperator(task_id="a1")
+            a2 = DoNothingOperator(task_id="a2")
+            a1 >> a2
+        with TaskGroup("group2"):
+            b1 = DoNothingOperator(task_id="b1")
+            b2 = DoNothingOperator(task_id="b2")
+            b1 >> b2
+        a1 >> b2
+        b1 >> a2
+    return dag
+
+
+def _make_three_group_ring_dag():
+    with DAG("dag", schedule=None) as dag:
+        tasks = {}
+        for group_id in ("g0", "g1", "g2"):
+            with TaskGroup(group_id):
+                tasks[group_id] = (DoNothingOperator(task_id="first"), DoNothingOperator(task_id="second"))
+        tasks["g1"][0] >> tasks["g0"][1]
+        tasks["g2"][0] >> tasks["g1"][1]
+        tasks["g0"][0] >> tasks["g2"][1]
+    return dag
+
+
+def _make_two_cycles_dag():
+    with DAG("dag", schedule=None) as dag:
+        _add_sibling_groups_cycle()
+        with TaskGroup("outer"):
+            _add_sibling_groups_cycle()
+    return dag
+
+
+def _make_setup_teardown_dag(*, work_in_group: bool):
+    with DAG("dag", schedule=None) as dag:
+        with TaskGroup("cluster") as cluster:
+            create = DoNothingOperator(task_id="create")
+            delete = DoNothingOperator(task_id="delete")
+        work = DoNothingOperator(task_id="work", task_group=cluster if work_in_group else None)
+        create >> work >> delete.as_teardown(setups=create)
+    return dag
+
+
+def _make_setup_teardown_around_many_tasks_dag():
+    with DAG("dag", schedule=None) as dag:
+        with TaskGroup("cluster"):
+            create = DoNothingOperator(task_id="create")
+            delete = DoNothingOperator(task_id="delete")
+        work = [DoNothingOperator(task_id=f"work_{i}") for i in range(100)]
+        create >> work >> delete.as_teardown(setups=create)
+    return dag
+
+
+def _make_many_bridged_groups_dag(count: int):
+    with DAG("dag", schedule=None) as dag:
+        for i in range(count):
+            with TaskGroup(f"group_{i}"):
+                a = DoNothingOperator(task_id="a")
+                b = DoNothingOperator(task_id="b")
+            a >> DoNothingOperator(task_id=f"bridge_{i}") >> b
+    return dag
+
+
+def _make_group_with_bridge_inside_dag():
+    with DAG("dag", schedule=None) as dag:
+        with TaskGroup("group"):
+            a = DoNothingOperator(task_id="a")
+            b = DoNothingOperator(task_id="b")
+            a >> DoNothingOperator(task_id="bridge") >> b
+    return dag
+
+
+def _make_mapped_group_with_always_task_dag():
+    with DAG("dag", schedule=None) as dag:
+
+        @task(trigger_rule=TriggerRule.ALWAYS)
+        def work(value):
+            return value
+
+        @task_group
+        def group(value):
+            work(value)
+
+        group.expand(value=[1, 2, 3])
+    return dag
+
+
+class TestCycleTester:
+    def test_cycle_empty(self):
+        # test empty
+        dag = DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"})
+
+        assert not dag.check_cycle()
+
+    def test_cycle_single_task(self):
+        # test single task
+        dag = DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"})
+
+        with dag:
+            DoNothingOperator(task_id="A")
+
+        assert not dag.check_cycle()
+
+    def test_semi_complex(self):
+        dag = DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"})
+
+        # A -> B -> C
+        #      B -> D
+        # E -> F
+        with dag:
+            create_cluster = DoNothingOperator(task_id="c")
+            pod_task = DoNothingOperator(task_id="p")
+            pod_task_xcom = DoNothingOperator(task_id="x")
+            delete_cluster = DoNothingOperator(task_id="d")
+            pod_task_xcom_result = DoNothingOperator(task_id="r")
+            create_cluster >> pod_task >> delete_cluster
+            create_cluster >> pod_task_xcom >> delete_cluster
+            pod_task_xcom >> pod_task_xcom_result
+
+        assert not dag.check_cycle()
+
+    def test_cycle_no_cycle(self):
+        # test no cycle
+        dag = DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"})
+
+        # A -> B -> C
+        #      B -> D
+        # E -> F
+        with dag:
+            op1 = DoNothingOperator(task_id="A")
+            op2 = DoNothingOperator(task_id="B")
+            op3 = DoNothingOperator(task_id="C")
+            op4 = DoNothingOperator(task_id="D")
+            op5 = DoNothingOperator(task_id="E")
+            op6 = DoNothingOperator(task_id="F")
+            op1.set_downstream(op2)
+            op2.set_downstream(op3)
+            op2.set_downstream(op4)
+            op5.set_downstream(op6)
+
+        assert not dag.check_cycle()
+
+    def test_cycle_loop(self):
+        # test self loop
+        dag = DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"})
+
+        # A -> A
+        with dag:
+            op1 = DoNothingOperator(task_id="A")
+            op1.set_downstream(op1)
+
+        with pytest.raises(AirflowDagCycleException):
+            assert not dag.check_cycle()
+
+    def test_cycle_downstream_loop(self):
+        # test downstream self loop
+        dag = DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"})
+
+        # A -> B -> C -> D -> E -> E
+        with dag:
+            op1 = DoNothingOperator(task_id="A")
+            op2 = DoNothingOperator(task_id="B")
+            op3 = DoNothingOperator(task_id="C")
+            op4 = DoNothingOperator(task_id="D")
+            op5 = DoNothingOperator(task_id="E")
+            op1.set_downstream(op2)
+            op2.set_downstream(op3)
+            op3.set_downstream(op4)
+            op4.set_downstream(op5)
+            op5.set_downstream(op5)
+
+        with pytest.raises(AirflowDagCycleException):
+            assert not dag.check_cycle()
+
+    def test_cycle_large_loop(self):
+        # large loop
+        dag = DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"})
+
+        # A -> B -> C -> D -> E -> A
+        with dag:
+            start = DoNothingOperator(task_id="start")
+            current = start
+
+            for i in range(10000):
+                next_task = DoNothingOperator(task_id=f"task_{i}")
+                current.set_downstream(next_task)
+                current = next_task
+
+            current.set_downstream(start)
+        with pytest.raises(AirflowDagCycleException):
+            assert not dag.check_cycle()
+
+    def test_cycle_arbitrary_loop(self):
+        # test arbitrary loop
+        dag = DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"})
+
+        # E-> A -> B -> F -> A
+        #       -> C -> F
+        with dag:
+            op1 = DoNothingOperator(task_id="A")
+            op2 = DoNothingOperator(task_id="B")
+            op3 = DoNothingOperator(task_id="C")
+            op4 = DoNothingOperator(task_id="E")
+            op5 = DoNothingOperator(task_id="F")
+            op1.set_downstream(op2)
+            op1.set_downstream(op3)
+            op4.set_downstream(op1)
+            op3.set_downstream(op5)
+            op2.set_downstream(op5)
+            op5.set_downstream(op1)
+
+        with pytest.raises(AirflowDagCycleException):
+            assert not dag.check_cycle()
+
+    def test_cycle_task_group_with_edge_labels(self):
+        # Test a cycle is not detected when Labels are used between tasks in Task Groups.
+
+        dag = DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"})
+
+        with dag:
+            with TaskGroup(group_id="group"):
+                op1 = DoNothingOperator(task_id="A")
+                op2 = DoNothingOperator(task_id="B")
+
+                op1 >> Label("label") >> op2
+
+        assert not dag.check_cycle()
+
+    @pytest.mark.parametrize(
+        ("make_dag", "expected_cycles"),
+        [
+            pytest.param(_make_sibling_groups_cycle_dag, "group1 and group2", id="sibling-groups"),
+            pytest.param(_make_group_bridged_by_outside_task_dag, "group and bridge", id="bridged-group"),
+            pytest.param(
+                _make_group_reentered_after_in_group_upstream_dag,
+                "group and bridge",
+                id="group-reentered-after-in-group-upstream",
+            ),
+            pytest.param(
+                _make_sibling_groups_cycle_through_non_roots_dag,
+                "group1 and group2",
+                id="sibling-groups-through-non-roots",
+            ),
+            pytest.param(_make_three_group_ring_dag, "g0, g1 and g2", id="three-group-ring"),
+            pytest.param(
+                _make_two_cycles_dag,
+                "group1 and group2; outer.group1 and outer.group2",
+                id="root-and-nested-cycles",
+            ),
+            pytest.param(
+                lambda: _make_setup_teardown_dag(work_in_group=False),
+                "cluster and work",
+                id="setup-teardown-around-outside-task",
+            ),
+        ],
+    )
+    def test_task_group_cycle_warns(self, make_dag, expected_cycles):
+        dag = make_dag()
+
+        with pytest.warns(TaskGroupCycleDeprecationWarning) as record:
+            dag.check_cycle()
+
+        assert len(record) == 1
+        assert str(record[0].message).startswith(
+            f"Dag 'dag': {expected_cycles} depend on each other in a cycle. "
+        )
+
+    @pytest.mark.parametrize(
+        ("make_dag", "expected_start"),
+        [
+            pytest.param(
+                _make_setup_teardown_around_many_tasks_dag,
+                "Dag 'dag': cluster, work_0, work_1, work_2, work_3 and 96 more depend on each other in a "
+                "cycle. ",
+                id="cycle-members",
+            ),
+            pytest.param(
+                lambda: _make_many_bridged_groups_dag(11),
+                f"Dag 'dag': {'; '.join(f'group_{i} and bridge_{i}' for i in range(10))} depend on each "
+                "other in a cycle (1 more cycle not listed). ",
+                id="one-unlisted-cycle",
+            ),
+            pytest.param(
+                lambda: _make_many_bridged_groups_dag(12),
+                f"Dag 'dag': {'; '.join(f'group_{i} and bridge_{i}' for i in range(10))} depend on each "
+                "other in a cycle (2 more cycles not listed). ",
+                id="unlisted-cycles",
+            ),
+        ],
+    )
+    def test_task_group_cycle_warning_caps_listed_ids(self, make_dag, expected_start):
+        dag = make_dag()
+
+        with pytest.warns(TaskGroupCycleDeprecationWarning) as record:
+            dag.check_cycle()
+
+        assert len(record) == 1
+        assert str(record[0].message).startswith(expected_start)
+
+    @pytest.mark.parametrize(
+        "make_dag",
+        [
+            pytest.param(_make_group_with_bridge_inside_dag, id="bridge-inside-group"),
+            pytest.param(lambda: _make_setup_teardown_dag(work_in_group=True), id="setup-teardown-in-group"),
+            pytest.param(_make_mapped_group_with_always_task_dag, id="mapped-group-with-always-task"),
+        ],
+    )
+    def test_acyclic_task_groups_do_not_warn(self, make_dag):
+        dag = make_dag()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", TaskGroupCycleDeprecationWarning)
+            dag.check_cycle()
+
+
+class TestDagGetItem:
+    def test_getitem_returns_task(self):
+        dag = DAG("test_dag", schedule=None, start_date=DEFAULT_DATE)
+        with dag:
+            op = DoNothingOperator(task_id="my_task")
+        assert dag["my_task"] is op
+
+    def test_getitem_returns_task_group(self):
+        dag = DAG("test_dag", schedule=None, start_date=DEFAULT_DATE)
+        with dag:
+            with TaskGroup(group_id="section") as tg:
+                DoNothingOperator(task_id="t")
+        assert dag["section"] is tg
+
+    def test_getitem_nested_task_by_qualified_id(self):
+        dag = DAG("test_dag", schedule=None, start_date=DEFAULT_DATE)
+        with dag:
+            with TaskGroup(group_id="section"):
+                op = DoNothingOperator(task_id="t")
+        assert dag["section.t"] is op
+
+    def test_getitem_nested_task_via_chained_access(self):
+        dag = DAG("test_dag", schedule=None, start_date=DEFAULT_DATE)
+        with dag:
+            with TaskGroup(group_id="section"):
+                op = DoNothingOperator(task_id="t")
+        assert dag["section"]["t"] is op
+
+    def test_getitem_missing_raises_node_not_found(self):
+        from airflow.sdk.exceptions import NodeNotFound
+
+        dag = DAG("test_dag", schedule=None, start_date=DEFAULT_DATE)
+        with pytest.raises(NodeNotFound):
+            dag["nonexistent"]
+
+    def test_getitem_missing_is_key_error(self):
+        dag = DAG("test_dag", schedule=None, start_date=DEFAULT_DATE)
+        with pytest.raises(KeyError):
+            dag["nonexistent"]

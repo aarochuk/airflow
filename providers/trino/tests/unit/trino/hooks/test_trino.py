@@ -25,13 +25,13 @@ from unittest.mock import patch
 import pytest
 from trino.transaction import IsolationLevel
 
-from airflow.exceptions import AirflowException
 from airflow.models import Connection
 from airflow.providers.common.compat.openlineage.facet import (
     Dataset,
     SchemaDatasetFacet,
     SchemaDatasetFacetFields,
 )
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.providers.trino.hooks.trino import TrinoHook
 
@@ -109,7 +109,10 @@ class TestTrinoHookConn:
             extra=json.dumps(extras),
         )
         with pytest.raises(
-            AirflowException, match=re.escape("The 'kerberos' authorization type doesn't support password.")
+            AirflowException,
+            match=re.escape(
+                "Multiple authentication methods specified: password, kerberos. Only one is allowed."
+            ),
         ):
             TrinoHook().get_conn()
 
@@ -144,7 +147,7 @@ class TestTrinoHookConn:
         self.assert_connection_called_with(mock_connect, auth=mock_jwt_auth)
 
     @pytest.mark.parametrize(
-        "jwt_file, jwt_token, error_suffix",
+        ("jwt_file", "jwt_token", "error_suffix"),
         [
             pytest.param(True, True, "provided both", id="provided-both-params"),
             pytest.param(False, False, "none of them provided", id="no-jwt-provided"),
@@ -233,7 +236,7 @@ class TestTrinoHookConn:
         self.assert_connection_called_with(mock_connect, client_tags=extras["client_tags"])
 
     @pytest.mark.parametrize(
-        "current_verify, expected_verify",
+        ("current_verify", "expected_verify"),
         [
             ("False", False),
             ("false", False),
@@ -258,6 +261,22 @@ class TestTrinoHookConn:
         TrinoHook().get_conn()
         self.assert_connection_called_with(mock_connect, timezone="Asia/Jerusalem")
 
+    @patch(HOOK_GET_CONNECTION)
+    @patch(TRINO_DBAPI_CONNECT)
+    def test_get_conn_extra_credential(self, mock_connect, mock_get_connection):
+        extras = {"extra_credential": [["a.username", "bar"], ["a.password", "foo"]]}
+        self.set_get_connection_return_value(mock_get_connection, extra=json.dumps(extras))
+        TrinoHook().get_conn()
+        self.assert_connection_called_with(mock_connect, extra_credential=extras["extra_credential"])
+
+    @patch(HOOK_GET_CONNECTION)
+    @patch(TRINO_DBAPI_CONNECT)
+    def test_get_conn_roles(self, mock_connect, mock_get_connection):
+        extras = {"roles": {"catalog1": "trinoRoleA", "catalog2": "trinoRoleB"}}
+        self.set_get_connection_return_value(mock_get_connection, extra=json.dumps(extras))
+        TrinoHook().get_conn()
+        self.assert_connection_called_with(mock_connect, roles=extras["roles"])
+
     @staticmethod
     def set_get_connection_return_value(mock_get_connection, extra=None, password=None):
         mocked_connection = Connection(
@@ -274,6 +293,8 @@ class TestTrinoHookConn:
         session_properties=None,
         client_tags=None,
         timezone=None,
+        extra_credential=None,
+        roles=None,
     ):
         mock_connect.assert_called_once_with(
             catalog="hive",
@@ -290,6 +311,8 @@ class TestTrinoHookConn:
             session_properties=session_properties,
             client_tags=client_tags,
             timezone=timezone,
+            extra_credential=extra_credential,
+            roles=roles,
         )
 
 
@@ -310,6 +333,7 @@ class TestTrinoHook:
                 return IsolationLevel.READ_COMMITTED
 
         self.db_hook = UnitTestTrinoHook()
+        self.db_hook.get_connection = mock.Mock(return_value=Connection(conn_type="trino"))
 
     @patch("airflow.providers.common.sql.hooks.sql.DbApiHook.insert_rows")
     def test_insert_rows(self, mock_insert_rows):
@@ -341,18 +365,21 @@ class TestTrinoHook:
         self.cur.close.assert_called_once_with()
         self.cur.execute.assert_called_once_with(statement)
 
-    def test_get_pandas_df(self):
+    @pytest.mark.parametrize("df_type", ["pandas", "polars"])
+    def test_df(self, df_type):
         statement = "SQL"
         column = "col"
         result_sets = [("row1",), ("row2",)]
-        self.cur.description = [(column,)]
+        self.cur.description = [(column, None, None, None, None, None, None)]
         self.cur.fetchall.return_value = result_sets
-        df = self.db_hook.get_pandas_df(statement)
-
+        df = self.db_hook.get_df(statement, df_type=df_type)
         assert column == df.columns[0]
-
-        assert result_sets[0][0] == df.values.tolist()[0][0]
-        assert result_sets[1][0] == df.values.tolist()[1][0]
+        if df_type == "pandas":
+            assert result_sets[0][0] == df.values.tolist()[0][0]
+            assert result_sets[1][0] == df.values.tolist()[1][0]
+        else:
+            assert result_sets[0][0] == df.row(0)[0]
+            assert result_sets[1][0] == df.row(1)[0]
 
         self.cur.execute.assert_called_once_with(statement, None)
 
@@ -374,6 +401,91 @@ class TestTrinoHook:
         handler = list
         self.db_hook.run(sql, autocommit, parameters, list)
         mock_run.assert_called_once_with(sql, autocommit, parameters, handler)
+
+    @patch("airflow.providers.common.sql.hooks.sql.DbApiHook.run")
+    def test_run_defaults_no_handler(self, super_run):
+        super_run.return_value = None
+        sql = "SELECT 1"
+        result = self.db_hook.run(sql)
+        assert result is None
+        super_run.assert_called_once_with(sql, False, None, None, True, True)
+
+    @patch("airflow.providers.common.sql.hooks.sql.DbApiHook.run")
+    def test_run_with_handler_and_params(self, super_run):
+        super_run.return_value = [("ok",)]
+        sql = "SELECT 1"
+        autocommit = True
+        parameters = ("hello", "world")
+        handler = list
+        res = self.db_hook.run(
+            sql,
+            autocommit=autocommit,
+            parameters=parameters,
+            handler=handler,
+            split_statements=False,
+            return_last=False,
+        )
+        assert res == [("ok",)]
+        super_run.assert_called_once_with(sql, True, parameters, handler, False, False)
+
+    @patch("airflow.providers.common.sql.hooks.sql.DbApiHook.run")
+    def test_run_multistatement_defaults_to_split(self, super_run):
+        sql = "SELECT 1; SELECT 2"
+        self.db_hook.run(sql)
+        super_run.assert_called_once_with(sql, False, None, None, True, True)
+
+    @patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    def test_run_hook_lineage(self, mock_send_lineage):
+        statement = "SELECT 1"
+        self.cur.fetchall.return_value = []
+
+        self.db_hook.run(statement)
+
+        mock_send_lineage.assert_called()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == statement
+        assert call_kw["sql_parameters"] is None
+        assert call_kw["cur"] is self.cur
+
+    @patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    def test_insert_rows_hook_lineage(self, mock_send_lineage):
+        table = "table"
+        rows = [("hello",), ("world",)]
+
+        self.db_hook.insert_rows(table, rows)
+
+        mock_send_lineage.assert_called()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == "INSERT INTO table  VALUES (?)"
+        assert call_kw["row_count"] == 2
+
+    @patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    @patch("airflow.providers.common.sql.hooks.sql.DbApiHook._get_pandas_df")
+    def test_get_df_hook_lineage(self, mock_get_pandas_df, mock_send_lineage):
+        sql = "SELECT 1"
+        parameters = ("x",)
+        self.db_hook.get_df(sql, parameters=parameters)
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] == parameters
+
+    @patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    @patch("airflow.providers.common.sql.hooks.sql.DbApiHook._get_pandas_df_by_chunks")
+    def test_get_df_by_chunks_hook_lineage(self, mock_get_pandas_df_by_chunks, mock_send_lineage):
+        sql = "SELECT 1"
+        parameters = ("x",)
+        self.db_hook.get_df_by_chunks(sql, parameters=parameters, chunksize=1)
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] == parameters
 
     def test_connection_success(self):
         status, msg = self.db_hook.test_connection()
@@ -444,3 +556,103 @@ def test_execute_openlineage_events():
             },
         )
     ]
+
+
+@patch(HOOK_GET_CONNECTION)
+def test_get_openlineage_default_schema(mock_get_connection):
+    mock_get_connection.return_value = Connection(
+        conn_id=TRINO_DEFAULT, conn_type="trino", host="trino", port=8080, schema="sales"
+    )
+    assert TrinoHook().get_openlineage_default_schema() == "sales"
+
+
+def test_execute_openlineage_events_resolves_unqualified_table_to_connection_schema():
+    class TrinoHookForTests(TrinoHook):
+        get_conn = mock.MagicMock(name="conn")
+        get_connection = mock.MagicMock()
+
+    dbapi_hook = TrinoHookForTests()
+    dbapi_hook.get_connection.return_value = Connection(
+        conn_id=TRINO_DEFAULT,
+        conn_type="trino",
+        host="trino",
+        port=8080,
+        schema="sf1",
+        extra=json.dumps({"catalog": "tpch"}),
+    )
+    # The tpch catalog has a customer table in every schema (tiny, sf1, sf100, ...).
+    dbapi_hook.get_conn.return_value.cursor.return_value.fetchall.side_effect = [
+        [
+            ("sf1", "customer", "name", 1, "varchar(25)", "tpch"),
+            ("tiny", "customer", "name", 1, "varchar(25)", "tpch"),
+        ],
+        [],
+    ]
+
+    op = SQLExecuteQueryOperator(task_id="trino_test", sql="SELECT name FROM customer", conn_id=TRINO_DEFAULT)
+    op._hook = dbapi_hook
+    lineage = op.get_openlineage_facets_on_start()
+
+    assert lineage.inputs == [
+        Dataset(
+            namespace="trino://trino:8080",
+            name="tpch.sf1.customer",
+            facets={
+                "schema": SchemaDatasetFacet(
+                    fields=[SchemaDatasetFacetFields(name="name", type="varchar(25)")]
+                )
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("conn_params", "expected_uri"),
+    [
+        (
+            {"login": "user", "password": "pass", "host": "localhost", "port": 8080, "schema": "hive"},
+            "trino://user:pass@localhost:8080/hive",
+        ),
+        (
+            {
+                "login": "user",
+                "password": "pass",
+                "host": "localhost",
+                "port": 8080,
+                "schema": "hive",
+                "extra": json.dumps({"schema": "sales"}),
+            },
+            "trino://user:pass@localhost:8080/hive/sales",
+        ),
+        (
+            {"login": "user@example.com", "password": "p@ss:word", "host": "localhost", "schema": "hive"},
+            "trino://user%40example.com:p%40ss%3Aword@localhost/hive",
+        ),
+        (
+            {"host": "localhost", "port": 8080, "schema": "hive"},
+            "trino://localhost:8080/hive",
+        ),
+        (
+            {
+                "login": "user",
+                "host": "host.example.com",
+                "schema": "hive",
+                "extra": json.dumps({"param1": "value1", "param2": "value2"}),
+            },
+            "trino://user@host.example.com/hive?param1=value1&param2=value2",
+        ),
+    ],
+    ids=[
+        "basic-connection",
+        "with-extra-schema",
+        "special-chars",
+        "no-credentials",
+        "extra-params",
+    ],
+)
+def test_get_uri(conn_params, expected_uri):
+    """Test TrinoHook.get_uri properly formats connection URIs."""
+    with patch(HOOK_GET_CONNECTION) as mock_get_connection:
+        mock_get_connection.return_value = Connection(**conn_params)
+        hook = TrinoHook()
+        assert hook.get_uri() == expected_uri

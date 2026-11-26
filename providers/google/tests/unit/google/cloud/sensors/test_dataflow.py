@@ -21,7 +21,7 @@ from unittest import mock
 
 import pytest
 
-from airflow.exceptions import AirflowException, TaskDeferred
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred
 from airflow.providers.google.cloud.hooks.dataflow import DataflowJobStatus
 from airflow.providers.google.cloud.sensors.dataflow import (
     DataflowJobAutoScalingEventsSensor,
@@ -46,7 +46,7 @@ TEST_IMPERSONATION_CHAIN = ["ACCOUNT_1", "ACCOUNT_2", "ACCOUNT_3"]
 
 class TestDataflowJobStatusSensor:
     @pytest.mark.parametrize(
-        "expected_status, current_status, sensor_return",
+        ("expected_status", "current_status", "sensor_return"),
         [
             (DataflowJobStatus.JOB_STATE_DONE, DataflowJobStatus.JOB_STATE_DONE, True),
             (DataflowJobStatus.JOB_STATE_DONE, DataflowJobStatus.JOB_STATE_RUNNING, False),
@@ -171,7 +171,7 @@ class TestDataflowJobStatusSensor:
 
 class TestDataflowJobMetricsSensor:
     @pytest.mark.parametrize(
-        "job_current_state, fail_on_terminal_state",
+        ("job_current_state", "fail_on_terminal_state"),
         [
             (DataflowJobStatus.JOB_STATE_RUNNING, True),
             (DataflowJobStatus.JOB_STATE_RUNNING, False),
@@ -197,7 +197,7 @@ class TestDataflowJobMetricsSensor:
         mock_get_job.return_value = {"id": TEST_JOB_ID, "currentState": job_current_state}
         results = task.poke(mock.MagicMock())
 
-        assert callback.return_value == results
+        assert callback.return_value == results.xcom_value
 
         mock_hook.assert_called_once_with(
             gcp_conn_id=TEST_GCP_CONN_ID,
@@ -240,6 +240,23 @@ class TestDataflowJobMetricsSensor:
         )
         mock_fetch_job_messages_by_id.assert_not_called()
         callback.assert_not_called()
+
+    @mock.patch("airflow.providers.google.cloud.sensors.dataflow.DataflowHook")
+    def test_execute_returns_xcom_value_in_non_deferrable_mode(self, mock_hook):
+        """Deferrable mode returns the metrics through execute_complete; poke mode must match it."""
+        callback = mock.MagicMock()
+        task = DataflowJobMetricsSensor(
+            task_id=TEST_TASK_ID,
+            job_id=TEST_JOB_ID,
+            callback=callback,
+            fail_on_terminal_state=False,
+            location=TEST_LOCATION,
+            project_id=TEST_PROJECT_ID,
+            gcp_conn_id=TEST_GCP_CONN_ID,
+            impersonation_chain=TEST_IMPERSONATION_CHAIN,
+        )
+
+        assert task.execute(mock.MagicMock()) == callback.return_value
 
     @mock.patch("airflow.providers.google.cloud.hooks.dataflow.AsyncDataflowHook")
     def test_execute_enters_deferred_state(self, mock_hook):
@@ -349,7 +366,7 @@ class TestDataflowJobMetricsSensor:
 
 class TestDataflowJobMessagesSensor:
     @pytest.mark.parametrize(
-        "job_current_state, fail_on_terminal_state",
+        ("job_current_state", "fail_on_terminal_state"),
         [
             (DataflowJobStatus.JOB_STATE_RUNNING, True),
             (DataflowJobStatus.JOB_STATE_RUNNING, False),
@@ -376,7 +393,7 @@ class TestDataflowJobMessagesSensor:
 
         results = task.poke(mock.MagicMock())
 
-        assert callback.return_value == results
+        assert callback.return_value == results.xcom_value
 
         mock_hook.assert_called_once_with(
             gcp_conn_id=TEST_GCP_CONN_ID,
@@ -418,6 +435,23 @@ class TestDataflowJobMessagesSensor:
         )
         mock_fetch_job_messages_by_id.assert_not_called()
         callback.assert_not_called()
+
+    @mock.patch("airflow.providers.google.cloud.sensors.dataflow.DataflowHook")
+    def test_execute_returns_xcom_value_in_non_deferrable_mode(self, mock_hook):
+        """Deferrable mode returns the messages through execute_complete; poke mode must match it."""
+        callback = mock.MagicMock()
+        task = DataflowJobMessagesSensor(
+            task_id=TEST_TASK_ID,
+            job_id=TEST_JOB_ID,
+            callback=callback,
+            fail_on_terminal_state=False,
+            location=TEST_LOCATION,
+            project_id=TEST_PROJECT_ID,
+            gcp_conn_id=TEST_GCP_CONN_ID,
+            impersonation_chain=TEST_IMPERSONATION_CHAIN,
+        )
+
+        assert task.execute(mock.MagicMock()) == callback.return_value
 
     @mock.patch("airflow.providers.google.cloud.hooks.dataflow.AsyncDataflowHook")
     def test_execute_enters_deferred_state(self, mock_hook):
@@ -525,7 +559,7 @@ class TestDataflowJobMessagesSensor:
 
 class TestDataflowJobAutoScalingEventsSensor:
     @pytest.mark.parametrize(
-        "job_current_state, fail_on_terminal_state",
+        ("job_current_state", "fail_on_terminal_state"),
         [
             (DataflowJobStatus.JOB_STATE_RUNNING, True),
             (DataflowJobStatus.JOB_STATE_RUNNING, False),
@@ -552,7 +586,7 @@ class TestDataflowJobAutoScalingEventsSensor:
 
         results = task.poke(mock.MagicMock())
 
-        assert callback.return_value == results
+        assert callback.return_value == results.xcom_value
 
         mock_hook.assert_called_once_with(
             gcp_conn_id=TEST_GCP_CONN_ID,
@@ -594,6 +628,23 @@ class TestDataflowJobAutoScalingEventsSensor:
         )
         mock_fetch_job_autoscaling_events_by_id.assert_not_called()
         callback.assert_not_called()
+
+    @mock.patch("airflow.providers.google.cloud.sensors.dataflow.DataflowHook")
+    def test_execute_returns_xcom_value_in_non_deferrable_mode(self, mock_hook):
+        """Deferrable mode returns the events through execute_complete; poke mode must match it."""
+        callback = mock.MagicMock()
+        task = DataflowJobAutoScalingEventsSensor(
+            task_id=TEST_TASK_ID,
+            job_id=TEST_JOB_ID,
+            callback=callback,
+            fail_on_terminal_state=False,
+            location=TEST_LOCATION,
+            project_id=TEST_PROJECT_ID,
+            gcp_conn_id=TEST_GCP_CONN_ID,
+            impersonation_chain=TEST_IMPERSONATION_CHAIN,
+        )
+
+        assert task.execute(mock.MagicMock()) == callback.return_value
 
     @mock.patch("airflow.providers.google.cloud.hooks.dataflow.AsyncDataflowHook")
     def test_execute_enters_deferred_state(self, mock_hook):

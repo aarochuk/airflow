@@ -20,6 +20,7 @@ export COLOR_RED=$'\e[31m'
 export COLOR_BLUE=$'\e[34m'
 export COLOR_YELLOW=$'\e[33m'
 export COLOR_RESET=$'\e[0m'
+export COLOR_GREEN=$'\e[32m'
 
 if [[ ! "$#" -eq 2 ]]; then
     echo "${COLOR_RED}You must provide 2 arguments: Group, Scope!.${COLOR_RESET}"
@@ -28,6 +29,21 @@ fi
 
 TEST_GROUP=${1}
 TEST_SCOPE=${2}
+
+# The whole job - not only this step - has to fit in JOB_TIMEOUT_MINUTES, so the tests get whatever
+# is left of that budget rather than a fixed value.
+if [[ -n "${JOB_START_EPOCH:-}" && -n "${JOB_TIMEOUT_MINUTES:-}" ]]; then
+    TOTAL_TEST_TIMEOUT=$(python "$(dirname "${BASH_SOURCE[0]}")/compute_remaining_test_timeout.py" \
+        --job-timeout-minutes "${JOB_TIMEOUT_MINUTES}" --job-start-epoch "${JOB_START_EPOCH}") || exit 1
+    export TOTAL_TEST_TIMEOUT
+    TIMEOUT_DISPLAY="$((TOTAL_TEST_TIMEOUT / 60))m$((TOTAL_TEST_TIMEOUT % 60))s"
+    echo "${COLOR_BLUE}Tests get ${TIMEOUT_DISPLAY} of the ${JOB_TIMEOUT_MINUTES}m job budget${COLOR_RESET}"
+elif [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    # Letting breeze fall back to its own default here would restore the timeout that cannot
+    # fire, and nothing would say so - the job would stay green until something hung.
+    echo "${COLOR_RED}JOB_START_EPOCH and JOB_TIMEOUT_MINUTES must both be set in CI${COLOR_RESET}"
+    exit 1
+fi
 
 function core_tests() {
     echo "${COLOR_BLUE}Running core tests${COLOR_RESET}"
@@ -49,12 +65,9 @@ function core_tests() {
         set +x
     elif [[ "${TEST_SCOPE}" == "Quarantined" ]]; then
         set -x
+        # The `|| true` is deliberate — quarantined tests are known-flaky and we do not want a
+        # failing run here to fail the whole CI job; they are reported separately. Do not remove.
         breeze testing core-tests --test-type "All-Quarantined" || true
-        RESULT=$?
-        set +x
-    elif [[ "${TEST_SCOPE}" == "ARM collection" ]]; then
-        set -x
-        breeze testing core-tests --collect-only --remove-arm-packages --test-type "All" --no-db-reset
         RESULT=$?
         set +x
     elif [[  "${TEST_SCOPE}" == "System" ]]; then
@@ -97,12 +110,9 @@ function providers_tests() {
         set +x
     elif [[ "${TEST_SCOPE}" == "Quarantined" ]]; then
         set -x
+        # The `|| true` is deliberate — quarantined tests are known-flaky and we do not want a
+        # failing run here to fail the whole CI job; they are reported separately. Do not remove.
         breeze testing providers-tests --test-type "All-Quarantined" || true
-        RESULT=$?
-        set +x
-    elif [[ "${TEST_SCOPE}" == "ARM collection" ]]; then
-        set -x
-        breeze testing providers-tests --collect-only --remove-arm-packages --test-type "All" --no-db-reset
         RESULT=$?
         set +x
     else
@@ -117,7 +127,7 @@ function providers_tests() {
         echo
         exit "${RESULT}"
     fi
-    echo "${COLOR_GREEB}Providers tests completed successfully${COLOR_RESET}"
+    echo "${COLOR_GREEN}Providers tests completed successfully${COLOR_RESET}"
 }
 
 
@@ -127,6 +137,15 @@ function task_sdk_tests() {
     breeze testing task-sdk-tests
     set +x
     echo "${COLOR_BLUE}Task SDK tests completed${COLOR_RESET}"
+}
+
+function go_sdk_tests() {
+    echo "${COLOR_BLUE}Running Go SDK tests${COLOR_RESET}"
+    set -x
+    cd go-sdk
+    go test -v -race ./...
+    set +x
+    echo "${COLOR_BLUE}Go SDK tests completed${COLOR_RESET}"
 }
 
 
@@ -146,6 +165,8 @@ function run_tests() {
         providers_tests
     elif [[ "${TEST_GROUP}" == "task-sdk" ]]; then
         task_sdk_tests
+    elif [[ "${TEST_GROUP}" == "go-sdk" ]]; then
+        go_sdk_tests
     elif [[ "${TEST_GROUP}" == "airflow-ctl" ]]; then
         airflow_ctl_tests
     else

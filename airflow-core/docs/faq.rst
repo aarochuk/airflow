@@ -20,7 +20,7 @@
 FAQ
 ========
 
-Scheduling / DAG file parsing
+Scheduling / Dag file parsing
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Why is task not getting scheduled?
@@ -29,25 +29,25 @@ Why is task not getting scheduled?
 There are very many reasons why your task might not be getting scheduled. Here are some of the common causes:
 
 - Does your script "compile", can the Airflow engine parse it and find your
-  DAG object? To test this, you can run ``airflow dags list`` and
-  confirm that your DAG shows up in the list. You can also run
-  ``airflow tasks list foo_dag_id --tree`` and confirm that your task
-  shows up in the list as expected. If you use the CeleryExecutor, you
+  Dag object? To test this, you can run ``airflow dags list`` and
+  confirm that your Dag shows up in the list. You can also run
+  ``airflow dags show foo_dag_id`` and confirm that your task
+  shows up in the graphviz format as expected. If you use the CeleryExecutor, you
   may want to confirm that this works both where the scheduler runs as well
   as where the worker runs.
 
-- Does the file containing your DAG contain the string "airflow" and "DAG" somewhere
-  in the contents? When searching the DAG directory, Airflow ignores files not containing
-  "airflow" and "DAG" in order to prevent the DagBag parsing from importing all python
-  files collocated with user's dags.
+- Does the file containing your Dag contain the string ``airflow`` and ``DAG`` somewhere
+  in the contents? When searching the Dag directory, Airflow ignores files not containing
+  ``airflow`` and ``DAG`` in order to prevent the DagBag parsing from importing all python
+  files collocated with user's Dags.
 
-- Is your ``start_date`` set properly? For time-based dags, the task won't be triggered until the
+- Is your ``start_date`` set properly? For time-based Dags, the task won't be triggered until
   the first schedule interval following the start date has passed.
 
 - Is your ``schedule`` argument set properly? The default
   is one day (``datetime.timedelta(1)``). You must specify a different ``schedule``
-  directly to the DAG object you instantiate, not as a ``default_param``, as task instances
-  do not override their parent DAG's ``schedule``.
+  directly to the Dag object you instantiate, not as a ``default_param``, as task instances
+  do not override their parent Dag's ``schedule``.
 
 - Is your ``start_date`` beyond where you can see it in the UI? If you
   set your ``start_date`` to some time say 3 months ago, you won't be able to see
@@ -65,40 +65,40 @@ There are very many reasons why your task might not be getting scheduled. Here a
   page for your task.
 
 - Are the DagRuns you need created and active? A DagRun represents a specific
-  execution of an entire DAG and has a state (running, success, failed, ...).
+  execution of an entire Dag and has a state (running, success, failed, ...).
   The scheduler creates new DagRun as it moves forward, but never goes back
   in time to create new ones. The scheduler only evaluates ``running`` DagRuns
   to see what task instances it can trigger. Note that clearing tasks
   instances (from the UI or CLI) does set the state of a DagRun back to
   running. You can bulk view the list of DagRuns and alter states by clicking
-  on the schedule tag for a DAG.
+  on the schedule tag for a Dag.
 
-- Is the ``concurrency`` parameter of your DAG reached? ``concurrency`` defines
-  how many ``running`` task instances a DAG is allowed to have, beyond which
+- Is the ``max_active_tasks`` parameter of your Dag reached? ``max_active_tasks`` defines
+  how many ``running`` task instances a Dag is allowed to have, beyond which
   point things get queued.
 
-- Is the ``max_active_runs`` parameter of your DAG reached? ``max_active_runs`` defines
-  how many ``running`` concurrent instances of a DAG there are allowed to be.
+- Is the ``max_active_runs`` parameter of your Dag reached? ``max_active_runs`` defines
+  how many ``running`` concurrent instances of a Dag there are allowed to be.
 
 You may also want to read about the :ref:`scheduler` and make
-sure you fully understand how the scheduler cycle.
+sure you fully understand how the scheduler cycle works.
 
 
-How to improve DAG performance?
+How to improve Dag performance?
 -------------------------------
 
-There are some Airflow configuration to allow for a larger scheduling capacity and frequency:
+There are some Airflow configurations to allow for a larger scheduling capacity and frequency:
 
 - :ref:`config:core__parallelism`
 - :ref:`config:core__max_active_tasks_per_dag`
 - :ref:`config:core__max_active_runs_per_dag`
 
-Dags have configurations that improves efficiency:
+Dags have configurations that improve efficiency:
 
 - ``max_active_tasks``: Overrides :ref:`config:core__max_active_tasks_per_dag`.
 - ``max_active_runs``: Overrides :ref:`config:core__max_active_runs_per_dag`.
 
-Operators or tasks also have configurations that improves efficiency and scheduling priority:
+Operators or tasks also have configurations that improve efficiency and scheduling priority:
 
 - ``max_active_tis_per_dag``: This parameter controls the number of concurrent running task instances across ``dag_runs``
   per task.
@@ -107,10 +107,10 @@ Operators or tasks also have configurations that improves efficiency and schedul
 - ``queue``: See :ref:`apache-airflow-providers-celery:celery_executor:queue` for CeleryExecutor deployments only.
 
 
-How to reduce DAG scheduling latency / task delay?
+How to reduce Dag scheduling latency / task delay?
 --------------------------------------------------
 
-Airflow 2.0 has low DAG scheduling latency out of the box (particularly when compared with Airflow 1.10.x),
+Airflow 2.0 has low Dag scheduling latency out of the box (particularly when compared with Airflow 1.10.x),
 however, if you need more throughput you can :ref:`start multiple schedulers<scheduler:ha>`.
 
 
@@ -121,14 +121,14 @@ You can achieve this with :ref:`concepts:trigger-rules`.
 
 .. _faq:how-to-control-dag-file-parsing-timeout:
 
-How to control DAG file parsing timeout for different DAG files?
+How to control Dag file parsing timeout for different Dag files?
 ----------------------------------------------------------------
 
 (only valid for Airflow >= 2.3.0)
 
 You can add a ``get_dagbag_import_timeout`` function in your ``airflow_local_settings.py`` which gets
-called right before a DAG file is parsed. You can return different timeout value based on the DAG file.
-When the return value is less than or equal to 0, it means no timeout during the DAG parsing.
+called right before a Dag file is parsed. You can return different timeout value based on the Dag file.
+When the return value is less than or equal to 0, it means no timeout during the Dag parsing.
 
 .. code-block:: python
    :caption: airflow_local_settings.py
@@ -136,12 +136,12 @@ When the return value is less than or equal to 0, it means no timeout during the
 
     def get_dagbag_import_timeout(dag_file_path: str) -> Union[int, float]:
         """
-        This setting allows to dynamically control the DAG file parsing timeout.
+        This setting allows to dynamically control the Dag file parsing timeout.
 
-        It is useful when there are a few DAG files requiring longer parsing times, while others do not.
-        You can control them separately instead of having one value for all DAG files.
+        It is useful when there are a few Dag files requiring longer parsing times, while others do not.
+        You can control them separately instead of having one value for all Dag files.
 
-        If the return value is less than or equal to 0, it means no timeout during the DAG parsing.
+        If the return value is less than or equal to 0, it means no timeout during the Dag parsing.
         """
         if "slow" in dag_file_path:
             return 90
@@ -155,19 +155,19 @@ configure local settings.
 
 
 
-When there are a lot (>1000) of DAG files, how to speed up parsing of new files?
+When there are a lot (>1000) of Dag files, how to speed up parsing of new files?
 ---------------------------------------------------------------------------------
 
 Change the :ref:`config:dag_processor__file_parsing_sort_mode` to ``modified_time``, raise
 the :ref:`config:dag_processor__min_file_process_interval` to ``600`` (10 minutes), ``6000`` (100 minutes)
 or a higher value.
 
-The DAG parser will skip the ``min_file_process_interval`` check if a file is recently modified.
+The Dag parser will skip the ``min_file_process_interval`` check if a file is recently modified.
 
-This might not work for case where the DAG is imported/created from a separate file. Example:
-``dag_file.py`` that imports ``dag_loader.py`` where the actual logic of the DAG file is as shown below.
+This might not work for case where the Dag is imported/created from a separate file. Example:
+``dag_file.py`` that imports ``dag_loader.py`` where the actual logic of the Dag file is as shown below.
 In this case if ``dag_loader.py`` is updated but ``dag_file.py`` is not updated, the changes won't be reflected
-until ``min_file_process_interval`` is reached since DAG Parser will look for modified time for ``dag_file.py`` file.
+until ``min_file_process_interval`` is reached since Dag Parser will look for modified time for ``dag_file.py`` file.
 
 .. code-block:: python
    :caption: dag_file.py
@@ -181,8 +181,7 @@ until ``min_file_process_interval`` is reached since DAG Parser will look for mo
    :caption: dag_loader.py
    :name: dag_loader.py
 
-    from airflow import DAG
-    from airflow.decorators import task
+    from airflow.sdk import DAG, task
 
     import pendulum
 
@@ -192,7 +191,7 @@ until ``min_file_process_interval`` is reached since DAG Parser will look for mo
             dag_id,
             schedule=schedule,
             default_args=default_args,
-            pendulum.datetime(2021, 9, 13, tz="UTC"),
+            start_date=pendulum.datetime(2021, 9, 13, tz="UTC"),
         )
 
         with dag:
@@ -200,42 +199,273 @@ until ``min_file_process_interval`` is reached since DAG Parser will look for mo
             @task()
             def hello_world():
                 print("Hello World")
-                print(f"This is DAG: {dag_number}")
+                print(f"This is Dag: {dag_number}")
 
             hello_world()
 
         return dag
 
+What to do if you see disappearing Dags on UI?
+----------------------------------------------
+There are several reasons why Dags might disappear from the UI. Common causes include:
 
-DAG construction
+* **Total parsing of all Dags is too long** - If parsing takes longer than :ref:`config:core__dagbag_import_timeout`,
+  files may not be processed completely. This often occurs when Dags don't follow
+  :ref:`Dag writing best practices<best_practice:writing_a_dag>` like:
+
+  * Excessive top-level code execution
+  * External system calls during parsing
+  * Complex dynamic Dag generation
+
+* **Inconsistent dynamic Dag generation** - Dags created through
+  :doc:`dynamic generation </howto/dynamic-dag-generation>` must produce stable Dag IDs across parses.
+  Verify consistency by running ``python your_dag_file.py`` repeatedly.
+
+* **File processing configuration issues** - A certain combination of parameters may lead to scenarios which certain Dags are less likely to be processed at each loop. Check these parameters:
+
+  * :ref:`config:dag_processor__file_parsing_sort_mode` - Ensure sorting method matches your sync strategy
+  * :ref:`config:dag_processor__parsing_processes` - Number of parallel parsers
+  * :ref:`config:scheduler__parsing_cleanup_interval` - Controls stale Dag cleanup frequency
+
+* **File synchronization problems** - Common with git-sync setups:
+
+  * Symbolic link swapping delays
+  * Permission changes during sync
+  * ``mtime`` preservation issues
+
+* **Time synchronization issues** - Ensure all nodes (database, schedulers, workers) use NTP with <1s clock drift.
+
+
+.. _faq:dag-version-inflation:
+
+Why does my Dag version keep increasing?
+-----------------------------------------
+
+Every time the Dag processor parses a Dag file, it serializes the Dag and compares the result with the
+version stored in the metadata database. If anything has changed, Airflow creates a new Dag version.
+
+**Dag version inflation** occurs when the version number increases indefinitely without the Dag author
+making any intentional changes.
+
+What goes wrong
+"""""""""""""""
+
+When Dag versions increase without meaningful changes:
+
+* The metadata database accumulates unnecessary Dag version records, increasing storage and query overhead.
+* The UI shows a misleading history of Dag changes, making it harder to identify real modifications.
+* The scheduler and API server may consume more memory as they load and cache a growing number of Dag versions.
+
+Common causes
+"""""""""""""
+
+Version inflation is caused by using values that change at **parse time** — that is, every time the Dag
+processor evaluates the Dag file — as arguments to Dag or Task constructors. The most common patterns are:
+
+**1. Using ``datetime.now()`` or ``pendulum.now()`` as ``start_date``:**
+
+.. code-block:: python
+
+    from datetime import datetime
+
+    from airflow.sdk import DAG
+
+    with DAG(
+        dag_id="bad_example",
+        # BAD: datetime.now() produces a different value on every parse
+        start_date=datetime.now(),
+        schedule="@daily",
+    ):
+        ...
+
+Every parse produces a different ``start_date``, so the serialized Dag is always different from the
+stored version.
+
+**2. Using random values in Dag or Task arguments:**
+
+.. code-block:: python
+
+    import random
+
+    from airflow.sdk import DAG
+    from airflow.providers.standard.operators.python import PythonOperator
+
+    with DAG(dag_id="bad_random", start_date="2024-01-01", schedule="@daily") as dag:
+        PythonOperator(
+            # BAD: random value changes every parse
+            task_id=f"task_{random.randint(1, 1000)}",
+            python_callable=lambda: None,
+        )
+
+**3. Assigning runtime-varying values to variables used in constructors:**
+
+.. code-block:: python
+
+    from datetime import datetime
+
+    from airflow.sdk import DAG
+    from airflow.providers.standard.operators.python import PythonOperator
+
+    # BAD: the variable captures a parse-time value, then is passed to the DAG
+    default_args = {"start_date": datetime.now()}
+
+    with DAG(dag_id="bad_defaults", default_args=default_args, schedule="@daily") as dag:
+        PythonOperator(task_id="my_task", python_callable=lambda: None)
+
+Even though ``datetime.now()`` is not called directly inside the Dag constructor, it flows in through
+``default_args`` and still causes a different serialized Dag on every parse.
+
+**4. Using environment variables or file contents that change between parses:**
+
+.. code-block:: python
+
+    import os
+
+    from airflow.sdk import DAG
+    from airflow.providers.standard.operators.bash import BashOperator
+
+    with DAG(dag_id="bad_env", start_date="2024-01-01", schedule="@daily") as dag:
+        BashOperator(
+            task_id="echo_build",
+            # BAD if BUILD_NUMBER changes on every deployment or parse
+            bash_command=f"echo {os.environ.get('BUILD_NUMBER', 'unknown')}",
+        )
+
+How to avoid version inflation
+""""""""""""""""""""""""""""""
+
+* **Use fixed ``start_date`` values.** Always set ``start_date`` to a static ``datetime`` literal:
+
+  .. code-block:: python
+
+      import datetime
+
+      from airflow.sdk import DAG
+
+      with DAG(
+          dag_id="good_example",
+          start_date=datetime.datetime(2024, 1, 1),
+          schedule="@daily",
+      ):
+          ...
+
+* **Keep all Dag and Task constructor arguments deterministic.** Arguments passed to Dag and Operator
+  constructors must produce the same value on every parse. Move any dynamic computation into the
+  ``execute()`` method or use Jinja templates, which are evaluated at task execution time rather than
+  parse time.
+
+* **Use Jinja templates for dynamic values:**
+
+  .. code-block:: python
+
+      from airflow.providers.standard.operators.bash import BashOperator
+
+      BashOperator(
+          task_id="echo_date",
+          # GOOD: the template is resolved at execution time, not parse time
+          bash_command="echo {{ ds }}",
+      )
+
+* **Use Airflow Variables with templates instead of top-level lookups:**
+
+  .. code-block:: python
+
+      from airflow.providers.standard.operators.bash import BashOperator
+
+      BashOperator(
+          task_id="echo_var",
+          # GOOD: Variable is resolved at execution time via template
+          bash_command="echo {{ var.value.my_variable }}",
+      )
+
+How to diagnose version inflation yourself
+""""""""""""""""""""""""""""""""""""""""""
+
+If your Dag version keeps increasing and it is not obvious which constructor argument is to blame, you
+can identify the changing field by inspecting the serialized Dag rows directly.
+
+The most reliable way is to query the ``serialized_dag`` table in the metadata database and compare how
+the serialized payload differs between two consecutive versions of the same Dag. The column that stores
+the serialized Dag holds the structured data that Airflow hashes to decide whether a new version is
+needed, so diffing two rows shows you exactly which field changed between parses.
+
+Once you spot the changing field, trace it back to the place in your Dag file where it is set, and
+replace the dynamic value with a deterministic one — for example, a fixed ``datetime`` literal, a Jinja
+template evaluated at execution time, or an Airflow Variable resolved via template. See
+`How to avoid version inflation`_ for concrete patterns.
+
+If you cannot tie the changing field to anything in your Dag code, and the value appears to come from
+Airflow itself (for example, an internal attribute that should be stable across parses), please report
+it as a bug at https://github.com/apache/airflow/issues. Include both serialized Dag payloads (or the
+relevant diff) and the Airflow version so maintainers can reproduce the issue.
+
+Dag version inflation detection
+""""""""""""""""""""""""""""""""
+
+Starting from Airflow 3.2, the Dag processor performs **AST-based static analysis** on every Dag file
+before parsing to detect runtime-varying values in Dag and Task constructors. When a potential issue is
+found, it is surfaced as a **Dag warning** visible in the UI.
+
+You can control this behavior with the
+:ref:`dag_version_inflation_check_level <config:dag_processor__dag_version_inflation_check_level>`
+configuration option:
+
+* ``off`` — Disables the check entirely. No errors or warnings are generated.
+* ``warning`` (default) — Dags load normally but warnings are displayed in the UI when issues are detected.
+* ``error`` — Treats detected issues as Dag import errors, preventing the Dag from loading.
+
+Additionally, you can catch these issues earlier in your development workflow by using the
+`AIR304 <https://docs.astral.sh/ruff/rules/airflow3-dag-dynamic-value/>`_ ruff rule, which detects
+dynamic values in Dag and Task constructors as part of static linting. See
+:ref:`best_practices/code_quality_and_linting` for how to set up ruff with Airflow-specific rules.
+
+.. _faq:duplicate-dag-id-warning:
+
+Why do I see a "duplicate dag id" warning?
+------------------------------------------
+
+The Dag processor recognizes each Dag by its ``dag_id``, not by its file path. If two files define a
+Dag with the same ``dag_id``, only one of them is shown in the UI at a time — whichever file was parsed
+most recently — and Airflow records a **Dag warning** naming the other, overwritten file.
+
+This is expected in one common case: you renamed or moved a Dag file. The old file's row is not removed
+from the database until it goes unobserved for
+:ref:`stale_dag_threshold <config:dag_processor__stale_dag_threshold>`, so the warning briefly
+appears for both the old and new paths and then clears on its own once the old file stops being parsed.
+
+If the warning does not clear, two files with the same ``dag_id`` genuinely coexist. Which one "wins" is
+not guaranteed to stay stable across parses, so rename one of them to give each Dag a unique ``dag_id``.
+
+
+Dag construction
 ^^^^^^^^^^^^^^^^
 
 What's the deal with ``start_date``?
 ------------------------------------
 
 ``start_date`` is partly legacy from the pre-DagRun era, but it is still
-relevant in many ways. When creating a new DAG, you probably want to set
+relevant in many ways. When creating a new Dag, you probably want to set
 a global ``start_date`` for your tasks. This can be done by declaring your
-``start_date`` directly in the ``DAG()`` object. A DAG's first
+``start_date`` directly in the ``DAG()`` object. A Dag's first
 DagRun will be created based on the first complete ``data_interval``
-after ``start_date``. For example, for a DAG with
+after ``start_date``. For example, for a Dag with
 ``start_date=datetime(2024, 1, 1)`` and ``schedule="0 0 3 * *"``, the
-first DAG run will be triggered at midnight on 2024-02-03 with
+first Dag run will be triggered at midnight on 2024-02-03 with
 ``data_interval_start=datetime(2024, 1, 3)`` and
 ``data_interval_end=datetime(2024, 2, 3)``. From that point on, the scheduler
 creates new DagRuns based on your ``schedule`` and the corresponding task
 instances run as your dependencies are met. When introducing new tasks to
-your DAG, you need to pay special attention to ``start_date``, and may want
+your Dag, you need to pay special attention to ``start_date``, and may want
 to reactivate inactive DagRuns to get the new task onboarded properly.
 
 We recommend against using dynamic values as ``start_date``, especially
 ``datetime.now()`` as it can be quite confusing. The task is triggered
-once the period closes, and in theory an ``@hourly`` DAG would never get to
+once the period closes, and in theory an ``@hourly`` Dag would never get to
 an hour after now as ``now()`` moves along.
 
 
 Previously, we also recommended using rounded ``start_date`` in relation to your
-DAG's ``schedule``. This meant an ``@hourly`` would be at ``00:00``
+Dag's ``schedule``. This meant an ``@hourly`` would be at ``00:00``
 minutes:seconds, a ``@daily`` job at midnight, a ``@monthly`` job on the
 first of the month. This is no longer required. Airflow will now auto align
 the ``start_date`` and the ``schedule``, by using the ``start_date``
@@ -259,10 +489,10 @@ It is also important to note that the task's ``start_date`` is ignored in backfi
 Using time zones
 ----------------
 
-Creating a time zone aware datetime (e.g. DAG's ``start_date``) is quite simple. Just make sure to supply
+Creating a time zone aware datetime (e.g. Dag's ``start_date``) is quite simple. Just make sure to supply
 a time zone aware dates using ``pendulum``. Don't try to use standard library
 `timezone <https://docs.python.org/3/library/datetime.html#timezone-objects>`_ as they are known to
-have limitations and we deliberately disallow using them in dags.
+have limitations and we deliberately disallow using them in Dags.
 
 
 .. _faq:what-does-execution-date-mean:
@@ -272,7 +502,7 @@ What does ``execution_date`` mean?
 
 *Execution date* or ``execution_date`` is a historical name for what is called a
 *logical date*, and also usually the start of the data interval represented by a
-DAG run.
+Dag run.
 
 Airflow was developed as a solution for ETL needs. In the ETL world, you
 typically summarize data. So, if you want to summarize data for ``2016-02-19``,
@@ -280,10 +510,10 @@ you would do it at ``2016-02-20`` midnight UTC, which would be right after all
 data for ``2016-02-19`` becomes available. This interval between midnights of
 ``2016-02-19`` and ``2016-02-20`` is called the *data interval*, and since it
 represents data in the date of ``2016-02-19``, this date is also called the
-run's *logical date*, or the date that this DAG run is executed for, thus
+run's *logical date*, or the date that this Dag run is executed for, thus
 *execution date*.
 
-For backward compatibility, a datetime value ``execution_date`` is still
+For backward compatibility, a datetime value ``execution_date`` is still available
 as :ref:`Template variables<templates:variables>` with various formats in Jinja
 templated fields, and in Airflow's Python API. It is also included in the
 context dictionary given to an Operator's execute function.
@@ -307,7 +537,7 @@ Note that ``ds`` (the YYYY-MM-DD form of ``data_interval_start``) refers to
     :ref:`concepts-dag-run`.
 
 
-How to create dags dynamically?
+How to create Dags dynamically?
 -------------------------------
 
 Airflow looks in your ``DAGS_FOLDER`` for modules that contain ``DAG`` objects
@@ -335,27 +565,27 @@ simple dictionary.
         other_dag_id = f"bar_{i}"
         globals()[other_dag_id] = create_dag(other_dag_id)
 
-Even though Airflow supports multiple DAG definition per python file, dynamically generated or otherwise, it is not
-recommended as Airflow would like better isolation between dags from a fault and deployment perspective and multiple
-dags in the same file goes against that.
+Even though Airflow supports multiple Dag definition per python file, dynamically generated or otherwise, it is not
+recommended as Airflow would like better isolation between Dags from a fault and deployment perspective and multiple
+Dags in the same file goes against that.
 
 
 Are top level Python code allowed?
 ----------------------------------
 
 While it is not recommended to write any code outside of defining Airflow constructs, Airflow does support any
-arbitrary python code as long as it does not break the DAG file processor or prolong file processing time past the
+arbitrary python code as long as it does not break the Dag file processor or prolong file processing time past the
 :ref:`config:core__dagbag_import_timeout` value.
 
-A common example is the violation of the time limit when building a dynamic DAG which usually requires querying data
-from another service like a database. At the same time, the requested service is being swamped with DAG file
+A common example is the violation of the time limit when building a dynamic Dag which usually requires querying data
+from another service like a database. At the same time, the requested service is being swamped with Dag file
 processors requests for data to process the file. These unintended interactions may cause the service to deteriorate
-and eventually cause DAG file processing to fail.
+and eventually cause Dag file processing to fail.
 
-Refer to :ref:`DAG writing best practices<best_practice:writing_a_dag>` for more information.
+Refer to :ref:`Dag writing best practices<best_practice:writing_a_dag>` for more information.
 
 
-Do Macros resolves in another Jinja template?
+Do Macros resolve in another Jinja template?
 ---------------------------------------------
 
 It is not possible to render :ref:`Macros<macros>` or any Jinja template within another Jinja template. This is
@@ -370,7 +600,7 @@ commonly attempted in ``user_defined_macros``.
 
         bo = BashOperator(task_id="my_task", bash_command="echo {{ my_custom_macro }}", dag=dag)
 
-This will echo "day={{ ds }}" instead of "day=2020-01-01" for a DAG run with a
+This will echo "day={{ ds }}" instead of "day=2020-01-01" for a Dag run with a
 ``data_interval_start`` of 2020-01-01 00:00:00.
 
 .. code-block:: python
@@ -383,10 +613,10 @@ By using the ds macros directly in the template_field, the rendered value result
 Why ``next_ds`` or ``prev_ds`` might not contain expected values?
 ------------------------------------------------------------------
 
-- When scheduling DAG, the ``next_ds`` ``next_ds_nodash`` ``prev_ds`` ``prev_ds_nodash`` are calculated using
-  ``logical_date`` and the DAG's schedule (if applicable). If you set ``schedule`` as ``None`` or ``@once``,
+- When scheduling Dag, the ``next_ds`` ``next_ds_nodash`` ``prev_ds`` ``prev_ds_nodash`` are calculated using
+  ``logical_date`` and the Dag's schedule (if applicable). If you set ``schedule`` as ``None`` or ``@once``,
   the ``next_ds``, ``next_ds_nodash``, ``prev_ds``, ``prev_ds_nodash`` values will be set to ``None``.
-- When manually triggering DAG, the schedule will be ignored, and ``prev_ds == next_ds == ds``.
+- When manually triggering Dag, the schedule will be ignored, and ``prev_ds == next_ds == ds``.
 
 
 Task execution interactions
@@ -396,10 +626,10 @@ What does ``TemplateNotFound`` mean?
 -------------------------------------
 
 ``TemplateNotFound`` errors are usually due to misalignment with user expectations when passing path to operator
-that trigger Jinja templating. A common occurrence is with :class:`~airflow.providers.standard.operators.BashOperator`.
+that trigger Jinja templating. A common occurrence is with :class:`~airflow.providers.standard.operators.bash.BashOperator`.
 
 Another commonly missed fact is that the files are resolved relative to where the pipeline file lives. You can add
-other directories to the ``template_searchpath`` of the DAG object to allow for other non-relative location.
+other directories to the ``template_searchpath`` of the Dag object to allow for other non-relative location.
 
 
 How to trigger tasks based on another task's failure?
@@ -413,9 +643,8 @@ upstream task.
 
     import pendulum
 
-    from airflow.decorators import dag, task
     from airflow.exceptions import AirflowException
-    from airflow.utils.trigger_rule import TriggerRule
+    from airflow.sdk import TriggerRule, dag, task
 
 
     @task()
@@ -464,13 +693,113 @@ How do I stop the sync perms happening multiple times per webserver?
 Set the value of ``[fab] update_fab_perms`` configuration in ``airflow.cfg`` to ``False``.
 
 
-Why did the pause DAG toggle turn red?
---------------------------------------
+Why did changing the Dag scheduling state fail?
+------------------------------------------------
 
-If pausing or unpausing a DAG fails for any reason, the DAG toggle will
-revert to its previous state and turn red. If you observe this behavior,
-try pausing the DAG again, or check the console or server logs if the
-issue recurs.
+If activating, draining, or pausing a Dag fails, the scheduling-state control reverts to its previous
+state. Try the action again, or check the console or API server logs if the issue recurs.
+
+
+API Server
+^^^^^^^^^^
+
+.. _faq:api-server-memory-growth:
+
+How to prevent API server memory growth?
+-----------------------------------------
+
+The API server caches serialized Dag objects in memory. Over time, as Dag versions accumulate
+(see :ref:`faq:dag-version-inflation`), this cache grows and can consume several gigabytes of memory.
+
+There are two complementary approaches:
+
+**1. Dag cache eviction (available since Airflow 3.2.2)**
+
+The API server can evict cached serialized Dag versions by size, by age, or both. Configure
+this in the ``[api]`` section:
+
+.. code-block:: ini
+
+    [api]
+    dag_cache_size = 64    ; max cached versions (0 = no size limit)
+    dag_cache_ttl = 3600   ; seconds before a cached entry expires (0 = no TTL)
+
+``dag_cache_size`` is the only hard ceiling on memory. An entry's TTL is refreshed only when the entry is
+checked against the database after ``[core] min_serialized_dag_update_interval``, not on every request.
+With a shorter TTL, even frequently requested entries can expire and reload between checks. Setting both
+options to 0 disables eviction, so the API server retains every deserialized Dag it loads until restart,
+matching the behavior before 3.2.2.
+
+The cache is keyed by Dag version ID. After a Dag is updated, the API server may serve the
+previous version until the cached entry expires (controlled by ``dag_cache_ttl``).
+
+See :ref:`config:api__dag_cache_size` and :ref:`config:api__dag_cache_ttl` for the full configuration
+reference. The scheduler has the same pair of options under ``[scheduler]`` (see :ref:`faq:scheduler-memory-growth`).
+
+**2. Gunicorn with rolling worker restarts (available since Airflow 3.2.0)**
+
+Gunicorn periodically recycles worker processes, releasing all accumulated memory. It also
+uses ``preload`` + ``fork``, so workers share read-only memory pages via copy-on-write, reducing overall
+memory usage by 40-50% compared to uvicorn's multiprocess mode.
+
+To enable gunicorn with worker recycling:
+
+.. code-block:: ini
+
+    [api]
+    server_type = gunicorn
+    # Restart each worker every 12 hours (43200 seconds)
+    worker_refresh_interval = 43200
+    worker_refresh_batch_size = 1
+
+This requires the ``apache-airflow-core[gunicorn]`` extra to be installed.
+
+See :ref:`config:api__server_type`, :ref:`config:api__worker_refresh_interval`, and
+:ref:`config:api__worker_refresh_batch_size` for the full configuration reference.
+
+.. note::
+
+    Worker recycling handles memory growth from *any* source, not just the Dag cache.
+    For production deployments, using both cache eviction and gunicorn worker recycling
+    provides the best results.
+
+.. _faq:scheduler-memory-growth:
+
+How to prevent scheduler memory growth?
+----------------------------------------
+
+The scheduler caches deserialized Dag objects. Airflow 3.3.2 capped this cache at 512 Dag versions to
+prevent memory from growing with every version the scheduler had ever seen (see :ref:`faq:dag-version-inflation`).
+Starting in Airflow 3.4.0, you can adjust that size limit and optionally add time-based eviction in the
+``[scheduler]`` section:
+
+.. code-block:: ini
+
+    [scheduler]
+    dag_cache_size = 512   ; max cached versions, evicting least recently used
+    dag_cache_ttl = 0      ; seconds before an idle cached entry expires (0 = no TTL)
+
+The defaults cap the cache at 512 Dag versions and evict the least recently used one beyond that, so memory
+cannot grow with the number of versions the scheduler has ever seen. The scheduler reaches the cache through
+the Dag version of each active Dag run, so its working set is the versions with runs in flight; 512 is meant
+to sit above that for a typical deployment.
+
+If the scheduler is still OOM killed, lower ``dag_cache_size``. Raise it if you have more Dag versions with
+runs in flight than the limit, since a limit below the working set evicts versions that are still being
+scheduled and costs a database fetch and a deserialization on the next loop — watch
+``scheduler.dag_bag.cache_miss`` to tell the two apart. Setting ``dag_cache_size = 0`` switches to no size
+limit, leaving eviction to ``dag_cache_ttl``, which bounds memory by the concurrently active set rather than
+outright: each re-check resets an entry's expiry, so a TTL reclaims a version only once its runs finish and
+it stops being requested. Setting both to 0 disables eviction, so the scheduler retains every deserialized
+Dag it loads until restart, matching the behavior before 3.3.2.
+
+Neither option affects how quickly the scheduler picks up a Dag change. A Dag update that creates a new
+version is seen immediately, because the new version is a different cache key. A version rewritten in place
+is re-checked against its current hash once :ref:`config:core__min_serialized_dag_update_interval` has elapsed since the entry was last validated,
+so that option, not ``dag_cache_ttl``, bounds how long a rewritten version can be served stale.
+The same applies to the API server.
+
+See :ref:`config:scheduler__dag_cache_size` and :ref:`config:scheduler__dag_cache_ttl` for the full configuration reference.
 
 
 MySQL and MySQL variant Databases
@@ -509,3 +838,37 @@ This means ``explicit_defaults_for_timestamp`` is disabled in your mysql server 
 
 #. Set ``explicit_defaults_for_timestamp = 1`` under the ``mysqld`` section in your ``my.cnf`` file.
 #. Restart the Mysql server.
+
+Connections
+^^^^^^^^^^^
+
+How can I test a connection or use a Canary Dag?
+------------------------------------------------
+
+For security reasons, the test connection functionality is disabled by default across the Airflow UI,
+API and CLI. This can be modified by setting :ref:`config:core__test_connection`.
+
+You can utilize a Dag to regularly test connections. This is referred to as a "Canary Dag" and can detect and
+alert on failures in external systems that your Dags depend on. You can create a simple Dag that tests connections
+such as the following Airflow 3 example:
+
+.. code-block:: python
+
+  from airflow.sdk import DAG, task
+
+  with DAG(dag_id="canary", schedule="@daily", doc_md="Canary Dag to regularly test connections to systems."):
+
+      @task(doc_md="Test a connection by its Connection ID.")
+      def test_connection(conn_id):
+          from airflow.hooks.base import BaseHook
+
+          ok, status = BaseHook.get_hook(conn_id=conn_id).test_connection()
+          if ok:
+              return status
+          raise RuntimeError(status)
+
+      for conn_id in [
+          # Add more connections here to create tasks to test them.
+          "aws_default",
+      ]:
+          test_connection.override(task_id="test_" + conn_id)(conn_id)

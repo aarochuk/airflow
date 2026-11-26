@@ -28,7 +28,7 @@ from airflow.providers.google.cloud.links.dataform import (
 if TYPE_CHECKING:
     from google.api_core.retry import Retry
 
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
 from google.cloud.dataform_v1beta1.types import (
@@ -68,7 +68,14 @@ class DataformCreateCompilationResultOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("project_id", "region", "repository_id", "compilation_result", "impersonation_chain")
+    template_fields: Sequence[str] = (
+        "project_id",
+        "region",
+        "repository_id",
+        "compilation_result",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,
@@ -134,12 +141,13 @@ class DataformGetCompilationResultOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = (
+    template_fields: Sequence[str] = (
         "project_id",
         "region",
         "repository_id",
         "compilation_result_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -210,7 +218,14 @@ class DataformCreateWorkflowInvocationOperator(GoogleCloudBaseOperator):
     :param wait_time: Number of seconds between checks
     """
 
-    template_fields = ("project_id", "region", "repository_id", "workflow_invocation", "impersonation_chain")
+    template_fields = (
+        "project_id",
+        "region",
+        "repository_id",
+        "workflow_invocation",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
     operator_extra_links = (DataformWorkflowInvocationLink(),)
 
     def __init__(
@@ -258,7 +273,6 @@ class DataformCreateWorkflowInvocationOperator(GoogleCloudBaseOperator):
         )
         workflow_invocation_id = result.name.split("/")[-1]
         DataformWorkflowInvocationLink.persist(
-            operator_instance=self,
             context=context,
             project_id=self.project_id,
             region=self.region,
@@ -305,6 +319,7 @@ class DataformGetWorkflowInvocationOperator(GoogleCloudBaseOperator):
         "repository_id",
         "workflow_invocation_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
     operator_extra_links = (DataformWorkflowInvocationLink(),)
 
@@ -347,6 +362,13 @@ class DataformGetWorkflowInvocationOperator(GoogleCloudBaseOperator):
             timeout=self.timeout,
             metadata=self.metadata,
         )
+        DataformWorkflowInvocationLink.persist(
+            context=context,
+            project_id=self.project_id,
+            region=self.region,
+            repository_id=self.repository_id,
+            workflow_invocation_id=self.workflow_invocation_id,
+        )
         return WorkflowInvocation.to_dict(result)
 
 
@@ -378,6 +400,7 @@ class DataformQueryWorkflowInvocationActionsOperator(GoogleCloudBaseOperator):
         "repository_id",
         "workflow_invocation_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
     operator_extra_links = (DataformWorkflowInvocationLink(),)
 
@@ -412,7 +435,6 @@ class DataformQueryWorkflowInvocationActionsOperator(GoogleCloudBaseOperator):
             impersonation_chain=self.impersonation_chain,
         )
         DataformWorkflowInvocationLink.persist(
-            operator_instance=self,
             context=context,
             project_id=self.project_id,
             region=self.region,
@@ -461,6 +483,7 @@ class DataformCancelWorkflowInvocationOperator(GoogleCloudBaseOperator):
         "repository_id",
         "workflow_invocation_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
     operator_extra_links = (DataformWorkflowInvocationLink(),)
 
@@ -493,6 +516,13 @@ class DataformCancelWorkflowInvocationOperator(GoogleCloudBaseOperator):
         hook = DataformHook(
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.impersonation_chain,
+        )
+        DataformWorkflowInvocationLink.persist(
+            context=context,
+            project_id=self.project_id,
+            region=self.region,
+            repository_id=self.repository_id,
+            workflow_invocation_id=self.workflow_invocation_id,
         )
         hook.cancel_workflow_invocation(
             project_id=self.project_id,
@@ -532,6 +562,7 @@ class DataformCreateRepositoryOperator(GoogleCloudBaseOperator):
         "region",
         "repository_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -576,7 +607,6 @@ class DataformCreateRepositoryOperator(GoogleCloudBaseOperator):
         )
 
         DataformRepositoryLink.persist(
-            operator_instance=self,
             context=context,
             project_id=self.project_id,
             region=self.region,
@@ -612,6 +642,7 @@ class DataformDeleteRepositoryOperator(GoogleCloudBaseOperator):
         "region",
         "repository_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -688,6 +719,7 @@ class DataformCreateWorkspaceOperator(GoogleCloudBaseOperator):
         "repository_id",
         "workspace_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -735,7 +767,6 @@ class DataformCreateWorkspaceOperator(GoogleCloudBaseOperator):
         )
 
         DataformWorkspaceLink.persist(
-            operator_instance=self,
             context=context,
             project_id=self.project_id,
             region=self.region,
@@ -774,6 +805,7 @@ class DataformDeleteWorkspaceOperator(GoogleCloudBaseOperator):
         "repository_id",
         "workspace_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -851,6 +883,7 @@ class DataformWriteFileOperator(GoogleCloudBaseOperator):
         "repository_id",
         "workspace_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -933,6 +966,7 @@ class DataformMakeDirectoryOperator(GoogleCloudBaseOperator):
         "repository_id",
         "workspace_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -1014,6 +1048,7 @@ class DataformRemoveFileOperator(GoogleCloudBaseOperator):
         "repository_id",
         "workspace_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -1093,6 +1128,7 @@ class DataformRemoveDirectoryOperator(GoogleCloudBaseOperator):
         "repository_id",
         "workspace_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(
@@ -1173,6 +1209,7 @@ class DataformInstallNpmPackagesOperator(GoogleCloudBaseOperator):
         "repository_id",
         "workspace_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
 
     def __init__(

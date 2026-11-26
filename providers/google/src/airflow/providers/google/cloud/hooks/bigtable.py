@@ -19,14 +19,18 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+import google.api_core.exceptions
+from google.api_core.client_options import ClientOptions
 from google.cloud.bigtable import Client, enums
 from google.cloud.bigtable.cluster import Cluster
 from google.cloud.bigtable.instance import Instance
 from google.cloud.bigtable.table import ClusterState, Table
 
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.common.consts import CLIENT_INFO
 from airflow.providers.google.common.hooks.base_google import GoogleBaseHook
 
@@ -57,6 +61,28 @@ class BigtableHook(GoogleBaseHook):
         )
         self._client: Client | None = None
 
+    def get_client_options(
+        self,
+        api_endpoint_override: str | None = None,
+    ) -> ClientOptions:
+        """
+        Return the ClientOptions object for Google Bigtable Admin API.
+
+        The returned options point at the Bigtable Admin API. ``Client`` passes the same options to its
+        data client, so data-plane methods added to this hook would need their own endpoint.
+        """
+        if not self.is_default_universe():
+            if api_endpoint_override:
+                self.log.info(
+                    "Ignoring api_endpoint_override because the universe domain is not Google default universe."
+                )
+            global_universe_domain = os.getenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN")
+            # google.cloud.bigtable.Client builds the admin channel from api_endpoint only and ignores
+            # universe_domain, so the base hook's ClientOptions(universe_domain=...) would still reach
+            # bigtableadmin.googleapis.com.
+            return ClientOptions(api_endpoint=f"bigtableadmin.{global_universe_domain}")
+        return super().get_client_options(api_endpoint_override=api_endpoint_override)
+
     def _get_client(self, project_id: str) -> Client:
         if not self._client:
             self._client = Client(
@@ -64,6 +90,7 @@ class BigtableHook(GoogleBaseHook):
                 credentials=self.get_credentials(),
                 client_info=CLIENT_INFO,
                 admin=True,
+                client_options=self.get_client_options(),
             )
         return self._client
 
@@ -87,8 +114,7 @@ class BigtableHook(GoogleBaseHook):
         """
         Delete the specified Cloud Bigtable instance.
 
-        Raises google.api_core.exceptions.NotFound if the Cloud Bigtable instance does
-        not exist.
+        If the instance does not exist, logs a warning message and exits.
 
         :param project_id: Optional, Google Cloud project ID where the
             BigTable exists. If set to None or missing,
@@ -203,7 +229,6 @@ class BigtableHook(GoogleBaseHook):
             instance_type=instance_type,
             labels=instance_labels,
         )
-
         operation = instance.update()
         operation.result(timeout)
 
@@ -241,7 +266,8 @@ class BigtableHook(GoogleBaseHook):
         """
         Delete the specified table in Cloud Bigtable.
 
-        Raises google.api_core.exceptions.NotFound if the table does not exist.
+        If the instance does not exist, raises RuntimeError.
+        If the table does not exist, logs a warning message and returns.
 
         :param instance_id: The ID of the Cloud Bigtable instance.
         :param table_id: The ID of the table in Cloud Bigtable.
@@ -252,15 +278,19 @@ class BigtableHook(GoogleBaseHook):
         instance = self.get_instance(instance_id=instance_id, project_id=project_id)
         if instance is None:
             raise RuntimeError(f"Instance {instance_id} did not exist; unable to delete table {table_id}")
+
         table = instance.table(table_id=table_id)
-        table.delete()
+        try:
+            table.delete()
+        except google.api_core.exceptions.NotFound:
+            self.log.info("The table '%s' no longer exists. Consider it as deleted", table_id)
 
     @staticmethod
     def update_cluster(instance: Instance, cluster_id: str, nodes: int) -> None:
         """
         Update number of nodes in the specified Cloud Bigtable cluster.
 
-        Raises google.api_core.exceptions.NotFound if the cluster does not exist.
+        If the cluster does not exist, raises AirflowException.
 
         :param instance: The Cloud Bigtable instance that owns the cluster.
         :param cluster_id: The ID of the cluster.
@@ -268,7 +298,12 @@ class BigtableHook(GoogleBaseHook):
         """
         cluster = Cluster(cluster_id, instance)
         # "reload" is required to set location_id attribute on cluster.
-        cluster.reload()
+        try:
+            cluster.reload()
+        except google.api_core.exceptions.NotFound:
+            raise AirflowException(
+                f"Dependency: cluster '{cluster_id}' does not exist for instance '{instance.instance_id}'."
+            )
         cluster.serve_nodes = nodes
         cluster.update()
 

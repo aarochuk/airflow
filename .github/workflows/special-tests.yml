@@ -20,16 +20,27 @@ name: Special tests
 on:  # yamllint disable-line rule:truthy
   workflow_call:
     inputs:
-      runs-on-as-json-default:
-        description: "The array of labels (in json form) determining default runner used for the build."
+      merge-with:
+        description: >-
+          The base branch commit and merge base to merge the pushed commit with, space-separated;
+          empty outside fork CI runs.
+        required: false
+        default: ""
+        type: string
+      runners:
+        description: "The array of labels (in json form) determining runners."
+        required: true
+        type: string
+      in-memory-runners:
+        description: "The same as runners, with docker in RAM on self-hosted runners."
+        required: true
+        type: string
+      platform:
+        description: "Platform for the build - 'linux/amd64' or 'linux/arm64'"
         required: true
         type: string
       default-branch:
         description: "The default branch for the repository"
-        required: true
-        type: string
-      test-groups:
-        description: "The json representing list of test test groups to run"
         required: true
         type: string
       core-test-types-list-as-strings-in-json:
@@ -38,6 +49,10 @@ on:  # yamllint disable-line rule:truthy
         type: string
       providers-test-types-list-as-strings-in-json:
         description: "The list of providers test types to run separated by spaces"
+        required: true
+        type: string
+      providers-split-test-types-list-as-strings-in-json:
+        description: "The providers test types for the jobs running them in parallel in the CI image"
         required: true
         type: string
       run-coverage:
@@ -94,7 +109,9 @@ jobs:
       contents: read
       packages: read
     with:
-      runs-on-as-json-default: ${{ inputs.runs-on-as-json-default }}
+      merge-with: ${{ inputs.merge-with }}
+      runners: ${{ format(inputs.in-memory-runners, '8+16', '32+128') }}
+      platform: ${{ inputs.platform }}
       downgrade-sqlalchemy: "true"
       test-name: "MinSQLAlchemy-Postgres"
       test-scope: "DB"
@@ -109,6 +126,7 @@ jobs:
       debug-resources: ${{ inputs.debug-resources }}
       skip-providers-tests: ${{ inputs.skip-providers-tests }}
       use-uv: ${{ inputs.use-uv }}
+      default-branch: ${{ inputs.default-branch }}
 
   tests-min-sqlalchemy-providers:
     name: "Min SQLAlchemy test: providers"
@@ -117,7 +135,9 @@ jobs:
       contents: read
       packages: read
     with:
-      runs-on-as-json-default: ${{ inputs.runs-on-as-json-default }}
+      merge-with: ${{ inputs.merge-with }}
+      runners: ${{ format(inputs.in-memory-runners, '32+64', '128+256') }}
+      platform: ${{ inputs.platform }}
       downgrade-sqlalchemy: "true"
       test-name: "MinSQLAlchemy-Postgres"
       test-scope: "DB"
@@ -127,11 +147,64 @@ jobs:
       backend-versions: "['${{ inputs.default-postgres-version }}']"
       excluded-providers-as-string: ${{ inputs.excluded-providers-as-string }}
       excludes: "[]"
-      test-types-as-strings-in-json: ${{ inputs.providers-test-types-list-as-strings-in-json }}
+      test-types-as-strings-in-json: ${{ inputs.providers-split-test-types-list-as-strings-in-json }}
       run-coverage: ${{ inputs.run-coverage }}
       debug-resources: ${{ inputs.debug-resources }}
       skip-providers-tests: ${{ inputs.skip-providers-tests }}
       use-uv: ${{ inputs.use-uv }}
+      default-branch: ${{ inputs.default-branch }}
+
+  tests-latest-sqlalchemy:
+    name: "Latest SQLAlchemy test: core"
+    uses: ./.github/workflows/run-unit-tests.yml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      merge-with: ${{ inputs.merge-with }}
+      runners: ${{ format(inputs.in-memory-runners, '8+16', '32+128') }}
+      platform: ${{ inputs.platform }}
+      upgrade-sqlalchemy: "true"
+      test-name: "LatestSQLAlchemy-Postgres"
+      test-scope: "DB"
+      test-group: "core"
+      backend: "postgres"
+      python-versions: "['${{ inputs.default-python-version }}']"
+      backend-versions: "['${{ inputs.default-postgres-version }}']"
+      excluded-providers-as-string: ${{ inputs.excluded-providers-as-string }}
+      excludes: "[]"
+      test-types-as-strings-in-json: ${{ inputs.core-test-types-list-as-strings-in-json }}
+      run-coverage: ${{ inputs.run-coverage }}
+      debug-resources: ${{ inputs.debug-resources }}
+      skip-providers-tests: ${{ inputs.skip-providers-tests }}
+      use-uv: ${{ inputs.use-uv }}
+      default-branch: ${{ inputs.default-branch }}
+
+  tests-latest-sqlalchemy-providers:
+    name: "Latest SQLAlchemy test: providers"
+    uses: ./.github/workflows/run-unit-tests.yml
+    permissions:
+      contents: read
+      packages: read
+    with:
+      merge-with: ${{ inputs.merge-with }}
+      runners: ${{ format(inputs.in-memory-runners, '32+64', '128+256') }}
+      platform: ${{ inputs.platform }}
+      upgrade-sqlalchemy: "true"
+      test-name: "LatestSQLAlchemy-Postgres"
+      test-scope: "DB"
+      test-group: "providers"
+      backend: "postgres"
+      python-versions: "['${{ inputs.default-python-version }}']"
+      backend-versions: "['${{ inputs.default-postgres-version }}']"
+      excluded-providers-as-string: ${{ inputs.excluded-providers-as-string }}
+      excludes: "[]"
+      test-types-as-strings-in-json: ${{ inputs.providers-split-test-types-list-as-strings-in-json }}
+      run-coverage: ${{ inputs.run-coverage }}
+      debug-resources: ${{ inputs.debug-resources }}
+      skip-providers-tests: ${{ inputs.skip-providers-tests }}
+      use-uv: ${{ inputs.use-uv }}
+      default-branch: ${{ inputs.default-branch }}
 
   tests-boto-core:
     name: "Latest Boto test: core"
@@ -140,7 +213,9 @@ jobs:
       contents: read
       packages: read
     with:
-      runs-on-as-json-default: ${{ inputs.runs-on-as-json-default }}
+      merge-with: ${{ inputs.merge-with }}
+      runners: ${{ format(inputs.in-memory-runners, '8+16', '32+128') }}
+      platform: ${{ inputs.platform }}
       upgrade-boto: "true"
       test-name: "LatestBoto-Postgres"
       test-scope: "All"
@@ -156,6 +231,7 @@ jobs:
       debug-resources: ${{ inputs.debug-resources }}
       skip-providers-tests: ${{ inputs.skip-providers-tests }}
       use-uv: ${{ inputs.use-uv }}
+      default-branch: ${{ inputs.default-branch }}
 
   tests-boto-providers:
     name: "Latest Boto test: providers"
@@ -164,7 +240,9 @@ jobs:
       contents: read
       packages: read
     with:
-      runs-on-as-json-default: ${{ inputs.runs-on-as-json-default }}
+      merge-with: ${{ inputs.merge-with }}
+      runners: ${{ format(inputs.in-memory-runners, '32+64', '128+256') }}
+      platform: ${{ inputs.platform }}
       upgrade-boto: "true"
       test-name: "LatestBoto-Postgres"
       test-scope: "All"
@@ -174,13 +252,13 @@ jobs:
       backend-versions: "['${{ inputs.default-postgres-version }}']"
       excluded-providers-as-string: ${{ inputs.excluded-providers-as-string }}
       excludes: "[]"
-      test-types-as-strings-in-json: ${{ inputs.providers-test-types-list-as-strings-in-json }}
+      test-types-as-strings-in-json: ${{ inputs.providers-split-test-types-list-as-strings-in-json }}
       include-success-outputs: ${{ inputs.include-success-outputs }}
       run-coverage: ${{ inputs.run-coverage }}
       debug-resources: ${{ inputs.debug-resources }}
       skip-providers-tests: ${{ inputs.skip-providers-tests }}
       use-uv: ${{ inputs.use-uv }}
-
+      default-branch: ${{ inputs.default-branch }}
 
   tests-pendulum-2-core:
     name: "Pendulum2 test: core"
@@ -189,7 +267,9 @@ jobs:
       contents: read
       packages: read
     with:
-      runs-on-as-json-default: ${{ inputs.runs-on-as-json-default }}
+      merge-with: ${{ inputs.merge-with }}
+      runners: ${{ format(inputs.in-memory-runners, '8+16', '32+128') }}
+      platform: ${{ inputs.platform }}
       downgrade-pendulum: "true"
       test-name: "Pendulum2-Postgres"
       test-scope: "All"
@@ -205,6 +285,7 @@ jobs:
       debug-resources: ${{ inputs.debug-resources }}
       skip-providers-tests: ${{ inputs.skip-providers-tests }}
       use-uv: ${{ inputs.use-uv }}
+      default-branch: ${{ inputs.default-branch }}
 
   tests-pendulum-2-providers:
     name: "Pendulum2 test: providers"
@@ -213,7 +294,9 @@ jobs:
       contents: read
       packages: read
     with:
-      runs-on-as-json-default: ${{ inputs.runs-on-as-json-default }}
+      merge-with: ${{ inputs.merge-with }}
+      runners: ${{ format(inputs.in-memory-runners, '32+64', '128+256') }}
+      platform: ${{ inputs.platform }}
       downgrade-pendulum: "true"
       test-name: "Pendulum2-Postgres"
       test-scope: "All"
@@ -223,12 +306,13 @@ jobs:
       backend-versions: "['${{ inputs.default-postgres-version }}']"
       excluded-providers-as-string: ${{ inputs.excluded-providers-as-string }}
       excludes: "[]"
-      test-types-as-strings-in-json: ${{ inputs.providers-test-types-list-as-strings-in-json }}
+      test-types-as-strings-in-json: ${{ inputs.providers-split-test-types-list-as-strings-in-json }}
       include-success-outputs: ${{ inputs.include-success-outputs }}
       run-coverage: ${{ inputs.run-coverage }}
       debug-resources: ${{ inputs.debug-resources }}
       skip-providers-tests: ${{ inputs.skip-providers-tests }}
       use-uv: ${{ inputs.use-uv }}
+      default-branch: ${{ inputs.default-branch }}
 
   tests-quarantined-core:
     name: "Quarantined test: core"
@@ -237,7 +321,9 @@ jobs:
       contents: read
       packages: read
     with:
-      runs-on-as-json-default: ${{ inputs.runs-on-as-json-default }}
+      merge-with: ${{ inputs.merge-with }}
+      runners: ${{ format(inputs.runners, '4+8', '16+32') }}
+      platform: ${{ inputs.platform }}
       test-name: "Postgres"
       test-scope: "Quarantined"
       test-group: "core"
@@ -252,6 +338,7 @@ jobs:
       debug-resources: ${{ inputs.debug-resources }}
       skip-providers-tests: ${{ inputs.skip-providers-tests }}
       use-uv: ${{ inputs.use-uv }}
+      default-branch: ${{ inputs.default-branch }}
 
   tests-quarantined-providers:
     name: "Quarantined test: providers"
@@ -260,7 +347,9 @@ jobs:
       contents: read
       packages: read
     with:
-      runs-on-as-json-default: ${{ inputs.runs-on-as-json-default }}
+      merge-with: ${{ inputs.merge-with }}
+      runners: ${{ format(inputs.runners, '4+8', '16+32') }}
+      platform: ${{ inputs.platform }}
       test-name: "Postgres"
       test-scope: "Quarantined"
       test-group: "providers"
@@ -275,56 +364,7 @@ jobs:
       debug-resources: ${{ inputs.debug-resources }}
       skip-providers-tests: ${{ inputs.skip-providers-tests }}
       use-uv: ${{ inputs.use-uv }}
-
-
-  tests-arm-collection-core:
-    name: "ARM Collection test: core"
-    uses: ./.github/workflows/run-unit-tests.yml
-    permissions:
-      contents: read
-      packages: read
-    with:
-      runs-on-as-json-default: ${{ inputs.runs-on-as-json-default }}
-      test-name: "Postgres"
-      test-scope: "ARM collection"
-      test-group: "core"
-      backend: "postgres"
-      python-versions: "['${{ inputs.default-python-version }}']"
-      backend-versions: "['${{ inputs.default-postgres-version }}']"
-      excluded-providers-as-string: ${{ inputs.excluded-providers-as-string }}
-      excludes: "[]"
-      test-types-as-strings-in-json: ${{ inputs.core-test-types-list-as-strings-in-json }}
-      include-success-outputs: ${{ inputs.include-success-outputs }}
-      run-coverage: ${{ inputs.run-coverage }}
-      debug-resources: ${{ inputs.debug-resources }}
-      skip-providers-tests: ${{ inputs.skip-providers-tests }}
-      use-uv: ${{ inputs.use-uv }}
-    if: ${{ inputs.default-branch == 'main' }}
-
-  tests-arm-collection-providers:
-    name: "ARM Collection test: providers"
-    uses: ./.github/workflows/run-unit-tests.yml
-    permissions:
-      contents: read
-      packages: read
-    with:
-      runs-on-as-json-default: ${{ inputs.runs-on-as-json-default }}
-      test-name: "Postgres"
-      test-scope: "ARM collection"
-      test-group: "providers"
-      backend: "postgres"
-      python-versions: "['${{ inputs.default-python-version }}']"
-      backend-versions: "['${{ inputs.default-postgres-version }}']"
-      excluded-providers-as-string: ${{ inputs.excluded-providers-as-string }}
-      excludes: "[]"
-      test-types-as-strings-in-json: ${{ inputs.core-test-types-list-as-strings-in-json }}
-      include-success-outputs: ${{ inputs.include-success-outputs }}
-      run-coverage: ${{ inputs.run-coverage }}
-      debug-resources: ${{ inputs.debug-resources }}
-      skip-providers-tests: ${{ inputs.skip-providers-tests }}
-      use-uv: ${{ inputs.use-uv }}
-    if: ${{ inputs.default-branch == 'main' }}
-
+      default-branch: ${{ inputs.default-branch }}
 
   tests-system-core:
     name: "System test: ${{ matrix.test-group }}"
@@ -333,7 +373,9 @@ jobs:
       contents: read
       packages: read
     with:
-      runs-on-as-json-default: ${{ inputs.runs-on-as-json-default }}
+      merge-with: ${{ inputs.merge-with }}
+      runners: ${{ format(inputs.runners, '8+16', '32+64') }}
+      platform: ${{ inputs.platform }}
       test-name: "SystemTest"
       test-scope: "System"
       test-group: "core"
@@ -348,3 +390,4 @@ jobs:
       debug-resources: ${{ inputs.debug-resources }}
       skip-providers-tests: ${{ inputs.skip-providers-tests }}
       use-uv: ${{ inputs.use-uv }}
+      default-branch: ${{ inputs.default-branch }}

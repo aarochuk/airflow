@@ -16,23 +16,36 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+import { useEffect } from "react";
+
 import { Box, VStack, Heading, Text, Button, Container, HStack, Code } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 import { useNavigate, useRouteError, isRouteErrorResponse } from "react-router-dom";
 
-import { AirflowPin } from "src/assets/AirflowPin";
+import { Logo } from "src/components/Logo";
+
+import { reloadAfterFailedRouteModuleLoad } from "src/utils/routeModule";
 
 export const ErrorPage = () => {
   const navigate = useNavigate();
   const error = useRouteError();
+  const { t: translate } = useTranslation();
 
-  let errorMessage = "An unexpected error occurred";
+  useEffect(() => {
+    reloadAfterFailedRouteModuleLoad();
+  }, [error]);
+
+  let errorMessage = translate("error.defaultMessage");
   let statusCode = "";
 
-  if (isRouteErrorResponse(error)) {
+  if (error === null || error === undefined) {
+    statusCode = "404";
+    errorMessage = translate("error.invalidUrl");
+  } else if (isRouteErrorResponse(error)) {
     statusCode = String(error.status);
     errorMessage =
       ((error as unknown as Error).message || (error as { statusText?: string }).statusText) ??
-      "Page Not Found";
+      translate("error.notFound");
   } else if (error instanceof Error) {
     errorMessage = error.message;
   } else if (typeof error === "string") {
@@ -46,10 +59,10 @@ export const ErrorPage = () => {
     <Box alignItems="center" display="flex" justifyContent="center" pt={36} px={4}>
       <Container maxW="lg">
         <VStack gap={8} textAlign="center">
-          <AirflowPin height="50px" width="50px" />
+          <Logo height="50px" width="50px" />
 
           <VStack gap={4}>
-            <Heading>{statusCode || "Error"}</Heading>
+            <Heading>{statusCode || translate("error.title")}</Heading>
             <Text fontSize="lg">{errorMessage}</Text>
             {error instanceof Error && isDev ? (
               <Code borderRadius="md" fontSize="sm" p={3} width="full">
@@ -59,12 +72,28 @@ export const ErrorPage = () => {
           </VStack>
 
           <HStack gap={4}>
-            <Button colorPalette="blue" onClick={() => navigate(-1)} size="lg">
-              Back
+            <Button
+              onClick={() => {
+                void Promise.resolve(navigate(-1));
+              }}
+              size="lg"
+            >
+              {translate("error.back")}
             </Button>
-            <Button colorPalette="blue" onClick={() => navigate("/")} size="lg" variant="outline">
-              Home
+            <Button
+              onClick={() => {
+                void Promise.resolve(navigate("/"));
+              }}
+              size="lg"
+              variant="outline"
+            >
+              {translate("error.home")}
             </Button>
+            {error === null || error === undefined ? undefined : (
+              <Button onClick={() => globalThis.location.reload()} size="lg" variant="outline">
+                {translate("error.reload")}
+              </Button>
+            )}
           </HStack>
         </VStack>
       </Container>

@@ -20,19 +20,22 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from airflow.sensors.base import BaseSensorOperator
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 
 if TYPE_CHECKING:
     from hdfs import InsecureClient
     from hdfs.ext.kerberos import KerberosClient
 
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class WebHdfsSensor(BaseSensorOperator):
     """Waits for a file or folder to land in HDFS."""
 
-    template_fields: Sequence[str] = ("filepath",)
+    template_fields: Sequence[str] = (
+        "filepath",
+        "webhdfs_conn_id",
+    )
 
     def __init__(self, *, filepath: str, webhdfs_conn_id: str = "webhdfs_default", **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -50,7 +53,7 @@ class WebHdfsSensor(BaseSensorOperator):
 class MultipleFilesWebHdfsSensor(BaseSensorOperator):
     """Waits for multiple files in a folder to land in HDFS."""
 
-    template_fields: Sequence[str] = ("directory_path", "expected_filenames")
+    template_fields: Sequence[str] = ("directory_path", "expected_filenames", "webhdfs_conn_id")
 
     def __init__(
         self,

@@ -17,8 +17,6 @@
 # under the License.
 from __future__ import annotations
 
-import functools
-import operator
 from collections.abc import Iterable, Mapping, Sequence, Sized
 from typing import TYPE_CHECKING, Any, ClassVar, Union
 
@@ -27,9 +25,10 @@ import attrs
 from airflow.sdk.definitions._internal.mixins import ResolveMixin
 
 if TYPE_CHECKING:
+    from typing import TypeGuard
+
     from airflow.sdk.definitions.xcom_arg import XComArg
     from airflow.sdk.types import Operator
-    from airflow.typing_compat import TypeGuard
 
 ExpandInput = Union["DictOfListsExpandInput", "ListOfDictsExpandInput"]
 
@@ -42,12 +41,13 @@ OperatorExpandArgument = Union["MappedArgument", "XComArg", Sequence, dict[str, 
 OperatorExpandKwargsArgument = Union["XComArg", Sequence[Union["XComArg", Mapping[str, Any]]]]
 
 
-class NotFullyPopulated(RuntimeError):
+class _NotFullyPopulated(RuntimeError):
     """
-    Raise when ``get_map_lengths`` cannot populate all mapping metadata.
+    Raise when an expand input cannot be resolved due to incomplete metadata.
 
-    This is generally due to not all upstream tasks have finished when the
-    function is called.
+    This generally should not happen. The scheduler should have made sure that
+    a not-yet-ready-to-expand task should not be executed. In the off chance
+    this gets raised, it will fail the task instance.
     """
 
     def __init__(self, missing: set[str]) -> None:
@@ -67,14 +67,14 @@ def is_mappable(v: Any) -> TypeGuard[OperatorExpandArgument]:
 
 # To replace tedious isinstance() checks.
 def _is_parse_time_mappable(v: OperatorExpandArgument) -> TypeGuard[Mapping | Sequence]:
-    from airflow.models.xcom_arg import XComArg
+    from airflow.sdk.definitions.xcom_arg import XComArg
 
     return not isinstance(v, (MappedArgument, XComArg))
 
 
 # To replace tedious isinstance() checks.
 def _needs_run_time_resolution(v: OperatorExpandArgument) -> TypeGuard[MappedArgument | XComArg]:
-    from airflow.models.xcom_arg import XComArg
+    from airflow.sdk.definitions.xcom_arg import XComArg
 
     return isinstance(v, (MappedArgument, XComArg))
 
@@ -122,44 +122,16 @@ class DictOfListsExpandInput(ResolveMixin):
         """Generate kwargs with values available on parse-time."""
         return ((k, v) for k, v in self.value.items() if _is_parse_time_mappable(v))
 
-    def get_parse_time_mapped_ti_count(self) -> int:
-        if not self.value:
-            return 0
-        literal_values = [len(v) for _, v in self._iter_parse_time_resolved_kwargs()]
-        if len(literal_values) != len(self.value):
-            literal_keys = (k for k, _ in self._iter_parse_time_resolved_kwargs())
-            raise NotFullyPopulated(set(self.value).difference(literal_keys))
-        return functools.reduce(operator.mul, literal_values, 1)
-
-    def _get_map_lengths(
-        self, resolved_vals: dict[str, Sized], upstream_map_indexes: dict[str, int]
-    ) -> dict[str, int]:
+    def _get_map_lengths(self, resolved_vals: dict[str, Sized]) -> dict[str, int]:
         """
         Return dict of argument name to map length.
 
-        If any arguments are not known right now (upstream task not finished),
-        they will not be present in the dict.
+        :raises _NotFullyPopulated: if any argument can not be resolved to a
+            sized value.
         """
-
-        # TODO: This initiates one API call for each XComArg. Would it be
-        # more efficient to do one single call and unpack the value here?
-        def _get_length(k: str, v: OperatorExpandArgument) -> int | None:
-            from airflow.sdk.definitions.xcom_arg import XComArg, get_task_map_length
-
-            if isinstance(v, XComArg):
-                return get_task_map_length(v, resolved_vals[k], upstream_map_indexes)
-
-            # Unfortunately a user-defined TypeGuard cannot apply negative type
-            # narrowing. https://github.com/python/typing/discussions/1013
-            if TYPE_CHECKING:
-                assert isinstance(v, Sized)
-            return len(v)
-
-        map_lengths = {
-            k: res for k, v in self.value.items() if v is not None if (res := _get_length(k, v)) is not None
-        }
+        map_lengths = {k: len(v) for k, v in resolved_vals.items()}
         if len(map_lengths) < len(self.value):
-            raise NotFullyPopulated(set(self.value).difference(map_lengths))
+            raise _NotFullyPopulated(set(self.value).difference(map_lengths))
         return map_lengths
 
     def _expand_mapped_field(self, key: str, value: Any, map_index: int, all_lengths: dict[str, int]) -> Any:
@@ -187,7 +159,7 @@ class DictOfListsExpandInput(ResolveMixin):
         raise IndexError(f"index {map_index} is over mapped length")
 
     def iter_references(self) -> Iterable[tuple[Operator, str]]:
-        from airflow.models.xcom_arg import XComArg
+        from airflow.sdk.definitions.xcom_arg import XComArg
 
         for x in self.value.values():
             if isinstance(x, XComArg):
@@ -198,15 +170,16 @@ class DictOfListsExpandInput(ResolveMixin):
         if map_index is None or map_index < 0:
             raise RuntimeError("can't resolve task-mapping argument without expanding")
 
-        upstream_map_indexes = getattr(context["ti"], "_upstream_map_indexes", {})
-
         # TODO: This initiates one API call for each XComArg. Would it be
         # more efficient to do one single call and unpack the value here?
+
         resolved = {
             k: v.resolve(context) if _needs_run_time_resolution(v) else v for k, v in self.value.items()
         }
 
-        all_lengths = self._get_map_lengths(resolved, upstream_map_indexes)
+        sized_resolved = {k: v for k, v in resolved.items() if isinstance(v, Sized)}
+
+        all_lengths = self._get_map_lengths(sized_resolved)
 
         data = {k: self._expand_mapped_field(k, v, map_index, all_lengths) for k, v in resolved.items()}
         literal_keys = {k for k, _ in self._iter_parse_time_resolved_kwargs()}
@@ -232,13 +205,8 @@ class ListOfDictsExpandInput(ResolveMixin):
 
     EXPAND_INPUT_TYPE: ClassVar[str] = "list-of-dicts"
 
-    def get_parse_time_mapped_ti_count(self) -> int:
-        if isinstance(self.value, Sized):
-            return len(self.value)
-        raise NotFullyPopulated({"expand_kwargs() argument"})
-
     def iter_references(self) -> Iterable[tuple[Operator, str]]:
-        from airflow.models.xcom_arg import XComArg
+        from airflow.sdk.definitions.xcom_arg import XComArg
 
         if isinstance(self.value, XComArg):
             yield from self.value.iter_references()
@@ -276,3 +244,6 @@ class ListOfDictsExpandInput(ResolveMixin):
         resolved_oids = {id(v) for k, v in mapping.items() if not _is_parse_time_mappable(v)}
 
         return mapping, resolved_oids
+
+
+EXPAND_INPUT_EMPTY = DictOfListsExpandInput({})  # Sentinel value.

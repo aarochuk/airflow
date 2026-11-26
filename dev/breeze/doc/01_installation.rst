@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -35,17 +34,29 @@ Docker Desktop
 - **Disk space**: On macOS, increase your available disk space before starting to work with
   the environment. At least 20 GB of free disk space is recommended. You can also get by with a
   smaller space but make sure to clean up the Docker disk space periodically.
-  See also `Docker for Mac - Space <https://docs.docker.com/docker-for-mac/space>`_ for details
-  on increasing disk space available for Docker on Mac.
+  See the `Docker Desktop disk usage settings
+  <https://docs.docker.com/desktop/settings-and-maintenance/settings/#advanced>`_ for details on
+  increasing the disk usage limit on macOS.
 - **Docker problems**: Sometimes it is not obvious that space is an issue when you run into
   a problem with Docker. If you see a weird behaviour, try ``breeze cleanup`` command.
   Also see `pruning <https://docs.docker.com/config/pruning/>`_ instructions from Docker.
 - **Docker context**: Recent versions of Docker Desktop are by default configured to use ``desktop-linux``
-  docker context that uses docker socket created in user home directory. Older versions (and plain docker)
-  uses ``/var/run/docker.sock`` socket and ``default`` context. Breeze will attempt to detect if you have
-  ``desktop-linux`` context configured and will use it if it is available, but you can force the
-  context by adding ``--builder`` flag to the commands that build image or run the container and forward
-  the socket to inside the image.
+  docker context that uses a docker socket created in the user home directory. Older versions (and plain
+  Docker Engine) use ``/var/run/docker.sock`` and the ``default`` context. Lightweight engines such as
+  Colima create a ``colima`` context. Breeze tries to pick a suitable context automatically, but a leftover
+  ``desktop-linux`` context after quitting Docker Desktop can still win even when Colima is the running
+  engine.
+
+  To point Breeze at a specific Docker socket (for example Colima), set ``DOCKER_HOST`` or pass
+  ``--docker-host``::
+
+      export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
+      # or:
+      breeze --docker-host unix://$HOME/.colima/default/docker.sock shell
+
+  The ``--builder`` flag selects the Buildx builder / docker context name used for
+  ``docker buildx build``. Prefer ``--docker-host`` / ``DOCKER_HOST`` when you only need to choose
+  which engine socket to talk to.
 
 Here is an example configuration with more than 200GB disk space for Docker:
 
@@ -77,7 +88,7 @@ Here is an example configuration with more than 200GB disk space for Docker:
             <img src="images/docker_socket.png" width="640" alt="Docker socket used">
         </div>
 
-Note: If you use Colima, please follow instructions at:
+Note: If you use Colima, please follow instructions in Colima section at:
 `Contributors Quick Start Guide </contributing-docs/03_contributors_quick_start.rst>`__
 
 Docker Compose
@@ -95,10 +106,7 @@ Docker in WSL 2
     `WSL 2 Installation Guide <https://docs.microsoft.com/en-us/windows/wsl/install-win10>`_ for details.
 
 - **Docker Desktop installation** :
-    Install Docker Desktop for Windows. For Windows Home follow the
-    `Docker Windows Home Installation Guide <https://docs.docker.com/docker-for-windows/install-windows-home>`_.
-    For Windows Pro, Enterprise, or Education follow the
-    `Docker Windows Installation Guide <https://docs.docker.com/docker-for-windows/install/>`_.
+    Follow the `Docker Desktop installation guide for Windows <https://docs.docker.com/desktop/setup/install/windows-install/>`_.
 
 - **Docker setting** :
     WSL integration needs to be enabled
@@ -125,7 +133,7 @@ Docker in WSL 2
     If you're experiencing errors such as ``ERROR: for docker-compose_airflow_run
     Cannot create container for service airflow: not a directory`` when starting Breeze
     after the first time or an error like ``docker: Error response from daemon: not a directory.
-    See 'docker run --help'.`` when running the pre-commit tests, you may need to consider
+    See 'docker run --help'.`` when running the prek tests, you may need to consider
     `installing Docker directly in WSL 2 <https://dev.to/bowmanjd/install-docker-on-windows-wsl-without-docker-desktop-34m9>`_
     instead of using Docker Desktop for Windows.
 
@@ -154,16 +162,27 @@ installing packages, managing workspaces and running development tools.).
 
 Installing ``uv`` is described in the `uv documentation <https://docs.astral.sh/uv/getting-started/installation/>`_.
 We highly recommend using ``uv`` to manage your Python environments, as it is very comprehensive,
-easy to use, it is faster than any of the other tools availables (way faster!) and has a lot of features
+easy to use, it is faster than any of the other tools available (way faster!) and has a lot of features
 that make it easier to work with Python.
+
+The ``gh`` cli needed for release managers
+------------------------------------------
+
+The ``gh`` GitHub CLI is a command line tool that allows you to interact with GitHub repositories, issues, pull
+requests, and more. It is useful for release managers to automate tasks such as creating releases,
+managing issues, and starting workflows (for example during documentation building). Release
+managers should have ``gh`` installed (see `gh installation guide <https://github.com/cli/cli>`_) and they
+should follow configuration steps to authorize ``gh`` in their local airflow repository (basically
+running ``gh auth login`` command and following the instructions).
+
 
 Alternative: pipx tool
 ----------------------
 
 However, we do not want to be entirely dependent on ``uv`` as it is a software governed by a VC-backed vendor,
 so we always want to provide open-source governed alternatives for our tools. If you can't or do not want to
-use ``uv``, we got you covered. Another too you can use to manage development tools (and ``breeze`` development
-environment is Python-Software-Foundation managed ``pipx``. The ``pipx`` tool is created by the creators
+use ``uv``, we got you covered. Another tool you can use to manage development tools (and ``breeze`` development
+environment) is Python-Software-Foundation managed ``pipx``. The ``pipx`` tool is created by the creators
 of ``pip`` from `Python Packaging Authority <https://www.pypa.io/en/latest/>`_
 
 Note that ``pipx`` >= 1.4.1 should be used.
@@ -196,9 +215,10 @@ Memory
 
 Minimum 4GB RAM for Docker Engine is required to run the full Breeze environment.
 
-On macOS, 2GB of RAM are available for your Docker containers by default, but more memory is recommended
-(4GB should be comfortable). For details see
-`Docker for Mac - Advanced tab <https://docs.docker.com/v17.12/docker-for-mac/#advanced-tab>`_.
+On macOS, Docker Desktop allocates 50% of the host's memory to its virtual machine by default.
+An allocation of 4 GB is a reasonable starting point for Breeze. If you need more memory,
+increase the memory limit in the
+`Docker Desktop resource settings <https://docs.docker.com/desktop/settings-and-maintenance/settings/#advanced>`_.
 
 On Windows WSL 2 expect the Linux Distro and Docker containers to use 7 - 8 GB of RAM.
 
@@ -207,9 +227,10 @@ Disk
 
 Minimum 40GB free disk space is required for your Docker Containers.
 
-On Mac OS This might deteriorate over time so you might need to increase it or run ``breeze cleanup``
-periodically. For details see
-`Docker for Mac - Advanced tab <https://docs.docker.com/v17.12/docker-for-mac/#advanced-tab>`_.
+On macOS, Docker images and containers can take up more disk space over time. Run
+``breeze cleanup`` periodically to reclaim space. If Docker Desktop reaches its disk usage
+limit and your Mac has enough free disk space, see the `Docker Desktop disk usage settings
+<https://docs.docker.com/desktop/settings-and-maintenance/settings/#advanced>`_ to increase the limit.
 
 On WSL2 you might want to increase your Virtual Hard Disk by following:
 `Expanding the size of your WSL 2 Virtual Hard Disk <https://docs.microsoft.com/en-us/windows/wsl/compare-versions#expanding-the-size-of-your-wsl-2-virtual-hard-disk>`_
@@ -238,7 +259,7 @@ If you run into disk space errors, consider pruning your Docker images with the 
 command. You may need to restart the Docker Engine before running this command.
 
 In case of disk space errors on macOS, increase the disk space available for Docker. See
-`Prerequisites <#prerequisites>`_ for details.
+`Disk <#disk>`_ for details.
 
 
 Installation
@@ -256,9 +277,53 @@ Set your working directory to the root of this cloned repository.
 
     cd  airflow
 
-Run this command to install Breeze (make sure to use ``-e`` flag) - you can choose ``uv`` (recommended) or
-``pipx``:
+The recommended way to make ``breeze`` available is to install a small **shim script** at
+``~/.local/bin/breeze`` that runs breeze from the ``dev/breeze`` folder of the current git
+worktree via ``uv run --locked``, with every dependency pinned by the committed
+``dev/breeze/uv.lock``. This avoids a single global install and means each git worktree
+(including ephemeral worktrees used by coding agents) gets its own breeze, tied to that
+worktree's sources. Because the shim is a real file on ``PATH``, subprocesses (pre-commit
+hooks, CI scripts, dev tools) see it just like a ``uv tool``-installed binary. See
+`ADR 0017 <adr/0017-use-uvx-to-run-breeze-from-local-sources.md>`_ for the rationale.
 
+The easiest way to set this up is to run the helper script:
+
+.. code-block:: bash
+
+    ./scripts/tools/setup_breeze
+
+It checks for ``uv``, refuses to proceed if a legacy global breeze install is present
+(see Uninstalling Breeze below), then writes the shim to ``~/.local/bin/breeze`` and
+marks it executable. To do it manually, write this file to ``~/.local/bin/breeze`` and
+``chmod +x`` it:
+
+.. code-block:: bash
+
+    #!/usr/bin/env bash
+    # Apache Airflow breeze shim — managed by scripts/tools/setup_breeze (ADR 0017).
+    set -e
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+        echo "breeze: not inside a git repository — cd into an Airflow worktree first" >&2
+        exit 1
+    }
+    if [ ! -d "${repo_root}/dev/breeze" ]; then
+        echo "breeze: ${repo_root} is not an Airflow worktree (no dev/breeze)" >&2
+        exit 1
+    fi
+    exec env AIRFLOW_ROOT_PATH="${repo_root}" SKIP_BREEZE_SELF_UPGRADE_CHECK=1 \
+        uv run --project "${repo_root}/dev/breeze" --locked --quiet breeze "$@"
+
+Then ``breeze`` invoked from any Airflow checkout uses that checkout's source. The first call in
+a fresh worktree pays a one-time sync of ``dev/breeze/.venv``; subsequent calls reuse it.
+
+Alternative: legacy global install (``uv tool`` or ``pipx``)
+------------------------------------------------------------
+
+If you prefer a single global install on ``PATH`` (the pre-ADR-0017 behaviour), you can still
+install Breeze with ``uv tool`` or ``pipx``. This is *not* recommended for setups with multiple
+checkouts or git worktrees, because all worktrees end up sharing one ``breeze`` binary tied to
+whichever source tree was last used for ``uv tool install --force``. It also conflicts with the
+shim approach above — both target ``~/.local/bin/breeze``.
 
 .. code-block:: bash
 
@@ -286,8 +351,9 @@ Run this command to install Breeze (make sure to use ``-e`` flag) - you can choo
 
         pipx install -e dev\breeze
 
-Once this is complete, you should have ``breeze`` binary on your PATH and available to run by ``breeze``
-command.
+Once either installation completes, you should have ``breeze`` available to run by ``breeze``
+command (the recommended setup uses a shim script at ``~/.local/bin/breeze`` that delegates
+to ``uvx``; the legacy global install puts a fully-installed binary at the same path).
 
 Those are all available commands for Breeze and details about the commands are described below:
 
@@ -296,19 +362,23 @@ Those are all available commands for Breeze and details about the commands are d
   :width: 100%
   :alt: Breeze commands
 
-Breeze installed this way is linked to your checked out sources of Airflow, so Breeze will
-automatically use latest version of sources from ``./dev/breeze``. Sometimes, when dependencies are
-updated ``breeze`` commands with offer you to run self-upgrade.
+Under the recommended uvx-based setup, Breeze always runs from the ``dev/breeze`` folder of the
+current git worktree, and ``uvx`` automatically rebuilds its cached environment whenever
+``pyproject.toml`` / ``uv.lock`` change — so there is no manual self-upgrade step.
 
-You can always run such self-upgrade at any time:
+If you used the legacy global install, Breeze is linked to the checked-out sources of Airflow it
+was installed from, so Breeze will automatically use the latest version of those sources. When
+breeze's own dependencies are updated, ``breeze`` commands will offer you to run self-upgrade,
+which you can also run at any time:
 
 .. code-block:: bash
 
     breeze setup self-upgrade
 
-If you have several checked out Airflow sources, Breeze will warn you if you are using it from a different
-source tree and will offer you to re-install from those sources - to make sure that you are using the right
-version.
+If you have several checked-out Airflow sources, the legacy global install will warn you if you
+are using it from a different source tree and offer you to re-install from those sources — to
+make sure that you are using the right version. (The recommended uvx-based setup avoids this
+class of problem entirely: each worktree has its own ephemeral install.)
 
 You can skip Breeze's upgrade check by setting ``SKIP_BREEZE_UPGRADE_CHECK`` variable to non empty value.
 
@@ -321,8 +391,19 @@ that Breeze works on
 
 .. warning:: Upgrading from earlier Python version
 
-    If you used Breeze with Python 3.8 and when running it, it will complain that it needs Python 3.9. In this
-    case you should force-reinstall Breeze with ``uv`` (or ``pipx``):
+    If breeze complains it needs a newer Python than what it picked up:
+
+    * **Recommended (uvx) setup:** export ``UV_PYTHON`` to the desired version before invoking
+      breeze, e.g.:
+
+        .. code-block:: bash
+
+            UV_PYTHON=3.11 breeze ...
+
+      or set it permanently in your shell rc. ``uvx`` will rebuild its cached environment with
+      that interpreter on the next call.
+
+    * **Legacy global install:** force-reinstall Breeze with ``uv`` (or ``pipx``):
 
         .. code-block:: bash
 
@@ -353,22 +434,22 @@ that Breeze works on
 
     .. note:: creating virtual env for ``apache-airflow-breeze`` with a specific python version
 
-        The ``uv tool install`` or  ``pipx install`` use default system python version to create virtual
-        env for breeze. You can use a specific version by providing python version in ``uv`` or
-        python executable in ``pipx`` in ``--python``.
+        For the recommended uvx setup, ``UV_PYTHON=3.11.16 breeze ...`` selects the Python version
+        for the cached environment.
 
-        If you have breeze installed already with another Python version you can reinstall breeze with reinstall
-        command
+        For a legacy global install, ``uv tool install`` or ``pipx install`` use the default system
+        python version to create the virtual env for breeze. You can pin a specific version with
+        ``--python``:
 
         .. code-block:: bash
 
-            uv tool install  --python 3.9.16 ./dev/breeze --force
+            uv tool install  --python 3.11.16 ./dev/breeze --force
 
         or
 
         .. code-block:: bash
 
-            pipx install -e ./dev/breeze --python /Users/airflow/.pyenv/versions/3.9.16/bin/python --force
+            pipx install -e ./dev/breeze --python /Users/airflow/.pyenv/versions/3.11.16/bin/python --force
 
 
 Running Breeze for the first time
@@ -419,7 +500,7 @@ also force reinstalling the autocomplete via:
 
    breeze setup autocomplete --force
 
-These are all available flags of ``setup-autocomplete`` command:
+These are all available flags of ``setup autocomplete`` command:
 
 .. image:: ./images/output_setup_autocomplete.svg
   :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_setup_autocomplete.svg
@@ -470,6 +551,10 @@ it off by passing ``--no-colour`` to config in which case the messages to the us
 will be printed using different schemes (italic/bold/underline) to indicate different kind of messages
 rather than colours.
 
+You can also switch off the separate Docker Compose project that Breeze uses for each git worktree with
+``--no-worktree-isolation`` (see `Stopping the environment <03_developer_tasks.rst#stopping-the-environment>`_).
+The setting applies to every worktree of the checkout.
+
 These are all available flags of ``setup config`` command:
 
 .. image:: ./images/output_setup_config.svg
@@ -481,14 +566,27 @@ Automating breeze installation
 ------------------------------
 
 Breeze on POSIX-compliant systems (Linux, MacOS) can be automatically installed by running the
-``scripts/tools/setup_breeze`` bash script. This includes checking and installing ``uv``, setting up
-``breeze`` with it and setting up autocomplete.
+``scripts/tools/setup_breeze`` bash script. It checks/installs ``uv``, refuses to proceed if a
+legacy global breeze install is present, then writes the shim script (see ADR 0017) to
+``~/.local/bin/breeze``.
 
 
 Uninstalling Breeze
 -------------------
 
-Since Breeze is installed with ``uv tool`` or ``pipx``, you need to use the appropriate tool to uninstall it.
+Under the recommended uvx-based setup, just delete the shim script:
+
+.. code-block:: bash
+
+    rm ~/.local/bin/breeze
+
+To also drop the cached environment:
+
+.. code-block:: bash
+
+    uv cache clean apache-airflow-breeze
+
+If you used the legacy global install, use the appropriate tool to uninstall it:
 
 .. code-block:: bash
 

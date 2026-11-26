@@ -19,17 +19,50 @@ from __future__ import annotations
 
 import asyncio
 import time
+import warnings
 from functools import cached_property
 from typing import Any
 
 from botocore.exceptions import ClientError
+from tenacity import (
+    AsyncRetrying,
+    Retrying,
+    before_sleep_log,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.providers.amazon.aws.hooks.base_aws import AwsBaseHook
 from airflow.providers.amazon.aws.hooks.logs import AwsLogsHook
+from airflow.providers.amazon.aws.hooks.sts import StsHook
+from airflow.providers.common.compat.sdk import AirflowException
 
 DEFAULT_LOG_SUFFIX = "output"
 ERROR_LOG_SUFFIX = "error"
+
+
+def get_glue_log_group_names(job_run: dict[str, Any]) -> tuple[str, str]:
+    """Extract the output and error CloudWatch log group names from a Glue job run response."""
+    log_group_prefix = job_run["LogGroupName"]
+    return (
+        f"{log_group_prefix}/{DEFAULT_LOG_SUFFIX}",
+        f"{log_group_prefix}/{ERROR_LOG_SUFFIX}",
+    )
+
+
+def format_glue_logs(fetched_logs: list[str], log_group: str) -> str:
+    """
+    Format fetched CloudWatch log messages for display.
+
+    Shared between ``GlueJobHook.print_job_logs`` and ``GlueJobCompleteTrigger._forward_logs``
+    so that both the sync and async paths produce identical output.
+    """
+    if fetched_logs:
+        messages = "\t".join(line.rstrip() + "\n" for line in fetched_logs)
+        return f"Glue Job Run {log_group} Logs:\n\t{messages}"
+    return f"No new log from the Glue Job in {log_group}"
 
 
 class GlueJobHook(AwsBaseHook):
@@ -45,11 +78,11 @@ class GlueJobHook(AwsBaseHook):
     :param script_location: path to etl script on s3
     :param retry_limit: Maximum number of times to retry this job if it fails
     :param num_of_dpus: Number of AWS Glue DPUs to allocate to this Job
-    :param region_name: aws region name (example: us-east-1)
     :param iam_role_name: AWS IAM Role for Glue Job Execution. If set `iam_role_arn` must equal None.
     :param iam_role_arn: AWS IAM Role ARN for Glue Job Execution, If set `iam_role_name` must equal None.
     :param create_job_kwargs: Extra arguments for Glue Job Creation
     :param update_config: Update job configuration on Glue (default: False)
+    :param api_retry_args: An optional dictionary with arguments passed to ``tenacity.Retrying`` & ``tenacity.AsyncRetrying`` classes.
 
     Additional arguments (such as ``aws_conn_id``) may be specified and
     are passed down to the underlying AwsBaseHook.
@@ -79,6 +112,7 @@ class GlueJobHook(AwsBaseHook):
         create_job_kwargs: dict | None = None,
         update_config: bool = False,
         job_poll_interval: int | float = 6,
+        api_retry_args: dict[Any, Any] | None = None,
         *args,
         **kwargs,
     ):
@@ -94,6 +128,17 @@ class GlueJobHook(AwsBaseHook):
         self.create_job_kwargs = create_job_kwargs or {}
         self.update_config = update_config
         self.job_poll_interval = job_poll_interval
+
+        self.retry_config: dict[str, Any] = {
+            "retry": retry_if_exception(self._should_retry_on_error),
+            "wait": wait_exponential(multiplier=1, min=1, max=60),
+            "stop": stop_after_attempt(5),
+            "before_sleep": before_sleep_log(self.log, log_level=20),  # type: ignore[arg-type]
+            "reraise": True,
+        }
+
+        if api_retry_args:
+            self.retry_config.update(api_retry_args)
 
         worker_type_exists = "WorkerType" in self.create_job_kwargs
         num_workers_exists = "NumberOfWorkers" in self.create_job_kwargs
@@ -114,6 +159,29 @@ class GlueJobHook(AwsBaseHook):
 
         kwargs["client_type"] = "glue"
         super().__init__(*args, **kwargs)
+
+    def _should_retry_on_error(self, exception: BaseException) -> bool:
+        """
+        Determine if an exception should trigger a retry.
+
+        :param exception: The exception that occurred
+        :return: True if the exception should trigger a retry, False otherwise
+        """
+        if isinstance(exception, ClientError):
+            error_code = exception.response.get("Error", {}).get("Code", "")
+            retryable_errors = {
+                "ThrottlingException",
+                "RequestLimitExceeded",
+                "ServiceUnavailable",
+                "InternalFailure",
+                "InternalServerError",
+                "TooManyRequestsException",
+                "RequestTimeout",
+                "RequestTimeoutException",
+                "HttpTimeoutException",
+            }
+            return error_code in retryable_errors
+        return False
 
     def create_glue_job_config(self) -> dict:
         default_command = {
@@ -145,7 +213,7 @@ class GlueJobHook(AwsBaseHook):
 
         return config
 
-    def list_jobs(self) -> list:
+    def describe_jobs(self) -> list:
         """
         Get list of Jobs.
 
@@ -153,6 +221,20 @@ class GlueJobHook(AwsBaseHook):
             - :external+boto3:py:meth:`Glue.Client.get_jobs`
         """
         return self.conn.get_jobs()
+
+    def list_jobs(self) -> list:
+        """
+        Get list of Jobs.
+
+        .. deprecated::
+            - Use :meth:`describe_jobs` instead.
+        """
+        warnings.warn(
+            "The method `list_jobs` is deprecated. Use the method `describe_jobs` instead.",
+            AirflowProviderDeprecationWarning,
+            stacklevel=2,
+        )
+        return self.describe_jobs()
 
     def get_iam_execution_role(self) -> dict:
         try:
@@ -202,8 +284,21 @@ class GlueJobHook(AwsBaseHook):
         :param run_id: The job-run ID of the predecessor job run
         :return: State of the Glue job
         """
-        job_run = self.conn.get_job_run(JobName=job_name, RunId=run_id, PredecessorsIncluded=True)
-        return job_run["JobRun"]["JobRunState"]
+        for attempt in Retrying(**self.retry_config):
+            with attempt:
+                try:
+                    job_run = self.conn.get_job_run(JobName=job_name, RunId=run_id, PredecessorsIncluded=True)
+                    return job_run["JobRun"]["JobRunState"]
+                except ClientError as e:
+                    self.log.error("Failed to get job state for job %s run %s: %s", job_name, run_id, e)
+                    raise
+                except Exception as e:
+                    self.log.error(
+                        "Unexpected error getting job state for job %s run %s: %s", job_name, run_id, e
+                    )
+                    raise
+        # This should never be reached due to reraise=True, but mypy needs it
+        raise RuntimeError("Unexpected end of retry loop")
 
     async def async_get_job_state(self, job_name: str, run_id: str) -> str:
         """
@@ -211,9 +306,22 @@ class GlueJobHook(AwsBaseHook):
 
         The async version of get_job_state.
         """
-        async with await self.get_async_conn() as client:
-            job_run = await client.get_job_run(JobName=job_name, RunId=run_id)
-        return job_run["JobRun"]["JobRunState"]
+        async for attempt in AsyncRetrying(**self.retry_config):
+            with attempt:
+                try:
+                    async with await self.get_async_conn() as client:
+                        job_run = await client.get_job_run(JobName=job_name, RunId=run_id)
+                    return job_run["JobRun"]["JobRunState"]
+                except ClientError as e:
+                    self.log.error("Failed to get job state for job %s run %s: %s", job_name, run_id, e)
+                    raise
+                except Exception as e:
+                    self.log.error(
+                        "Unexpected error getting job state for job %s run %s: %s", job_name, run_id, e
+                    )
+                    raise
+        # This should never be reached due to reraise=True, but mypy needs it
+        raise RuntimeError("Unexpected end of retry loop")
 
     @cached_property
     def logs_hook(self):
@@ -265,22 +373,14 @@ class GlueJobHook(AwsBaseHook):
                 else:
                     raise
 
-            if len(fetched_logs):
-                # Add a tab to indent those logs and distinguish them from airflow logs.
-                # Log lines returned already contain a newline character at the end.
-                messages = "\t".join(fetched_logs)
-                self.log.info("Glue Job Run %s Logs:\n\t%s", log_group, messages)
-            else:
-                self.log.info("No new log from the Glue Job in %s", log_group)
+            self.log.info(format_glue_logs(fetched_logs, log_group))
             return next_token
 
-        log_group_prefix = job_run["LogGroupName"]
-        log_group_default = f"{log_group_prefix}/{DEFAULT_LOG_SUFFIX}"
-        log_group_error = f"{log_group_prefix}/{ERROR_LOG_SUFFIX}"
+        log_group_output, log_group_error = get_glue_log_group_names(job_run)
         # one would think that the error log group would contain only errors, but it actually contains
         # a lot of interesting logs too, so it's valuable to have both
         continuation_tokens.output_stream_continuation = display_logs_from(
-            log_group_default, continuation_tokens.output_stream_continuation
+            log_group_output, continuation_tokens.output_stream_continuation
         )
         continuation_tokens.error_stream_continuation = display_logs_from(
             log_group_error, continuation_tokens.error_stream_continuation
@@ -305,8 +405,7 @@ class GlueJobHook(AwsBaseHook):
             if ret:
                 time.sleep(sleep_before_return)
                 return ret
-            else:
-                time.sleep(self.job_poll_interval)
+            time.sleep(self.job_poll_interval)
 
     async def async_job_completion(self, job_name: str, run_id: str, verbose: bool = False) -> dict[str, str]:
         """
@@ -323,8 +422,7 @@ class GlueJobHook(AwsBaseHook):
             ret = self._handle_state(job_run_state, job_name, run_id, verbose, next_log_tokens)
             if ret:
                 return ret
-            else:
-                await asyncio.sleep(self.job_poll_interval)
+            await asyncio.sleep(self.job_poll_interval)
 
     def _handle_state(
         self,
@@ -352,15 +450,14 @@ class GlueJobHook(AwsBaseHook):
             job_error_message = f"Exiting Job {run_id} Run State: {state}"
             self.log.info(job_error_message)
             raise AirflowException(job_error_message)
-        else:
-            self.log.info(
-                "Polling for AWS Glue Job %s current run state with status %s",
-                job_name,
-                state,
-            )
-            return None
+        self.log.info(
+            "Polling for AWS Glue Job %s current run state with status %s",
+            job_name,
+            state,
+        )
+        return None
 
-    def has_job(self, job_name) -> bool:
+    def has_job(self, job_name: str) -> bool:
         """
         Check if the job already exists.
 
@@ -389,6 +486,8 @@ class GlueJobHook(AwsBaseHook):
         :return: True if job was updated and false otherwise
         """
         job_name = job_kwargs.pop("Name")
+        # Glue ``update_job`` does not accept ``Tags`` in ``JobUpdate``; reconcile them separately.
+        tags_updated = self.update_tags(job_name, job_kwargs.pop("Tags")) if "Tags" in job_kwargs else False
         current_job = self.conn.get_job(JobName=job_name)["Job"]
 
         update_config = {
@@ -399,8 +498,34 @@ class GlueJobHook(AwsBaseHook):
             self.conn.update_job(JobName=job_name, JobUpdate=job_kwargs)
             self.log.info("Updated configurations: %s", update_config)
             return True
-        else:
-            return False
+        return tags_updated
+
+    def update_tags(self, job_name: str, job_tags: dict) -> bool:
+        """
+        Reconcile a job's tags with the desired set.
+
+        Glue manages tags outside of ``update_job``, so adds/updates go through
+        ``tag_resource`` and removals through ``untag_resource``.
+
+        .. seealso::
+            - :external+boto3:py:meth:`Glue.Client.tag_resource`
+            - :external+boto3:py:meth:`Glue.Client.untag_resource`
+
+        :param job_name: Name of the job for which to update tags
+        :param job_tags: Desired tags. Keys absent from this mapping are removed from the job.
+        :return: True if any tag was added, changed, or removed, False otherwise
+        """
+        account_number = StsHook(aws_conn_id=self.aws_conn_id).get_account_number()
+        job_arn = f"arn:{self.conn_partition}:glue:{self.conn_region_name}:{account_number}:job/{job_name}"
+        current_tags: dict = self.conn.get_tags(ResourceArn=job_arn)["Tags"]
+
+        if tags_to_add := {key: value for key, value in job_tags.items() if current_tags.get(key) != value}:
+            self.log.info("Updating job tags: %s", job_name)
+            self.conn.tag_resource(ResourceArn=job_arn, TagsToAdd=tags_to_add)
+        if tags_to_remove := [key for key in current_tags if key not in job_tags]:
+            self.log.info("Removing job tags: %s", job_name)
+            self.conn.untag_resource(ResourceArn=job_arn, TagsToRemove=tags_to_remove)
+        return bool(tags_to_add or tags_to_remove)
 
     def get_or_create_glue_job(self) -> str | None:
         """
@@ -411,6 +536,9 @@ class GlueJobHook(AwsBaseHook):
 
         :return:Name of the Job
         """
+        if self.job_name is None:
+            raise ValueError("job_name must be set to get or create a Glue job")
+
         if self.has_job(self.job_name):
             return self.job_name
 
@@ -430,6 +558,9 @@ class GlueJobHook(AwsBaseHook):
 
         :return:Name of the Job
         """
+        if self.job_name is None:
+            raise ValueError("job_name must be set to create or update a Glue job")
+
         config = self.create_glue_job_config()
 
         if self.has_job(self.job_name):
@@ -479,7 +610,13 @@ class GlueDataQualityHook(AwsBaseHook):
         Rule_3    ColumnLength "marketplace" between 1 and 2     FAIL        {'Column.marketplace.MaximumLength': 9.0, 'Column.marketplace.MinimumLength': 3.0}     Value: 9.0 does not meet the constraint requirement!
 
         """
-        import pandas as pd
+        try:
+            import pandas as pd
+        except ImportError:
+            self.log.warning(
+                "Pandas is not installed. Please install pandas to see the detailed Data Quality results."
+            )
+            return
 
         pd.set_option("display.max_rows", None)
         pd.set_option("display.max_columns", None)

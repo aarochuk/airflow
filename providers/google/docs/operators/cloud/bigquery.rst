@@ -1,5 +1,4 @@
  .. Licensed to the Apache Software Foundation (ASF) under one
- .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
     regarding copyright ownership.  The ASF licenses this file
@@ -26,6 +25,16 @@ analyzing data to find meaningful insights using familiar SQL.
 
 Airflow provides operators to manage datasets and tables, run queries and validate
 data.
+
+.. note::
+
+    GoogleSQL is the recommended dialect for BigQuery. BigQuery legacy SQL availability is restricted
+    after June 1, 2026, based on legacy SQL usage during Google's evaluation period. In Airflow, the
+    implicit default for older BigQuery operators that expose ``use_legacy_sql`` is deprecated and will
+    change from ``True`` to ``False`` in a future provider release. Set ``use_legacy_sql=True``
+    explicitly if you still need legacy SQL, or set ``use_legacy_sql=False`` to use GoogleSQL.
+    For more information, see
+    `Legacy SQL feature availability <https://docs.cloud.google.com/bigquery/docs/legacy-sql-feature-availability>`__.
 
 Prerequisite Tasks
 ^^^^^^^^^^^^^^^^^^
@@ -95,6 +104,22 @@ method only replaces fields that are provided in the submitted Table resource.
     :dedent: 4
     :start-after: [START howto_operator_bigquery_update_table]
     :end-before: [END howto_operator_bigquery_update_table]
+
+You can use this operator to update a view.
+
+.. exampleinclude:: /../../google/tests/system/google/cloud/bigquery/example_bigquery_tables.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_bigquery_update_view]
+    :end-before: [END howto_operator_bigquery_update_view]
+
+And use the same operator to update a materialized view.
+
+.. exampleinclude:: /../../google/tests/system/google/cloud/bigquery/example_bigquery_tables.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_bigquery_update_materialized_view]
+    :end-before: [END howto_operator_bigquery_update_materialized_view]
 
 .. _howto/operator:BigQueryUpdateDatasetOperator:
 
@@ -171,32 +196,6 @@ caches results of a query for increased performance and efficiency.
     :dedent: 4
     :start-after: [START howto_operator_bigquery_create_materialized_view]
     :end-before: [END howto_operator_bigquery_create_materialized_view]
-
-.. _howto/operator:BigQueryCreateEmptyTableOperator:
-
-Create native table
-"""""""""""""""""""
-
-.. warning::
-    This operator is deprecated and will be removed after July 30, 2025. Please use
-    :class:`~airflow.providers.google.cloud.operators.bigquery.BigQueryCreateTableOperator`.
-
-To create a new, empty table in the given BigQuery dataset, optionally with
-schema you can use
-:class:`~airflow.providers.google.cloud.operators.bigquery.BigQueryCreateEmptyTableOperator`.
-
-.. _howto/operator:BigQueryCreateExternalTableOperator:
-
-Create external table
-"""""""""""""""""""""
-
-.. warning::
-    This operator is deprecated and will be removed after July 30, 2025. Please use
-    :class:`~airflow.providers.google.cloud.operators.bigquery.BigQueryCreateTableOperator`.
-
-To create a new external table in a dataset with the data in Google Cloud Storage
-you can use
-:class:`~airflow.providers.google.cloud.operators.bigquery.BigQueryCreateExternalTableOperator`.
 
 .. _howto/operator:BigQueryGetDataOperator:
 
@@ -295,6 +294,14 @@ You can also use this operator to delete a materialized view.
     :start-after: [START howto_operator_bigquery_delete_materialized_view]
     :end-before: [END howto_operator_bigquery_delete_materialized_view]
 
+Manage routines
+^^^^^^^^^^^^^^^
+
+Airflow exposes the BigQuery routines API (user-defined functions, stored
+procedures, and table-valued functions) through a small set of dedicated
+operators and a sensor. See :doc:`bigquery_routines` for the full guide with
+examples for each routine type.
+
 .. _howto/operator:BigQueryInsertJobOperator:
 
 Execute BigQuery jobs
@@ -356,6 +363,70 @@ Also for all this action you can use operator in the deferrable mode:
     :dedent: 4
     :start-after: [START howto_operator_bigquery_insert_job_async]
     :end-before: [END howto_operator_bigquery_insert_job_async]
+
+Durable execution
+^^^^^^^^^^^^^^^^^
+
+``BigQueryInsertJobOperator`` submits a job and then polls it to completion on the worker. By
+default the operator runs in a *durable* mode that makes this crash-safe: the submitted BigQuery
+job id is persisted to :doc:`task state store <apache-airflow:core-concepts/task-state-store>`
+before polling begins, so if the worker crashes or is preempted and the task is retried, the
+operator reconnects to the job that is already running in BigQuery instead of submitting a
+duplicate.
+
+On retry the operator checks the prior job's state:
+
+* if it is still running, the operator reconnects and continues polling
+* if it already succeeded, the operator returns immediately without resubmitting
+* if it failed, or its id is no longer found, the operator submits the job fresh
+
+This makes reattachment on retry work regardless of ``force_rerun``, which defaults to ``True``.
+Without durable execution, ``force_rerun=True`` computes a new random job id on every attempt, so
+the existing ``reattach_states``/``Conflict`` mechanism (recomputing an identical id and relying
+on BigQuery rejecting the duplicate) almost never has a matching id to find on retry -- setting
+``force_rerun=False`` was the only way to make that mechanism reliable. Durable execution replaces
+that specific use of ``force_rerun=False``: the operator now reconnects using the id it actually
+persisted, so ``force_rerun`` no longer needs to change purely to make *retries of the same task
+instance* reattach.
+
+``force_rerun`` still matters for a different, narrower purpose it always had: idempotency across
+*separate* invocations, such as two different DAG runs or a manual re-trigger that reuses the same
+explicit ``job_id``. Durable execution's persisted state is scoped to a single task instance
+(``dag_id``/``task_id``/``run_id``/``map_index``); a new DAG run has no durable state to reconnect
+to at all. If you rely on ``force_rerun=False`` with an explicit ``job_id`` so that re-triggering
+the same logical run doesn't submit a second job, that guarantee is unrelated to durable execution
+and keeping ``force_rerun=False`` is still the right choice for it.
+
+Durable execution requires Airflow 3.3 or newer, since it relies on the task state store. On
+earlier Airflow versions the flag is a no-op -- setting it explicitly only emits a warning -- and
+the operator always submits a fresh job on retry, exactly as before -- including the pre-existing
+``reattach_states``/``Conflict`` behavior, which is unchanged. If the task state store is
+unavailable at runtime, the operator logs that crash recovery is disabled and behaves the same way.
+
+Like the persisted state itself, the stored job id isn't deleted automatically, that only happens
+when someone runs ``airflow state-store clean``. If a task's ``retry_delay`` is longer than
+``[state_store] default_retention_days`` (30 days by default) and cleanup runs in between, the
+job id won't be there for the next retry, and the operator will submit a fresh job instead of
+reconnecting. Avoid running cleanup on a schedule shorter than your longest ``retry_delay``.
+
+To opt out and always submit a fresh job on retry, set ``durable=False``:
+
+.. code-block:: python
+
+  insert_query_job = BigQueryInsertJobOperator(
+      task_id="insert_query_job",
+      configuration={
+          "query": {
+              "query": "SELECT 1",
+              "useLegacySql": False,
+          }
+      },
+      durable=False,
+  )
+
+Durable execution applies to the synchronous path. When ``deferrable=True`` is set, the Triggerer
+already tracks the job across the wait, so deferrable mode takes precedence and ``durable`` has no
+effect.
 
 Validate data
 ^^^^^^^^^^^^^
@@ -523,6 +594,28 @@ Also you can use deferrable mode in this operator if you would like to free up t
     :dedent: 4
     :start-after: [START howto_sensor_bigquery_table_partition_async]
     :end-before: [END howto_sensor_bigquery_table_partition_async]
+
+Check that the BigQuery Table Streaming Buffer is empty
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+To check that the BigQuery streaming buffer of a table is empty you can use
+:class:`~airflow.providers.google.cloud.sensors.bigquery.BigQueryStreamingBufferEmptySensor`.
+This sensor is useful in ETL pipelines to ensure that recent streamed data has been fully
+processed before continuing downstream tasks.
+
+.. exampleinclude:: /../../google/tests/system/google/cloud/bigquery/example_bigquery_streaming_buffer_sensor.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_sensor_bigquery_streaming_buffer_empty]
+    :end-before: [END howto_sensor_bigquery_streaming_buffer_empty]
+
+Also you can use deferrable mode in this operator if you would like to free up the worker slots while the sensor is running.
+
+.. exampleinclude:: /../../google/tests/system/google/cloud/bigquery/example_bigquery_streaming_buffer_sensor.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_sensor_bigquery_streaming_buffer_empty_deferred]
+    :end-before: [END howto_sensor_bigquery_streaming_buffer_empty_deferred]
 
 Reference
 ^^^^^^^^^

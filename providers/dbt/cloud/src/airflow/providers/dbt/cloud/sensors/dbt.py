@@ -20,16 +20,19 @@ import time
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
-from airflow.providers.dbt.cloud.hooks.dbt import DbtCloudHook, DbtCloudJobRunException, DbtCloudJobRunStatus
+from airflow.providers.common.compat.sdk import BaseSensorOperator, conf
+from airflow.providers.dbt.cloud.hooks.dbt import (
+    DbtCloudHook,
+    DbtCloudJobRunException,
+    DbtCloudJobRunStatus,
+    validate_execute_complete_event,
+)
 from airflow.providers.dbt.cloud.triggers.dbt import DbtCloudRunJobTrigger
 from airflow.providers.dbt.cloud.utils.openlineage import generate_openlineage_events_from_dbt_cloud_run
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
     from airflow.providers.openlineage.extractors import OperatorLineage
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class DbtCloudJobRunSensor(BaseSensorOperator):
@@ -55,6 +58,7 @@ class DbtCloudJobRunSensor(BaseSensorOperator):
         run_id: int,
         account_id: int | None = None,
         deferrable: bool = conf.getboolean("operators", "default_deferrable", fallback=False),
+        hook_params: dict[str, Any] | None = None,
         **kwargs,
     ) -> None:
         if deferrable:
@@ -68,22 +72,24 @@ class DbtCloudJobRunSensor(BaseSensorOperator):
         self.dbt_cloud_conn_id = dbt_cloud_conn_id
         self.run_id = run_id
         self.account_id = account_id
-
+        self.hook_params = hook_params or {}
         self.deferrable = deferrable
 
     @cached_property
     def hook(self):
         """Returns DBT Cloud hook."""
-        return DbtCloudHook(self.dbt_cloud_conn_id)
+        return DbtCloudHook(self.dbt_cloud_conn_id, **self.hook_params)
 
     def poke(self, context: Context) -> bool:
         job_run_status = self.hook.get_job_run_status(run_id=self.run_id, account_id=self.account_id)
 
         if job_run_status == DbtCloudJobRunStatus.ERROR.value:
+            self.hook.log_job_run_failure_details(run_id=self.run_id, account_id=self.account_id)
             message = f"Job run {self.run_id} has failed."
             raise DbtCloudJobRunException(message)
 
         if job_run_status == DbtCloudJobRunStatus.CANCELLED.value:
+            self.hook.log_job_run_failure_details(run_id=self.run_id, account_id=self.account_id)
             message = f"Job run {self.run_id} has been cancelled."
             raise DbtCloudJobRunException(message)
 
@@ -110,19 +116,21 @@ class DbtCloudJobRunSensor(BaseSensorOperator):
                         account_id=self.account_id,
                         poll_interval=self.poke_interval,
                         end_time=end_time,
+                        hook_params=self.hook_params,
                     ),
                     method_name="execute_complete",
                 )
 
-    def execute_complete(self, context: Context, event: dict[str, Any]) -> int:
+    def execute_complete(self, context: Context, event: dict[str, Any] | None = None) -> int:
         """
         Execute when the trigger fires - returns immediately.
 
         This relies on trigger to throw an exception, otherwise it assumes
         execution was successful.
         """
-        if event["status"] in ["error", "cancelled"]:
-            raise AirflowException()
+        event = validate_execute_complete_event(event)
+        if event["status"] != "success":
+            raise DbtCloudJobRunException(event["message"])
         self.log.info(event["message"])
         return int(event["run_id"])
 

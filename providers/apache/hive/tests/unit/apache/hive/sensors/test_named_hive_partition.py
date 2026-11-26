@@ -23,20 +23,18 @@ from unittest import mock
 
 import pytest
 
-from airflow.exceptions import AirflowSensorTimeout
 from airflow.models.dag import DAG
 from airflow.providers.apache.hive.sensors.named_hive_partition import NamedHivePartitionSensor
-from airflow.utils.timezone import datetime
+from airflow.providers.common.compat.sdk import AirflowSensorTimeout, timezone
 
 from unit.apache.hive import MockHiveMetastoreHook, TestHiveEnvironment
 
-DEFAULT_DATE = datetime(2015, 1, 1)
+DEFAULT_DATE = timezone.datetime(2015, 1, 1)
 DEFAULT_DATE_ISO = DEFAULT_DATE.isoformat()
 DEFAULT_DATE_DS = DEFAULT_DATE_ISO[:10]
 
-pytestmark = pytest.mark.db_test
 
-
+@pytest.mark.db_test
 class TestNamedHivePartitionSensor:
     def setup_method(self):
         args = {"owner": "airflow", "start_date": DEFAULT_DATE}
@@ -73,7 +71,7 @@ class TestNamedHivePartitionSensor:
 
     def test_parse_partition_name_incorrect(self):
         name = "incorrect.name"
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Could not parse incorrect.nameinto table, partition"):
             NamedHivePartitionSensor.parse_partition_name(name)
 
     def test_parse_partition_name_default(self):
@@ -114,6 +112,38 @@ class TestNamedHivePartitionSensor:
         self.hook.metastore.__enter__().check_for_named_partition.assert_called_with(
             self.database, self.table, f"{self.partition_by}={self.next_day}"
         )
+
+    def test_native_templated_partition_names(self):
+        self.hook.metastore.__enter__().check_for_named_partition.return_value = True
+        partitions = [f"{self.database}.{self.table}/{self.partition_by}={DEFAULT_DATE_DS}"]
+        dag = DAG(
+            "named_hive_native",
+            schedule=None,
+            start_date=DEFAULT_DATE,
+            render_template_as_native_obj=True,
+        )
+        sensor = NamedHivePartitionSensor(
+            partition_names="{{ params.names }}",
+            task_id="test_native_templated_partition_names",
+            poke_interval=1,
+            hook=self.hook,
+            params={"names": partitions},
+            dag=dag,
+        )
+        sensor.render_template_fields({"params": {"names": partitions}})
+        assert sensor.partition_names == partitions
+        assert sensor.poke(None)
+
+    def test_poke_rejects_str_partition_names(self):
+        """partition_names is validated at poke now, so a rendered str raises there, not in __init__."""
+        sensor = NamedHivePartitionSensor(
+            partition_names="not-a-list",
+            task_id="test_poke_rejects_str_partition_names",
+            poke_interval=1,
+            hook=self.hook,
+        )
+        with pytest.raises(TypeError, match="partition_names must be an array of strings"):
+            sensor.poke(None)
 
 
 @pytest.mark.skipif(

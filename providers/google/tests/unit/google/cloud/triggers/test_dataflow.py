@@ -22,13 +22,15 @@ import logging
 from unittest import mock
 
 import pytest
+from google.api_core.exceptions import ServiceUnavailable
 from google.cloud.dataflow_v1beta3 import Job, JobState, JobType
 
-from airflow.providers.google.cloud.hooks.dataflow import DataflowJobStatus
+from airflow.providers.google.cloud.hooks.dataflow import DataflowJobStatus, DataflowJobType
 from airflow.providers.google.cloud.triggers.dataflow import (
     DataflowJobAutoScalingEventTrigger,
     DataflowJobMessagesTrigger,
     DataflowJobMetricsTrigger,
+    DataflowJobStateCompleteTrigger,
     DataflowJobStatusTrigger,
     DataflowStartYamlJobTrigger,
     TemplateJobStartTrigger,
@@ -42,6 +44,7 @@ GCP_CONN_ID = "test_gcp_conn_id"
 POLL_SLEEP = 20
 IMPERSONATION_CHAIN = ["impersonate", "this"]
 CANCEL_TIMEOUT = 10 * 420
+WAIT_UNTIL_FINISHED = None
 
 
 @pytest.fixture
@@ -123,8 +126,77 @@ def dataflow_start_yaml_job_trigger():
 
 
 @pytest.fixture
+def dataflow_job_state_complete_trigger():
+    return DataflowJobStateCompleteTrigger(
+        project_id=PROJECT_ID,
+        job_id=JOB_ID,
+        location=LOCATION,
+        gcp_conn_id=GCP_CONN_ID,
+        poll_sleep=POLL_SLEEP,
+        impersonation_chain=IMPERSONATION_CHAIN,
+        wait_until_finished=WAIT_UNTIL_FINISHED,
+    )
+
+
+@pytest.fixture
 def test_dataflow_batch_job():
     return Job(id=JOB_ID, current_state=JobState.JOB_STATE_DONE, type_=JobType.JOB_TYPE_BATCH)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger_class", [TemplateJobStartTrigger, DataflowStartYamlJobTrigger])
+@pytest.mark.parametrize("project_id", [PROJECT_ID, None], ids=["explicit-project", "connection-project"])
+@pytest.mark.parametrize(
+    ("drain_pipeline", "requested_state"),
+    [(False, DataflowJobStatus.JOB_STATE_CANCELLED), (True, DataflowJobStatus.JOB_STATE_DRAINED)],
+)
+@mock.patch(
+    "airflow.providers.google.cloud.hooks.dataflow._DataflowJobsController._wait_for_states", autospec=True
+)
+@mock.patch("airflow.providers.google.cloud.hooks.dataflow.DataflowHook.get_conn", autospec=True)
+@mock.patch("airflow.providers.google.common.hooks.base_google.BaseHook.get_connection", autospec=True)
+@mock.patch(
+    "airflow.providers.google.common.hooks.base_google.GoogleBaseHook.get_credentials_and_project_id",
+    autospec=True,
+    return_value=(None, PROJECT_ID),
+)
+async def test_on_kill_requests_stop_without_waiting(
+    mock_credentials,
+    mock_connection,
+    mock_get_conn,
+    mock_wait_for_states,
+    trigger_class,
+    project_id,
+    drain_pipeline,
+    requested_state,
+):
+    mock_connection.return_value.extra_dejson = {}
+    jobs = mock_get_conn.return_value.projects.return_value.locations.return_value.jobs.return_value
+    jobs.get.return_value.execute.return_value = {
+        "id": JOB_ID,
+        "name": "test-job",
+        "currentState": DataflowJobStatus.JOB_STATE_RUNNING,
+        "type": DataflowJobType.JOB_TYPE_STREAMING,
+    }
+    trigger = trigger_class(
+        project_id=project_id,
+        job_id=JOB_ID,
+        location=LOCATION,
+        gcp_conn_id=GCP_CONN_ID,
+        cancel_timeout=CANCEL_TIMEOUT,
+        drain_pipeline=drain_pipeline,
+    )
+
+    await trigger.on_kill()
+
+    jobs.update.assert_called_once_with(
+        projectId=PROJECT_ID,
+        location=LOCATION,
+        jobId=JOB_ID,
+        body={"requestedState": requested_state},
+    )
+    jobs.update.return_value.execute.assert_called_once()
+    mock_wait_for_states.assert_not_called()
 
 
 class TestTemplateJobStartTrigger:
@@ -140,12 +212,14 @@ class TestTemplateJobStartTrigger:
                 "poll_sleep": POLL_SLEEP,
                 "impersonation_chain": IMPERSONATION_CHAIN,
                 "cancel_timeout": CANCEL_TIMEOUT,
+                "cancel_on_kill": True,
+                "drain_pipeline": False,
             },
         )
         assert actual_data == expected_data
 
     @pytest.mark.parametrize(
-        "attr, expected",
+        ("attr", "expected"),
         [
             ("gcp_conn_id", GCP_CONN_ID),
             ("poll_sleep", POLL_SLEEP),
@@ -158,6 +232,87 @@ class TestTemplateJobStartTrigger:
         actual = hook._hook_kwargs.get(attr)
         assert actual is not None
         assert actual == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("project_id", [PROJECT_ID, None], ids=["explicit-project", "connection-project"])
+    @mock.patch("airflow.providers.google.cloud.triggers.dataflow.DataflowHook", autospec=True)
+    async def test_on_kill_stops_the_job(self, mock_hook_class, template_job_start_trigger, project_id):
+        template_job_start_trigger.project_id = project_id
+        await template_job_start_trigger.on_kill()
+
+        mock_hook_class.assert_called_once_with(
+            gcp_conn_id=GCP_CONN_ID,
+            impersonation_chain=IMPERSONATION_CHAIN,
+            drain_pipeline=False,
+            cancel_timeout=None,
+            poll_sleep=POLL_SLEEP,
+        )
+        mock_hook_class.return_value.cancel_job.assert_called_once_with(
+            job_id=JOB_ID,
+            project_id=project_id,
+            location=LOCATION,
+        )
+
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.triggers.dataflow.DataflowHook", autospec=True)
+    async def test_on_kill_passes_drain_pipeline_to_the_hook(self, mock_hook_class):
+        trigger = TemplateJobStartTrigger(
+            project_id=PROJECT_ID,
+            job_id=JOB_ID,
+            location=LOCATION,
+            gcp_conn_id=GCP_CONN_ID,
+            poll_sleep=POLL_SLEEP,
+            impersonation_chain=IMPERSONATION_CHAIN,
+            cancel_timeout=CANCEL_TIMEOUT,
+            drain_pipeline=True,
+        )
+
+        await trigger.on_kill()
+
+        assert mock_hook_class.call_args.kwargs["drain_pipeline"] is True
+
+    @pytest.mark.parametrize(
+        ("cancel_on_kill", "job_id", "project_id"),
+        [
+            pytest.param(False, JOB_ID, PROJECT_ID, id="cancel-on-kill-disabled"),
+            pytest.param(True, None, PROJECT_ID, id="no-job-id"),
+        ],
+    )
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.triggers.dataflow.DataflowHook", autospec=True)
+    async def test_on_kill_does_not_stop_the_job(self, mock_hook_class, cancel_on_kill, job_id, project_id):
+        trigger = TemplateJobStartTrigger(
+            project_id=project_id,
+            job_id=job_id,
+            location=LOCATION,
+            gcp_conn_id=GCP_CONN_ID,
+            cancel_on_kill=cancel_on_kill,
+        )
+
+        await trigger.on_kill()
+
+        mock_hook_class.assert_not_called()
+
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.triggers.dataflow.DataflowHook", autospec=True)
+    async def test_on_kill_swallows_hook_errors(self, mock_hook_class, template_job_start_trigger):
+        mock_hook_class.return_value.cancel_job.side_effect = RuntimeError("api down")
+
+        await template_job_start_trigger.on_kill()
+
+        mock_hook_class.return_value.cancel_job.assert_called_once()
+
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.triggers.dataflow.DataflowHook", autospec=True)
+    async def test_on_kill_swallows_hook_construction_errors(
+        self, mock_hook_class, template_job_start_trigger
+    ):
+        # The hook resolves its connection during construction; that must not escape on_kill.
+        mock_hook_class.side_effect = RuntimeError("no connection")
+
+        await template_job_start_trigger.on_kill()
+
+        mock_hook_class.assert_called_once()
 
     @pytest.mark.asyncio
     @mock.patch("airflow.providers.google.cloud.hooks.dataflow.AsyncDataflowHook.get_job_status")
@@ -214,10 +369,53 @@ class TestTemplateJobStartTrigger:
         await asyncio.sleep(0.5)
 
         assert not task.done()
-        assert f"Current job status is: {JobState.JOB_STATE_RUNNING}"
-        assert f"Sleeping for {POLL_SLEEP} seconds."
+        assert "Current job status is: JOB_STATE_RUNNING" in caplog.text
+        assert f"Sleeping for {POLL_SLEEP} seconds." in caplog.text
         # cancel the task to suppress test warnings
         task.cancel()
+
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.triggers.dataflow.asyncio.sleep", new_callable=mock.AsyncMock)
+    @mock.patch("airflow.providers.google.cloud.hooks.dataflow.AsyncDataflowHook.get_job_status")
+    async def test_run_continues_polling_after_retryable_service_unavailable(
+        self, mock_job_status, mock_sleep, template_job_start_trigger
+    ):
+        mock_job_status.side_effect = [
+            ServiceUnavailable(
+                "Visibility check was unavailable. Please retry the request and contact support if the problem persists"
+            ),
+            JobState.JOB_STATE_DONE,
+        ]
+        expected_event = TriggerEvent(
+            {
+                "job_id": JOB_ID,
+                "status": "success",
+                "message": "Job completed",
+            }
+        )
+        actual_event = await template_job_start_trigger.run().asend(None)
+
+        assert actual_event == expected_event
+        assert mock_job_status.await_count == 2
+        mock_sleep.assert_awaited_once_with(POLL_SLEEP)
+
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.hooks.dataflow.AsyncDataflowHook.get_job_status")
+    async def test_run_returns_error_event_after_unexpected_status_polling_exception(
+        self, mock_job_status, template_job_start_trigger
+    ):
+        mock_job_status.side_effect = Exception("Test exception")
+
+        expected_event = TriggerEvent(
+            {
+                "status": "error",
+                "message": "Test exception",
+            }
+        )
+        actual_event = await template_job_start_trigger.run().asend(None)
+
+        assert actual_event == expected_event
+        mock_job_status.assert_awaited_once_with(project_id=PROJECT_ID, job_id=JOB_ID, location=LOCATION)
 
 
 class TestDataflowJobAutoScalingEventTrigger:
@@ -238,7 +436,7 @@ class TestDataflowJobAutoScalingEventTrigger:
         assert actual_data == expected_data
 
     @pytest.mark.parametrize(
-        "attr, expected",
+        ("attr", "expected"),
         [
             ("gcp_conn_id", GCP_CONN_ID),
             ("poll_sleep", POLL_SLEEP),
@@ -378,7 +576,7 @@ class TestDataflowJobMessagesTrigger:
         assert actual_data == expected_data
 
     @pytest.mark.parametrize(
-        "attr, expected",
+        ("attr", "expected"),
         [
             ("gcp_conn_id", GCP_CONN_ID),
             ("poll_sleep", POLL_SLEEP),
@@ -514,7 +712,7 @@ class TestDataflowJobMetricsTrigger:
         assert actual_data == expected_data
 
     @pytest.mark.parametrize(
-        "attr, expected",
+        ("attr", "expected"),
         [
             ("gcp_conn_id", GCP_CONN_ID),
             ("poll_sleep", POLL_SLEEP),
@@ -644,7 +842,7 @@ class TestDataflowJobStatusTrigger:
         assert actual_data == expected_data
 
     @pytest.mark.parametrize(
-        "attr, expected",
+        ("attr", "expected"),
         [
             ("gcp_conn_id", GCP_CONN_ID),
             ("poll_sleep", POLL_SLEEP),
@@ -760,12 +958,95 @@ class TestDataflowStartYamlJobTrigger:
                 "expected_terminal_state": None,
                 "impersonation_chain": IMPERSONATION_CHAIN,
                 "cancel_timeout": CANCEL_TIMEOUT,
+                "cancel_on_kill": True,
+                "drain_pipeline": False,
             },
         )
         assert actual_data == expected_data
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("project_id", [PROJECT_ID, None], ids=["explicit-project", "connection-project"])
+    @mock.patch("airflow.providers.google.cloud.triggers.dataflow.DataflowHook", autospec=True)
+    async def test_on_kill_stops_the_job(self, mock_hook_class, dataflow_start_yaml_job_trigger, project_id):
+        dataflow_start_yaml_job_trigger.project_id = project_id
+        await dataflow_start_yaml_job_trigger.on_kill()
+
+        mock_hook_class.assert_called_once_with(
+            gcp_conn_id=GCP_CONN_ID,
+            impersonation_chain=IMPERSONATION_CHAIN,
+            drain_pipeline=False,
+            cancel_timeout=None,
+            poll_sleep=POLL_SLEEP,
+        )
+        mock_hook_class.return_value.cancel_job.assert_called_once_with(
+            job_id=JOB_ID,
+            project_id=project_id,
+            location=LOCATION,
+        )
+
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.triggers.dataflow.DataflowHook", autospec=True)
+    async def test_on_kill_passes_drain_pipeline_to_the_hook(self, mock_hook_class):
+        trigger = DataflowStartYamlJobTrigger(
+            project_id=PROJECT_ID,
+            job_id=JOB_ID,
+            location=LOCATION,
+            gcp_conn_id=GCP_CONN_ID,
+            poll_sleep=POLL_SLEEP,
+            impersonation_chain=IMPERSONATION_CHAIN,
+            cancel_timeout=CANCEL_TIMEOUT,
+            drain_pipeline=True,
+        )
+
+        await trigger.on_kill()
+
+        assert mock_hook_class.call_args.kwargs["drain_pipeline"] is True
+
     @pytest.mark.parametrize(
-        "attr, expected",
+        ("cancel_on_kill", "job_id", "project_id"),
+        [
+            pytest.param(False, JOB_ID, PROJECT_ID, id="cancel-on-kill-disabled"),
+            pytest.param(True, None, PROJECT_ID, id="no-job-id"),
+        ],
+    )
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.triggers.dataflow.DataflowHook", autospec=True)
+    async def test_on_kill_does_not_stop_the_job(self, mock_hook_class, cancel_on_kill, job_id, project_id):
+        trigger = DataflowStartYamlJobTrigger(
+            project_id=project_id,
+            job_id=job_id,
+            location=LOCATION,
+            gcp_conn_id=GCP_CONN_ID,
+            cancel_on_kill=cancel_on_kill,
+        )
+
+        await trigger.on_kill()
+
+        mock_hook_class.assert_not_called()
+
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.triggers.dataflow.DataflowHook", autospec=True)
+    async def test_on_kill_swallows_hook_errors(self, mock_hook_class, dataflow_start_yaml_job_trigger):
+        mock_hook_class.return_value.cancel_job.side_effect = RuntimeError("api down")
+
+        await dataflow_start_yaml_job_trigger.on_kill()
+
+        mock_hook_class.return_value.cancel_job.assert_called_once()
+
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.triggers.dataflow.DataflowHook", autospec=True)
+    async def test_on_kill_swallows_hook_construction_errors(
+        self, mock_hook_class, dataflow_start_yaml_job_trigger
+    ):
+        # The hook resolves its connection during construction; that must not escape on_kill.
+        mock_hook_class.side_effect = RuntimeError("no connection")
+
+        await dataflow_start_yaml_job_trigger.on_kill()
+
+        mock_hook_class.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("attr", "expected"),
         [
             ("gcp_conn_id", GCP_CONN_ID),
             ("poll_sleep", POLL_SLEEP),
@@ -860,3 +1141,132 @@ class TestDataflowStartYamlJobTrigger:
         await asyncio.sleep(0.5)
         assert task.done() is False
         task.cancel()
+
+
+class TestDataflowJobStateCompleteTrigger:
+    """Test case for DataflowJobStatusTrigger"""
+
+    def test_serialize(self, dataflow_job_state_complete_trigger):
+        expected_data = (
+            "airflow.providers.google.cloud.triggers.dataflow.DataflowJobStateCompleteTrigger",
+            {
+                "project_id": PROJECT_ID,
+                "job_id": JOB_ID,
+                "location": LOCATION,
+                "wait_until_finished": WAIT_UNTIL_FINISHED,
+                "gcp_conn_id": GCP_CONN_ID,
+                "poll_sleep": POLL_SLEEP,
+                "impersonation_chain": IMPERSONATION_CHAIN,
+            },
+        )
+        actual_data = dataflow_job_state_complete_trigger.serialize()
+        assert actual_data == expected_data
+
+    @pytest.mark.parametrize(
+        ("attr", "expected"),
+        [
+            ("gcp_conn_id", GCP_CONN_ID),
+            ("poll_sleep", POLL_SLEEP),
+            ("impersonation_chain", IMPERSONATION_CHAIN),
+        ],
+    )
+    def test_async_hook(self, dataflow_job_state_complete_trigger, attr, expected):
+        hook = dataflow_job_state_complete_trigger.async_hook
+        actual = hook._hook_kwargs.get(attr)
+        assert actual == expected
+
+    @pytest.mark.parametrize(
+        "job_status_value",
+        [
+            JobState.JOB_STATE_FAILED,
+            JobState.JOB_STATE_CANCELLED,
+            JobState.JOB_STATE_DRAINED,
+        ],
+    )
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.hooks.dataflow.AsyncDataflowHook.get_job")
+    async def test_run_yields_error_on_failed_state(
+        self,
+        mock_job,
+        job_status_value,
+        dataflow_job_state_complete_trigger,
+    ):
+        mock_job.return_value = Job(
+            id=JOB_ID, current_state=job_status_value, type_=JobType.JOB_TYPE_STREAMING
+        )
+        expected_event = TriggerEvent(
+            {
+                "status": "error",
+                "message": f"Job with id '{JOB_ID}' is in failed terminal state: {job_status_value.name}",
+            }
+        )
+        actual_event = await dataflow_job_state_complete_trigger.run().asend(None)
+        assert actual_event == expected_event
+
+    @pytest.mark.parametrize(
+        "job_item",
+        [
+            Job(id=JOB_ID, current_state=JobState.JOB_STATE_DONE, type_=JobType.JOB_TYPE_BATCH),
+            Job(id=JOB_ID, current_state=JobState.JOB_STATE_RUNNING, type_=JobType.JOB_TYPE_STREAMING),
+        ],
+    )
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.hooks.dataflow.AsyncDataflowHook.get_job")
+    async def test_run_yields_success_event_if_expected_job_status(
+        self,
+        mock_job,
+        job_item,
+        dataflow_job_state_complete_trigger,
+    ):
+        dataflow_job_state_complete_trigger.expected_statuses = {
+            DataflowJobStatus.JOB_STATE_DONE,
+            DataflowJobStatus.JOB_STATE_RUNNING,
+        }
+        mock_job.return_value = mock_job.return_value = job_item
+
+        expected_event = TriggerEvent(
+            {
+                "status": "success",
+                "message": f"Job with id '{JOB_ID}' has reached successful final state:"
+                f" {job_item.current_state.name}",
+            }
+        )
+        actual_event = await dataflow_job_state_complete_trigger.run().asend(None)
+        assert actual_event == expected_event
+
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.hooks.dataflow.AsyncDataflowHook.get_job")
+    async def test_run_loop_is_still_running_if_state_is_not_terminal_or_expected(
+        self,
+        mock_job,
+        dataflow_job_state_complete_trigger,
+    ):
+        """
+        Test that DataflowJobStateCompleteTrigger is still in loop if the job status neither
+        terminal nor expected.
+        """
+        mock_job.return_value = Job(
+            id=JOB_ID,
+            current_state=JobState.JOB_STATE_PENDING,
+            type_=JobType.JOB_TYPE_STREAMING,
+        )
+        task = asyncio.create_task(dataflow_job_state_complete_trigger.run().__anext__())
+        await asyncio.sleep(0.5)
+        assert task.done() is False
+        task.cancel()
+
+    @pytest.mark.asyncio
+    @mock.patch("airflow.providers.google.cloud.hooks.dataflow.AsyncDataflowHook.get_job")
+    async def test_run_raises_exception(self, mock_job, dataflow_job_state_complete_trigger):
+        """
+        Tests the DataflowJobStateCompleteTrigger does trigger error if there is an exception.
+        """
+        mock_job.side_effect = mock.AsyncMock(side_effect=Exception("Test exception"))
+        expected_event = TriggerEvent(
+            {
+                "status": "error",
+                "message": "Test exception",
+            }
+        )
+        actual_event = await dataflow_job_state_complete_trigger.run().asend(None)
+        assert expected_event == actual_event

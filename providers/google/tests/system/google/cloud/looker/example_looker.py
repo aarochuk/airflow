@@ -16,7 +16,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """
-Example Airflow DAG that show how to use various Looker
+Example Airflow DAG that show how to use various Data Studio
 operators to submit PDT materialization job and manage it.
 """
 
@@ -35,9 +35,10 @@ LOOKER_VIEW = "your_lookml_view"
 
 with DAG(
     dag_id=DAG_ID,
+    schedule="@once",
     start_date=datetime(2021, 1, 1),
     catchup=False,
-    tags=["example", "looker"],
+    tags=["example", "data-studio"],
 ) as dag:
     # [START cloud_looker_async_start_pdt_sensor]
     start_pdt_task_async = LookerStartPdtBuildOperator(
@@ -77,5 +78,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

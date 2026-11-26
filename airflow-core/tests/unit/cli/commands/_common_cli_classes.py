@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import os
 import re
-import time
 from contextlib import suppress
 
 import psutil
@@ -33,7 +32,7 @@ from airflow.utils.cli import setup_locations
 console = Console(width=400, color_system="standard")
 
 
-class _CommonCLIGunicornTestClass:
+class _CommonCLIUvicornTestClass:
     main_process_regexp: str = "process_to_look_for"
 
     @pytest.fixture(autouse=True)
@@ -49,12 +48,12 @@ class _CommonCLIGunicornTestClass:
         # Confirm that nmain procss hasn't been launched.
         # pgrep returns exit status 1 if no process matched.
         # Use more specific regexps (^) to avoid matching pytest run when running specific method.
-        # For instance, we want to be able to do: pytest -k 'gunicorn'
+        # For instance, we want to be able to do: pytest -k 'uvicorn'
         airflow_internal_api_pids = self._find_all_processes(self.main_process_regexp)
-        gunicorn_pids = self._find_all_processes(r"gunicorn: ")
-        if airflow_internal_api_pids or gunicorn_pids:
+        uvicorn_pids = self._find_all_processes(r"uvicorn: ")
+        if airflow_internal_api_pids or uvicorn_pids:
             console.print("[blue]Some processes are still running")
-            for pid in gunicorn_pids + airflow_internal_api_pids:
+            for pid in uvicorn_pids + airflow_internal_api_pids:
                 with suppress(NoSuchProcess):
                     console.print(psutil.Process(pid).as_dict(attrs=["pid", "name", "cmdline"]))
             console.print("[blue]Here list of processes ends")
@@ -63,9 +62,9 @@ class _CommonCLIGunicornTestClass:
                 for pid in airflow_internal_api_pids:
                     with suppress(NoSuchProcess):
                         psutil.Process(pid).kill()
-            if gunicorn_pids:
-                console.print("[yellow]Forcefully killing all gunicorn processes")
-                for pid in gunicorn_pids:
+            if uvicorn_pids:
+                console.print("[yellow]Forcefully killing all uvicorn processes")
+                for pid in uvicorn_pids:
                     with suppress(NoSuchProcess):
                         psutil.Process(pid).kill()
             if not ignore_running:
@@ -93,38 +92,6 @@ class _CommonCLIGunicornTestClass:
             console.print(f"[blue]Removing pidfile{pidfile_monitor}")
             os.remove(pidfile_monitor)
 
-    def _wait_pidfile(self, pidfile):
-        start_time = time.monotonic()
-        while True:
-            try:
-                with open(pidfile) as file:
-                    return int(file.read())
-            except Exception:
-                if start_time - time.monotonic() > 60:
-                    raise
-                console.print(f"[blue]Waiting for pidfile {pidfile} to be created ...")
-                time.sleep(1)
-
-    def _find_process(self, regexp_match: str, print_found_process=False) -> int | None:
-        """
-        Find if process is running by matching its command line with a regexp.
-        :param regexp_match: regexp to match the command line of the process
-        :param print_found_process: if True, print the process found
-        :return: PID of the process if found, None otherwise
-        """
-        matcher = re.compile(regexp_match)
-        for proc in psutil.process_iter():
-            try:
-                proc_cmdline = " ".join(proc.cmdline())
-            except Error:
-                # only check processes we can access and are existing
-                continue
-            if matcher.search(proc_cmdline):
-                if print_found_process:
-                    console.print(proc.as_dict(attrs=["pid", "name", "cmdline"]))
-                return proc.pid
-        return None
-
     def _find_all_processes(self, regexp_match: str, print_found_process=False) -> list[int]:
         """
         Find all running process matching their command line with a regexp and return the list of pids
@@ -146,13 +113,3 @@ class _CommonCLIGunicornTestClass:
                     console.print(proc.as_dict(attrs=["pid", "name", "cmdline"]))
                 pids.append(proc.pid)
         return pids
-
-    def _terminate_multiple_process(self, pid_list):
-        process = []
-        for pid in pid_list:
-            proc = psutil.Process(pid)
-            proc.terminate()
-            process.append(proc)
-        gone, alive = psutil.wait_procs(process, timeout=120)
-        for p in alive:
-            p.kill()

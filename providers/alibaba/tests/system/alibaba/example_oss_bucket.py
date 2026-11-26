@@ -24,7 +24,7 @@ from airflow.providers.alibaba.cloud.operators.oss import OSSCreateBucketOperato
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID")
 DAG_ID = "oss_bucket_dag"
-REGION = os.environ.get("REGION", "default_regior")
+REGION = os.environ.get("REGION", "default_region")
 # [START howto_operator_oss_bucket]
 with DAG(
     dag_id=DAG_ID,
@@ -50,5 +50,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

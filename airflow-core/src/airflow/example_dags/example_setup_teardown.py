@@ -21,9 +21,8 @@ from __future__ import annotations
 
 import pendulum
 
-from airflow.models.dag import DAG
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.utils.task_group import TaskGroup
+from airflow.sdk import DAG, TaskGroup
 
 with DAG(
     dag_id="example_setup_teardown",

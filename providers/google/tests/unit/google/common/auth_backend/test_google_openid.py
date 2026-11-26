@@ -16,12 +16,17 @@
 # under the License.
 from __future__ import annotations
 
+import importlib
 from unittest import mock
 
 import pytest
+
+# Do not run the tests when FAB / Flask is not installed
+pytest.importorskip("flask_session")
+
 from google.auth.exceptions import GoogleAuthError
 
-from airflow.providers.google.version_compat import AIRFLOW_V_3_0_PLUS
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 
 if not AIRFLOW_V_3_0_PLUS:
     pytest.skip(
@@ -34,6 +39,9 @@ from tests_common.test_utils.config import conf_vars
 
 @pytest.fixture(scope="module")
 def google_openid_app():
+    if importlib.util.find_spec("flask_session") is None:
+        return None
+
     def factory():
         with conf_vars(
             {
@@ -44,10 +52,23 @@ def google_openid_app():
                 ): "airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager",
             }
         ):
+            from flask import Response
+
             from airflow.providers.fab.www.app import create_app
+            from airflow.providers.google.common.auth_backend.google_openid import requires_authentication
 
             _app = create_app(enable_plugins=False)
             _app.config["AUTH_ROLE_PUBLIC"] = None
+
+            # Register a dummy route protected by the Google OpenID auth backend.
+            # The connexion-based /fab/v1/users endpoint was removed when FAB migrated
+            # to FastAPI, but these tests only need any route guarded by
+            # requires_authentication to verify the auth backend logic.
+            @_app.route("/fab/v1/users")
+            @requires_authentication
+            def _test_dummy_endpoint():
+                return Response("OK", status=200)
+
             return _app
 
     return factory()
@@ -63,20 +84,26 @@ def delete_user(app, username):
 
 @pytest.fixture(scope="module")
 def admin_user(google_openid_app):
+    if importlib.util.find_spec("airflow.providers.fab") is None:
+        return
     appbuilder = google_openid_app.appbuilder
-    role_admin = appbuilder.sm.find_role("Admin")
-    delete_user(google_openid_app, "test")
-    appbuilder.sm.add_user(
-        username="test",
-        first_name="test",
-        last_name="test",
-        email="test@fab.org",
-        role=role_admin,
-        password="test",
-    )
+    with google_openid_app.app_context():
+        role_admin = appbuilder.sm.find_role("Admin")
+        delete_user(google_openid_app, "test")
+        appbuilder.sm.add_user(
+            username="test",
+            first_name="test",
+            last_name="test",
+            email="test@fab.org",
+            role=role_admin,
+            password="test",
+        )
     return role_admin
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("airflow.providers.fab") is None, reason="FAB provider is not installed"
+)
 @pytest.mark.db_test
 class TestGoogleOpenID:
     @pytest.fixture(autouse=True)
@@ -135,7 +162,7 @@ class TestGoogleOpenID:
         with self.app.test_client() as test_client:
             response = test_client.get("/fab/v1/users", headers={"Authorization": "bearer JWT_TOKEN"})
 
-        assert response.status_code == 401
+        assert response.status_code == 403
 
     @conf_vars({("fab", "auth_backends"): "airflow.providers.google.common.auth_backend.google_openid"})
     def test_missing_id_token(self):

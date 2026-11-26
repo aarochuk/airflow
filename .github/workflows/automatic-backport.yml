@@ -26,7 +26,8 @@ permissions:
 jobs:
   get-pr-info:
     name: "Get PR information"
-    runs-on: ubuntu-latest
+    if: github.repository == 'apache/airflow'
+    runs-on: ubuntu-slim
     outputs:
       branches: ${{ steps.pr-info.outputs.branches }}
       commit-sha: ${{ github.sha }}
@@ -35,13 +36,26 @@ jobs:
         id: get-sha
         run: echo "COMMIT_SHA=${GITHUB_SHA}" >> $GITHUB_ENV
 
+      # Adding a slight delay to allow GitHub's API to associate the merge commit with the PR.
+      # This is needed because GH has a consistency of 6-10+ seconds
+      # to process the commit and PR association after a merge based on some of our past runs.
+      # Without this delay, the listPullRequestsAssociatedWithCommit API call may return an empty array
+      # even though a PR was just merged, causing backports to be skipped.
+      - name: Add delay for GitHub to process PR merge
+        run: sleep 15
+
       - name: Find PR information
         id: pr-info
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Branches fast-forwarded to main during a beta phase - a backport PR there would make
+          # them diverge from main. Empty this list when the RCs start (see "Beta releases"
+          # in dev/README_RELEASE_AIRFLOW.md).
+          BACKPORT_PAUSED_BRANCHES: '[]'
         with:
           script: |
+            const pausedBranches = JSON.parse(process.env.BACKPORT_PAUSED_BRANCHES);
             const { data: pullRequest } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -51,13 +65,20 @@ jobs:
                 const pr = pullRequest[0];
                 const backportBranches = pr.labels
                       .filter(label => label.name.startsWith('backport-to-'))
-                      .map(label => label.name.replace('backport-to-', ''));
+                      .map(label => label.name.replace('backport-to-', ''))
+                      .filter(branch => {
+                          if (pausedBranches.includes(branch)) {
+                              console.log(`⚠️ Skipping backport to ${branch}: backports to it are paused.`);
+                              return false;
+                          }
+                          return true;
+                      });
 
                 console.log(`Commit ${process.env.GITHUB_SHA} is associated with PR ${pr.number}`);
                 console.log(`Backport branches: ${backportBranches}`);
                 core.setOutput('branches', JSON.stringify(backportBranches));
             } else {
-                console.log('No pull request found for this commit.');
+                console.log('⚠️ No pull request found for this commit.');
                 core.setOutput('branches', '[]');
             }
 

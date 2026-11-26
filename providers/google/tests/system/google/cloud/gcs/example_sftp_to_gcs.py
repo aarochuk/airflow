@@ -30,7 +30,12 @@ from airflow.models.dag import DAG
 from airflow.providers.google.cloud.operators.gcs import GCSCreateBucketOperator, GCSDeleteBucketOperator
 from airflow.providers.google.cloud.transfers.sftp_to_gcs import SFTPToGCSOperator
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 from system.openlineage.operator import OpenLineageTestOperator
@@ -75,6 +80,17 @@ with DAG(
     )
     # [END howto_operator_sftp_to_gcs_copy_single_file]
 
+    # [START howto_operator_sftp_to_gcs_copy_single_file_stream]
+    copy_file_from_sftp_to_gcs_stream = SFTPToGCSOperator(
+        task_id="file-copy-sftp-to-gcs-stream",
+        source_path=f"{FILE_LOCAL_PATH}/{OBJECT_SRC_1}",
+        destination_bucket=BUCKET_NAME,
+        destination_path="streamed/parent-1.bin",
+        use_stream=True,
+        sftp_prefetch=False,
+    )
+    # [END howto_operator_sftp_to_gcs_copy_single_file_stream]
+
     # [START howto_operator_sftp_to_gcs_move_single_file_destination]
     move_file_from_sftp_to_gcs_destination = SFTPToGCSOperator(
         task_id="file-move-sftp-to-gcs-destination",
@@ -118,6 +134,7 @@ with DAG(
         unzip_file,
         # TEST BODY
         copy_file_from_sftp_to_gcs,
+        copy_file_from_sftp_to_gcs_stream,
         move_file_from_sftp_to_gcs_destination,
         copy_directory_from_sftp_to_gcs,
         move_specific_files_from_sftp_to_gcs,
@@ -135,5 +152,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

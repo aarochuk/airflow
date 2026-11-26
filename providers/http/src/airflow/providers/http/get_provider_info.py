@@ -26,49 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-http",
         "name": "Hypertext Transfer Protocol (HTTP)",
         "description": "`Hypertext Transfer Protocol (HTTP) <https://www.w3.org/Protocols/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477833,
-        "versions": [
-            "5.2.1",
-            "5.2.0",
-            "5.0.0",
-            "4.13.3",
-            "4.13.2",
-            "4.13.1",
-            "4.13.0",
-            "4.12.0",
-            "4.11.1",
-            "4.11.0",
-            "4.10.1",
-            "4.10.0",
-            "4.9.1",
-            "4.9.0",
-            "4.8.0",
-            "4.7.0",
-            "4.6.0",
-            "4.5.2",
-            "4.5.1",
-            "4.5.0",
-            "4.4.2",
-            "4.4.1",
-            "4.4.0",
-            "4.3.0",
-            "4.2.0",
-            "4.1.1",
-            "4.1.0",
-            "4.0.0",
-            "3.0.0",
-            "2.1.2",
-            "2.1.1",
-            "2.1.0",
-            "2.0.3",
-            "2.0.2",
-            "2.0.1",
-            "2.0.0",
-            "1.1.1",
-            "1.1.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Hypertext Transfer Protocol (HTTP)",
@@ -96,6 +53,7 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.http.hooks.http"],
             }
         ],
+        "notifications": ["airflow.providers.http.notifications.HttpNotifier"],
         "triggers": [
             {
                 "integration-name": "Hypertext Transfer Protocol (HTTP)",
@@ -103,14 +61,18 @@ def get_provider_info():
             }
         ],
         "connection-types": [
-            {"hook-class-name": "airflow.providers.http.hooks.http.HttpHook", "connection-type": "http"}
+            {
+                "hook-class-name": "airflow.providers.http.hooks.http.HttpHook",
+                "hook-name": "HTTP",
+                "connection-type": "http",
+                "ui-field-behaviour": {"hidden-fields": [], "relabeling": {}, "placeholders": {}},
+                "conn-fields": {
+                    "srv_lookup": {
+                        "label": "Use DNS SRV Lookup",
+                        "description": "Whether to treat the Host field as a DNS SRV record name and resolve the target host/port at request time.",
+                        "schema": {"type": ["boolean", "null"]},
+                    }
+                },
+            }
         ],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "requests>=2.31.0,<3",
-            "requests-toolbelt>=1.0.0",
-            "aiohttp>=3.9.2,!=3.11.0",
-            "asgiref>=2.3.0",
-        ],
-        "devel-dependencies": [],
     }

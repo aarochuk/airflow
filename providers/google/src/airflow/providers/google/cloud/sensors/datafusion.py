@@ -22,13 +22,14 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
-from airflow.exceptions import AirflowException, AirflowNotFoundException
+from requests.exceptions import HTTPError
+
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator
 from airflow.providers.google.cloud.hooks.datafusion import DataFusionHook
 from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class CloudDataFusionPipelineStateSensor(BaseSensorOperator):
@@ -57,7 +58,10 @@ class CloudDataFusionPipelineStateSensor(BaseSensorOperator):
 
     """
 
-    template_fields: Sequence[str] = ("pipeline_id",)
+    template_fields: Sequence[str] = (
+        "pipeline_id",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,
@@ -110,12 +114,9 @@ class CloudDataFusionPipelineStateSensor(BaseSensorOperator):
                 pipeline_id=self.pipeline_id,
                 namespace=self.namespace,
             )
-            pipeline_status = pipeline_workflow["status"]
-        except AirflowNotFoundException:
-            message = "Specified Pipeline ID was not found."
-            raise AirflowException(message)
-        except AirflowException:
-            pass  # Because the pipeline may not be visible in system yet
+            pipeline_status = pipeline_workflow.get("status")
+        except HTTPError:
+            pass  # A newly started pipeline run may not be visible in CDAP yet
         if pipeline_status is not None:
             if self.failure_statuses and pipeline_status in self.failure_statuses:
                 message = (
@@ -127,4 +128,4 @@ class CloudDataFusionPipelineStateSensor(BaseSensorOperator):
         self.log.debug(
             "Current status of the pipeline workflow for %s: %s.", self.pipeline_id, pipeline_status
         )
-        return pipeline_status in self.expected_statuses
+        return pipeline_status is not None and pipeline_status in self.expected_statuses

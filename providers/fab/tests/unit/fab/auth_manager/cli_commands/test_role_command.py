@@ -26,15 +26,11 @@ from typing import TYPE_CHECKING
 import pytest
 
 from airflow.cli import cli_parser
-
-from tests_common.test_utils.compat import ignore_provider_compatibility_error
-from tests_common.test_utils.config import conf_vars
-
-with ignore_provider_compatibility_error("2.9.0+", __file__):
-    from airflow.providers.fab.auth_manager.cli_commands import role_command
-    from airflow.providers.fab.auth_manager.cli_commands.utils import get_application_builder
-
+from airflow.providers.fab.auth_manager.cli_commands import role_command
+from airflow.providers.fab.auth_manager.cli_commands.utils import get_application_builder
 from airflow.providers.fab.www.security import permissions
+
+from tests_common.test_utils.config import conf_vars
 
 pytestmark = pytest.mark.db_test
 
@@ -70,7 +66,7 @@ class TestCliRoles:
                     self.clear_users_and_roles()
 
     def clear_users_and_roles(self):
-        session = self.appbuilder.get_session
+        session = self.appbuilder.session
         for user in self.appbuilder.sm.get_all_users():
             session.delete(user)
         for role_name in ["FakeTeamA", "FakeTeamB", "FakeTeamC"]:
@@ -119,9 +115,9 @@ class TestCliRoles:
         self.appbuilder.sm.add_role("FakeTeamA")
         self.appbuilder.sm.add_role("FakeTeamB")
 
-        with redirect_stdout(StringIO()) as stdout:
+        with redirect_stdout(StringIO()) as stdout_io:
             role_command.roles_list(self.parser.parse_args(["roles", "list"]))
-            stdout = stdout.getvalue()
+            stdout = stdout_io.getvalue()
 
         assert "FakeTeamA" in stdout
         assert "FakeTeamB" in stdout
@@ -230,3 +226,94 @@ class TestCliRoles:
             and permission.action.name == permissions.ACTION_CAN_ACCESS_MENU
             for permission in fakeTeamA.permissions
         )
+
+    def test_cli_import_roles_when_a_role_without_permissions_comes_first(self, tmp_path):
+        fn = tmp_path / "import_roles.json"
+        roles_list = [
+            {"name": "FakeTeamB", "resource": "", "action": ""},
+            {"name": "FakeTeamA", "resource": "Pools", "action": "can_edit,can_read"},
+        ]
+        fn.write_text(json.dumps(roles_list))
+        role_command.roles_import(self.parser.parse_args(["roles", "import", str(fn)]))
+
+        fakeTeamA: Role = self.appbuilder.sm.find_role("FakeTeamA")
+        fakeTeamB: Role = self.appbuilder.sm.find_role("FakeTeamB")
+
+        assert fakeTeamA is not None
+        assert fakeTeamB is not None
+        assert len(fakeTeamB.permissions) == 0
+        assert {
+            (permission.resource.name, permission.action.name) for permission in fakeTeamA.permissions
+        } == {
+            (permissions.RESOURCE_POOL, permissions.ACTION_CAN_EDIT),
+            (permissions.RESOURCE_POOL, permissions.ACTION_CAN_READ),
+        }
+
+    @pytest.mark.parametrize(
+        ("roles_list", "messages"),
+        [
+            pytest.param(
+                [
+                    {"name": "FakeTeamA", "resource": "Pools", "action": "can_edit,can_read"},
+                    {"name": "FakeTeamB", "resource": "NonExistentResource", "action": "can_read"},
+                ],
+                ["Resource named 'NonExistentResource' does not exist"],
+                id="unknown-resource",
+            ),
+            pytest.param(
+                [
+                    {"name": "FakeTeamA", "resource": "Pools", "action": "can_edit,can_read"},
+                    {"name": "FakeTeamB", "resource": "Pools", "action": "can_read,can_nonexistent"},
+                ],
+                ["Action named 'can_nonexistent' does not exist"],
+                id="unknown-action",
+            ),
+            pytest.param(
+                [
+                    {"name": "FakeTeamA", "resource": "Pools", "action": "can_edit,can_read"},
+                    {"name": "FakeTeamB", "resource": "NonExistentResource", "action": "can_read"},
+                    {"name": "FakeTeamB", "resource": "Pools", "action": "can_nonexistent"},
+                    {"name": "FakeTeamC", "resource": "NonExistentResource", "action": "can_nonexistent"},
+                ],
+                [
+                    "Resource named 'NonExistentResource' does not exist",
+                    "Action named 'can_nonexistent' does not exist",
+                ],
+                id="several-unknown-names",
+            ),
+        ],
+    )
+    def test_cli_import_roles_with_unknown_names_changes_nothing(self, tmp_path, roles_list, messages):
+        fn = tmp_path / "import_roles.json"
+        fn.write_text(json.dumps(roles_list))
+
+        with redirect_stdout(StringIO()) as stdout_io, pytest.raises(SystemExit) as exc_info:
+            role_command.roles_import(self.parser.parse_args(["roles", "import", str(fn)]))
+
+        assert exc_info.value.code == 1
+        stdout = stdout_io.getvalue()
+        for message in messages:
+            assert stdout.count(message) == 1
+        assert self.appbuilder.sm.find_role("FakeTeamA") is None
+        assert self.appbuilder.sm.find_role("FakeTeamB") is None
+        assert self.appbuilder.sm.find_role("FakeTeamC") is None
+
+    def test_cli_import_roles_skips_entries_of_existing_roles_before_checking_names(self, tmp_path):
+        self.appbuilder.sm.add_role("FakeTeamA")
+        fn = tmp_path / "import_roles.json"
+        roles_list = [
+            {"name": "FakeTeamA", "resource": "NonExistentResource", "action": "can_nonexistent"},
+            {"name": "FakeTeamB", "resource": "Pools", "action": "can_read"},
+        ]
+        fn.write_text(json.dumps(roles_list))
+        role_command.roles_import(self.parser.parse_args(["roles", "import", str(fn)]))
+
+        fakeTeamA: Role = self.appbuilder.sm.find_role("FakeTeamA")
+        fakeTeamB: Role = self.appbuilder.sm.find_role("FakeTeamB")
+
+        assert fakeTeamA is not None
+        assert fakeTeamB is not None
+        assert len(fakeTeamA.permissions) == 0
+        assert {
+            (permission.resource.name, permission.action.name) for permission in fakeTeamB.permissions
+        } == {(permissions.RESOURCE_POOL, permissions.ACTION_CAN_READ)}

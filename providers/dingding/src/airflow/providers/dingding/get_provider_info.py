@@ -26,30 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-dingding",
         "name": "Dingding",
         "description": "`DingTalk <https://www.dingtalk.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477811,
-        "versions": [
-            "3.7.3",
-            "3.7.2",
-            "3.7.0",
-            "3.6.0",
-            "3.5.1",
-            "3.5.0",
-            "3.4.0",
-            "3.3.0",
-            "3.2.1",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.0.4",
-            "2.0.3",
-            "2.0.2",
-            "2.0.1",
-            "2.0.0",
-            "1.0.2",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "DingTalk",
@@ -71,9 +47,8 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.dingding.hooks.dingding.DingdingHook",
+                "hook-name": "DingTalk Custom Robot (Dingding)",
                 "connection-type": "dingding",
             }
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "apache-airflow-providers-http"],
-        "devel-dependencies": [],
     }

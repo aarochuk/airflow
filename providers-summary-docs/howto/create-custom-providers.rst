@@ -15,6 +15,8 @@
     specific language governing permissions and limitations
     under the License.
 
+ .. TODO(potiuk) - derive the list of schema fields and provider extensions from provider_info.schema.json
+
 How to create your own provider
 -------------------------------
 
@@ -22,7 +24,7 @@ Custom providers
 ''''''''''''''''
 
 You can develop and release your own providers. Your custom operators, hooks, sensors, transfer operators
-can be packaged together in a standard airflow package and installed using the same mechanisms.
+can be packaged together in a standard Airflow package and installed using the same mechanisms.
 Moreover they can also use the same mechanisms to extend the Airflow Core with auth backends,
 custom connections, logging, secret backends and extra operator links as described in the previous chapter.
 
@@ -59,48 +61,77 @@ Displaying package information in CLI/API:
 
 Exposing customized functionality to the Airflow's core:
 
-* ``extra-links`` - this field should contain the list of all the operator class names that are adding extra links
-  capability. See :doc:`apache-airflow:howto/define-extra-link` for description of how to add extra link
-  capability to the operators of yours.
+* ``auth-backends`` - this field should contain the list of all the auth backend class names that the
+  provider provides. See :doc:`apache-airflow:core-concepts/auth-manager/index` for description of authentication.
+
+* ``auth-managers`` - this field should contain the list of all the auth manager class names that the
+  provider provides. See :doc:`apache-airflow:core-concepts/auth-manager/index` for description of the auth managers.
+
+* ``bundles`` - this field should contain the list of all the bundle class names that the
+  provider provides.
+
+* ``config`` - this field should contain dictionary that should conform to the
+  ``airflow/config_templates/config.yml.schema.json`` with configuration contributed by the providers
+  See :doc:`apache-airflow:howto/set-config` for details about setting configuration.
+
+* ``cli`` - this field should contain the list of all the functions that return CLI commands
+  to be included in Airflow CLI. See :doc:`apache-airflow:cli-and-env-variables-ref` for description of CLI commands.
 
 * ``connection-types`` - this field should contain the list of all the connection types together with hook
   class names implementing those custom connection types (providing custom extra fields and
   custom field behaviour). This field is available as of Airflow 2.2.0 and it replaces deprecated
   ``hook-class-names``. See :doc:`apache-airflow:howto/connection` for more details.
 
-* ``secret-backends`` - this field should contain the list of all the secret backends class names that the
-  provider provides. See :doc:`apache-airflow:security/secrets/secrets-backend/index` for description of how
-  to add.
+* ``executors`` - this field should contain the executor class names.
+  See :doc:`apache-airflow:core-concepts/executor/index` for description of the executors.
 
-* ``task-decorators`` - this field should contain the list of dictionaries of name/path where the decorators
-  are available. See :doc:`apache-airflow:howto/create-custom-decorator` for description of how to add
-  custom decorators.
+* ``extra-links`` - this field should contain the list of all the operator class names that are adding extra links
+  capability. See :doc:`apache-airflow:howto/define-extra-link` for description of how to add extra link
+  capability to the operators of yours.
+
+* ``filesystems`` - this field should contain the list of all the filesystem module names.
+  See :doc:`apache-airflow:core-concepts/objectstorage` for description of the filesystems.
+
+* ``hooks`` - this field should contain the list of all the hook class names that the provider provides.
+  See :doc:`apache-airflow:howto/connection` for description of the hooks and connections they provide.
+
+* ``integrations`` - provides list of integrations that are available in the provider.
 
 * ``logging`` - this field should contain the list of all the logging handler class names that the
   provider provides. See :doc:`apache-airflow:administration-and-deployment/logging-monitoring/logging-tasks`
   for description of the logging handlers.
 
-* ``notifications`` - this field should contain the notification classes.
-  See :doc:`apache-airflow:howto/notifications` for description of the notifications.
+* ``notifications`` - this field should contain the list of all the notification classes that the
+  provider provides. See :doc:`apache-airflow:howto/notifications` for description of the notifications.
 
-* ``executors`` - this field should contain the executor class names.
-  See :doc:`apache-airflow:core-concepts/executor/index` for description of the executors.
+* ``operators`` - this field should contain the list of all the operator class names that the
+  provider provides. See :doc:`apache-airflow:core-concepts/operators` for description of the operators.
 
-* ``config`` - this field should contain dictionary that should conform to the
-  ``airflow/config_templates/config.yml.schema.json`` with configuration contributed by the providers
-  See :doc:`apache-airflow:howto/set-config` for details about setting configuration.
+* ``secret-backends`` - this field should contain the list of all the secret backends class names that the
+  provider provides. See :doc:`apache-airflow:security/secrets/secrets-backend/index` for description of how
+  to add.
 
-* ``filesystems`` - this field should contain the list of all the filesystem module names.
-  See :doc:`apache-airflow:core-concepts/objectstorage` for description of the filesystems.
+* ``sensors`` - this field should contain the list of all the sensor class names that the
+  provider provides. See :doc:`apache-airflow:core-concepts/sensors` for description of the sensors.
 
-..
-  TODO: Change this from Dataset to Asset in Airflow 3.0
+* ``task-decorators`` - this field should contain the list of dictionaries of name/class-name where the decorators
+  are available. See :doc:`apache-airflow:howto/create-custom-decorator` for description of how to add
+  custom decorators.
 
-* ``dataset-uris`` - this field should contain the list of the URI schemes together with
-  class names implementing normalization functions.
-  See :doc:`apache-airflow:authoring-and-scheduling/datasets` for description of the dataset URIs.
+* ``transfers`` - this field should contain the list of all the transfer operator class names that the
+  provider provides. See :doc:`apache-airflow:core-concepts/operators` for description of the operators (transfers being one of the operator types).
+
+* ``triggers`` - this field should contain the list of all the trigger class names that the
+  provider provides. See :doc:`apache-airflow:authoring-and-scheduling/deferring` for description of the triggers.
 
 .. note:: Deprecated values
+
+  * ``asset-uris`` (deprecated) - this field should contain the list of the URI schemes together with
+    class names implementing normalization functions.
+    See :doc:`apache-airflow:authoring-and-scheduling/assets` for description of the dataset URIs.
+
+  * ``dataset-uris`` (deprecated) - this field should contain the list of the URI schemes together with
+    class names implementing normalization functions. Deprecated in Airflow 3.0 in favor of ``asset-uris``.
 
   * ``hook-class-names`` (deprecated) - this field should contain the list of all hook class names that provide
     custom connection types with custom extra fields and field behaviour. The ``hook-class-names`` array
@@ -109,14 +140,13 @@ Exposing customized functionality to the Airflow's core:
     you want to also target earlier versions of Airflow 2, you should include both ``hook-class-names`` and
     ``connection-types`` arrays. See :doc:`apache-airflow:howto/connection` for more details.
 
-
 When your providers are installed you can query the installed providers and their capabilities with the
 ``airflow providers`` command. This way you can verify if your providers are properly recognized and whether
 they define the extensions properly. See :doc:`apache-airflow:cli-and-env-variables-ref` for details of available CLI
 sub-commands.
 
 When you write your own provider, consider following the
-`Naming conventions for providers <https://github.com/apache/airflow/blob/main/contributing-docs/11_provider_distributions.rst#naming-conventions-for-provider-distributions>`_
+`Naming conventions for providers <https://github.com/apache/airflow/blob/main/contributing-docs/12_provider_distributions.rst#naming-conventions-for-provider-distributions>`_
 
 Special considerations
 ''''''''''''''''''''''
@@ -186,7 +216,7 @@ You do not need to do anything special besides creating the ``apache_airflow_pro
 returning properly formatted meta-data  - dictionary with ``extra-links`` and ``connection-types`` fields
 (and deprecated ``hook-class-names`` field if you are also targeting versions of Airflow before 2.2.0).
 
-Anyone who runs airflow in an environment that has your Python package installed will be able to use the
+Anyone who runs Airflow in an environment that has your Python package installed will be able to use the
 package as a provider package.
 
 
@@ -216,7 +246,7 @@ You need to do the following to turn an existing Python package into a provider 
   in the schema:
 
 .. exampleinclude:: /../airflow-core/src/airflow/provider_info.schema.json
-    :language: json
+  :language: python
 
 Example ``pyproject.toml``:
 

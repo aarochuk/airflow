@@ -51,6 +51,30 @@ class TestADFPipelineRunStatusSensorTrigger:
         poke_interval=POKE_INTERVAL,
     )
 
+    @pytest.mark.parametrize(
+        ("pipeline_status", "expected_status", "expected_message"),
+        [
+            ("Failed", "error", f"Pipeline run {RUN_ID} has Failed."),
+            ("Cancelled", "error", f"Pipeline run {RUN_ID} has been Cancelled."),
+            ("Succeeded", "success", f"Pipeline run {RUN_ID} has been Succeeded."),
+        ],
+    )
+    def test_build_trigger_event_terminal_states(self, pipeline_status, expected_status, expected_message):
+        """Test _build_trigger_event returns correct TriggerEvent for terminal states."""
+        event = self.TRIGGER._build_trigger_event(pipeline_status)
+        assert event is not None
+        assert event.payload["status"] == expected_status
+        assert event.payload["message"] == expected_message
+
+    @pytest.mark.parametrize(
+        "pipeline_status",
+        ["Queued", "InProgress", "Canceling"],
+    )
+    def test_build_trigger_event_non_terminal_states(self, pipeline_status):
+        """Test _build_trigger_event returns None for non-terminal states."""
+        event = self.TRIGGER._build_trigger_event(pipeline_status)
+        assert event is None
+
     def test_adf_pipeline_run_status_sensors_trigger_serialization(self):
         """
         Asserts that the TaskStateTrigger correctly serializes its arguments
@@ -128,7 +152,7 @@ class TestADFPipelineRunStatusSensorTrigger:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "mock_status, mock_message",
+        ("mock_status", "mock_message"),
         [
             ("Failed", f"Pipeline run {RUN_ID} has Failed."),
         ],
@@ -146,7 +170,7 @@ class TestADFPipelineRunStatusSensorTrigger:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "mock_status, mock_message",
+        ("mock_status", "mock_message"),
         [
             ("Cancelled", f"Pipeline run {RUN_ID} has been Cancelled."),
         ],
@@ -186,6 +210,31 @@ class TestAzureDataFactoryTrigger:
         end_time=AZ_PIPELINE_END_TIME,
     )
 
+    @pytest.mark.parametrize(
+        ("pipeline_status", "expected_status"),
+        [
+            ("Failed", "error"),
+            ("Cancelled", "error"),
+            ("Succeeded", "success"),
+        ],
+    )
+    def test_build_trigger_event_terminal_states(self, pipeline_status, expected_status):
+        """Test _build_trigger_event returns correct TriggerEvent for terminal states."""
+        event = self.TRIGGER._build_trigger_event(pipeline_status)
+        assert event is not None
+        assert event.payload["status"] == expected_status
+        assert event.payload["run_id"] == AZ_PIPELINE_RUN_ID
+        assert f"The pipeline run {AZ_PIPELINE_RUN_ID} has {pipeline_status}." in event.payload["message"]
+
+    @pytest.mark.parametrize(
+        "pipeline_status",
+        ["Queued", "InProgress", "Canceling"],
+    )
+    def test_build_trigger_event_non_terminal_states(self, pipeline_status):
+        """Test _build_trigger_event returns None for non-terminal states."""
+        event = self.TRIGGER._build_trigger_event(pipeline_status)
+        assert event is None
+
     def test_azure_data_factory_trigger_serialization(self):
         """Asserts that the AzureDataFactoryTrigger correctly serializes its arguments and classpath."""
 
@@ -199,6 +248,7 @@ class TestAzureDataFactoryTrigger:
             "end_time": AZ_PIPELINE_END_TIME,
             "wait_for_termination": True,
             "check_interval": 60,
+            "cancel_on_error": True,
         }
 
     @pytest.mark.asyncio
@@ -320,15 +370,24 @@ class TestAzureDataFactoryTrigger:
         assert expected == actual
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(("cancel_on_error", "cancel_calls"), [(True, 1), (False, 0)])
     @mock.patch(f"{MODULE}.hooks.data_factory.AzureDataFactoryAsyncHook.cancel_pipeline_run")
     @mock.patch(f"{MODULE}.hooks.data_factory.AzureDataFactoryAsyncHook.get_adf_pipeline_run_status")
     async def test_azure_data_factory_trigger_run_exception(
-        self, mock_pipeline_run_status, mock_cancel_pipeline_run
+        self, mock_pipeline_run_status, mock_cancel_pipeline_run, cancel_on_error, cancel_calls
     ):
         """Assert that run catch exception if Azure API throw exception"""
         mock_pipeline_run_status.side_effect = Exception("Test exception")
+        trigger = AzureDataFactoryTrigger(
+            run_id=AZ_PIPELINE_RUN_ID,
+            resource_group_name=AZ_RESOURCE_GROUP_NAME,
+            factory_name=AZ_FACTORY_NAME,
+            azure_data_factory_conn_id=AZ_DATA_FACTORY_CONN_ID,
+            end_time=AZ_PIPELINE_END_TIME,
+            cancel_on_error=cancel_on_error,
+        )
 
-        task = [i async for i in self.TRIGGER.run()]
+        task = [i async for i in trigger.run()]
         response = TriggerEvent(
             {
                 "status": "error",
@@ -338,7 +397,7 @@ class TestAzureDataFactoryTrigger:
         )
         assert len(task) == 1
         assert response in task
-        mock_cancel_pipeline_run.assert_called_once()
+        assert mock_cancel_pipeline_run.call_count == cancel_calls
 
     @pytest.mark.asyncio
     @mock.patch(f"{MODULE}.hooks.data_factory.AzureDataFactoryAsyncHook.get_adf_pipeline_run_status")

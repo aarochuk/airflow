@@ -25,46 +25,56 @@ def get_provider_info():
     return {
         "package-name": "apache-airflow-providers-openai",
         "name": "OpenAI",
-        "description": "`OpenAI <https://platform.openai.com/docs/introduction>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477857,
-        "versions": [
-            "1.5.3",
-            "1.5.2",
-            "1.5.1",
-            "1.5.0",
-            "1.4.0",
-            "1.3.0",
-            "1.2.2",
-            "1.2.1",
-            "1.2.0",
-            "1.1.0",
-            "1.0.1",
-            "1.0.0",
-        ],
+        "description": "`OpenAI <https://platform.openai.com/docs/introduction>`__ provider for Apache Airflow.\nEnables interaction with OpenAI APIs for text generation, embeddings,\nand other AI-powered workflows directly from Airflow Dags.\n",
         "integrations": [
             {
                 "integration-name": "OpenAI",
                 "external-doc-url": "https://platform.openai.com/docs/introduction",
+                "logo": "/docs/integration-logos/OpenAI.png",
                 "how-to-guide": ["/docs/apache-airflow-providers-openai/operators/openai.rst"],
-                "tags": ["software"],
+                "tags": [
+                    "ai",
+                    "openai",
+                    "machine-learning",
+                    "generative-ai",
+                    "llm",
+                    "text-generation",
+                    "embeddings",
+                    "ai-inference",
+                ],
             }
         ],
         "hooks": [
             {"integration-name": "OpenAI", "python-modules": ["airflow.providers.openai.hooks.openai"]}
         ],
         "operators": [
-            {"integration-name": "OpenAI", "python-modules": ["airflow.providers.openai.operators.openai"]}
+            {
+                "integration-name": "OpenAI",
+                "python-modules": [
+                    "airflow.providers.openai.operators.openai",
+                    "airflow.providers.openai.operators.agent",
+                ],
+            }
         ],
         "triggers": [
-            {"integration-name": "OpenAI", "python-modules": ["airflow.providers.openai.triggers.openai"]}
+            {
+                "integration-name": "OpenAI",
+                "python-modules": [
+                    "airflow.providers.openai.triggers.openai",
+                    "airflow.providers.openai.triggers.agent",
+                ],
+            }
         ],
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.openai.hooks.openai.OpenAIHook",
+                "hook-name": "OpenAI",
                 "connection-type": "openai",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema", "port", "login"],
+                    "relabeling": {"password": "API Key"},
+                    "placeholders": {},
+                },
             }
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "openai[datalib]>=1.66.0"],
-        "devel-dependencies": [],
     }

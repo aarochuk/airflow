@@ -26,88 +26,51 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-trino",
         "name": "Trino",
         "description": "`Trino <https://trino.io/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477905,
-        "versions": [
-            "6.1.1",
-            "6.1.0",
-            "6.0.1",
-            "6.0.0",
-            "5.9.0",
-            "5.8.1",
-            "5.8.0",
-            "5.7.2",
-            "5.7.1",
-            "5.7.0",
-            "5.6.3",
-            "5.6.2",
-            "5.6.1",
-            "5.6.0",
-            "5.5.0",
-            "5.4.1",
-            "5.4.0",
-            "5.3.1",
-            "5.3.0",
-            "5.2.1",
-            "5.2.0",
-            "5.1.1",
-            "5.1.0",
-            "5.0.0",
-            "4.3.2",
-            "4.3.1",
-            "4.3.0",
-            "4.2.0",
-            "4.1.0",
-            "4.0.1",
-            "4.0.0",
-            "3.1.0",
-            "3.0.0",
-            "2.3.0",
-            "2.2.0",
-            "2.1.2",
-            "2.1.1",
-            "2.1.0",
-            "2.0.2",
-            "2.0.1",
-            "2.0.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Trino",
                 "external-doc-url": "https://trino.io/docs/",
                 "logo": "/docs/integration-logos/trino-og.png",
-                "how-to-guide": ["/docs/apache-airflow-providers-trino/operators/trino.rst"],
+                "how-to-guide": ["/docs/apache-airflow-providers-trino/operators.rst"],
                 "tags": ["software"],
             }
         ],
         "asset-uris": [
-            {"schemes": ["trino"], "handler": "airflow.providers.trino.assets.trino.sanitize_uri"}
+            {
+                "schemes": ["trino"],
+                "handler": "airflow.providers.trino.assets.trino.sanitize_uri",
+                "factory": "airflow.providers.trino.assets.trino.create_asset",
+                "to_openlineage_converter": "airflow.providers.trino.assets.trino.convert_asset_to_openlineage",
+            }
         ],
         "dataset-uris": [
-            {"schemes": ["trino"], "handler": "airflow.providers.trino.assets.trino.sanitize_uri"}
+            {
+                "schemes": ["trino"],
+                "handler": "airflow.providers.trino.assets.trino.sanitize_uri",
+                "factory": "airflow.providers.trino.assets.trino.create_asset",
+                "to_openlineage_converter": "airflow.providers.trino.assets.trino.convert_asset_to_openlineage",
+            }
         ],
         "hooks": [{"integration-name": "Trino", "python-modules": ["airflow.providers.trino.hooks.trino"]}],
         "transfers": [
             {
                 "source-integration-name": "Google Cloud Storage (GCS)",
                 "target-integration-name": "Trino",
-                "how-to-guide": "/docs/apache-airflow-providers-trino/operators/transfer/gcs_to_trino.rst",
+                "how-to-guide": "/docs/apache-airflow-providers-trino/transfer/gcs_to_trino.rst",
                 "python-module": "airflow.providers.trino.transfers.gcs_to_trino",
             }
         ],
         "connection-types": [
-            {"hook-class-name": "airflow.providers.trino.hooks.trino.TrinoHook", "connection-type": "trino"}
+            {
+                "hook-class-name": "airflow.providers.trino.hooks.trino.TrinoHook",
+                "hook-name": "Trino",
+                "connection-type": "trino",
+                "ui-field-behaviour": {
+                    "placeholders": {
+                        "extra": '{\n "auth": "authentication type",\n "impersonate_as_owner": "allow impersonate as owner",\n "jwt__token": "JWT token",\n "jwt__file": "JWT file path",\n "certs__client_cert_path": "Client certificate path",\n "certs__client_key_path": "Client key path",\n "kerberos__config": "Kerberos config",\n "kerberos__service_name": "Kerberos service name",\n "kerberos__mutual_authentication": "Kerberos mutual authentication",\n "kerberos__force_preemptive": "Kerberos force preemptive",\n "kerberos__hostname_override": "Kerberos hostname override",\n "kerberos__sanitize_mutual_error_response": "Kerberos sanitize mutual error response",\n "kerberos__principal": "Kerberos principal",\n "kerberos__delegate": "Kerberos delegate",\n "kerberos__ca_bundle": "Kerberos CA bundle",\n "session_properties": "session properties",\n "client_tags": "Trino client tags. Example [\'sales\',\'cluster1\']",\n "timezone": "Trino timezone"\n}\n',
+                        "login": "Effective user for connection",
+                    }
+                },
+            }
         ],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-common-sql>=1.20.0",
-            "pandas>=2.1.2,<2.2",
-            "trino>=0.319.0",
-        ],
-        "optional-dependencies": {
-            "google": ["apache-airflow-providers-google"],
-            "openlineage": ["apache-airflow-providers-openlineage"],
-        },
-        "devel-dependencies": [],
     }

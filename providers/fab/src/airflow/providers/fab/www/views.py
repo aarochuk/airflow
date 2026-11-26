@@ -22,7 +22,7 @@ from urllib.parse import unquote, urljoin, urlsplit
 from flask import (
     g,
     make_response,
-    redirect,
+    redirect as flask_redirect,
     render_template,
     request,
     url_for,
@@ -31,7 +31,14 @@ from flask_appbuilder import IndexView, expose
 
 from airflow.api_fastapi.app import get_auth_manager
 from airflow.api_fastapi.auth.managers.base_auth_manager import COOKIE_NAME_JWT_TOKEN
-from airflow.configuration import conf
+from airflow.providers.common.compat.sdk import conf
+from airflow.providers.fab.version_compat import AIRFLOW_V_3_1_1_PLUS, AIRFLOW_V_3_1_8_PLUS
+from airflow.providers.fab.www.extensions.init_session import get_remaining_session_lifetime
+
+if AIRFLOW_V_3_1_8_PLUS:
+    from airflow.api_fastapi.app import get_cookie_path
+else:
+    get_cookie_path = lambda: "/"
 
 # Following the release of https://github.com/python/cpython/issues/102153 in Python 3.9.17 on
 # June 6, 2023, we are adding extra sanitization of the urls passed to get_safe_url method to make it works
@@ -66,16 +73,7 @@ class FabIndexView(IndexView):
 
     @expose("/")
     def index(self):
-        if g.user is not None and g.user.is_authenticated:
-            token = get_auth_manager().generate_jwt(g.user)
-            response = make_response(redirect(f"{conf.get('api', 'base_url')}", code=302))
-
-            secure = conf.has_option("api", "ssl_cert")
-            response.set_cookie(COOKIE_NAME_JWT_TOKEN, token, secure=secure)
-
-            return response
-        else:
-            return redirect(conf.get("api", "base_url"), code=302)
+        return redirect(conf.get("api", "base_url", fallback="/"), code=302)
 
 
 def show_traceback(error):
@@ -115,6 +113,47 @@ def get_safe_url(url):
 
     # This will ensure we only redirect to the right scheme/netloc
     return redirect_url.geturl()
+
+
+def get_token_expiration_seconds() -> int:
+    """
+    Return how long the API token handed to the browser should live.
+
+    The UI only comes back to the auth manager once its token expires, so the token expiry — not
+    the session cookie — is what actually forces a re-authentication. Capping it at whatever is
+    left of the session keeps ``[fab] session_max_lifetime_minutes`` an exact deadline instead of
+    one the user overshoots by up to ``[api_auth] jwt_expiration_time``.
+    """
+    expiration_seconds = conf.getint("api_auth", "jwt_expiration_time")
+    remaining_session_lifetime = get_remaining_session_lifetime()
+    if remaining_session_lifetime is None:
+        return expiration_seconds
+    # Truncate rather than round so the token never survives the deadline. At least a second: a
+    # session already past its deadline is logged out on its next request anyway, and a
+    # non-positive expiry would be rejected as malformed rather than as expired.
+    return max(min(expiration_seconds, int(remaining_session_lifetime)), 1)
+
+
+def redirect(*args, **kwargs):
+    if g.user is not None and g.user.is_authenticated:
+        token = get_auth_manager().generate_jwt(
+            g.user, expiration_time_in_seconds=get_token_expiration_seconds()
+        )
+        response = make_response(flask_redirect(*args, **kwargs))
+
+        secure = request.scheme == "https" or bool(conf.get("api", "ssl_cert", fallback=""))
+        # In Airflow 3.1.1 authentication changes, front-end no longer handle the token
+        # See https://github.com/apache/airflow/pull/55506
+        cookie_path = get_cookie_path()
+        if AIRFLOW_V_3_1_1_PLUS:
+            response.set_cookie(
+                COOKIE_NAME_JWT_TOKEN, token, path=cookie_path, secure=secure, httponly=True, samesite="Lax"
+            )
+        else:
+            response.set_cookie(COOKIE_NAME_JWT_TOKEN, token, path=cookie_path, secure=secure, samesite="Lax")
+
+        return response
+    return flask_redirect(*args, **kwargs)
 
 
 def method_not_allowed(error):

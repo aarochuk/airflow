@@ -21,10 +21,10 @@ from unittest import mock
 import pandas as pd
 import pytest
 
-from airflow import DAG
 from airflow.models import Connection
 from airflow.providers.slack.transfers.sql_to_slack_webhook import SqlToSlackWebhookOperator
-from airflow.utils import timezone
+
+from tests_common.test_utils.compat import timezone
 
 TEST_DAG_ID = "sql_to_slack_unit_test"
 TEST_TASK_ID = "sql_to_slack_unit_test_task"
@@ -37,10 +37,18 @@ def mocked_hook():
         yield m
 
 
-@pytest.mark.db_test
 class TestSqlToSlackWebhookOperator:
+    @pytest.fixture(autouse=True)
+    def setup_connections(self, create_connection_without_db):
+        create_connection_without_db(
+            Connection(
+                conn_id="slack_connection",
+                conn_type="slackwebhook",
+                password="xoxb-1234567890123-09876543210987-AbCdEfGhIjKlMnOpQrStUvWx",
+            )
+        )
+
     def setup_method(self):
-        self.example_dag = DAG(TEST_DAG_ID, schedule=None, start_date=DEFAULT_DATE)
         self.default_hook_parameters = {"timeout": None, "proxy": None, "retry_handlers": None}
 
     @staticmethod
@@ -49,7 +57,7 @@ class TestSqlToSlackWebhookOperator:
         return operator
 
     @pytest.mark.parametrize(
-        "slack_op_kwargs, hook_extra_kwargs",
+        ("slack_op_kwargs", "hook_extra_kwargs"),
         [
             pytest.param(
                 {}, {"timeout": None, "proxy": None, "retry_handlers": None}, id="default-hook-parameters"
@@ -65,8 +73,8 @@ class TestSqlToSlackWebhookOperator:
         mock_dbapi_hook = mock.Mock()
 
         test_df = pd.DataFrame({"a": "1", "b": "2"}, index=[0, 1])
-        get_pandas_df_mock = mock_dbapi_hook.return_value.get_pandas_df
-        get_pandas_df_mock.return_value = test_df
+        get_df_mock = mock_dbapi_hook.return_value.get_df
+        get_df_mock.return_value = test_df
 
         operator_args = {
             "sql_conn_id": "snowflake_connection",
@@ -74,14 +82,14 @@ class TestSqlToSlackWebhookOperator:
             "slack_message": "message: {{ ds }}, {{ results_df }}",
             "slack_channel": "#test",
             "sql": "sql {{ ds }}",
-            "dag": self.example_dag,
             **slack_op_kwargs,
         }
         sql_to_slack_operator = self._construct_operator(**operator_args)
 
         slack_webhook_hook = mocked_hook.return_value
         sql_to_slack_operator._get_hook = mock_dbapi_hook
-        sql_to_slack_operator.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
+        sql_to_slack_operator.render_template_fields({"ds": "2017-01-01"})
+        sql_to_slack_operator.execute({"ds": "2017-01-01"})
 
         # Test that the Slack hook is instantiated with the right parameters
         mocked_hook.assert_called_once_with(slack_webhook_conn_id="slack_connection", **hook_extra_kwargs)
@@ -96,8 +104,8 @@ class TestSqlToSlackWebhookOperator:
         mock_dbapi_hook = mock.Mock()
 
         test_df = pd.DataFrame({"a": "1", "b": "2"}, index=[0, 1])
-        get_pandas_df_mock = mock_dbapi_hook.return_value.get_pandas_df
-        get_pandas_df_mock.return_value = test_df
+        get_df_mock = mock_dbapi_hook.return_value.get_df
+        get_df_mock.return_value = test_df
 
         operator_args = {
             "sql_conn_id": "snowflake_connection",
@@ -105,13 +113,14 @@ class TestSqlToSlackWebhookOperator:
             "slack_message": "message: {{ ds }}, {{ results_df }}",
             "slack_channel": "#test",
             "sql": "sql {{ ds }}",
-            "dag": self.example_dag,
         }
         sql_to_slack_operator = self._construct_operator(**operator_args)
 
         slack_webhook_hook = mocked_hook.return_value
         sql_to_slack_operator._get_hook = mock_dbapi_hook
-        sql_to_slack_operator.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
+
+        sql_to_slack_operator.render_template_fields({"ds": "2017-01-01"})
+        sql_to_slack_operator.execute({"ds": "2017-01-01"})
 
         # Test that the Slack hook is instantiated with the right parameters
         mocked_hook.assert_called_once_with(
@@ -124,8 +133,69 @@ class TestSqlToSlackWebhookOperator:
             channel="#test",
         )
 
+    def test_second_render_leaves_already_rendered_fields_alone(self, mocked_hook):
+        """The second render pass must touch only ``slack_message``.
+
+        The first pass renders every other templated field; re-rendering them afterwards would feed
+        each field's own output back in as template source, so Jinja syntax that arrived inside a
+        context value would be evaluated on the second pass instead of staying literal.
+        """
+        mock_dbapi_hook = mock.Mock()
+        mock_dbapi_hook.return_value.get_df.return_value = pd.DataFrame({"a": "1"}, index=[0])
+
+        sql_to_slack_operator = self._construct_operator(
+            sql_conn_id="snowflake_connection",
+            slack_webhook_conn_id="slack_connection",
+            slack_message="message: {{ results_df }}",
+            slack_channel="#test",
+            sql="SELECT '{{ ds }}'",
+        )
+        sql_to_slack_operator._get_hook = mock_dbapi_hook
+
+        # ``ds`` resolves to a value that itself contains Jinja - the shape a triggering user can
+        # produce through ``dag_run.conf``. It must survive as literal text.
+        context = {"ds": "{{ leaked }}", "leaked": "SECRET"}
+
+        sql_to_slack_operator.render_template_fields(context)
+        assert sql_to_slack_operator.sql == "SELECT '{{ leaked }}'"
+
+        sql_to_slack_operator.execute(context)
+        assert sql_to_slack_operator.sql == "SELECT '{{ leaked }}'"
+
+    def test_send_renders_each_field_once_after_mapped_first_render(self, mocked_hook):
+        """A mapped task's first render bypasses ``render_template_fields``: it renders every template
+        field, ``slack_message`` included, and leaves ``times_rendered`` at 0. Sending must not render
+        any field a second time, or Jinja that arrived in a context value would be evaluated."""
+        mock_dbapi_hook = mock.Mock()
+        mock_dbapi_hook.return_value.get_df.return_value = pd.DataFrame({"a": "1"}, index=[0])
+
+        sql_to_slack_operator = self._construct_operator(
+            sql_conn_id="snowflake_connection",
+            slack_webhook_conn_id="slack_connection",
+            slack_message="message: {{ ds }}",
+            slack_channel="#test",
+            sql="SELECT '{{ ds }}'",
+        )
+        sql_to_slack_operator._get_hook = mock_dbapi_hook
+        context = {"ds": "{{ leaked }}", "leaked": "SECRET"}
+
+        # What MappedOperator.render_template_fields does for the unmapped task.
+        sql_to_slack_operator._do_render_template_fields(
+            sql_to_slack_operator,
+            sql_to_slack_operator.template_fields,
+            context,
+            sql_to_slack_operator.get_template_env(),
+            set(),
+        )
+        assert sql_to_slack_operator.times_rendered == 0
+
+        sql_to_slack_operator.execute(context)
+
+        assert sql_to_slack_operator.sql == "SELECT '{{ leaked }}'"
+        assert sql_to_slack_operator.slack_message == "message: {{ leaked }}"
+
     @pytest.mark.parametrize(
-        "slack_webhook_conn_id, warning_expected, expected_conn_id",
+        ("slack_webhook_conn_id", "warning_expected", "expected_conn_id"),
         [
             pytest.param("foo", False, "foo", id="slack-webhook-conn-id"),
             pytest.param("spam", True, "spam", id="mixin-conn-ids"),
@@ -157,8 +227,8 @@ class TestSqlToSlackWebhookOperator:
         mock_dbapi_hook = mock.Mock()
 
         test_df = pd.DataFrame({"a": "1", "b": "2"}, index=[0, 1])
-        get_pandas_df_mock = mock_dbapi_hook.return_value.get_pandas_df
-        get_pandas_df_mock.return_value = test_df
+        get_df_mock = mock_dbapi_hook.return_value.get_df
+        get_df_mock.return_value = test_df
 
         operator_args = {
             "sql_conn_id": "snowflake_connection",
@@ -167,13 +237,14 @@ class TestSqlToSlackWebhookOperator:
             "slack_channel": "#test",
             "sql": "sql {{ ds }}",
             "results_df_name": "testing",
-            "dag": self.example_dag,
         }
         sql_to_slack_operator = self._construct_operator(**operator_args)
 
         slack_webhook_hook = mocked_hook.return_value
         sql_to_slack_operator._get_hook = mock_dbapi_hook
-        sql_to_slack_operator.run(start_date=DEFAULT_DATE, end_date=DEFAULT_DATE, ignore_ti_state=True)
+
+        sql_to_slack_operator.render_template_fields({"ds": "2017-01-01"})
+        sql_to_slack_operator.execute({"ds": "2017-01-01"})
 
         # Test that the Slack hook is instantiated with the right parameters
         mocked_hook.assert_called_once_with(
@@ -202,7 +273,6 @@ class TestSqlToSlackWebhookOperator:
             "slack_webhook_conn_id": "slack_connection",
             "parameters": ["1", "2", "3"],
             "slack_message": "message: {{ ds }}, {{ xxxx }}",
-            "dag": self.example_dag,
         }
         sql_to_slack_operator = SqlToSlackWebhookOperator(task_id=TEST_TASK_ID, **operator_args)
 

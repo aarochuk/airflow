@@ -21,17 +21,18 @@ import traceback
 import warnings
 from contextlib import contextmanager
 from threading import RLock
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import quote_plus, urlencode
 
 import jaydebeapi
-import jpype
-from sqlalchemy.engine import URL
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException
 from airflow.providers.common.sql.hooks.sql import DbApiHook
 
 if TYPE_CHECKING:
-    from airflow.models.connection import Connection
+    from sqlalchemy.engine import URL
+
+    from airflow.providers.common.compat.sdk import Connection
 
 
 @contextmanager
@@ -111,7 +112,7 @@ class JdbcHook(DbApiHook):
 
     @property
     def driver_path(self) -> str | None:
-        from airflow.configuration import conf
+        from airflow.providers.common.compat.sdk import conf
 
         extra_driver_path = self.connection_extra_lower.get("driver_path")
         if extra_driver_path:
@@ -131,7 +132,7 @@ class JdbcHook(DbApiHook):
 
     @property
     def driver_class(self) -> str | None:
-        from airflow.configuration import conf
+        from airflow.providers.common.compat.sdk import conf
 
         extra_driver_class = self.connection_extra_lower.get("driver_class")
         if extra_driver_class:
@@ -151,13 +152,21 @@ class JdbcHook(DbApiHook):
 
     @property
     def sqlalchemy_url(self) -> URL:
+        try:
+            from sqlalchemy.engine import URL
+        except (ImportError, ModuleNotFoundError) as err:
+            raise AirflowOptionalProviderFeatureException(
+                "The 'sqlalchemy' library is required to use this feature. "
+                "Please install it with: pip install 'apache-airflow-providers-jdbc[sqlalchemy]'"
+            ) from err
+
         conn = self.connection
         sqlalchemy_query = conn.extra_dejson.get("sqlalchemy_query", {})
         if not isinstance(sqlalchemy_query, dict):
-            raise AirflowException("The parameter 'sqlalchemy_query' must be of type dict!")
+            raise TypeError("The parameter 'sqlalchemy_query' must be of type dict!")
         sqlalchemy_scheme = conn.extra_dejson.get("sqlalchemy_scheme")
         if sqlalchemy_scheme is None:
-            raise AirflowException(
+            raise ValueError(
                 "The parameter 'sqlalchemy_scheme' must be defined in extra for JDBC connections!"
             )
         return URL.create(
@@ -185,9 +194,9 @@ class JdbcHook(DbApiHook):
 
     def get_conn(self) -> jaydebeapi.Connection:
         conn: Connection = self.connection
-        host: str = conn.host
-        login: str = conn.login
-        psw: str = conn.password
+        host: str = cast("str", conn.host)
+        login: str = cast("str", conn.login)
+        psw: str = cast("str", conn.password)
 
         with self.lock:
             conn = jaydebeapi.connect(
@@ -205,7 +214,9 @@ class JdbcHook(DbApiHook):
         :param conn: The connection.
         :param autocommit: The connection's autocommit setting.
         """
-        with suppress_and_warn(jaydebeapi.Error, jpype.JException):
+        from jpype import JException
+
+        with suppress_and_warn(jaydebeapi.Error, JException):
             conn.jconn.setAutoCommit(autocommit)
 
     def get_autocommit(self, conn: jaydebeapi.Connection) -> bool:
@@ -217,6 +228,128 @@ class JdbcHook(DbApiHook):
             to True on the connection. False if it is either not set, set to
             False, or the connection does not support auto-commit.
         """
-        with suppress_and_warn(jaydebeapi.Error, jpype.JException):
+        from jpype import JException
+
+        with suppress_and_warn(jaydebeapi.Error, JException):
             return conn.jconn.getAutoCommit()
-        return False
+
+        # This is reachable when the driver does not support autocommit then exceptions raised above are
+        # custom suppressed for jaydebeapi so we return False when control yields here.
+        return False  # type: ignore[unreachable]
+
+    def get_uri(self) -> str:
+        """Get the connection URI for the JDBC connection."""
+        conn = self.connection
+        extra = conn.extra_dejson
+
+        scheme = extra.get("sqlalchemy_scheme")
+        if not scheme:
+            return cast("str", conn.host)
+
+        driver = extra.get("sqlalchemy_driver")
+        uri_prefix = f"{scheme}+{driver}" if driver else scheme
+
+        auth_part = ""
+        if conn.login:
+            auth_part = quote_plus(conn.login)
+            if conn.password:
+                auth_part = f"{auth_part}:{quote_plus(conn.password)}"
+            auth_part = f"{auth_part}@"
+
+        host_part = conn.host or "localhost"
+        if conn.port:
+            host_part = f"{host_part}:{conn.port}"
+
+        schema_part = f"/{quote_plus(conn.schema)}" if conn.schema else ""
+
+        uri = f"{uri_prefix}://{auth_part}{host_part}{schema_part}"
+
+        sqlalchemy_query = extra.get("sqlalchemy_query", {})
+        if isinstance(sqlalchemy_query, dict):
+            query_string = urlencode({k: str(v) for k, v in sqlalchemy_query.items() if v is not None})
+            if query_string:
+                uri = f"{uri}?{query_string}"
+
+        return uri
+
+    def get_openlineage_database_info(self, connection):
+        """
+        Return JDBC database information for OpenLineage.
+
+        Returns ``None`` when the database scheme cannot be inferred from the
+        connection's ``sqlalchemy_scheme`` extra or the JDBC URL in ``host``.
+        """
+        from airflow.providers.openlineage.sqlparser import DatabaseInfo
+
+        scheme = self._get_openlineage_scheme(connection)
+        if not scheme:
+            return None
+
+        return DatabaseInfo(
+            scheme=scheme,
+            authority=self._get_openlineage_authority(connection),
+            database=connection.schema or None,
+        )
+
+    def get_openlineage_database_dialect(self, connection) -> str:
+        """Return SQL dialect inferred from the JDBC connection, or ``generic``."""
+        return self._get_openlineage_scheme(connection) or "generic"
+
+    def get_openlineage_default_schema(self) -> str | None:
+        """Return default schema from the connection."""
+        return self.connection.schema or None
+
+    @staticmethod
+    def _get_openlineage_scheme(connection) -> str | None:
+        """Infer scheme from ``sqlalchemy_scheme`` extra or JDBC URL prefix."""
+        raw: str | None = None
+        sqlalchemy_scheme = connection.extra_dejson.get("sqlalchemy_scheme")
+        if sqlalchemy_scheme:
+            raw = sqlalchemy_scheme.split("+")[0]
+        else:
+            host = connection.host or ""
+            # The ``jdbc:`` prefix is case-insensitive per the JDBC spec.
+            if host.lower().startswith("jdbc:"):
+                jdbc_part = host[5:]
+                for sep in ("://", ":"):
+                    if sep in jdbc_part:
+                        candidate = jdbc_part.split(sep)[0].lower()
+                        if candidate:
+                            raw = candidate
+                        break
+
+        if not raw:
+            return None
+        # Normalize SQLAlchemy's "postgresql" to OL's canonical "postgres" so
+        # JDBC-Postgres shares a namespace with PostgresHook downstream.
+        return "postgres" if raw == "postgresql" else raw
+
+    @staticmethod
+    def _get_openlineage_authority(connection) -> str | None:
+        """Extract ``host:port`` from a JDBC URL in ``host`` or from plain ``host``/``port``."""
+        host = connection.host or ""
+        # The ``jdbc:`` prefix is case-insensitive per the JDBC spec.
+        if host.lower().startswith("jdbc:"):
+            rest = host[5:]
+            # Oracle thin service-name format (``jdbc:oracle:thin:@//host:1521/service``)
+            # uses ``:@//`` instead of ``://``. Handle before the ``://`` branch.
+            if "@//" in rest:
+                after = rest.split("@//", 1)[1]
+            elif "://" in rest:
+                after = rest.split("://", 1)[1]
+            else:
+                # Non-standard JDBC URL we can't reliably parse (e.g. Oracle
+                # SID format ``thin:@host:port:sid``, H2 ``mem:test``).
+                return None
+            # Strip path, query string, and driver-specific option separator
+            # (e.g. SQL Server uses ``;`` for connection properties).
+            for sep in ("/", "?", ";"):
+                after = after.split(sep, 1)[0]
+            # Strip userinfo (some drivers accept ``user:pass@host:port`` in the
+            # URL); we never want credentials leaking into the OL namespace.
+            if "@" in after:
+                after = after.rsplit("@", 1)[-1]
+            return after or None
+        if connection.port and host:
+            return f"{host}:{connection.port}"
+        return host or None

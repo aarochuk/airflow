@@ -21,7 +21,6 @@ import atexit
 import multiprocessing
 import os
 import signal
-import sys
 import time
 from abc import abstractmethod
 from collections.abc import Generator
@@ -36,7 +35,7 @@ from airflow_breeze.global_constants import (
     AIRFLOW_PYTHON_COMPATIBILITY_MATRIX,
     DEFAULT_PYTHON_MAJOR_MINOR_VERSION,
 )
-from airflow_breeze.utils.console import Output, get_console
+from airflow_breeze.utils.console import Output, console_print, get_console
 from airflow_breeze.utils.github import (
     download_constraints_file,
     download_file_from_github,
@@ -50,9 +49,9 @@ if TYPE_CHECKING:
     from rich.console import Console
 
 
-def start_cdxgen_server(application_root_path: Path, run_in_parallel: bool, parallelism: int) -> None:
+def start_cdxgen_servers(application_root_path: Path, run_in_parallel: bool, parallelism: int) -> None:
     """
-    Start cdxgen server that is used to perform cdxgen scans of applications in child process
+    Start cdxgen servers that is used to perform cdxgen scans of applications in child process
     :param run_in_parallel: run parallel servers
     :param parallelism: parallelism to use
     :param application_root_path: path where the application to scan is located
@@ -71,49 +70,69 @@ def start_cdxgen_server(application_root_path: Path, run_in_parallel: bool, para
         for i in range(parallelism):
             fork_cdxgen_server(application_root_path, port=8080 + i)
     time.sleep(1)
-    get_console().print("[info]Waiting for cdxgen server to start")
+    console_print("[info]Waiting for cdxgen server(s) to start")
     time.sleep(3)
+    if os.environ.get("CI", "false") == "true":
+        # In CI we wait longer for the server to start
+        console_print("[info]Waiting longer for cdxgen server(s) to start in CI")
+        time.sleep(5)
+        print("::endgroup::")
+
+
+def remove_cdxgen_server(name: str) -> None:
+    # `docker run -t` does not forward signals to the container, so terminating the `docker run`
+    # process leaves the server running and holding its memory for the rest of the CI job.
+    run_command(["docker", "rm", "--force", name], check=False, capture_output=True, quiet=True)
 
 
 def fork_cdxgen_server(application_root_path, port=9090):
+    name = f"airflow-cdxgen-server-{port}"
+    remove_cdxgen_server(name)
     pid = os.fork()
     if pid:
-        # Parent process - send signal to process group of the child process
+        # Parent process - send signal to process group of the child process. atexit runs the
+        # handlers in reverse, so the container is removed after its `docker run` is terminated.
+        atexit.register(remove_cdxgen_server, name)
         atexit.register(os.killpg, pid, signal.SIGTERM)
         # Give the server child process some time to start
     else:
-        # Check if we are not a group leader already (We should not be)
-        if os.getpid() != os.getsid(0):
-            # and create a new process group where we are the leader
-            os.setpgid(0, 0)
-        run_command(
-            [
-                "docker",
-                "run",
-                "--init",
-                "--rm",
-                "-p",
-                f"{port}:{port}",
-                "-v",
-                "/tmp:/tmp",
-                "-v",
-                f"{application_root_path}:/app",
-                "-t",
-                "ghcr.io/cyclonedx/cdxgen",
-                "--server",
-                "--server-host",
-                "0.0.0.0",
-                "--server-port",
-                str(port),
-            ],
-            check=True,
-        )
-        # we should get here when the server gets terminated
-        sys.exit(0)
+        try:
+            # Check if we are not a group leader already (We should not be)
+            if os.getpid() != os.getsid(0):
+                # and create a new process group where we are the leader
+                os.setpgid(0, 0)
+            run_command(
+                [
+                    "docker",
+                    "run",
+                    "--init",
+                    "--rm",
+                    "--name",
+                    name,
+                    "-p",
+                    f"{port}:{port}",
+                    "-v",
+                    "/tmp:/tmp",
+                    "-v",
+                    f"{application_root_path}:/app",
+                    "-t",
+                    "ghcr.io/cyclonedx/cdxgen",
+                    "--server",
+                    "--server-host",
+                    "0.0.0.0",
+                    "--server-port",
+                    str(port),
+                ],
+                check=True,
+            )
+        finally:
+            # We get here when the server gets terminated. The child inherited the atexit handlers
+            # of the servers forked before it, which would stop those servers, so they are skipped.
+            os._exit(0)
 
 
 def get_port_mapping(x):
-    # if we do not sleep here, then we could skip mapping for some process if it is handle
+    # if we do not sleep here, then we could skip mapping for some process if it is handled
     time.sleep(1)
     return multiprocessing.current_process().name, 8080 + x
 
@@ -137,7 +156,7 @@ def get_all_airflow_versions_image_name(python_version: str) -> str:
 
 
 def list_providers_from_providers_requirements(
-    airflow_site_archive_directory: Path,
+    airflow_site_archive_path: Path,
 ) -> Generator[tuple[str, str, str, Path], None, None]:
     for node_name in os.listdir(PROVIDER_REQUIREMENTS_DIR_PATH):
         if not node_name.startswith("provider"):
@@ -146,15 +165,13 @@ def list_providers_from_providers_requirements(
         provider_id, provider_version = node_name.rsplit("-", 1)
 
         provider_documentation_directory = (
-            airflow_site_archive_directory
+            airflow_site_archive_path
             / f"apache-airflow-providers-{provider_id.replace('provider-', '').replace('.', '-')}"
         )
         provider_version_documentation_directory = provider_documentation_directory / provider_version
 
         if not provider_version_documentation_directory.exists():
-            get_console().print(
-                f"[warning]The {provider_version_documentation_directory} does not exist. Skipping"
-            )
+            console_print(f"[warning]The {provider_version_documentation_directory} does not exist. Skipping")
             continue
 
         yield (node_name, provider_id, provider_version, provider_version_documentation_directory)
@@ -213,8 +230,7 @@ def get_requirements_for_provider(
             f"Provider requirements already existed, skipped generation for {provider_id} version "
             f"{provider_version} python {python_version}",
         )
-    else:
-        provider_folder_path.mkdir(exist_ok=True)
+    provider_folder_path.mkdir(exist_ok=True, parents=True)
 
     command = f"""
 mkdir -pv {DOCKER_FILE_PREFIX}
@@ -329,7 +345,7 @@ class SbomApplicationJob:
     target_path: Path
 
     @abstractmethod
-    def produce(self, output: Output | None, port: int) -> tuple[int, str]:
+    def produce(self, output: Output | None, port: int, github_token: str | None) -> tuple[int, str]:
         raise NotImplementedError
 
     @abstractmethod
@@ -344,6 +360,7 @@ class SbomCoreJob(SbomApplicationJob):
     include_provider_dependencies: bool
     include_python: bool
     include_npm: bool
+    constraints_reference: str | None = None
 
     def get_job_name(self) -> str:
         name = f"{self.airflow_version}"
@@ -369,22 +386,35 @@ class SbomCoreJob(SbomApplicationJob):
             source_dir = source_dir / f"python{self.python_version}"
         return source_dir
 
-    def download_dependency_files(self, output: Output | None) -> bool:
+    def download_dependency_files(self, output: Output | None, github_token: str | None) -> bool:
         source_dir = self.get_files_directory(self.application_root_path)
         source_dir.mkdir(parents=True, exist_ok=True)
-        lock_file_relative_path = "airflow/www/yarn.lock"
+        version_number = int(self.airflow_version.split(".")[0])
+        lock_file_relative_path = (
+            "airflow-core/src/airflow/ui/package.json" if version_number >= 3 else "airflow/www/yarn.lock"
+        )
+        source_dir_with_file = (
+            (source_dir / "package.json") if version_number >= 3 else (source_dir / "yarn.lock")
+        )
         if self.include_npm:
             download_file_from_github(
-                tag=self.airflow_version, path=lock_file_relative_path, output_file=source_dir / "yarn.lock"
+                reference=self.airflow_version,
+                path=lock_file_relative_path,
+                output_file=source_dir_with_file,
+                github_token=github_token,
             )
         else:
-            (source_dir / "yarn.lock").unlink(missing_ok=True)
+            source_dir_with_file.unlink(missing_ok=True)
         if self.include_python:
+            constraints_reference = self.constraints_reference or f"constraints-{self.airflow_version}"
             if not download_constraints_file(
-                airflow_version=self.airflow_version,
+                constraints_reference=constraints_reference,
                 python_version=self.python_version,
-                include_provider_dependencies=self.include_provider_dependencies,
+                airflow_constraints_mode="constraints"
+                if self.include_provider_dependencies
+                else "constraints-no-providers",
                 output_file=source_dir / "requirements.txt",
+                github_token=github_token,
             ):
                 get_console(output=output).print(
                     f"[warning]Failed to download constraints file for "
@@ -396,7 +426,7 @@ class SbomCoreJob(SbomApplicationJob):
             (source_dir / "requirements.txt").unlink(missing_ok=True)
         return True
 
-    def produce(self, output: Output | None, port: int) -> tuple[int, str]:
+    def produce(self, output: Output | None, port: int, github_token: str | None) -> tuple[int, str]:
         import requests
 
         get_console(output=output).print(
@@ -404,7 +434,7 @@ class SbomCoreJob(SbomApplicationJob):
             f"include_provider_dependencies={self.include_provider_dependencies}, "
             f"python={self.include_python}, npm={self.include_npm}"
         )
-        if not self.download_dependency_files(output):
+        if not self.download_dependency_files(output, github_token=github_token):
             return 0, f"SBOM Generate {self.airflow_version}:{self.python_version}"
 
         get_console(output=output).print(
@@ -463,7 +493,7 @@ class SbomProviderJob(SbomApplicationJob):
     def get_job_name(self) -> str:
         return f"{self.provider_id}:{self.provider_version}:python{self.python_version}"
 
-    def produce(self, output: Output | None, port: int) -> tuple[int, str]:
+    def produce(self, output: Output | None, port: int, github_token: str | None) -> tuple[int, str]:
         import requests
 
         get_console(output=output).print(
@@ -502,12 +532,16 @@ class SbomProviderJob(SbomApplicationJob):
 
 
 def produce_sbom_for_application_via_cdxgen_server(
-    job: SbomApplicationJob, output: Output | None, port_map: dict[str, int] | None = None
+    job: SbomApplicationJob,
+    output: Output | None,
+    github_token: str | None,
+    port_map: dict[str, int] | None = None,
 ) -> tuple[int, str]:
     """
     Produces SBOM for application using cdxgen server.
     :param job: Job to run
     :param output: Output to use
+    :param github_token: GitHub token to use for downloading files`
     :param port_map map of process name to port - making sure that one process talks to one server
          in case parallel processing is used
     :return: tuple with exit code and output
@@ -518,7 +552,7 @@ def produce_sbom_for_application_via_cdxgen_server(
     else:
         port = port_map[multiprocessing.current_process().name]
         get_console(output=output).print(f"[info]Using port {port}")
-    return job.produce(output, port)
+    return job.produce(output, port, github_token)
 
 
 def convert_licenses(licenses: list[dict[str, Any]]) -> str:
@@ -592,7 +626,7 @@ def get_github_stats(
         console.print(f"[bright_blue]Retrieving GitHub Stats from {api_url}")
         response = requests.get(api_url, headers=headers)
         if response.status_code == 404:
-            console.print(f"[yellow]Github API returned 404 for {api_url}")
+            console.print(f"[yellow]GitHub API returned 404 for {api_url}")
             return {}
         response.raise_for_status()
         github_data = response.json()
@@ -611,7 +645,7 @@ def get_github_stats(
         result["Industry importance"] = importance
         console.print("[green]Successfully retrieved GitHub Stats.")
     else:
-        console.print(f"[yellow]Not retrieving Github Stats for {vcs}")
+        console.print(f"[yellow]Not retrieving GitHub Stats for {vcs}")
     return result
 
 

@@ -16,18 +16,55 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Flex, Box, Text } from "@chakra-ui/react";
+import { Flex, Box, Portal, Text, Tooltip } from "@chakra-ui/react";
 import dayjs from "dayjs";
 import duration from "dayjs/plugin/duration";
+import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
 import type { DAGWithLatestDagRunsResponse } from "openapi/requests/types.gen";
+
+import { StateIcon } from "src/components/StateIcon";
 import Time from "src/components/Time";
-import { Tooltip } from "src/components/ui";
+
+import { useDurationFormat } from "src/utils";
+
+import { BAR_GAP, BAR_WIDTH } from "./recentRunsLayout";
 
 dayjs.extend(duration);
 
 const BAR_HEIGHT = 65;
+
+type LatestRun = DAGWithLatestDagRunsResponse["latest_dag_runs"][number];
+
+const RecentRunTooltipContent = ({ run }: { readonly run: LatestRun }) => {
+  const { t: translate } = useTranslation();
+  const { renderDuration } = useDurationFormat();
+
+  return (
+    <Box>
+      <Text>
+        {translate("state")}: {translate(`common:states.${run.state}`)}
+      </Text>
+      <Text>
+        {translate("dagRun.runAfter")}: <Time datetime={run.run_after} />
+      </Text>
+      {run.start_date === null ? undefined : (
+        <Text>
+          {translate("startDate")}: <Time datetime={run.start_date} />
+        </Text>
+      )}
+      {run.end_date === null ? undefined : (
+        <Text>
+          {translate("endDate")}: <Time datetime={run.end_date} />
+        </Text>
+      )}
+      <Text>
+        {translate("duration")}: {renderDuration(run.duration)}
+      </Text>
+    </Box>
+  );
+};
 
 export const RecentRuns = ({
   latestRuns,
@@ -38,61 +75,66 @@ export const RecentRuns = ({
     return undefined;
   }
 
-  const runsWithDuration = latestRuns.map((run) => ({
-    ...run,
-    duration: dayjs.duration(dayjs(run.end_date).diff(run.start_date)).asSeconds(),
-  }));
-
   const max = Math.max.apply(
     undefined,
-    runsWithDuration.map((run) => run.duration),
+    latestRuns.map((run) => run.duration ?? 0),
   );
 
   return (
-    <Flex alignItems="flex-end" flexDirection="row-reverse" pb={1}>
-      {runsWithDuration.map((run) => (
-        <Tooltip
-          content={
-            <Box>
-              <Text>State: {run.state}</Text>
-              <Text>
-                Run After: <Time datetime={run.run_after} />
-              </Text>
-              {run.start_date === null ? undefined : (
-                <Text>
-                  Start Date: <Time datetime={run.start_date} />
-                </Text>
-              )}
-              {run.end_date === null ? undefined : (
-                <Text>
-                  End Date: <Time datetime={run.end_date} />
-                </Text>
-              )}
-              <Text>Duration: {run.duration.toFixed(2)}s</Text>
-            </Box>
-          }
-          key={run.dag_run_id}
-          positioning={{
-            offset: {
-              crossAxis: 5,
-              mainAxis: 5,
-            },
-            placement: "bottom-start",
-          }}
-        >
-          <Link to={`/dags/${run.dag_id}/runs/${run.dag_run_id}/`}>
-            <Box px={1}>
-              <Box
+    <Tooltip.Root
+      positioning={{
+        offset: {
+          crossAxis: 5,
+          mainAxis: 5,
+        },
+        placement: "bottom-start",
+      }}
+    >
+      {/* Hold the full bar height even when every run is short or still pending, so the bars stay
+          anchored to the bottom of the card's chart area instead of floating at the top of it. */}
+      <Flex
+        alignItems="flex-end"
+        flexDirection="row-reverse"
+        gap={{ base: `${BAR_GAP.base}px`, lg: `${BAR_GAP.lg}px` }}
+        minHeight={`${BAR_HEIGHT}px`}
+        pb={1}
+      >
+        {latestRuns.map((run) => (
+          <Tooltip.Trigger asChild key={run.run_id} value={run.run_id}>
+            <Link data-testid="recent-run" to={`/dags/${run.dag_id}/runs/${run.run_id}/`}>
+              <Flex
+                alignItems="center"
                 bg={`${run.state}.solid`}
                 borderRadius="4px"
-                height={`${(run.duration / max) * BAR_HEIGHT}px`}
-                minHeight={1}
-                width="4px"
-              />
-            </Box>
-          </Link>
-        </Tooltip>
-      ))}
-    </Flex>
+                flexDir="column"
+                fontSize="12px"
+                height={`${run.duration === null ? 1 : (run.duration / max) * BAR_HEIGHT}px`}
+                justifyContent="flex-end"
+                minHeight="12px"
+                width={`${BAR_WIDTH}px`}
+              >
+                <StateIcon color="white" state={run.state} />
+              </Flex>
+            </Link>
+          </Tooltip.Trigger>
+        ))}
+      </Flex>
+      <Portal disabled>
+        <Tooltip.Positioner>
+          <Tooltip.Content>
+            <Tooltip.Arrow>
+              <Tooltip.ArrowTip />
+            </Tooltip.Arrow>
+            <Tooltip.Context>
+              {({ triggerValue }) => {
+                const run = latestRuns.find(({ run_id: runId }) => runId === triggerValue);
+
+                return run === undefined ? undefined : <RecentRunTooltipContent run={run} />;
+              }}
+            </Tooltip.Context>
+          </Tooltip.Content>
+        </Tooltip.Positioner>
+      </Portal>
+    </Tooltip.Root>
   );
 };

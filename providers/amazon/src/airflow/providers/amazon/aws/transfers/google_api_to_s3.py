@@ -24,17 +24,18 @@ import sys
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
-from airflow.models.xcom import MAX_XCOM_SIZE, XCOM_RETURN_KEY
+from airflow.models.xcom import XCOM_RETURN_KEY
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.google.common.hooks.discovery_api import GoogleDiscoveryApiHook
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.types import RuntimeTaskInstanceProtocol
-    except ImportError:
-        from airflow.models import TaskInstance as RuntimeTaskInstanceProtocol  # type: ignore[assignment]
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import RuntimeTaskInstanceProtocol
+    from airflow.sdk import Context
+
+# MAX XCOM Size is 48KB
+# https://github.com/apache/airflow/pull/1618#discussion_r68249677
+MAX_XCOM_SIZE = 49344
 
 
 class GoogleApiToS3Operator(BaseOperator):
@@ -97,6 +98,7 @@ class GoogleApiToS3Operator(BaseOperator):
         "s3_destination_key",
         "google_impersonation_chain",
         "gcp_conn_id",
+        "aws_conn_id",
     )
     template_ext: Sequence[str] = ()
     ui_color = "#cc181e"

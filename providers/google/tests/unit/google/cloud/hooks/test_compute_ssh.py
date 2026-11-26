@@ -21,17 +21,15 @@ import logging
 from unittest import mock
 
 import httplib2
+import paramiko
 import pytest
 from googleapiclient.errors import HttpError
 from paramiko.ssh_exception import SSHException
 
-from airflow.exceptions import AirflowException
 from airflow.models import Connection
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks.compute_ssh import ComputeEngineSSHHook
 from airflow.providers.google.cloud.hooks.os_login import OSLoginHook
-
-pytestmark = pytest.mark.db_test
-
 
 TEST_PROJECT_ID = "test-project-id"
 
@@ -56,6 +54,7 @@ class TestComputeEngineHookWithPassedProjectId:
         assert ComputeEngineSSHHook(gcp_conn_id="gcpssh")._oslogin_hook
         mock_os_login_hook.assert_called_with(gcp_conn_id="gcpssh")
 
+    @pytest.mark.db_test
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.ComputeEngineHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.paramiko")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh._GCloudAuthorizedSSHClient")
@@ -112,8 +111,9 @@ class TestComputeEngineHookWithPassedProjectId:
             ]
         )
 
+    @pytest.mark.db_test
     @pytest.mark.parametrize(
-        "exception_type, error_message",
+        ("exception_type", "error_message"),
         [(SSHException, r"Error occurred when establishing SSH connection using Paramiko")],
     )
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.ComputeEngineHook")
@@ -156,6 +156,7 @@ class TestComputeEngineHookWithPassedProjectId:
         assert error_message in caplog.text
         assert "Failed establish SSH connection" in caplog.text
 
+    @pytest.mark.db_test
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.ComputeEngineHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.OSLoginHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.paramiko")
@@ -214,8 +215,9 @@ class TestComputeEngineHookWithPassedProjectId:
 
         mock_os_login_hook.return_value.import_ssh_public_key.assert_not_called()
 
+    @pytest.mark.db_test
     @pytest.mark.parametrize(
-        "exception_type, error_message",
+        ("exception_type", "error_message"),
         [
             (
                 HttpError(resp=httplib2.Response({"status": 412}), content=b"Error content"),
@@ -257,6 +259,7 @@ class TestComputeEngineHookWithPassedProjectId:
         assert error_message in caplog.text
         assert "Failed establish SSH connection" in caplog.text
 
+    @pytest.mark.db_test
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.ComputeEngineHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.OSLoginHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.paramiko")
@@ -287,6 +290,7 @@ class TestComputeEngineHookWithPassedProjectId:
             zone=TEST_ZONE,
         )
 
+    @pytest.mark.db_test
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.ComputeEngineHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.OSLoginHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.paramiko")
@@ -315,6 +319,7 @@ class TestComputeEngineHookWithPassedProjectId:
             hostname=INTERNAL_IP, look_for_keys=mock.ANY, pkey=mock.ANY, sock=mock.ANY, username=mock.ANY
         )
 
+    @pytest.mark.db_test
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.ComputeEngineHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.OSLoginHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.paramiko")
@@ -343,6 +348,7 @@ class TestComputeEngineHookWithPassedProjectId:
             username=mock.ANY,
         )
 
+    @pytest.mark.db_test
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.ComputeEngineHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.OSLoginHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.paramiko")
@@ -372,6 +378,7 @@ class TestComputeEngineHookWithPassedProjectId:
             f"--zone={TEST_ZONE} --verbosity=warning"
         )
 
+    @pytest.mark.db_test
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.ComputeEngineHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.OSLoginHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.paramiko")
@@ -407,8 +414,9 @@ class TestComputeEngineHookWithPassedProjectId:
             f"--zone={TEST_ZONE} --verbosity=warning --impersonate-service-account={IMPERSONATION_CHAIN}"
         )
 
+    @pytest.mark.db_test
     @pytest.mark.parametrize(
-        "exception_type, error_message",
+        ("exception_type", "error_message"),
         [(SSHException, r"Error occurred when establishing SSH connection using Paramiko")],
     )
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.ComputeEngineHook")
@@ -442,6 +450,7 @@ class TestComputeEngineHookWithPassedProjectId:
         assert error_message in caplog.text
         assert "Failed establish SSH connection" in caplog.text
 
+    @pytest.mark.db_test
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.ComputeEngineHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.OSLoginHook")
     @mock.patch("airflow.providers.google.cloud.hooks.compute_ssh.paramiko")
@@ -514,7 +523,7 @@ class TestComputeEngineHookWithPassedProjectId:
         assert isinstance(hook.expire_time, int)
 
     @pytest.mark.parametrize(
-        "metadata, expected_metadata",
+        ("metadata", "expected_metadata"),
         [
             ({"items": []}, {"items": [{"key": "ssh-keys", "value": "user:pubkey\n"}]}),
             (
@@ -552,3 +561,39 @@ class TestComputeEngineHookWithPassedProjectId:
             mock_set_instance_metadata.call_args.kwargs["metadata"]["items"].sort(key=lambda x: x["key"])
             expected_metadata["items"].sort(key=lambda x: x["key"])
             assert mock_set_instance_metadata.call_args.kwargs["metadata"] == expected_metadata
+
+
+class TestHostKeyPolicyResolution:
+    """Tests for the ``host_key_policy`` constructor argument."""
+
+    def test_default_is_auto_add(self):
+        hook = ComputeEngineSSHHook()
+
+        assert hook.host_key_policy == "auto_add"
+        assert isinstance(hook._resolve_host_key_policy(), paramiko.AutoAddPolicy)
+
+    def test_string_aliases(self):
+        assert isinstance(
+            ComputeEngineSSHHook(host_key_policy="auto_add")._resolve_host_key_policy(),
+            paramiko.AutoAddPolicy,
+        )
+        assert isinstance(
+            ComputeEngineSSHHook(host_key_policy="reject")._resolve_host_key_policy(),
+            paramiko.RejectPolicy,
+        )
+        assert isinstance(
+            ComputeEngineSSHHook(host_key_policy="warning")._resolve_host_key_policy(),
+            paramiko.WarningPolicy,
+        )
+
+    def test_custom_policy_instance_is_returned_unchanged(self):
+        custom_policy = paramiko.RejectPolicy()
+        hook = ComputeEngineSSHHook(host_key_policy=custom_policy)
+
+        assert hook._resolve_host_key_policy() is custom_policy
+
+    def test_unknown_string_raises_value_error(self):
+        hook = ComputeEngineSSHHook(host_key_policy="strict")
+
+        with pytest.raises(ValueError, match=r"Unknown host_key_policy 'strict'"):
+            hook._resolve_host_key_policy()

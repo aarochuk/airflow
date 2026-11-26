@@ -17,19 +17,14 @@
 # under the License.
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any
 
-from airflow.exceptions import AirflowException
-from airflow.models import BaseOperator
 from airflow.providers.arangodb.hooks.arangodb import ArangoDBHook
+from airflow.providers.common.compat.sdk import BaseOperator
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class AQLOperator(BaseOperator):
@@ -46,7 +41,10 @@ class AQLOperator(BaseOperator):
     :param arangodb_conn_id: Reference to :ref:`ArangoDB connection id <howto/connection:arangodb>`.
     """
 
-    template_fields: Sequence[str] = ("query",)
+    template_fields: Sequence[str] = (
+        "query",
+        "arangodb_conn_id",
+    )
     template_ext: Sequence[str] = (".sql",)
     template_fields_renderers = {"query": "sql"}
 
@@ -84,6 +82,8 @@ class ArangoDBCollectionOperator(BaseOperator):
     :param delete_collection: If True, the specified collection will be deleted.
     """
 
+    template_fields: Sequence[str] = ("arangodb_conn_id",)
+
     def __init__(
         self,
         *,
@@ -117,7 +117,7 @@ class ArangoDBCollectionOperator(BaseOperator):
                 self.delete_collection,
             ]
         ):
-            raise AirflowException("At least one operation must be specified.")
+            raise ValueError("At least one operation must be specified.")
 
         if self.documents_to_insert:
             self.log.info(

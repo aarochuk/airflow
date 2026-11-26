@@ -53,16 +53,27 @@ from datetime import datetime
 
 import boto3
 
-from airflow import settings
-from airflow.decorators import task
-from airflow.models import Connection
-from airflow.models.baseoperator import chain
-from airflow.models.dag import DAG
 from airflow.providers.amazon.aws.operators.s3 import S3CreateBucketOperator, S3DeleteBucketOperator
 from airflow.providers.amazon.aws.transfers.google_api_to_s3 import GoogleApiToS3Operator
-from airflow.utils.trigger_rule import TriggerRule
+
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import DAG, chain, task
+else:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
+    from airflow.models.baseoperator import chain  # type: ignore[attr-defined,no-redef]
+    from airflow.models.dag import DAG  # type: ignore[attr-defined,no-redef,assignment]
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.amazon.aws.utils import ENV_ID_KEY, SystemTestContextBuilder
+from tests_common.test_utils.api_client_helpers import create_airflow_connection
 
 DAG_ID = "example_google_api_youtube_to_s3"
 
@@ -80,21 +91,18 @@ sys_test_context_task = SystemTestContextBuilder().add_variable(SECRET_ARN_KEY).
 @task
 def create_connection_gcp(conn_id_name: str, secret_arn: str):
     json_data = boto3.client("secretsmanager").get_secret_value(SecretId=secret_arn)["SecretString"]
-    conn = Connection(
-        conn_id=conn_id_name,
-        conn_type="google_cloud_platform",
-    )
-    scopes = "https://www.googleapis.com/auth/youtube.readonly"
     conn_extra = {
-        "scope": scopes,
+        "scope": "https://www.googleapis.com/auth/youtube.readonly",
         "project": "aws-oss-airflow",
         "keyfile_dict": json_data,
     }
-    conn_extra_json = json.dumps(conn_extra)
-    conn.set_extra(conn_extra_json)
-    session = settings.Session()
-    session.add(conn)
-    session.commit()
+    create_airflow_connection(
+        connection_id=conn_id_name,
+        connection_conf={
+            "conn_type": "google_cloud_platform",
+            "extra": json.dumps(conn_extra),
+        },
+    )
 
 
 @task(task_id="wait_for_s3_bucket")
@@ -119,7 +127,6 @@ with DAG(
     dag_id=DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),  # Override to match your needs
-    tags=["example"],
     catchup=False,
 ) as dag:
     test_context = sys_test_context_task()
@@ -205,5 +212,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

@@ -26,53 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-postgres",
         "name": "PostgreSQL",
         "description": "`PostgreSQL <https://www.postgresql.org/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477872,
-        "versions": [
-            "6.1.1",
-            "6.1.0",
-            "6.0.0",
-            "5.14.0",
-            "5.13.1",
-            "5.13.0",
-            "5.12.0",
-            "5.11.3",
-            "5.11.2",
-            "5.11.1",
-            "5.11.0",
-            "5.10.2",
-            "5.10.1",
-            "5.10.0",
-            "5.9.0",
-            "5.8.0",
-            "5.7.1",
-            "5.7.0",
-            "5.6.1",
-            "5.6.0",
-            "5.5.2",
-            "5.5.1",
-            "5.5.0",
-            "5.4.0",
-            "5.3.1",
-            "5.3.0",
-            "5.2.2",
-            "5.2.1",
-            "5.2.0",
-            "5.1.0",
-            "5.0.0",
-            "4.1.0",
-            "4.0.1",
-            "4.0.0",
-            "3.0.0",
-            "2.4.0",
-            "2.3.0",
-            "2.2.0",
-            "2.1.0",
-            "2.0.0",
-            "1.0.2",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "PostgreSQL",
@@ -97,30 +50,39 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.postgres.hooks.postgres.PostgresHook",
+                "hook-name": "Postgres",
                 "connection-type": "postgres",
+                "ui-field-behaviour": {"relabeling": {"schema": "Database"}},
             }
         ],
         "asset-uris": [
             {
                 "schemes": ["postgres", "postgresql"],
                 "handler": "airflow.providers.postgres.assets.postgres.sanitize_uri",
+                "factory": "airflow.providers.postgres.assets.postgres.create_asset",
+                "to_openlineage_converter": "airflow.providers.postgres.assets.postgres.convert_asset_to_openlineage",
             }
         ],
         "dataset-uris": [
             {
                 "schemes": ["postgres", "postgresql"],
                 "handler": "airflow.providers.postgres.assets.postgres.sanitize_uri",
+                "factory": "airflow.providers.postgres.assets.postgres.create_asset",
+                "to_openlineage_converter": "airflow.providers.postgres.assets.postgres.convert_asset_to_openlineage",
             }
         ],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-common-sql>=1.23.0",
-            "psycopg2-binary>=2.9.9",
-            "asyncpg>=0.30.0",
-        ],
-        "optional-dependencies": {
-            "amazon": ["apache-airflow-providers-amazon>=2.6.0"],
-            "openlineage": ["apache-airflow-providers-openlineage"],
+        "config": {
+            "postgres": {
+                "description": "Configuration for Postgres hooks and operators.\n",
+                "options": {
+                    "azure_oauth_scope": {
+                        "description": "The scope to use while retrieving Oauth token for Postgres Flexible Server\nfrom Azure Entra authentication.\n",
+                        "version_added": "6.4.0",
+                        "type": "string",
+                        "example": None,
+                        "default": "https://ossrdbms-aad.database.windows.net/.default",
+                    }
+                },
+            }
         },
-        "devel-dependencies": [],
     }

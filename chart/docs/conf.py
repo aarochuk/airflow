@@ -38,9 +38,10 @@ import re
 from typing import Any
 
 import yaml
-from packaging.version import parse as parse_version
-
-import airflow
+from airflow_breeze.global_constants import (
+    ALLOWED_KUBERNETES_VERSIONS,
+    HELM_VERSION,
+)
 from docs.utils.conf_constants import (
     AIRFLOW_FAVICON_PATH,
     AIRFLOW_REPO_ROOT_PATH,
@@ -59,13 +60,14 @@ from docs.utils.conf_constants import (
     get_intersphinx_mapping,
     get_rst_epilogue,
 )
+from packaging.version import parse as parse_version
+
+import airflow
 
 PACKAGE_NAME = "helm-chart"
 CHART_ROOT_PATH = AIRFLOW_REPO_ROOT_PATH / "chart"
 CHART_DOC_PATH = CHART_ROOT_PATH / "docs"
 CHART_STATIC_PATH = CHART_DOC_PATH / "static"
-conf_py_path = f"/docs/{PACKAGE_NAME}/"
-
 os.environ["AIRFLOW_PACKAGE_NAME"] = PACKAGE_NAME
 
 CHART_YAML_FILE_PATH = CHART_ROOT_PATH / "Chart.yaml"
@@ -133,6 +135,10 @@ keep_warnings = True
 html_theme = "sphinx_airflow_theme"
 
 html_title = f"{PACKAGE_NAME} Documentation"
+
+conf_py_path = "/chart/docs/"
+# A dictionary of values to pass into the template engine's context for all pages.
+html_context = get_html_context(conf_py_path)
 
 # A shorter title for the navigation bar.  Default is the same as html_title.
 html_short_title = ""
@@ -202,9 +208,8 @@ def _format_examples(param_name: str, schema: dict) -> str | None:
 
     # Nicer to have the parameter name shown as well
     out = ""
-    for ex in schema["examples"]:
-        if schema["type"] == "array":
-            ex = [ex]
+    for ex_data in schema["examples"]:
+        ex = [ex_data] if schema["type"] == "array" else ex_data
         out += yaml.dump({param_name: ex})
     return out
 
@@ -216,16 +221,18 @@ def _get_params(root_schema: dict, prefix: str = "", default_section: str = "") 
     Given an jsonschema objects properties dict, return a flattened list of all parameters
     from that object and any nested objects
     """
-    # TODO: handle arrays? probably missing more cases too
     out = []
     for param_name, schema in root_schema.items():
         prefixed_name = f"{prefix}.{param_name}" if prefix else param_name
         section_name = schema["x-docsSection"] if "x-docsSection" in schema else default_section
-        if section_name and schema["description"] and "default" in schema:
+        common_out = {
+            "section": section_name,
+            "name": prefixed_name,
+        }
+        if section_name and "description" in schema and schema["description"] and "default" in schema:
             out.append(
                 {
-                    "section": section_name,
-                    "name": prefixed_name,
+                    **common_out,
                     "description": schema["description"],
                     "default": _format_default(schema["default"]),
                     "examples": _format_examples(param_name, schema),
@@ -233,7 +240,32 @@ def _get_params(root_schema: dict, prefix: str = "", default_section: str = "") 
             )
         if schema.get("properties"):
             out += _get_params(schema["properties"], prefixed_name, section_name)
+        items = schema.get("items")
+        if items:
+            out.extend(_process_array_items(items, prefixed_name, param_name, section_name))
     return out
+
+
+def _process_array_items(items: dict, parent_name: str, param_name: str, default_section: str) -> list[dict]:
+    """Extract parameters from array item schemas."""
+    item_prefix = f"{parent_name}[]"
+    section_name = items.get("x-docsSection", default_section)
+
+    if items.get("properties"):
+        return _get_params(items["properties"], item_prefix, section_name)
+
+    if section_name and items.get("description") and "default" in items:
+        return [
+            {
+                "section": section_name,
+                "name": item_prefix,
+                "description": items["description"],
+                "default": _format_default(items["default"]),
+                "examples": _format_examples(param_name, items),
+            }
+        ]
+
+    return []
 
 
 schema_file = CHART_ROOT_PATH / "values.schema.json"
@@ -264,13 +296,24 @@ for name in chart_schema["x-docsSectionOrder"]:
 if sections:
     raise ValueError(f"Found section(s) which were not in `section_order`: {list(sections.keys())}")
 
+deprecations_exist = False
+for param in (param for sec in ordered_sections for param in sec["params"]):
+    if "deprecated" in param["description"]:
+        deprecations_exist = True
+        break
+
 jinja_contexts = {
-    "params_ctx": {"sections": ordered_sections},
+    "params_ctx": {"sections": ordered_sections, "deprecations_exist": deprecations_exist},
     "official_download_page": {
         "base_url": "https://downloads.apache.org/airflow/helm-chart",
         "closer_lua_url": "https://www.apache.org/dyn/closer.lua/airflow/helm-chart",
         "package_name": PACKAGE_NAME,
         "package_version": PACKAGE_VERSION,
+    },
+    "global_ctx": {
+        "package_version": PACKAGE_VERSION,
+        "min_k8s_version": ALLOWED_KUBERNETES_VERSIONS[0],
+        "helm_version": HELM_VERSION,
     },
 }
 

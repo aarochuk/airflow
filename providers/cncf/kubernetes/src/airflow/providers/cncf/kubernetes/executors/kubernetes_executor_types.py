@@ -16,22 +16,76 @@
 # under the License.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional, Union
+import json
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict
+from uuid import UUID
 
-ADOPTED = "adopted"
+from airflow.executors.base_executor import BaseExecutor
+
+if hasattr(BaseExecutor, "get_task_key"):
+    from airflow.executors.workloads.types import TaskInstanceUuid  # noqa: TC001
+
 if TYPE_CHECKING:
-    from airflow.executors.base_executor import CommandType
+    from collections.abc import Sequence
+
+    from kubernetes.client import models as k8s
+
     from airflow.models.taskinstance import TaskInstanceKey
     from airflow.utils.state import TaskInstanceState
 
-    # TaskInstance key, command, configuration, pod_template_file
-    KubernetesJobType = tuple[TaskInstanceKey, CommandType, Any, Optional[str]]
 
-    # key, pod state, pod_name, namespace, resource_version
-    KubernetesResultsType = tuple[TaskInstanceKey, Optional[Union[TaskInstanceState, str]], str, str, str]
+ADOPTED = "adopted"
 
-    # pod_name, namespace, pod state, annotations, resource_version
-    KubernetesWatchType = tuple[str, str, Optional[Union[TaskInstanceState, str]], dict[str, str], str]
+
+class FailureDetails(TypedDict, total=False):
+    """Detailed information about pod/container failure."""
+
+    pod_status: str | None
+    pod_reason: str | None
+    pod_message: str | None
+    container_state: str | None
+    container_reason: str | None
+    container_message: str | None
+    exit_code: int | None
+    container_type: Literal["init", "main"] | None
+    container_name: str | None
+
+
+class KubernetesResults(NamedTuple):
+    """Results from Kubernetes task execution."""
+
+    key: TaskInstanceUuid | TaskInstanceKey
+    state: TaskInstanceState | str | None
+    pod_name: str
+    namespace: str
+    resource_version: str
+    failure_details: FailureDetails | None
+
+
+class KubernetesWatch(NamedTuple):
+    """Watch event data from Kubernetes pods."""
+
+    pod_name: str
+    namespace: str
+    state: TaskInstanceState | str | None
+    annotations: dict[str, str]
+    resource_version: str
+    failure_details: FailureDetails | None
+
+
+# TODO: Remove after Airflow 2 support is removed
+CommandType = "Sequence[str]"
+
+
+class KubernetesJob(NamedTuple):
+    """Job definition for Kubernetes execution."""
+
+    key: TaskInstanceUuid | TaskInstanceKey
+    command: Sequence[str]
+    kube_executor_config: Any
+    pod_template_file: str | None
+    kube_image: str | None = None
+
 
 ALL_NAMESPACES = "ALL_NAMESPACES"
 POD_EXECUTOR_DONE_KEY = "airflow_executor_done"
@@ -45,3 +99,35 @@ So we want events on a revoked pod to be ignored.
 
 :meta private:
 """
+
+
+TASK_INSTANCE_ID_ANNOTATION = "task_instance_id"
+TASK_INSTANCE_ID_LABEL = "ti_id"
+
+
+def task_instance_id_from_pod(pod: k8s.V1Pod) -> UUID | None:
+    """
+    Read immutable identity from an annotation or a pre-upgrade workload command.
+
+    Pod templates can split the workload invocation between ``command`` and ``args``.
+    An invalid annotation is authoritative; falling back could attach a stale pod to another attempt.
+    """
+    annotations = pod.metadata.annotations if pod.metadata else None
+    task_id = (annotations or {}).get(TASK_INSTANCE_ID_ANNOTATION)
+    if task_id is not None:
+        try:
+            return UUID(task_id)
+        except ValueError:
+            return None
+    if pod.spec is None:
+        return None
+    for container in pod.spec.containers:
+        args = [*(container.command or []), *(container.args or [])]
+        if "airflow.sdk.execution_time.execute_workload" not in args or "--json-string" not in args:
+            continue
+        try:
+            payload = json.loads(args[args.index("--json-string") + 1])
+            return UUID(payload["ti"]["id"])
+        except (IndexError, KeyError, TypeError, ValueError):
+            return None
+    return None

@@ -19,7 +19,11 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-from airflow.decorators import task
+try:
+    from airflow.sdk import task
+except ImportError:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
 from airflow.models.dag import DAG
 from airflow.providers.influxdb.hooks.influxdb import InfluxDBHook
 
@@ -30,10 +34,13 @@ def test_influxdb_hook():
     influxdb_hook = InfluxDBHook()
     client = influxdb_hook.get_conn()
     print(client)
-    print(f"Organization name {influxdb_hook.org_name}")
+
+    org_name = influxdb_hook.extras["org"]
+    print(f"Organization name {org_name}")
+    org_id = client.organizations_api().find_organizations(org=org_name)[0].id
 
     # Make sure enough permissions to create bucket.
-    influxdb_hook.create_bucket(bucket_name, "Bucket to test influxdb connection", influxdb_hook.org_name)
+    influxdb_hook.create_bucket(bucket_name, "Bucket to test influxdb connection", org_id)
     influxdb_hook.write(bucket_name, "test_point", "location", "Prague", "temperature", 25.3, True)
 
     tables = influxdb_hook.query('from(bucket:"test-influx") |> range(start: -10m)')
@@ -69,5 +76,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

@@ -28,7 +28,7 @@ from airflow.providers.google.cloud.operators.cloud_base import GoogleCloudBaseO
 from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class DataprepGetJobsForJobGroupOperator(GoogleCloudBaseOperator):
@@ -44,7 +44,10 @@ class DataprepGetJobsForJobGroupOperator(GoogleCloudBaseOperator):
     :param job_group_id The ID of the job group that will be requests
     """
 
-    template_fields: Sequence[str] = ("job_group_id",)
+    template_fields: Sequence[str] = (
+        "job_group_id",
+        "dataprep_conn_id",
+    )
 
     def __init__(
         self,
@@ -87,6 +90,7 @@ class DataprepGetJobGroupOperator(GoogleCloudBaseOperator):
         "job_group_id",
         "embed",
         "project_id",
+        "dataprep_conn_id",
     )
     operator_extra_links = (DataprepJobGroupLink(),)
 
@@ -113,7 +117,6 @@ class DataprepGetJobGroupOperator(GoogleCloudBaseOperator):
         if self.project_id:
             DataprepJobGroupLink.persist(
                 context=context,
-                task_instance=self,
                 project_id=self.project_id,
                 job_group_id=int(self.job_group_id),
             )
@@ -145,7 +148,10 @@ class DataprepRunJobGroupOperator(GoogleCloudBaseOperator):
         where it's the identifier for the recipe to run
     """
 
-    template_fields: Sequence[str] = ("body_request",)
+    template_fields: Sequence[str] = (
+        "body_request",
+        "dataprep_conn_id",
+    )
     operator_extra_links = (DataprepJobGroupLink(),)
 
     def __init__(
@@ -170,7 +176,6 @@ class DataprepRunJobGroupOperator(GoogleCloudBaseOperator):
         if self.project_id and job_group_id:
             DataprepJobGroupLink.persist(
                 context=context,
-                task_instance=self,
                 project_id=self.project_id,
                 job_group_id=int(job_group_id),
             )
@@ -194,6 +199,7 @@ class DataprepCopyFlowOperator(GoogleCloudBaseOperator):
         "name",
         "project_id",
         "description",
+        "dataprep_conn_id",
     )
     operator_extra_links = (DataprepFlowLink(),)
 
@@ -230,7 +236,6 @@ class DataprepCopyFlowOperator(GoogleCloudBaseOperator):
         if self.project_id and copied_flow_id:
             DataprepFlowLink.persist(
                 context=context,
-                task_instance=self,
                 project_id=self.project_id,
                 flow_id=int(copied_flow_id),
             )
@@ -245,7 +250,10 @@ class DataprepDeleteFlowOperator(GoogleCloudBaseOperator):
     :param flow_id: ID of the flow to be copied
     """
 
-    template_fields: Sequence[str] = ("flow_id",)
+    template_fields: Sequence[str] = (
+        "flow_id",
+        "dataprep_conn_id",
+    )
 
     def __init__(
         self,
@@ -276,6 +284,7 @@ class DataprepRunFlowOperator(GoogleCloudBaseOperator):
     template_fields: Sequence[str] = (
         "flow_id",
         "project_id",
+        "dataprep_conn_id",
     )
     operator_extra_links = (DataprepJobGroupLink(),)
 
@@ -303,7 +312,6 @@ class DataprepRunFlowOperator(GoogleCloudBaseOperator):
             job_group_id = response["data"][0]["id"]
             DataprepJobGroupLink.persist(
                 context=context,
-                task_instance=self,
                 project_id=self.project_id,
                 job_group_id=int(job_group_id),
             )

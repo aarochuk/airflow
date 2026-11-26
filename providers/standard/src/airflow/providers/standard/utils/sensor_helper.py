@@ -16,17 +16,19 @@
 # under the License.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from collections.abc import Collection
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import func, select, tuple_
 
-from airflow.models import DagBag, DagRun, TaskInstance
+from airflow.models import DagRun, TaskInstance
+from airflow.models.serialized_dag import SerializedDagModel
 from airflow.providers.standard.version_compat import AIRFLOW_V_3_0_PLUS
 from airflow.utils.session import NEW_SESSION, provide_session
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
-    from sqlalchemy.sql import Executable
+    from sqlalchemy.sql import Select
 
 
 @provide_session
@@ -36,6 +38,7 @@ def _get_count(
     external_task_group_id,
     external_dag_id,
     states,
+    *,
     session: Session = NEW_SESSION,
 ) -> int:
     """
@@ -54,10 +57,9 @@ def _get_count(
         return 0
 
     if external_task_ids:
-        count = (
-            session.scalar(
-                _count_stmt(TI, states, dttm_filter, external_dag_id).where(TI.task_id.in_(external_task_ids))
-            )
+        count = _get_scalar_count(
+            _count_stmt(TI, states, dttm_filter, external_dag_id).where(TI.task_id.in_(external_task_ids)),
+            session,
         ) / len(external_task_ids)
     elif external_task_group_id:
         external_task_group_task_ids = _get_external_task_group_task_ids(
@@ -67,20 +69,29 @@ def _get_count(
             count = 0
         else:
             count = (
-                session.scalar(
+                _get_scalar_count(
                     _count_stmt(TI, states, dttm_filter, external_dag_id).where(
                         tuple_(TI.task_id, TI.map_index).in_(external_task_group_task_ids)
-                    )
+                    ),
+                    session,
                 )
                 / len(external_task_group_task_ids)
                 * len(dttm_filter)
             )
     else:
-        count = session.scalar(_count_stmt(DR, states, dttm_filter, external_dag_id))
+        count = _get_scalar_count(_count_stmt(DR, states, dttm_filter, external_dag_id), session)
     return cast("int", count)
 
 
-def _count_stmt(model, states, dttm_filter, external_dag_id) -> Executable:
+def _get_scalar_count(stmt: Select[tuple[int]], session: Session) -> int:
+    # SQLAlchemy 2.0 and 2.1 type `session.scalar()` of a single-column select differently.
+    result: Any = session.scalar(stmt)
+    return result or 0
+
+
+def _count_stmt(
+    model: type[DagRun] | type[TaskInstance], states: list[str], dttm_filter: list[Any], external_dag_id: str
+) -> Select[tuple[int]]:
     """
     Get the count of records against dttm filter and states.
 
@@ -91,12 +102,15 @@ def _count_stmt(model, states, dttm_filter, external_dag_id) -> Executable:
     """
     date_field = model.logical_date if AIRFLOW_V_3_0_PLUS else model.execution_date
 
-    return select(func.count()).where(
+    stmt: Any = select(func.count()).where(
         model.dag_id == external_dag_id, model.state.in_(states), date_field.in_(dttm_filter)
     )
+    return stmt
 
 
-def _get_external_task_group_task_ids(dttm_filter, external_task_group_id, external_dag_id, session):
+def _get_external_task_group_task_ids(
+    dttm_filter: list[Any], external_task_group_id: str, external_dag_id: str, session: Session
+) -> list[tuple[str, int]]:
     """
     Get the count of records against dttm filter and states.
 
@@ -105,7 +119,9 @@ def _get_external_task_group_task_ids(dttm_filter, external_task_group_id, exter
     :param external_dag_id: The ID of the external DAG.
     :param session: airflow session object
     """
-    refreshed_dag_info = DagBag(read_dags_from_db=True).get_dag(external_dag_id, session)
+    refreshed_dag_info = SerializedDagModel.get_dag(external_dag_id, session=session)
+    if not refreshed_dag_info:
+        return [(external_task_group_id, -1)]
     task_group = refreshed_dag_info.task_group_dict.get(external_task_group_id)
 
     if task_group:
@@ -124,3 +140,19 @@ def _get_external_task_group_task_ids(dttm_filter, external_task_group_id, exter
     # returning default task_id as group_id itself, this will avoid any failure in case of
     # 'check_existence=False' and will fail on timeout
     return [(external_task_group_id, -1)]
+
+
+def _get_count_by_matched_states(
+    run_id_task_state_map: dict[str, dict[str, Any]],
+    states: Collection[str],
+):
+    count = 0
+    for _, task_states in run_id_task_state_map.items():
+        # Create this list such that len() can be checked in the conditional (to handle empty inner)
+        matched_states: list = [state in states for state in task_states.values()]
+
+        # An empty inner, such as {"r": {}}, results in count NOT being incremented
+        if len(matched_states) > 0 and all(matched_states):
+            count += 1
+
+    return count

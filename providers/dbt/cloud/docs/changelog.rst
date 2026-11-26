@@ -28,6 +28,468 @@
 Changelog
 ---------
 
+4.12.0
+......
+
+.. note::
+    On Airflow 3.3 and later, ``DbtCloudRunJobOperator`` is durable by default when
+    ``wait_for_termination`` is True: a retry reconnects to the dbt Cloud run the previous try
+    triggered instead of triggering a new one. Before Airflow 3.5, clearing the whole Dag run keeps
+    the stored run id, so a task whose run succeeded does not run dbt again. Clear the task instance
+    instead, or set ``durable=False`` to trigger a new run on every try. Below Airflow 3.3 nothing
+    changes.
+
+Features
+~~~~~~~~
+
+* ``Support durable execution for dbt cloud job runs (#76918)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.11.2
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Apply timeout_seconds and connection proxies to dbt Cloud sync requests (#74684)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] Upgrade important CI environment (#76278)``
+   * ``Fix task loop information and tests for OpenLineage provider (#74752)``
+
+4.11.1
+......
+
+Bug Fixes
+~~~~~~~~~
+
+* ``dbt Cloud: emit OpenLineage events via the OpenLineage public API (#74754)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.11.0
+......
+
+Features
+~~~~~~~~
+
+* ``Apply hook_params to deferred dbt Cloud job runs (#74199, #74489)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Add validate trigger events in dbt cloud deferrable tasks (#69739)``
+
+Misc
+~~~~
+
+* ``Drop support for Python 3.10 (#74157)``
+
+Doc-only
+~~~~~~~~
+
+* ``Update provider READMEs for the Python 3.11 baseline (#74158)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare providers release 2026-10-06 (#74429)``
+   * ``[main] Upgrade important CI environment (#73629)``
+
+4.10.0
+......
+
+Features
+~~~~~~~~
+
+* ``Template every connection id accepted by provider operators (#73286)``
+* ``Link dbt Cloud runs to the triggering Airflow task via OpenLineage (#70131)``
+* ``Surface dbt Cloud failure details in Airflow task logs (#70171)``
+
+Doc-only
+~~~~~~~~
+
+* ``Fix typo in dbt cloud hook docstring (#71971)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert "[main] Upgrade important CI environment (#73308)" (#73621)``
+   * ``[main] Upgrade important CI environment (#73308)``
+   * ``Remove real sleeps from slow provider unit tests (#73478)``
+   * ``Prepare providers release 2026-09-09 (#72834)``
+   * ``Prepare providers release 2026-08-18 (#71794)``
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+   * ``Update changelog with better wording (#71161)``
+
+4.9.3
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix DbtCloudRunJobOperator having false failures during deferred polling (#70581)``
+* ``Derive DbtCloudGetJobRunArtifactOperator default file name after rendering (#70336)``
+
+Doc-only
+~~~~~~~~
+
+* ``Document each provider's optional extras in its docs index (#69478)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Use common.compat.sdk for timezone imports in providers (#70492)``
+   * ``Prepare providers release 2026-07-22 (#70256)``
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+4.9.2
+.....
+
+Misc
+~~~~
+
+* ``Bump aiohttp>=3.14.0 (#67978)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.9.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix dbt Cloud trigger timeout deadline clock (#67626)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+4.9.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add to list dbt Cloud job runs with support for filtering by status, ordering, and job_definition_id, and optionally returning only the most recent run via latest_only. (#66150)``
+
+Bug Fixes
+~~~~~~~~~
+
+   * ``Fix deferrable execution_timeout handling in DbtCloudRunJobOperator (#67360)``
+
+Misc
+~~~~
+
+* ``Refactor deferrable execution in DbtCloudRunJobOperator. Simplify trigger polling/control flow and propagate execution_timeout via defer. (#66449)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+.. Review and move the new changes to one of the sections above:
+   * ``Prepare providers release 2026-05-19 (#67137)``
+
+4.8.2
+.....
+
+Misc
+~~~~
+
+* ``Refactor DbtCloudRunJobOperator.execute() by extracting job ID (#64393)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Fix stale system test documentation links (#65071)``
+
+4.8.1
+.....
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.8.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Implement execution_timeout semantics for DbtCloudRunJobOperator in deferrable mode (#61472)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+* ``Migrate dbt Cloud connection UI fields to YAML config (#62579)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+   * ``Standardize connection docs labels across providers (#63455)``
+
+4.7.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add sync and async helpers to resolve the dbt Cloud account ID from the (#61757)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Raise on unexpected terminal dbt Cloud job run states (#61300)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.6.5
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix DbtCloudRunJobTrigger timeout error message and add final status check (#61979) (#62306)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+
+4.6.4
+.....
+
+Misc
+~~~~
+
+* ``Use common provider's get_async_connection in other providers (#56791)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix time-machine lib >=3.0.0 supporting changes (#60939)``
+
+4.6.3
+.....
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+* ``Source dbt provider to use airflow.sdk.configuration.conf (#59988)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Consume ''AirflowOptionalProviderFeatureException'' from compat sdk in providers (#60335)``
+   * ``Remove TaskInstance and TaskLogReader unused methods (#59922)``
+
+4.6.2
+.....
+
+Misc
+~~~~
+
+* ``Remove top-level SDK reference in Core (#59817)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``TaskInstance unused method cleanup (#59835)``
+
+4.6.1
+.....
+
+Misc
+~~~~
+
+* ``chore: use OL macros instead of building OL ids from scratch (#59197)``
+* ``Add backcompat for exceptions in providers (#58727)``
+
+Doc-only
+~~~~~~~~
+
+* ``CHG: fix address (#59193)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+4.6.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+   * ``Bump min version of openlineage libraries to 1.40.0 to fix compat issues (#58302)``
+
+4.5.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Fixes inconsistency where other dbt operators already supported hook_params (#57242)``
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to 14 files in providers (databricks,dbt,docker) (#57994)``
+
+4.4.4
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Add retry mechanism and error handling to DBT Hook (#56651)``
+
+Misc
+~~~~
+
+* ``Migrate dbt.cloud provider to ''common.compat'' (#56999)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Enable PT011 rule to prvoider tests (#56320)``
+   * ``nit: Bump required OL client for Openlineage provider (#56302)``
+
+4.4.3
+.....
+
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Change operator DbtCloudRunJobOperator to send job_run_id to XCom (#55184)``
+
+Doc-only
+~~~~~~~~
+
+* ``Make term Dag consistent in providers docs (#55101)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Switch pre-commit to prek (#54258)``
+   * ``Fix Airflow 2 reference in README/index of providers (#55240)``
+
+4.4.2
+.....
+
+Misc
+~~~~
+
+* ``Add Python 3.13 support for Airflow. (#46891)``
+* ``Cleanup mypy ignore in dbt provider where possible (#53270)``
+* ``Remove type ignore across codebase after mypy upgrade (#53243)``
+* ``Remove upper-binding for "python-requires" (#52980)``
+* ``Temporarily switch to use >=,< pattern instead of '~=' (#52967)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``mocking definition order FIX (#52905)``
+
+4.4.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Converting int account IDs to str in DBT Cloud connections (#51957)``
+
+Misc
+~~~~
+
+* ``Move 'BaseHook' implementation to task SDK (#51873)``
+* ``Disable UP038 ruff rule and revert mandatory 'X | Y' in insintance checks (#52644)``
+* ``Replace 'models.BaseOperator' to Task SDK one for DBT & Databricks (#52377)``
+* ``Drop support for Python 3.9 (#52072)``
+* ``Use BaseSensorOperator from task sdk in providers (#52296)``
+* ``Add deprecation to 'airflow/sensors/base.py' (#52249)``
+* ``Adding 'invocation_id' to run-results as expected by Openlineage (#51916)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Make sure all test version imports come from test_common (#52425)``
+   * ``removed usage of pytest.mark.db_test from dbt tests (#52031)``
+   * ``Introducing fixture to create 'Connections' without DB in provider tests (#51930)``
+   * ``Switch the Supervisor/task process from line-based to length-prefixed (#51699)``
+
+4.4.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.10+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Features
+~~~~~~~~
+
+* ``add root parent information to OpenLineage events (#49237)``
+
+Misc
+~~~~
+
+* ``nit: Switch to emitting OL events with adapter and not client directly (#50398)``
+* ``fix: adjust dag_run extraction for Airflow 3 in OL utils (#50346)``
+* ``Remove AIRFLOW_2_10_PLUS conditions (#49877)``
+* ``Bump min Airflow version in providers to 2.10 (#49843)``
+* ``Use Label class from task sdk in providers (#49398)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Update description of provider.yaml dependencies (#50231)``
+   * ``Avoid committing history for providers (#49907)``
+
+4.3.3
+.....
+
+Misc
+~~~~
+
+* ``remove superfluous else block (#49199)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare docs for Apr 2nd wave of providers (#49051)``
+   * ``Remove unnecessary entries in get_provider_info and update the schema (#48849)``
+   * ``Remove fab from preinstalled providers (#48457)``
+   * ``Improve documentation building iteration (#48760)``
+
+4.3.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``fix: add explicit requirement for OpenLineage version on DBT function (#47999)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Simplify tooling by switching completely to uv (#48223)``
+   * ``Upgrade ruff to latest version (#48553)``
+
 4.3.1
 .....
 
@@ -67,7 +529,7 @@ Misc
 .....
 
 .. note::
-  This version has no code changes. It's released due to yank of previous version due to packaging issues.
+  This version contains no code changes. It was released to replace a previous version that was yanked due to a packaging issue.
 
 4.1.0
 .....
@@ -390,7 +852,8 @@ Misc
 * ``Remove some useless try/except from providers code (#33967)``
 * ``Use a single  statement with multiple contexts instead of nested  statements in providers (#33768)``
 
-.. Review and move the new changes to one of the sections above:
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
    * ``Prepare docs for 09 2023 - 1st wave of Providers (#34201)``
 
 3.2.3

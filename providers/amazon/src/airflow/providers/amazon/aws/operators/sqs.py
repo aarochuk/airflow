@@ -26,7 +26,7 @@ from airflow.providers.amazon.aws.operators.base_aws import AwsBaseOperator
 from airflow.providers.amazon.aws.utils.mixins import aws_template_fields
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class SqsPublishOperator(AwsBaseOperator[SqsHook]):
@@ -41,7 +41,7 @@ class SqsPublishOperator(AwsBaseOperator[SqsHook]):
     :param message_content: The message content (templated)
     :param message_attributes: additional attributes for the message (default: None)
         For details of the attributes parameter see :py:meth:`botocore.client.SQS.send_message`
-    :param delay_seconds: message delay (templated) (default: 1 second)
+    :param delay_seconds: message delay (templated) (default: 0 second)
     :param message_group_id: This parameter applies only to FIFO (first-in-first-out) queues. (default: None)
         For details of the attributes parameter see :py:meth:`botocore.client.SQS.send_message`
     :param message_deduplication_id: This applies only to FIFO (first-in-first-out) queues.

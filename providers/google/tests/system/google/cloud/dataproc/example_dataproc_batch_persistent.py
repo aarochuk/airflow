@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """
-Example Airflow DAG for Dataproc batch operators.
+Example Airflow DAG for Managed Spark batch operators.
 """
 
 from __future__ import annotations
@@ -27,14 +27,18 @@ from google.api_core.retry import Retry
 
 from airflow.models.dag import DAG
 from airflow.providers.google.cloud.operators.dataproc import (
-    ClusterGenerator,
     DataprocCreateBatchOperator,
     DataprocCreateClusterOperator,
     DataprocDeleteBatchOperator,
     DataprocDeleteClusterOperator,
 )
 from airflow.providers.google.cloud.operators.gcs import GCSCreateBucketOperator, GCSDeleteBucketOperator
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 
@@ -48,17 +52,26 @@ CLUSTER_NAME_FULL = CLUSTER_NAME_BASE + f"-{ENV_ID}".replace("_", "-")
 CLUSTER_NAME = CLUSTER_NAME_BASE if len(CLUSTER_NAME_FULL) >= 33 else CLUSTER_NAME_FULL
 BATCH_ID = f"batch-{ENV_ID}-{DAG_ID}".replace("_", "-")
 
-CLUSTER_GENERATOR_CONFIG_FOR_PHS = ClusterGenerator(
-    project_id=PROJECT_ID,
-    region=REGION,
-    master_machine_type="n1-standard-4",
-    worker_machine_type="n1-standard-4",
-    num_workers=0,
-    properties={
-        "spark:spark.history.fs.logDirectory": f"gs://{BUCKET_NAME}/logging",
+CLUSTER_CONFIG_FOR_PHS = {
+    "master_config": {
+        "num_instances": 1,
+        "machine_type_uri": "n1-standard-4",
     },
-    enable_component_gateway=True,
-).make()
+    "worker_config": {
+        "num_instances": 0,
+        "machine_type_uri": "n1-standard-4",
+    },
+    "software_config": {
+        "properties": {
+            "dataproc:dataproc.allow.zero.workers": "true",
+            "spark:spark.history.fs.logDirectory": f"gs://{BUCKET_NAME}",
+        },
+    },
+    "endpoint_config": {
+        "enable_http_port_access": True,
+    },
+}
+
 BATCH_CONFIG_WITH_PHS = {
     "spark_batch": {
         "jar_file_uris": ["file:///usr/lib/spark/examples/jars/spark-examples.jar"],
@@ -79,7 +92,7 @@ with DAG(
     schedule="@once",
     start_date=datetime(2021, 1, 1),
     catchup=False,
-    tags=["example", "dataproc", "batch", "persistent"],
+    tags=["example", "managed-spark", "batch", "persistent"],
 ) as dag:
     create_bucket = GCSCreateBucketOperator(
         task_id="create_bucket", bucket_name=BUCKET_NAME, project_id=PROJECT_ID
@@ -89,7 +102,7 @@ with DAG(
     create_cluster = DataprocCreateClusterOperator(
         task_id="create_cluster_for_phs",
         project_id=PROJECT_ID,
-        cluster_config=CLUSTER_GENERATOR_CONFIG_FOR_PHS,
+        cluster_config=CLUSTER_CONFIG_FOR_PHS,
         region=REGION,
         cluster_name=CLUSTER_NAME,
         retry=Retry(maximum=100.0, initial=10.0, multiplier=1.0),
@@ -150,5 +163,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

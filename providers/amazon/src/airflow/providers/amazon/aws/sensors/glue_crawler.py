@@ -20,13 +20,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.hooks.glue_crawler import GlueCrawlerHook
 from airflow.providers.amazon.aws.sensors.base_aws import AwsBaseSensor
 from airflow.providers.amazon.aws.utils.mixins import aws_template_fields
+from airflow.providers.common.compat.sdk import AirflowException
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class GlueCrawlerSensor(AwsBaseSensor[GlueCrawlerHook]):
@@ -73,7 +73,5 @@ class GlueCrawlerSensor(AwsBaseSensor[GlueCrawlerHook]):
             if crawler_status == self.success_statuses:
                 self.log.info("Status: %s", crawler_status)
                 return True
-            else:
-                raise AirflowException(f"Status: {crawler_status}")
-        else:
-            return False
+            raise AirflowException(f"Status: {crawler_status}")
+        return False

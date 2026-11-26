@@ -19,17 +19,26 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
 from collections.abc import AsyncIterator, Sequence
 from functools import cached_property
 from typing import Any
 
 from google.cloud.pubsub_v1.types import ReceivedMessage
 
+from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.providers.google.cloud.hooks.pubsub import PubSubAsyncHook
-from airflow.triggers.base import BaseTrigger, TriggerEvent
+from airflow.providers.google.common.consts import PUBSUB_RETURN_IMMEDIATELY_DEPRECATION_MESSAGE
+from airflow.providers.google.version_compat import AIRFLOW_V_3_0_PLUS
+from airflow.triggers.base import TriggerEvent
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.triggers.base import BaseEventTrigger
+else:
+    from airflow.triggers.base import BaseTrigger as BaseEventTrigger  # type: ignore
 
 
-class PubsubPullTrigger(BaseTrigger):
+class PubsubPullTrigger(BaseEventTrigger):
     """
     Initialize the Pubsub Pull Trigger with needed parameters.
 
@@ -49,6 +58,15 @@ class PubsubPullTrigger(BaseTrigger):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
+    :param return_immediately: Normally supplied by the sensor or operator that defers to this
+        trigger; callers constructing the trigger directly (for example via
+        :class:`~airflow.providers.common.messaging.triggers.msg_queue.MessageQueueTrigger`) can
+        set it themselves. Defaults to True, which uses the deprecated Pub/Sub
+        ``returnImmediately`` Pull option and can return zero messages even if there are messages
+        in the backlog. If set to False, the system will instead wait (for a bounded amount of
+        time) until at least one message is available, rather than returning no messages. The
+        default will change to False in the first Google provider major release after
+        March 31, 2027.
     """
 
     def __init__(
@@ -60,6 +78,7 @@ class PubsubPullTrigger(BaseTrigger):
         gcp_conn_id: str,
         poke_interval: float = 10.0,
         impersonation_chain: str | Sequence[str] | None = None,
+        return_immediately: bool | None = None,
     ):
         super().__init__()
         self.project_id = project_id
@@ -69,6 +88,14 @@ class PubsubPullTrigger(BaseTrigger):
         self.poke_interval = poke_interval
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
+        if return_immediately is None:
+            warnings.warn(
+                f"{PUBSUB_RETURN_IMMEDIATELY_DEPRECATION_MESSAGE} Subscription: {self.subscription}.",
+                AirflowProviderDeprecationWarning,
+                stacklevel=2,
+            )
+            return_immediately = True
+        self.return_immediately = return_immediately
 
     def serialize(self) -> tuple[str, dict[str, Any]]:
         """Serialize PubsubPullTrigger arguments and classpath."""
@@ -82,30 +109,27 @@ class PubsubPullTrigger(BaseTrigger):
                 "poke_interval": self.poke_interval,
                 "gcp_conn_id": self.gcp_conn_id,
                 "impersonation_chain": self.impersonation_chain,
+                "return_immediately": self.return_immediately,
             },
         )
 
-    async def run(self) -> AsyncIterator[TriggerEvent]:  # type: ignore[override]
-        try:
-            while True:
-                if pulled_messages := await self.hook.pull(
-                    project_id=self.project_id,
-                    subscription=self.subscription,
-                    max_messages=self.max_messages,
-                    return_immediately=True,
-                ):
-                    if self.ack_messages:
-                        await self.message_acknowledgement(pulled_messages)
+    async def run(self) -> AsyncIterator[TriggerEvent]:
+        while True:
+            if pulled_messages := await self.hook.pull(
+                project_id=self.project_id,
+                subscription=self.subscription,
+                max_messages=self.max_messages,
+                return_immediately=self.return_immediately,
+            ):
+                if self.ack_messages:
+                    await self.message_acknowledgement(pulled_messages)
 
-                    messages_json = [ReceivedMessage.to_dict(m) for m in pulled_messages]
+                messages_json = [ReceivedMessage.to_dict(m) for m in pulled_messages]
 
-                    yield TriggerEvent({"status": "success", "message": messages_json})
-                    return
-                self.log.info("Sleeping for %s seconds.", self.poke_interval)
-                await asyncio.sleep(self.poke_interval)
-        except Exception as e:
-            yield TriggerEvent({"status": "error", "message": str(e)})
-            return
+                yield TriggerEvent({"status": "success", "message": messages_json})
+                return
+            self.log.info("Sleeping for %s seconds.", self.poke_interval)
+            await asyncio.sleep(self.poke_interval)
 
     async def message_acknowledgement(self, pulled_messages):
         await self.hook.acknowledge(

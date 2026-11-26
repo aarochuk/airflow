@@ -15,7 +15,7 @@
     specific language governing permissions and limitations
     under the License.
 
-.. _howto/connection/odbc:
+.. _howto/connection:odbc:
 
 ODBC Connection
 ===============
@@ -73,7 +73,7 @@ Extra (optional)
           this config from env vars, use ``AIRFLOW__PROVIDERS_ODBC__ALLOW_DRIVER_IN_EXTRA=true``.
 
     .. note::
-        If setting ``allow_driver_extra`` to True, this allows users to set the driver via the Airflow Connection's
+        If setting ``allow_driver_in_extra`` to True, this allows users to set the driver via the Airflow Connection's
         ``extra`` field.  By default this is not allowed.  If enabling this functionality, you should make sure
         that you trust the users who can edit connections in the UI to not use it maliciously.
 

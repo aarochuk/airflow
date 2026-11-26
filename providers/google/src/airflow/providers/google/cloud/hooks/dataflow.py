@@ -27,9 +27,9 @@ import subprocess
 import time
 import uuid
 import warnings
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from google.cloud.dataflow_v1beta3 import (
     GetJobRequest,
@@ -49,15 +49,27 @@ from google.cloud.dataflow_v1beta3.types import (
 from google.cloud.dataflow_v1beta3.types.jobs import ListJobsRequest
 from googleapiclient.discovery import Resource, build
 
-from airflow.exceptions import AirflowException, AirflowProviderDeprecationWarning
-from airflow.providers.apache.beam.hooks.beam import BeamHook, BeamRunnerType, beam_options_to_args
+from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.providers.common.compat.sdk import (
+    AirflowException,
+    AirflowOptionalProviderFeatureException,
+    timeout,
+)
+
+try:
+    from airflow.providers.apache.beam.hooks.beam import BeamHook, BeamRunnerType, beam_options_to_args
+except ImportError as e:
+    raise AirflowOptionalProviderFeatureException(
+        "Failed to import apache-airflow-providers-apache-beam. "
+        "To use the Dataflow service with Apache Beam pipelines, please install the apache-beam provider: "
+        "pip install apache-airflow-providers-apache-beam"
+    ) from e
 from airflow.providers.google.common.hooks.base_google import (
     PROVIDE_PROJECT_ID,
     GoogleBaseAsyncHook,
     GoogleBaseHook,
 )
 from airflow.utils.log.logging_mixin import LoggingMixin
-from airflow.utils.timeout import timeout
 
 if TYPE_CHECKING:
     from google.cloud.dataflow_v1beta3.services.jobs_v1_beta3.pagers import ListJobsAsyncPager
@@ -184,7 +196,67 @@ class DataflowJobType:
     JOB_TYPE_STREAMING = "JOB_TYPE_STREAMING"
 
 
-class _DataflowJobsController(LoggingMixin):
+class DataflowJobTerminalStateHelper(LoggingMixin):
+    """Helper to define and validate the dataflow job terminal state."""
+
+    @staticmethod
+    def expected_terminal_state_is_allowed(expected_terminal_state):
+        job_allowed_terminal_states = DataflowJobStatus.TERMINAL_STATES | {
+            DataflowJobStatus.JOB_STATE_RUNNING
+        }
+        if expected_terminal_state not in job_allowed_terminal_states:
+            raise AirflowException(
+                f"Google Cloud Dataflow job's expected terminal state "
+                f"'{expected_terminal_state}' is invalid."
+                f" The value should be any of the following: {job_allowed_terminal_states}"
+            )
+        return True
+
+    @staticmethod
+    def expected_terminal_state_is_valid_for_job_type(expected_terminal_state, is_streaming: bool):
+        if is_streaming:
+            invalid_terminal_state = DataflowJobStatus.JOB_STATE_DONE
+            job_type = "streaming"
+        else:
+            invalid_terminal_state = DataflowJobStatus.JOB_STATE_DRAINED
+            job_type = "batch"
+
+        if expected_terminal_state == invalid_terminal_state:
+            raise AirflowException(
+                f"Google Cloud Dataflow job's expected terminal state cannot be {invalid_terminal_state} while it is a {job_type} job"
+            )
+        return True
+
+    def job_reached_terminal_state(self, job, wait_until_finished=None, custom_terminal_state=None) -> bool:
+        """
+        Check the job reached terminal state, if job failed raise exception.
+
+        :return: True if job is done.
+        :raise: Exception
+        """
+        current_state = job["currentState"]
+        is_streaming = job.get("type") == DataflowJobType.JOB_TYPE_STREAMING
+        expected_terminal_state = (
+            DataflowJobStatus.JOB_STATE_RUNNING if is_streaming else DataflowJobStatus.JOB_STATE_DONE
+        )
+        if custom_terminal_state is not None:
+            expected_terminal_state = custom_terminal_state
+        self.expected_terminal_state_is_allowed(expected_terminal_state)
+        self.expected_terminal_state_is_valid_for_job_type(expected_terminal_state, is_streaming=is_streaming)
+        if current_state == expected_terminal_state:
+            if expected_terminal_state == DataflowJobStatus.JOB_STATE_RUNNING and wait_until_finished:
+                return False
+            return True
+        if current_state in DataflowJobStatus.AWAITING_STATES:
+            return wait_until_finished is False
+        self.log.debug("Current job: %s", job)
+        raise AirflowException(
+            f"Google Cloud Dataflow job {job['name']} is in an unexpected terminal state: {current_state}, "
+            f"expected terminal state: {expected_terminal_state}"
+        )
+
+
+class _DataflowJobsController(DataflowJobTerminalStateHelper):
     """
     Interface for communication with Google Cloud Dataflow API.
 
@@ -261,15 +333,14 @@ class _DataflowJobsController(LoggingMixin):
         """
         if not self._multiple_jobs and self._job_id:
             return [self.fetch_job_by_id(self._job_id)]
-        elif self._jobs:
+        if self._jobs:
             return [self.fetch_job_by_id(job["id"]) for job in self._jobs]
-        elif self._job_name:
+        if self._job_name:
             jobs = self._fetch_jobs_by_prefix_name(self._job_name.lower())
             if len(jobs) == 1:
                 self._job_id = jobs[0]["id"]
             return jobs
-        else:
-            raise ValueError("Missing both dataflow job ID and name.")
+        raise ValueError("Missing both dataflow job ID and name.")
 
     def fetch_job_by_id(self, job_id: str) -> dict[str, str]:
         """
@@ -363,13 +434,40 @@ class _DataflowJobsController(LoggingMixin):
             autoscaling_events.extend(response.get("autoscalingEvents", []))
         return autoscaling_events
 
-    def _fetch_all_jobs(self) -> list[dict]:
-        request = (
-            self._dataflow.projects()
-            .locations()
-            .jobs()
-            .list(projectId=self._project_number, location=self._job_location)
-        )
+    def fetch_job_id(self) -> str | None:
+        if self._job_id:
+            return self._job_id
+        if not self._job_name:
+            raise ValueError("Missing both dataflow job ID and name.")
+        jobs = self._fetch_all_jobs(jobs_filter="ACTIVE")
+        job_name = self._job_name.lower()
+        active_jobs = [
+            job
+            for job in jobs
+            if job.get("name") == job_name
+            and job.get("currentState") not in DataflowJobStatus.TERMINAL_STATES
+        ]
+        if active_jobs:
+            for job in active_jobs:
+                self.log.info(
+                    "Google Cloud DataFlow job %s is state: %s",
+                    job["name"],
+                    job["currentState"],
+                )
+            active_jobs.sort(key=lambda j: j.get("createTime", ""), reverse=True)
+            self._job_id = active_jobs[0]["id"]
+        else:
+            self.log.info("Google Cloud DataFlow job not available yet..")
+        return self._job_id
+
+    def _fetch_all_jobs(self, jobs_filter: str | None = None) -> list[dict]:
+        list_kwargs: dict[str, Any] = {
+            "projectId": self._project_number,
+            "location": self._job_location,
+        }
+        if jobs_filter is not None:
+            list_kwargs["filter"] = jobs_filter
+        request = self._dataflow.projects().locations().jobs().list(**list_kwargs)
         all_jobs: list[dict] = []
         while request is not None:
             response = request.execute(num_retries=self._num_retries)
@@ -409,60 +507,14 @@ class _DataflowJobsController(LoggingMixin):
         else:
             self.log.info("Google Cloud DataFlow job not available yet..")
 
-    def _check_dataflow_job_state(self, job) -> bool:
-        """
-        Check the state of one job in dataflow for this task if job failed raise exception.
-
-        :return: True if job is done.
-        :raise: Exception
-        """
-        current_state = job["currentState"]
-        is_streaming = job.get("type") == DataflowJobType.JOB_TYPE_STREAMING
-
-        current_expected_state = self._expected_terminal_state
-
-        if current_expected_state is None:
-            if is_streaming:
-                current_expected_state = DataflowJobStatus.JOB_STATE_RUNNING
-            else:
-                current_expected_state = DataflowJobStatus.JOB_STATE_DONE
-
-        terminal_states = DataflowJobStatus.TERMINAL_STATES | {DataflowJobStatus.JOB_STATE_RUNNING}
-        if current_expected_state not in terminal_states:
-            raise AirflowException(
-                f"Google Cloud Dataflow job's expected terminal state "
-                f"'{current_expected_state}' is invalid."
-                f" The value should be any of the following: {terminal_states}"
-            )
-        elif is_streaming and current_expected_state == DataflowJobStatus.JOB_STATE_DONE:
-            raise AirflowException(
-                "Google Cloud Dataflow job's expected terminal state cannot be "
-                "JOB_STATE_DONE while it is a streaming job"
-            )
-        elif not is_streaming and current_expected_state == DataflowJobStatus.JOB_STATE_DRAINED:
-            raise AirflowException(
-                "Google Cloud Dataflow job's expected terminal state cannot be "
-                "JOB_STATE_DRAINED while it is a batch job"
-            )
-        if current_state == current_expected_state:
-            if current_expected_state == DataflowJobStatus.JOB_STATE_RUNNING:
-                return not self._wait_until_finished
-            return True
-
-        if current_state in DataflowJobStatus.AWAITING_STATES:
-            return self._wait_until_finished is False
-
-        self.log.debug("Current job: %s", job)
-        raise AirflowException(
-            f"Google Cloud Dataflow job {job['name']} is in an unexpected terminal state: {current_state}, "
-            f"expected terminal state: {current_expected_state}"
-        )
-
     def wait_for_done(self) -> None:
         """Wait for result of submitted job."""
         self.log.info("Start waiting for done.")
         self._refresh_jobs()
-        while self._jobs and not all(self._check_dataflow_job_state(job) for job in self._jobs):
+        while self._jobs and not all(
+            self.job_reached_terminal_state(job, self._wait_until_finished, self._expected_terminal_state)
+            for job in self._jobs
+        ):
             self.log.info("Waiting for done. Sleep %s s", self._poll_sleep)
             time.sleep(self._poll_sleep)
             self._refresh_jobs()
@@ -578,12 +630,24 @@ class DataflowHook(GoogleBaseHook):
     def get_conn(self) -> Resource:
         """Return a Google Cloud Dataflow service object."""
         http_authorized = self._authorize()
-        return build("dataflow", "v1b3", http=http_authorized, cache_discovery=False)
+        return build(
+            "dataflow",
+            "v1b3",
+            http=http_authorized,
+            cache_discovery=False,
+            client_options=self.get_client_options(),
+        )
 
     def get_pipelines_conn(self) -> build:
         """Return a Google Cloud Data Pipelines service object."""
         http_authorized = self._authorize()
-        return build("datapipelines", "v1", http=http_authorized, cache_discovery=False)
+        return build(
+            "datapipelines",
+            "v1",
+            http=http_authorized,
+            cache_discovery=False,
+            client_options=self.get_client_options(),
+        )
 
     @_fallback_to_location_from_variables
     @_fallback_to_project_id_from_variables
@@ -646,7 +710,7 @@ class DataflowHook(GoogleBaseHook):
 
         if on_new_job_id_callback:
             warnings.warn(
-                "on_new_job_id_callback is Deprecated. Please start using on_new_job_callback",
+                "on_new_job_id_callback is Deprecated. Please start using on_new_job_callback. Planned removal date: October 5, 2026.",
                 AirflowProviderDeprecationWarning,
                 stacklevel=3,
             )
@@ -823,7 +887,7 @@ class DataflowHook(GoogleBaseHook):
 
         if on_new_job_id_callback:
             warnings.warn(
-                "on_new_job_id_callback is Deprecated. Please start using on_new_job_callback",
+                "on_new_job_id_callback is Deprecated. Please start using on_new_job_callback. Planned removal date: October 5, 2026.",
                 AirflowProviderDeprecationWarning,
                 stacklevel=3,
             )
@@ -943,7 +1007,7 @@ class DataflowHook(GoogleBaseHook):
         success_code = 0
 
         with self.provide_authorized_gcloud():
-            proc = subprocess.run(cmd, capture_output=True)
+            proc = subprocess.run(cmd, check=False, capture_output=True)
 
         if proc.returncode != success_code:
             stderr_last_20_lines = "\n".join(proc.stderr.decode().strip().splitlines()[-20:])
@@ -1005,7 +1069,7 @@ class DataflowHook(GoogleBaseHook):
         if variables:
             warnings.warn(
                 "The variables parameter has been deprecated. You should pass project_id using "
-                "the project_id parameter.",
+                "the project_id parameter. Planned removal date: October 5, 2026.",
                 AirflowProviderDeprecationWarning,
                 stacklevel=4,
             )
@@ -1014,7 +1078,7 @@ class DataflowHook(GoogleBaseHook):
             location = DEFAULT_DATAFLOW_LOCATION
             warnings.warn(
                 "The location argument will be become mandatory in future versions, "
-                f"currently, it defaults to {DEFAULT_DATAFLOW_LOCATION}, please set the location explicitly.",
+                f"currently, it defaults to {DEFAULT_DATAFLOW_LOCATION}, please set the location explicitly. Planned removal date: October 5, 2026.",
                 AirflowProviderDeprecationWarning,
                 stacklevel=4,
             )
@@ -1064,85 +1128,6 @@ class DataflowHook(GoogleBaseHook):
         jobs_controller.cancel()
 
     @GoogleBaseHook.fallback_to_default_project_id
-    def start_sql_job(
-        self,
-        job_name: str,
-        query: str,
-        options: dict[str, Any],
-        project_id: str,
-        location: str = DEFAULT_DATAFLOW_LOCATION,
-        on_new_job_id_callback: Callable[[str], None] | None = None,
-        on_new_job_callback: Callable[[dict], None] | None = None,
-    ):
-        """
-        Start Dataflow SQL query.
-
-        :param job_name: The unique name to assign to the Cloud Dataflow job.
-        :param query: The SQL query to execute.
-        :param options: Job parameters to be executed.
-            For more information, look at:
-            `https://cloud.google.com/sdk/gcloud/reference/beta/dataflow/sql/query
-            <gcloud beta dataflow sql query>`__
-            command reference
-        :param location: The location of the Dataflow job (for example europe-west1)
-        :param project_id: The ID of the GCP project that owns the job.
-            If set to ``None`` or missing, the default project_id from the GCP connection is used.
-        :param on_new_job_id_callback: (Deprecated) Callback called when the job ID is known.
-        :param on_new_job_callback: Callback called when the job is known.
-        :return: the new job object
-        """
-        gcp_options = {
-            "project": project_id,
-            "format": "value(job.id)",
-            "job-name": job_name,
-            "region": location,
-        }
-        cmd = self._build_gcloud_command(
-            command=["gcloud", "dataflow", "sql", "query", query], parameters={**gcp_options, **options}
-        )
-        self.log.info("Executing command: %s", " ".join(shlex.quote(c) for c in cmd))
-        with self.provide_authorized_gcloud():
-            proc = subprocess.run(cmd, capture_output=True)
-        self.log.info("Output: %s", proc.stdout.decode())
-        self.log.warning("Stderr: %s", proc.stderr.decode())
-        self.log.info("Exit code %d", proc.returncode)
-        stderr_last_20_lines = "\n".join(proc.stderr.decode().strip().splitlines()[-20:])
-        if proc.returncode != 0:
-            raise AirflowException(
-                f"Process exit with non-zero exit code. Exit code: {proc.returncode} Error Details : "
-                f"{stderr_last_20_lines}"
-            )
-        job_id = proc.stdout.decode().strip()
-
-        self.log.info("Created job ID: %s", job_id)
-
-        jobs_controller = _DataflowJobsController(
-            dataflow=self.get_conn(),
-            project_number=project_id,
-            job_id=job_id,
-            location=location,
-            poll_sleep=self.poll_sleep,
-            num_retries=self.num_retries,
-            drain_pipeline=self.drain_pipeline,
-            wait_until_finished=self.wait_until_finished,
-        )
-        job = jobs_controller.get_jobs(refresh=True)[0]
-
-        if on_new_job_id_callback:
-            warnings.warn(
-                "on_new_job_id_callback is Deprecated. Please start using on_new_job_callback",
-                AirflowProviderDeprecationWarning,
-                stacklevel=3,
-            )
-            on_new_job_id_callback(cast("str", job.get("id")))
-
-        if on_new_job_callback:
-            on_new_job_callback(job)
-
-        jobs_controller.wait_for_done()
-        return jobs_controller.get_jobs(refresh=True)[0]
-
-    @GoogleBaseHook.fallback_to_default_project_id
     def get_job(
         self,
         job_id: str,
@@ -1165,6 +1150,19 @@ class DataflowHook(GoogleBaseHook):
             location=location,
         )
         return jobs_controller.fetch_job_by_id(job_id)
+
+    @GoogleBaseHook.fallback_to_default_project_id
+    def get_job_id_of_running_job(
+        self, job_name: str, project_id: str = PROVIDE_PROJECT_ID, location: str = DEFAULT_DATAFLOW_LOCATION
+    ) -> str | None:
+        """Get the job_id for currently running Dataflow Job by job_name."""
+        jobs_controller = _DataflowJobsController(
+            dataflow=self.get_conn(),
+            project_number=project_id,
+            name=job_name,
+            location=location,
+        )
+        return jobs_controller.fetch_job_id()
 
     @GoogleBaseHook.fallback_to_default_project_id
     def fetch_job_metrics_by_id(
@@ -1290,8 +1288,7 @@ class DataflowHook(GoogleBaseHook):
             location=location,
         )
         job = job_controller.fetch_job_by_id(job_id)
-
-        return job_controller._check_dataflow_job_state(job)
+        return job_controller.job_reached_terminal_state(job)
 
     @GoogleBaseHook.fallback_to_default_project_id
     def create_data_pipeline(
@@ -1420,7 +1417,7 @@ class DataflowHook(GoogleBaseHook):
         return f"projects/{project_id}/locations/{location}"
 
 
-class AsyncDataflowHook(GoogleBaseAsyncHook):
+class AsyncDataflowHook(GoogleBaseAsyncHook, DataflowJobTerminalStateHelper):
     """Async hook class for dataflow service."""
 
     sync_hook_class = DataflowHook
@@ -1434,9 +1431,12 @@ class AsyncDataflowHook(GoogleBaseAsyncHook):
         received from the method of the GoogleBaseHook class.
         :param client_class: Class of the Google cloud SDK
         """
-        credentials = (await self.get_sync_hook()).get_credentials()
+        sync_hook = await self.get_sync_hook()
+        credentials = sync_hook.get_credentials()
+        client_options = sync_hook.get_client_options()
         return client_class(
             credentials=credentials,
+            client_options=client_options,
         )
 
     async def get_project_id(self) -> str:

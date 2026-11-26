@@ -20,25 +20,25 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, SupportsAbs, cast
+from functools import cached_property
+from typing import TYPE_CHECKING, Any, ClassVar, SupportsAbs, cast
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+import requests
+
+from airflow.providers.common.compat.sdk import ResumableJobMixin, conf
 from airflow.providers.common.sql.operators.sql import (
     SQLCheckOperator,
     SQLExecuteQueryOperator,
     SQLIntervalCheckOperator,
     SQLValueCheckOperator,
 )
-from airflow.providers.snowflake.hooks.snowflake_sql_api import SnowflakeSqlApiHook
+from airflow.providers.snowflake.hooks.sql_api import SnowflakeSqlApiHook
 from airflow.providers.snowflake.triggers.snowflake_trigger import SnowflakeSqlApiTrigger
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from pydantic import JsonValue
+
+    from airflow.providers.common.compat.sdk import Context
 
 
 class SnowflakeCheckOperator(SQLCheckOperator):
@@ -75,8 +75,6 @@ class SnowflakeCheckOperator(SQLCheckOperator):
         Template references are recognized by str ending in '.sql'
     :param snowflake_conn_id: Reference to
         :ref:`Snowflake connection id<howto/connection:snowflake>`
-    :param autocommit: if True, each command is automatically committed.
-        (default value: True)
     :param parameters: (optional) the parameters to render the SQL query with.
     :param warehouse: name of warehouse (will overwrite any warehouse
         defined in the connection's extra JSON)
@@ -108,8 +106,6 @@ class SnowflakeCheckOperator(SQLCheckOperator):
         sql: str,
         snowflake_conn_id: str = "snowflake_default",
         parameters: Iterable | Mapping[str, Any] | None = None,
-        autocommit: bool = True,
-        do_xcom_push: bool = True,
         warehouse: str | None = None,
         database: str | None = None,
         role: str | None = None,
@@ -178,8 +174,6 @@ class SnowflakeValueCheckOperator(SQLValueCheckOperator):
         tolerance: Any = None,
         snowflake_conn_id: str = "snowflake_default",
         parameters: Iterable | Mapping[str, Any] | None = None,
-        autocommit: bool = True,
-        do_xcom_push: bool = True,
         warehouse: str | None = None,
         database: str | None = None,
         role: str | None = None,
@@ -201,7 +195,12 @@ class SnowflakeValueCheckOperator(SQLValueCheckOperator):
                 **hook_params,
             }
         super().__init__(
-            sql=sql, pass_value=pass_value, tolerance=tolerance, conn_id=snowflake_conn_id, **kwargs
+            sql=sql,
+            pass_value=pass_value,
+            tolerance=tolerance,
+            conn_id=snowflake_conn_id,
+            parameters=parameters,
+            **kwargs,
         )
         self.query_ids: list[str] = []
 
@@ -258,9 +257,6 @@ class SnowflakeIntervalCheckOperator(SQLIntervalCheckOperator):
         date_filter_column: str = "ds",
         days_back: SupportsAbs[int] = -7,
         snowflake_conn_id: str = "snowflake_default",
-        parameters: Iterable | Mapping[str, Any] | None = None,
-        autocommit: bool = True,
-        do_xcom_push: bool = True,
         warehouse: str | None = None,
         database: str | None = None,
         role: str | None = None,
@@ -292,7 +288,7 @@ class SnowflakeIntervalCheckOperator(SQLIntervalCheckOperator):
         self.query_ids: list[str] = []
 
 
-class SnowflakeSqlApiOperator(SQLExecuteQueryOperator):
+class SnowflakeSqlApiOperator(ResumableJobMixin, SQLExecuteQueryOperator):
     """
     Implemented Snowflake SQL API Operator to support multiple SQL statements sequentially.
 
@@ -300,12 +296,20 @@ class SnowflakeSqlApiOperator(SQLExecuteQueryOperator):
     multiple SQL statements in a single request. It make post request to submit SQL
     statements for execution, poll to check the status of the execution of a statement. Fetch query results
     concurrently.
-    This Operator currently uses key pair authentication, so you need to provide private key raw content or
-    private key file path in the snowflake connection along with other details
+
+    The operator supports the following authentication methods via the Snowflake connection:
+
+    - **Key pair**: provide ``private_key_file`` or ``private_key_content`` in the connection extras.
+    - **OAuth**: for the ``refresh_token`` or ``client_credentials`` grant, put the OAuth client ID and
+      client secret in the connection ``login`` and ``password``. To get the token from an Azure
+      connection instead, set ``azure_conn_id``. See
+      :ref:`the Snowflake connection docs <howto/connection:snowflake>`.
+    - **Programmatic Access Token (PAT)**: set ``authenticator`` to ``programmatic_access_token`` in
+      the connection extras and put the PAT value in the connection ``password`` field.
 
     .. seealso::
 
-        `Snowflake SQL API key pair Authentication <https://docs.snowflake.com/en/developer-guide/sql-api/authenticating.html#label-sql-api-authenticating-key-pair>`_
+        `Snowflake SQL API Authentication <https://docs.snowflake.com/en/developer-guide/sql-api/authenticating>`_
 
     Where can this operator fit in?
          - To execute multiple SQL statements in a single request
@@ -347,17 +351,31 @@ class SnowflakeSqlApiOperator(SQLExecuteQueryOperator):
     :param session_parameters: You can set session-level parameters at
         the time you connect to Snowflake
     :param poll_interval: the interval in seconds to poll the query
-    :param statement_count: Number of SQL statement to be executed
+    :param statement_count: Number of SQL statement to be executed.
+            Set to 0 to submit a variable number of SQL statements without specifying
+            the exact count.
     :param token_life_time: lifetime of the JWT Token
     :param token_renewal_delta: Renewal time of the JWT Token
     :param bindings: (Optional) Values of bind variables in the SQL statement.
             When executing the statement, Snowflake replaces placeholders (? and :name) in
             the statement with these specified values.
+    :param timeout: (Optional) Timeout in seconds for statement execution.
+            If not set, the timeout specified by STATEMENT_TIMEOUT_IN_SECONDS is used.
+            To set the timeout to the maximum value (604800 seconds), set timeout to 0.
     :param deferrable: Run operator in the deferrable mode.
+    :param snowflake_api_retry_args: An optional dictionary with arguments passed to ``tenacity.Retrying`` & ``tenacity.AsyncRetrying`` classes.
+    :param cancel_on_kill: If True (default), cancel the running Snowflake queries when the task is
+        killed. This applies both while the operator is running and, for a deferred task, while it
+        waits in the triggerer.
+    :param durable: When ``True`` (the default), the submitted statement handles are persisted to
+        task state before polling begins. A worker crash on retry reconnects to the existing
+        statements instead of resubmitting the SQL. Set to ``False`` to always submit fresh on
+        retry. Requires Airflow 3.3+; ignored silently on earlier versions.
     """
 
     LIFETIME = timedelta(minutes=59)  # The tokens will have a 59 minutes lifetime
     RENEWAL_DELTA = timedelta(minutes=54)  # Tokens will be renewed after 54 minutes
+    external_id_key = "snowflake_query_ids"
 
     template_fields: Sequence[str] = tuple(
         set(SQLExecuteQueryOperator.template_fields) | {"snowflake_conn_id"}
@@ -379,17 +397,29 @@ class SnowflakeSqlApiOperator(SQLExecuteQueryOperator):
         token_life_time: timedelta = LIFETIME,
         token_renewal_delta: timedelta = RENEWAL_DELTA,
         bindings: dict[str, Any] | None = None,
+        timeout: int | None = None,
         deferrable: bool = conf.getboolean("operators", "default_deferrable", fallback=False),
+        snowflake_api_retry_args: dict[str, Any] | None = None,
+        durable: bool | None = None,
+        cancel_on_kill: bool = True,
         **kwargs: Any,
     ) -> None:
+        # Named here (not left to **kwargs) so default_args reaches it on every
+        # supported Airflow version.
+        if durable is not None:
+            kwargs["durable"] = durable
         self.snowflake_conn_id = snowflake_conn_id
         self.poll_interval = poll_interval
         self.statement_count = statement_count
         self.token_life_time = token_life_time
         self.token_renewal_delta = token_renewal_delta
         self.bindings = bindings
+        self.timeout = timeout
         self.execute_async = False
+        self.snowflake_api_retry_args = snowflake_api_retry_args or {}
         self.deferrable = deferrable
+        self.cancel_on_kill = cancel_on_kill
+        self.query_ids: list[str] = []
         if any([warehouse, database, role, schema, authenticator, session_parameters]):  # pragma: no cover
             hook_params = kwargs.pop("hook_params", {})  # pragma: no cover
             kwargs["hook_params"] = {
@@ -403,25 +433,34 @@ class SnowflakeSqlApiOperator(SQLExecuteQueryOperator):
             }
         super().__init__(conn_id=snowflake_conn_id, **kwargs)  # pragma: no cover
 
+    @cached_property
+    def _hook(self):
+        return SnowflakeSqlApiHook(
+            snowflake_conn_id=self.snowflake_conn_id,
+            token_life_time=self.token_life_time,
+            token_renewal_delta=self.token_renewal_delta,
+            deferrable=self.deferrable,
+            api_retry_args=self.snowflake_api_retry_args,
+            **self.hook_params,
+        )
+
     def execute(self, context: Context) -> None:
         """
         Make a POST API request to snowflake by using SnowflakeSQL and execute the query to get the ids.
 
         By deferring the SnowflakeSqlApiTrigger class passed along with query ids.
         """
+        if not self.deferrable:
+            return self.execute_resumable(context)
+
         self.log.info("Executing: %s", self.sql)
-        self._hook = SnowflakeSqlApiHook(
-            snowflake_conn_id=self.snowflake_conn_id,
-            token_life_time=self.token_life_time,
-            token_renewal_delta=self.token_renewal_delta,
-            deferrable=self.deferrable,
-            **self.hook_params,
-        )
         self.query_ids = self._hook.execute_query(
-            self.sql,  # type: ignore[arg-type]
-            statement_count=self.statement_count,
-            bindings=self.bindings,
+            self.sql, statement_count=self.statement_count, bindings=self.bindings, timeout=self.timeout
         )
+
+        if not self.query_ids:
+            raise RuntimeError("No Snowflake SQL API query IDs returned")
+
         self.log.info("List of query ids %s", self.query_ids)
 
         if self.do_xcom_push:
@@ -433,36 +472,27 @@ class SnowflakeSqlApiOperator(SQLExecuteQueryOperator):
             statement_status = self._hook.get_sql_api_query_status(query_id)
             if statement_status.get("status") == "running":
                 break
-            elif statement_status.get("status") == "success":
+            if statement_status.get("status") == "success":
                 succeeded_query_ids.append(query_id)
             else:
-                raise AirflowException(f"{statement_status.get('status')}: {statement_status.get('message')}")
+                raise RuntimeError(f"{statement_status.get('status')}: {statement_status.get('message')}")
 
         if len(self.query_ids) == len(succeeded_query_ids):
             self.log.info("%s completed successfully.", self.task_id)
             return
 
-        if self.deferrable:
-            self.defer(
-                timeout=self.execution_timeout,
-                trigger=SnowflakeSqlApiTrigger(
-                    poll_interval=self.poll_interval,
-                    query_ids=self.query_ids,
-                    snowflake_conn_id=self.snowflake_conn_id,
-                    token_life_time=self.token_life_time,
-                    token_renewal_delta=self.token_renewal_delta,
-                ),
-                method_name="execute_complete",
-            )
-        else:
-            while True:
-                statement_status = self.poll_on_queries()
-                if statement_status["error"]:
-                    raise AirflowException(statement_status["error"])
-                if not statement_status["running"]:
-                    break
-
-            self._hook.check_query_output(self.query_ids)
+        self.defer(
+            timeout=self.execution_timeout,
+            trigger=SnowflakeSqlApiTrigger(
+                poll_interval=self.poll_interval,
+                query_ids=self.query_ids,
+                snowflake_conn_id=self.snowflake_conn_id,
+                token_life_time=self.token_life_time,
+                token_renewal_delta=self.token_renewal_delta,
+                cancel_on_kill=self.cancel_on_kill,
+            ),
+            method_name="execute_complete",
+        )
 
     def poll_on_queries(self):
         """Poll on requested queries."""
@@ -477,21 +507,107 @@ class SnowflakeSqlApiOperator(SQLExecuteQueryOperator):
             try:
                 statement_status = self._hook.get_sql_api_query_status(query_id)
             except Exception as e:
-                raise ValueError({"status": "error", "message": str(e)})
+                raise RuntimeError(f"Failed to get status for query {query_id}: {e}") from e
             if statement_status.get("status") == "error":
                 queries_in_progress.remove(query_id)
                 statement_error_status[query_id] = statement_status
-            if statement_status.get("status") == "success":
+            elif statement_status.get("status") == "success":
                 statement_success_status[query_id] = statement_status
                 queries_in_progress.remove(query_id)
-            if statement_status.get("status") == "running":
+            elif statement_status.get("status") == "running":
                 statement_running_status[query_id] = statement_status
+            else:
+                raise RuntimeError(
+                    f"Unexpected Snowflake SQL API status for query {query_id}: {statement_status.get('status')!r}"
+                )
+        # Only wait before the next poll cycle if something is still running. Sleeping
+        # unconditionally after every handle would delay returning even when this cycle
+        # already resolved everything (e.g. all statements finished, or one failed).
+        if queries_in_progress:
             time.sleep(self.poll_interval)
         return {
             "success": statement_success_status,
             "error": statement_error_status,
             "running": statement_running_status,
         }
+
+    def submit_job(self, context: Context) -> JsonValue:
+        """Submit the SQL for execution and return the resulting statement handles."""
+        self.log.info("Executing: %s", self.sql)
+        self.query_ids = self._hook.execute_query(
+            self.sql, statement_count=self.statement_count, bindings=self.bindings, timeout=self.timeout
+        )
+
+        if not self.query_ids:
+            raise RuntimeError("No Snowflake SQL API query IDs returned")
+
+        self.log.info("List of query ids %s", self.query_ids)
+        return cast("JsonValue", self.query_ids)
+
+    def get_job_status(self, external_id: JsonValue, context: Context) -> str:
+        """Aggregate the status of every handle into a single verdict for the mixin."""
+        statuses = []
+        for query_id in cast("list[str]", external_id):
+            try:
+                statuses.append(self._hook.get_sql_api_query_status(query_id)["status"])
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code == 404:
+                    return "not_found"
+                raise
+        if "error" in statuses:
+            return "error"
+
+        # An unknown status may still represent an active query.
+        # Fail rather than risk resubmitting the SQL on reconnect.
+        if any(status not in {"success", "running"} for status in statuses):
+            raise RuntimeError(f"Unexpected Snowflake SQL API query statuses: {statuses}")
+        if "running" in statuses:
+            return "running"
+        if not statuses:
+            raise RuntimeError("No Snowflake SQL API query statuses returned")
+        return "success"
+
+    def is_job_active(self, status: str) -> bool:
+        return status == "running"
+
+    def is_job_succeeded(self, status: str) -> bool:
+        return status == "success"
+
+    def poll_until_complete(self, external_id: JsonValue, context: Context) -> None:
+        self.query_ids = cast("list[str]", external_id)
+        # On reconnect, execute_query (the only thing that normally populates this) never ran
+        # on this hook instance -- sync it so OpenLineage's get_openlineage_database_specific_lineage,
+        # which reads hook.query_ids (not the operator's), doesn't silently produce no lineage.
+        self._hook.query_ids = self.query_ids
+        # Push before polling, not after, so the handles are recorded even if a statement
+        # errors below.
+        if self.do_xcom_push and context is not None:
+            context["ti"].xcom_push(key="query_ids", value=self.query_ids)
+        while True:
+            statement_status = self.poll_on_queries()
+            if statement_status["error"]:
+                raise RuntimeError(str(statement_status["error"]))
+            if not statement_status["running"]:
+                break
+        # On reconnect, the mixin calls poll_until_complete alone -- get_job_result is never
+        # invoked in that case -- so the output must be fetched here too, not left to
+        # get_job_result. Fresh submit calls both; the flag stops get_job_result from
+        # fetching (and pushing xcoms) a second time.
+        self._hook.check_query_output(self.query_ids)
+        self._poll_until_complete_ran = True
+
+    def get_job_result(self, external_id: JsonValue, context: Context) -> None:
+        self.query_ids = cast("list[str]", external_id)
+        # Same reconnect-hook gap as poll_until_complete -- see the comment there. This path
+        # hits it too, since the already-succeeded case never calls poll_until_complete either.
+        self._hook.query_ids = self.query_ids
+        if getattr(self, "_poll_until_complete_ran", False):
+            return
+        # The already-succeeded retry path skips submit_job and poll_until_complete entirely,
+        # so push the query_ids xcom and fetch output here for parity with the normal path.
+        if self.do_xcom_push and context is not None:
+            context["ti"].xcom_push(key="query_ids", value=self.query_ids)
+        self._hook.check_query_output(self.query_ids)
 
     def execute_complete(self, context: Context, event: dict[str, str | list[str]] | None = None) -> None:
         """
@@ -502,11 +618,81 @@ class SnowflakeSqlApiOperator(SQLExecuteQueryOperator):
         if event:
             if "status" in event and event["status"] == "error":
                 msg = f"{event['status']}: {event['message']}"
-                raise AirflowException(msg)
-            elif "status" in event and event["status"] == "success":
-                hook = SnowflakeSqlApiHook(snowflake_conn_id=self.snowflake_conn_id)
-                query_ids = cast("list[str]", event["statement_query_ids"])
-                hook.check_query_output(query_ids)
+                raise RuntimeError(msg)
+            if "status" in event and event["status"] == "success":
+                self.query_ids = cast("list[str]", event["statement_query_ids"])
+                self._hook.check_query_output(self.query_ids)
                 self.log.info("%s completed successfully.", self.task_id)
+                # Re-assign query_ids to hook after coming back from deferral to be consistent for listeners.
+                if not self._hook.query_ids:
+                    self._hook.query_ids = self.query_ids
         else:
             self.log.info("%s completed successfully.", self.task_id)
+
+    def on_kill(self) -> None:
+        """Cancel the running query."""
+        if not self.cancel_on_kill:
+            return
+        if self.query_ids:
+            self.log.info("Cancelling the query ids %s", self.query_ids)
+            self._hook.cancel_queries(self.query_ids)
+            self.log.info("Query ids %s cancelled successfully", self.query_ids)
+
+
+class SnowflakeNotebookOperator(SnowflakeSqlApiOperator):
+    """
+    Execute a Snowflake Notebook via the Snowflake SQL API.
+
+    Builds an ``EXECUTE NOTEBOOK`` statement and delegates execution to
+    :class:`~airflow.providers.snowflake.operators.snowflake.SnowflakeSqlApiOperator`,
+    which handles query submission, polling, deferral, and cancellation.
+
+    .. seealso::
+        `Snowflake EXECUTE NOTEBOOK
+        <https://docs.snowflake.com/en/sql-reference/sql/execute-notebook>`_
+
+    :param notebook: Fully-qualified notebook name
+        (e.g. ``MY_DB.MY_SCHEMA.MY_NOTEBOOK``).
+    :param notebook_parameters: Optional list of string parameters to pass to
+        the notebook.  Values must be strings (the type hint declares
+        ``list[str]``).  Parameters are accessible in the notebook via
+        ``sys.argv``.
+    """
+
+    template_fields: Sequence[str] = tuple(
+        set(SnowflakeSqlApiOperator.template_fields) | {"notebook", "notebook_parameters"}
+    )
+    # The SQL is generated from `notebook`/`notebook_parameters`, never loaded from a
+    # file, so the inherited `.sql`/`.json` extensions would only cause harm: a notebook
+    # parameter that happens to end in one gets replaced by the contents of a file of
+    # that name.
+    template_ext: Sequence[str] = ()
+    # Same reason the parent's `parameters` renderer is dropped: it describes SQL bind
+    # parameters, not notebook arguments.
+    template_fields_renderers: ClassVar[dict] = {"sql": "sql"}
+
+    def __init__(
+        self,
+        *,
+        notebook: str,
+        notebook_parameters: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.notebook = notebook
+        self.notebook_parameters = notebook_parameters
+        super().__init__(sql=self._build_execute_notebook_query(), statement_count=1, **kwargs)
+
+    def execute(self, context: Context) -> None:
+        """Rebuild SQL from rendered template fields, then execute."""
+        self.sql = self._build_execute_notebook_query()
+        return super().execute(context)
+
+    def _build_execute_notebook_query(self) -> str:
+        """Build the ``EXECUTE NOTEBOOK`` SQL statement."""
+        params_clause = ""
+        if self.notebook_parameters:
+            # Escape backslashes first (Snowflake interprets `\` in string literals),
+            # then single quotes.
+            sanitized = [p.replace("\\", "\\\\").replace("'", "''") for p in self.notebook_parameters]
+            params_clause = ", ".join(f"'{p}'" for p in sanitized)
+        return f"EXECUTE NOTEBOOK {self.notebook}({params_clause})"

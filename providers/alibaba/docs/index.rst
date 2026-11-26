@@ -56,7 +56,7 @@
     :maxdepth: 1
     :caption: Resources
 
-    Example DAGs <https://github.com/apache/airflow/tree/providers-alibaba/|version|/alibaba/tests/system/alibaba>
+    Example Dags <https://github.com/apache/airflow/tree/providers-alibaba/|version|/alibaba/tests/system/alibaba>
     PyPI Repository <https://pypi.org/project/apache-airflow-providers-alibaba/>
     Installing from sources <installing-providers-from-sources>
 
@@ -77,7 +77,7 @@ apache-airflow-providers-alibaba package
 Alibaba Cloud integration (including `Alibaba Cloud <https://www.alibabacloud.com/>`__).
 
 
-Release: 3.0.1
+Release: 4.0.0
 
 Provider package
 ----------------
@@ -88,20 +88,32 @@ All classes for this package are included in the ``airflow.providers.alibaba`` p
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-alibaba``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-============================  ==================
-PIP package                   Version required
-============================  ==================
-``apache-airflow``            ``>=2.9.0``
-``oss2``                      ``>=2.14.0``
-``alibabacloud_adb20211201``  ``>=1.0.0``
-``alibabacloud_tea_openapi``  ``>=0.3.7``
-============================  ==================
+==========================================  ========================================
+PIP package                                 Version required
+==========================================  ========================================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.13.0``
+``alibabacloud-oss-v2``                     ``>=1.2.0``
+``alibabacloud_adb20211201``                ``>=1.0.0``
+``alibabacloud_tea_openapi``                ``>=0.3.7``
+``pyodps``                                  ``>=0.12.2.2; python_version < "3.13"``
+``pyodps``                                  ``>=0.12.5.1; python_version >= "3.13"``
+==========================================  ========================================
+
+Downloading official packages
+-----------------------------
+
+You can download officially released packages and verify their checksums and signatures from the
+`Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
+
+* `The apache-airflow-providers-alibaba 4.0.0 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_alibaba-4.0.0.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_alibaba-4.0.0.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_alibaba-4.0.0.tar.gz.sha512>`__)
+* `The apache-airflow-providers-alibaba 4.0.0 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_alibaba-4.0.0-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_alibaba-4.0.0-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_alibaba-4.0.0-py3-none-any.whl.sha512>`__)

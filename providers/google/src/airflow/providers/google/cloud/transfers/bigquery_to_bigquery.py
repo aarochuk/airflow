@@ -22,12 +22,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
 from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
 from airflow.providers.google.cloud.links.bigquery import BigQueryTableLink
+from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID
+from airflow.providers.google.version_compat import BaseOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class BigQueryToBigQueryOperator(BaseOperator):
@@ -73,6 +74,8 @@ class BigQueryToBigQueryOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
+    :param project_id: Google Cloud Project where the job is running
+    :param cancel_on_kill: Flag which indicates whether cancel the hook's job or not, when on_kill is called
     """
 
     template_fields: Sequence[str] = (
@@ -80,6 +83,7 @@ class BigQueryToBigQueryOperator(BaseOperator):
         "destination_project_dataset_table",
         "labels",
         "impersonation_chain",
+        "gcp_conn_id",
     )
     template_ext: Sequence[str] = (".sql",)
     ui_color = "#e6f0e4"
@@ -93,10 +97,12 @@ class BigQueryToBigQueryOperator(BaseOperator):
         write_disposition: str = "WRITE_EMPTY",
         create_disposition: str = "CREATE_IF_NEEDED",
         gcp_conn_id: str = "google_cloud_default",
+        project_id: str = PROVIDE_PROJECT_ID,
         labels: dict | None = None,
         encryption_configuration: dict | None = None,
         location: str | None = None,
         impersonation_chain: str | Sequence[str] | None = None,
+        cancel_on_kill: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -112,6 +118,9 @@ class BigQueryToBigQueryOperator(BaseOperator):
         self.impersonation_chain = impersonation_chain
         self.hook: BigQueryHook | None = None
         self._job_conf: dict = {}
+        self.project_id = project_id
+        self.cancel_on_kill = cancel_on_kill
+        self.job_id: str | None = None
 
     def _prepare_job_configuration(self):
         self.source_project_dataset_tables = (
@@ -124,7 +133,7 @@ class BigQueryToBigQueryOperator(BaseOperator):
         for source_project_dataset_table in self.source_project_dataset_tables:
             source_project, source_dataset, source_table = self.hook.split_tablename(
                 table_input=source_project_dataset_table,
-                default_project_id=self.hook.project_id,
+                default_project_id=self.project_id,
                 var_name="source_project_dataset_table",
             )
             source_project_dataset_tables_fixup.append(
@@ -133,7 +142,7 @@ class BigQueryToBigQueryOperator(BaseOperator):
 
         destination_project, destination_dataset, destination_table = self.hook.split_tablename(
             table_input=self.destination_project_dataset_table,
-            default_project_id=self.hook.project_id,
+            default_project_id=self.project_id,
         )
         configuration = {
             "copy": {
@@ -168,22 +177,37 @@ class BigQueryToBigQueryOperator(BaseOperator):
             impersonation_chain=self.impersonation_chain,
         )
 
-        if not self.hook.project_id:
-            raise ValueError("The project_id should be set")
+        if not self.project_id:
+            self.project_id = self.hook.project_id
 
         configuration = self._prepare_job_configuration()
+        # The ID is set before submitting so on_kill can cancel the job while insert_job waits for it.
+        self.job_id = self.hook.generate_job_id(
+            job_id=None,
+            dag_id=self.dag_id,
+            task_id=self.task_id,
+            logical_date=None,
+            configuration=configuration,
+            run_after=self.hook.get_run_after_or_logical_date(context),
+            force_rerun=True,
+        )
         self._job_conf = self.hook.insert_job(
-            configuration=configuration, project_id=self.hook.project_id
+            configuration=configuration, job_id=self.job_id, project_id=self.project_id
         ).to_api_repr()
 
         dest_table_info = self._job_conf["configuration"]["copy"]["destinationTable"]
         BigQueryTableLink.persist(
             context=context,
-            task_instance=self,
             dataset_id=dest_table_info["datasetId"],
             project_id=dest_table_info["projectId"],
             table_id=dest_table_info["tableId"],
         )
+
+    def on_kill(self) -> None:
+        if self.hook and self.job_id and self.cancel_on_kill:
+            self.hook.cancel_job(job_id=self.job_id, project_id=self.project_id, location=self.location)
+        else:
+            self.log.info("Skipping to cancel job: %s:%s.%s", self.project_id, self.location, self.job_id)
 
     def get_openlineage_facets_on_complete(self, task_instance):
         """Implement on_complete as we will include final BQ job id."""

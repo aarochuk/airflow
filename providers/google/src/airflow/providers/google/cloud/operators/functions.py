@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.cloud.hooks.functions import CloudFunctionsHook
 from airflow.providers.google.cloud.links.cloud_functions import (
     CloudFunctionsDetailsLink,
@@ -40,7 +40,7 @@ from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID
 from airflow.version import version
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 def _validate_available_memory_in_mb(value):
@@ -171,20 +171,18 @@ class CloudFunctionDeployFunctionOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.api_version = api_version
         self.zip_path = zip_path
-        self.zip_path_preprocessor = ZipPathPreprocessor(body, zip_path)
+        self.validate_body = validate_body
+        self.zip_path_preprocessor: ZipPathPreprocessor | None = None
         self._field_validator: GcpBodyFieldValidator | None = None
         self.impersonation_chain = impersonation_chain
-        if validate_body:
-            self._field_validator = GcpBodyFieldValidator(CLOUD_FUNCTION_VALIDATION, api_version=api_version)
-        self._validate_inputs()
         super().__init__(**kwargs)
 
-    def _validate_inputs(self) -> None:
+    def _validate_inputs(self, zip_path_preprocessor: ZipPathPreprocessor) -> None:
         if not self.location:
             raise AirflowException("The required parameter 'location' is missing")
         if not self.body:
             raise AirflowException("The required parameter 'body' is missing")
-        self.zip_path_preprocessor.preprocess_body()
+        zip_path_preprocessor.preprocess_body()
 
     def _validate_all_body_fields(self) -> None:
         if self._field_validator:
@@ -219,13 +217,27 @@ class CloudFunctionDeployFunctionOperator(GoogleCloudBaseOperator):
             self.body["labels"] = {}
         self.body["labels"].update({"airflow-version": "v" + version.replace(".", "-").replace("+", "-")})
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "location": self.location,
+            "function_name": self.body["name"].split("/")[-1],
+        }
+
     def execute(self, context: Context):
+        zip_path_preprocessor = ZipPathPreprocessor(self.body, self.zip_path)
+        self.zip_path_preprocessor = zip_path_preprocessor
+        if self.validate_body:
+            self._field_validator = GcpBodyFieldValidator(
+                CLOUD_FUNCTION_VALIDATION, api_version=self.api_version
+            )
+        self._validate_inputs(zip_path_preprocessor)
         hook = CloudFunctionsHook(
             gcp_conn_id=self.gcp_conn_id,
             api_version=self.api_version,
             impersonation_chain=self.impersonation_chain,
         )
-        if self.zip_path_preprocessor.should_upload_function():
+        if zip_path_preprocessor.should_upload_function():
             self.body[GCF_SOURCE_UPLOAD_URL] = self._upload_source_code(hook)
         self._validate_all_body_fields()
         self._set_airflow_version_label()
@@ -237,7 +249,6 @@ class CloudFunctionDeployFunctionOperator(GoogleCloudBaseOperator):
         if project_id:
             CloudFunctionsDetailsLink.persist(
                 context=context,
-                task_instance=self,
                 location=self.location,
                 project_id=project_id,
                 function_name=self.body["name"].split("/")[-1],
@@ -379,10 +390,9 @@ class CloudFunctionDeleteFunctionOperator(GoogleCloudBaseOperator):
     def _validate_inputs(self) -> None:
         if not self.name:
             raise AttributeError("Empty parameter: name")
-        else:
-            pattern = FUNCTION_NAME_COMPILED_PATTERN
-            if not pattern.match(self.name):
-                raise AttributeError(f"Parameter name must match pattern: {FUNCTION_NAME_PATTERN}")
+        pattern = FUNCTION_NAME_COMPILED_PATTERN
+        if not pattern.match(self.name):
+            raise AttributeError(f"Parameter name must match pattern: {FUNCTION_NAME_PATTERN}")
 
     def execute(self, context: Context):
         hook = CloudFunctionsHook(
@@ -395,7 +405,6 @@ class CloudFunctionDeleteFunctionOperator(GoogleCloudBaseOperator):
             if project_id:
                 CloudFunctionsListLink.persist(
                     context=context,
-                    task_instance=self,
                     project_id=project_id,
                 )
             return hook.delete_function(self.name)
@@ -404,9 +413,8 @@ class CloudFunctionDeleteFunctionOperator(GoogleCloudBaseOperator):
             if status == 404:
                 self.log.info("The function does not exist in this project")
                 return None
-            else:
-                self.log.error("An error occurred. Exiting.")
-                raise e
+            self.log.error("An error occurred. Exiting.")
+            raise e
 
 
 class CloudFunctionInvokeFunctionOperator(GoogleCloudBaseOperator):
@@ -415,7 +423,7 @@ class CloudFunctionInvokeFunctionOperator(GoogleCloudBaseOperator):
 
     .. seealso::
         For more information on how to use this operator, take a look at the guide:
-        :ref:`howto/operator:CloudFunctionDeployFunctionOperator`
+        :ref:`howto/operator:CloudFunctionInvokeFunctionOperator`
 
     :param function_id: ID of the function to be called
     :param input_data: Input to be passed to the function
@@ -440,6 +448,7 @@ class CloudFunctionInvokeFunctionOperator(GoogleCloudBaseOperator):
         "location",
         "project_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
     operator_extra_links = (CloudFunctionsDetailsLink(),)
 
@@ -464,6 +473,13 @@ class CloudFunctionInvokeFunctionOperator(GoogleCloudBaseOperator):
         self.api_version = api_version
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "location": self.location,
+            "function_name": self.function_id,
+        }
+
     def execute(self, context: Context):
         hook = CloudFunctionsHook(
             api_version=self.api_version,
@@ -478,16 +494,13 @@ class CloudFunctionInvokeFunctionOperator(GoogleCloudBaseOperator):
             project_id=self.project_id,
         )
         self.log.info("Function called successfully. Execution id %s", result.get("executionId"))
-        self.xcom_push(context=context, key="execution_id", value=result.get("executionId"))
+        context["ti"].xcom_push(key="execution_id", value=result.get("executionId"))
 
         project_id = self.project_id or hook.project_id
         if project_id:
             CloudFunctionsDetailsLink.persist(
                 context=context,
-                task_instance=self,
-                location=self.location,
                 project_id=project_id,
-                function_name=self.function_id,
             )
 
         return result

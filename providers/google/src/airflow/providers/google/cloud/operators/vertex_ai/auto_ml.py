@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from google.api_core.exceptions import NotFound
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
@@ -40,11 +40,13 @@ from airflow.providers.google.cloud.operators.cloud_base import GoogleCloudBaseO
 if TYPE_CHECKING:
     from google.api_core.retry import Retry
 
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class AutoMLTrainingJobBaseOperator(GoogleCloudBaseOperator):
     """The base class for operators that launch AutoML jobs on VertexAI."""
+
+    template_fields: Sequence[str] = ("gcp_conn_id",)
 
     def __init__(
         self,
@@ -91,6 +93,13 @@ class AutoMLTrainingJobBaseOperator(GoogleCloudBaseOperator):
         self.impersonation_chain = impersonation_chain
         self.hook: AutoMLHook | None = None
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "region": self.region,
+            "project_id": self.project_id,
+        }
+
     def on_kill(self) -> None:
         """Act as a callback called when the operator is killed; cancel any running job."""
         if self.hook:
@@ -107,6 +116,7 @@ class CreateAutoMLForecastingTrainingJobOperator(AutoMLTrainingJobBaseOperator):
         "impersonation_chain",
         "display_name",
         "model_display_name",
+        "gcp_conn_id",
     )
     operator_extra_links = (VertexAIModelLink(), VertexAITrainingLink())
 
@@ -139,6 +149,7 @@ class CreateAutoMLForecastingTrainingJobOperator(AutoMLTrainingJobBaseOperator):
         validation_options: str | None = None,
         budget_milli_node_hours: int = 1000,
         region: str,
+        gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
         parent_model: str | None = None,
         window_stride_length: int | None = None,
@@ -150,6 +161,7 @@ class CreateAutoMLForecastingTrainingJobOperator(AutoMLTrainingJobBaseOperator):
             display_name=display_name,
             model_display_name=model_display_name,
             region=region,
+            gcp_conn_id=gcp_conn_id,
             impersonation_chain=impersonation_chain,
             parent_model=parent_model,
             **kwargs,
@@ -242,12 +254,12 @@ class CreateAutoMLForecastingTrainingJobOperator(AutoMLTrainingJobBaseOperator):
         if model:
             result = Model.to_dict(model)
             model_id = self.hook.extract_model_id(result)
-            self.xcom_push(context, key="model_id", value=model_id)
-            VertexAIModelLink.persist(context=context, task_instance=self, model_id=model_id)
+            context["ti"].xcom_push(key="model_id", value=model_id)
+            VertexAIModelLink.persist(context=context, model_id=model_id)
         else:
             result = model  # type: ignore
-        self.xcom_push(context, key="training_id", value=training_id)
-        VertexAITrainingLink.persist(context=context, task_instance=self, training_id=training_id)
+        context["ti"].xcom_push(key="training_id", value=training_id)
+        VertexAITrainingLink.persist(context=context, training_id=training_id)
         return result
 
 
@@ -259,6 +271,7 @@ class CreateAutoMLImageTrainingJobOperator(AutoMLTrainingJobBaseOperator):
         "dataset_id",
         "region",
         "impersonation_chain",
+        "gcp_conn_id",
     )
     operator_extra_links = (VertexAIModelLink(), VertexAITrainingLink())
 
@@ -277,12 +290,17 @@ class CreateAutoMLImageTrainingJobOperator(AutoMLTrainingJobBaseOperator):
         budget_milli_node_hours: int | None = None,
         disable_early_stopping: bool = False,
         region: str,
+        gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
         parent_model: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
-            region=region, impersonation_chain=impersonation_chain, parent_model=parent_model, **kwargs
+            region=region,
+            gcp_conn_id=gcp_conn_id,
+            impersonation_chain=impersonation_chain,
+            parent_model=parent_model,
+            **kwargs,
         )
         self.dataset_id = dataset_id
         self.prediction_type = prediction_type
@@ -334,12 +352,12 @@ class CreateAutoMLImageTrainingJobOperator(AutoMLTrainingJobBaseOperator):
         if model:
             result = Model.to_dict(model)
             model_id = self.hook.extract_model_id(result)
-            self.xcom_push(context, key="model_id", value=model_id)
-            VertexAIModelLink.persist(context=context, task_instance=self, model_id=model_id)
+            context["ti"].xcom_push(key="model_id", value=model_id)
+            VertexAIModelLink.persist(context=context, model_id=model_id)
         else:
             result = model  # type: ignore
-        self.xcom_push(context, key="training_id", value=training_id)
-        VertexAITrainingLink.persist(context=context, task_instance=self, training_id=training_id)
+        context["ti"].xcom_push(key="training_id", value=training_id)
+        VertexAITrainingLink.persist(context=context, training_id=training_id)
         return result
 
 
@@ -351,6 +369,7 @@ class CreateAutoMLTabularTrainingJobOperator(AutoMLTrainingJobBaseOperator):
         "dataset_id",
         "region",
         "impersonation_chain",
+        "gcp_conn_id",
     )
     operator_extra_links = (VertexAIModelLink(), VertexAITrainingLink())
 
@@ -375,12 +394,17 @@ class CreateAutoMLTabularTrainingJobOperator(AutoMLTrainingJobBaseOperator):
         export_evaluated_data_items_bigquery_destination_uri: str | None = None,
         export_evaluated_data_items_override_destination: bool = False,
         region: str,
+        gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: str | Sequence[str] | None = None,
         parent_model: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
-            region=region, impersonation_chain=impersonation_chain, parent_model=parent_model, **kwargs
+            region=region,
+            gcp_conn_id=gcp_conn_id,
+            impersonation_chain=impersonation_chain,
+            parent_model=parent_model,
+            **kwargs,
         )
         self.dataset_id = dataset_id
         self.target_column = target_column
@@ -457,86 +481,12 @@ class CreateAutoMLTabularTrainingJobOperator(AutoMLTrainingJobBaseOperator):
         if model:
             result = Model.to_dict(model)
             model_id = self.hook.extract_model_id(result)
-            self.xcom_push(context, key="model_id", value=model_id)
-            VertexAIModelLink.persist(context=context, task_instance=self, model_id=model_id)
+            context["ti"].xcom_push(key="model_id", value=model_id)
+            VertexAIModelLink.persist(context=context, model_id=model_id)
         else:
             result = model  # type: ignore
-        self.xcom_push(context, key="training_id", value=training_id)
-        VertexAITrainingLink.persist(context=context, task_instance=self, training_id=training_id)
-        return result
-
-
-class CreateAutoMLVideoTrainingJobOperator(AutoMLTrainingJobBaseOperator):
-    """Create Auto ML Video Training job."""
-
-    template_fields = (
-        "parent_model",
-        "dataset_id",
-        "region",
-        "impersonation_chain",
-    )
-    operator_extra_links = (VertexAIModelLink(), VertexAITrainingLink())
-
-    def __init__(
-        self,
-        *,
-        dataset_id: str,
-        prediction_type: str = "classification",
-        model_type: str = "CLOUD",
-        training_filter_split: str | None = None,
-        test_filter_split: str | None = None,
-        region: str,
-        impersonation_chain: str | Sequence[str] | None = None,
-        parent_model: str | None = None,
-        **kwargs,
-    ) -> None:
-        super().__init__(
-            region=region, impersonation_chain=impersonation_chain, parent_model=parent_model, **kwargs
-        )
-        self.dataset_id = dataset_id
-        self.prediction_type = prediction_type
-        self.model_type = model_type
-        self.training_filter_split = training_filter_split
-        self.test_filter_split = test_filter_split
-
-    def execute(self, context: Context):
-        self.hook = AutoMLHook(
-            gcp_conn_id=self.gcp_conn_id,
-            impersonation_chain=self.impersonation_chain,
-        )
-        self.parent_model = self.parent_model.split("@")[0] if self.parent_model else None
-        model, training_id = self.hook.create_auto_ml_video_training_job(
-            project_id=self.project_id,
-            region=self.region,
-            display_name=self.display_name,
-            dataset=datasets.VideoDataset(dataset_name=self.dataset_id),
-            prediction_type=self.prediction_type,
-            model_type=self.model_type,
-            labels=self.labels,
-            training_encryption_spec_key_name=self.training_encryption_spec_key_name,
-            model_encryption_spec_key_name=self.model_encryption_spec_key_name,
-            training_fraction_split=self.training_fraction_split,
-            test_fraction_split=self.test_fraction_split,
-            training_filter_split=self.training_filter_split,
-            test_filter_split=self.test_filter_split,
-            model_display_name=self.model_display_name,
-            model_labels=self.model_labels,
-            sync=self.sync,
-            parent_model=self.parent_model,
-            is_default_version=self.is_default_version,
-            model_version_aliases=self.model_version_aliases,
-            model_version_description=self.model_version_description,
-        )
-
-        if model:
-            result = Model.to_dict(model)
-            model_id = self.hook.extract_model_id(result)
-            self.xcom_push(context, key="model_id", value=model_id)
-            VertexAIModelLink.persist(context=context, task_instance=self, model_id=model_id)
-        else:
-            result = model  # type: ignore
-        self.xcom_push(context, key="training_id", value=training_id)
-        VertexAITrainingLink.persist(context=context, task_instance=self, training_id=training_id)
+        context["ti"].xcom_push(key="training_id", value=training_id)
+        VertexAITrainingLink.persist(context=context, training_id=training_id)
         return result
 
 
@@ -548,7 +498,13 @@ class DeleteAutoMLTrainingJobOperator(GoogleCloudBaseOperator):
     AutoMLTabularTrainingJob, AutoMLTextTrainingJob, or AutoMLVideoTrainingJob.
     """
 
-    template_fields = ("training_pipeline_id", "region", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = (
+        "training_pipeline_id",
+        "region",
+        "project_id",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,
@@ -606,6 +562,7 @@ class ListAutoMLTrainingJobOperator(GoogleCloudBaseOperator):
         "region",
         "project_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
     operator_extra_links = [
         VertexAITrainingPipelinesLink(),
@@ -640,6 +597,12 @@ class ListAutoMLTrainingJobOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = AutoMLHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -656,5 +619,5 @@ class ListAutoMLTrainingJobOperator(GoogleCloudBaseOperator):
             timeout=self.timeout,
             metadata=self.metadata,
         )
-        VertexAITrainingPipelinesLink.persist(context=context, task_instance=self)
+        VertexAITrainingPipelinesLink.persist(context=context)
         return [TrainingPipeline.to_dict(result) for result in results]

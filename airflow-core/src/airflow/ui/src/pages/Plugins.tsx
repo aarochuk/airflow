@@ -16,38 +16,54 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Heading } from "@chakra-ui/react";
-import type { ColumnDef } from "@tanstack/react-table";
+import { Box } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 
 import { usePluginServiceGetPlugins } from "openapi/queries";
-import type { PluginResponse } from "openapi/requests/types.gen";
+
 import { DataTable } from "src/components/DataTable";
+import { useTableURLState } from "src/components/DataTable/useTableUrlState";
 import { ErrorAlert } from "src/components/ErrorAlert";
 
-const columns: Array<ColumnDef<PluginResponse>> = [
-  {
-    accessorKey: "name",
-    enableSorting: false,
-    header: "Name",
-  },
-  {
-    accessorKey: "source",
-    enableSorting: false,
-    header: "Source",
-  },
-];
+import { useDocumentTitle } from "src/utils";
+
+import { PluginImportErrors } from "./Dashboard/Stats/PluginImportErrors";
 
 export const Plugins = () => {
-  const { data, error } = usePluginServiceGetPlugins();
+  const { t: translate } = useTranslation(["admin", "common"]);
+
+  useDocumentTitle(translate("common:admin.Plugins"));
+
+  const { setTableURLState, tableURLState } = useTableURLState();
+  const { pagination } = tableURLState;
+  const { data, error } = usePluginServiceGetPlugins({
+    limit: pagination.pageSize,
+    offset: pagination.pageIndex * pagination.pageSize,
+  });
+
+  const columns = [
+    {
+      accessorKey: "name",
+      enableSorting: false,
+      header: translate("columns.name"),
+    },
+    {
+      accessorKey: "source",
+      enableSorting: false,
+      header: translate("plugins.columns.source"),
+    },
+  ];
 
   return (
-    <Box p={2}>
-      <Heading>Plugins</Heading>
+    <Box px={2}>
+      <PluginImportErrors iconOnly />
       <DataTable
         columns={columns}
         data={data?.plugins ?? []}
         errorMessage={<ErrorAlert error={error} />}
-        modelName="Plugin"
+        initialState={tableURLState}
+        modelName="admin:plugins.plugin"
+        onStateChange={setTableURLState}
         total={data?.total_entries}
       />
     </Box>

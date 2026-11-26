@@ -17,16 +17,73 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import joinedload
+from sqlalchemy.orm.interfaces import LoaderOption
+
+from airflow.api_fastapi.common.db.dags import eager_load_teams
+from airflow.models.dag import DagModel
+from airflow.models.dag_version import DagVersion
 from airflow.models.dagrun import DagRun
 
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+# Use the hybrid_property for dag_display_name so the CASE WHEN fallback to dag_id
+# is applied when dag_display_name is NULL.  Using __table__.c would return raw NULLs
+# and crash DagStatsResponse validation (https://github.com/apache/airflow/issues/64247).
 dagruns_select_with_state_count = (
-    select(
-        DagRun.dag_id,
-        DagRun.state,
-        func.count(DagRun.state),
+    select(  # type: ignore[call-overload]
+        DagRun.__table__.c.dag_id,
+        DagRun.__table__.c.state,
+        DagModel.dag_display_name,
+        func.count(DagRun.__table__.c.state).label("count"),
     )
-    .group_by(DagRun.dag_id, DagRun.state)
-    .order_by(DagRun.dag_id)
+    .join(DagModel, DagRun.__table__.c.dag_id == DagModel.__table__.c.dag_id)
+    .group_by(DagRun.__table__.c.dag_id, DagRun.__table__.c.state, DagModel.dag_display_name)
+    .order_by(DagRun.__table__.c.dag_id)
 )
+
+
+def eager_load_dag_run_for_list() -> tuple[LoaderOption, ...]:
+    """
+    Lightweight eager loading for the DagRun list endpoint.
+
+    Only loads the direct relationships needed for serialization (dag_model,
+    dag_run_note, created_dag_version, and the owning team).  The dag_versions
+    property — which requires iterating every attempt — is populated separately by
+    :func:`attach_dag_versions_to_runs` using a single DISTINCT query.
+    """
+    return (
+        joinedload(DagRun.dag_model),
+        joinedload(DagRun.dag_run_note),
+        joinedload(DagRun.created_dag_version).joinedload(DagVersion.bundle),
+        *eager_load_teams(DagRun.dag_model),
+    )
+
+
+def attach_dag_versions_to_runs(dag_runs: Sequence[DagRun], *, session: Session) -> None:
+    """
+    Batch-prefetch dag versions for many runs in one query (list/grid endpoints).
+
+    Bundle-versioned runs are included: after a ``run_on_latest_version``
+    clear they can keep older versions on uncleared TIs or archived attempts,
+    so they must not skip this prefetch.
+    """
+    if not dag_runs:
+        return
+    per_run = DagRun.fetch_dag_versions_for_runs([(dr.dag_id, dr.run_id) for dr in dag_runs], session=session)
+    for dr in dag_runs:
+        dr._prefetched_dag_version_ids = per_run.get((dr.dag_id, dr.run_id), {})
+
+
+def is_filtered_existing_run(dag_id: str, run_id: str, *, has_filter: bool, session: Session) -> bool:
+    """Return whether an active filter can produce an empty result for this run."""
+    return (
+        has_filter
+        and session.scalar(select(DagRun.run_id).where(DagRun.dag_id == dag_id, DagRun.run_id == run_id))
+        is not None
+    )

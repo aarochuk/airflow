@@ -34,7 +34,12 @@ from airflow.providers.google.cloud.operators.kubernetes_engine import (
     GKEStartKueueInsideClusterOperator,
     GKEStartKueueJobOperator,
 )
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 DAG_ID = "kubernetes_engine_kueue"
@@ -42,7 +47,7 @@ GCP_PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT", "default")
 
 GCP_LOCATION = "europe-west3"
 CLUSTER_NAME = f"gke-kueue-{ENV_ID}".replace("_", "-")
-CLUSTER = {"name": CLUSTER_NAME, "initial_node_count": 1, "autopilot": {"enabled": True}}
+CLUSTER = {"name": CLUSTER_NAME, "autopilot": {"enabled": True}}
 
 flavor_conf = """
 apiVersion: kueue.x-k8s.io/v1beta1
@@ -103,7 +108,7 @@ with DAG(
         project_id=GCP_PROJECT_ID,
         location=GCP_LOCATION,
         cluster_name=CLUSTER_NAME,
-        kueue_version="v0.6.2",
+        kueue_version="v0.16.4",
     )
     # [END howto_operator_gke_install_kueue]
 
@@ -150,7 +155,7 @@ with DAG(
         suspend=True,
         container_resources=k8s.V1ResourceRequirements(
             requests={
-                "cpu": 1,
+                "cpu": "1",
                 "memory": "200Mi",
             },
         ),
@@ -160,7 +165,7 @@ with DAG(
 
     delete_cluster = GKEDeleteClusterOperator(
         task_id="delete_cluster",
-        name=CLUSTER_NAME,
+        cluster_name=CLUSTER_NAME,
         project_id=GCP_PROJECT_ID,
         location=GCP_LOCATION,
         trigger_rule=TriggerRule.ALL_DONE,
@@ -188,5 +193,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

@@ -29,7 +29,6 @@ import asyncio
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from google.api_core.client_options import ClientOptions
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
 from google.cloud.aiplatform import PipelineJob
 from google.cloud.aiplatform_v1 import (
@@ -39,7 +38,7 @@ from google.cloud.aiplatform_v1 import (
     types,
 )
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.common.consts import CLIENT_INFO
 from airflow.providers.google.common.hooks.base_google import GoogleBaseAsyncHook, GoogleBaseHook
 from airflow.providers.google.common.hooks.operation_helpers import OperationHelper
@@ -68,17 +67,25 @@ class PipelineJobHook(GoogleBaseHook, OperationHelper):
         )
         self._pipeline_job: PipelineJob | None = None
 
+    def _get_api_endpoint(
+        self,
+        region: str | None = None,
+    ) -> str | None:
+        if region and region != "global" and self.is_default_universe():
+            return f"{region}-aiplatform.googleapis.com:443"
+        return None
+
     def get_pipeline_service_client(
         self,
         region: str | None = None,
     ) -> PipelineServiceClient:
         """Return PipelineServiceClient object."""
-        if region and region != "global":
-            client_options = ClientOptions(api_endpoint=f"{region}-aiplatform.googleapis.com:443")
-        else:
-            client_options = ClientOptions()
         return PipelineServiceClient(
-            credentials=self.get_credentials(), client_info=CLIENT_INFO, client_options=client_options
+            credentials=self.get_credentials(),
+            client_info=CLIENT_INFO,
+            client_options=self.get_client_options(
+                api_endpoint_override=self._get_api_endpoint(region=region)
+            ),
         )
 
     def get_pipeline_job_object(
@@ -178,6 +185,7 @@ class PipelineJobHook(GoogleBaseHook, OperationHelper):
         network: str | None = None,
         create_request_timeout: float | None = None,
         experiment: str | experiment_resources.Experiment | None = None,
+        reserved_ip_ranges: list[str] | None = None,
         # END: run param
     ) -> PipelineJob:
         """
@@ -227,6 +235,9 @@ class PipelineJobHook(GoogleBaseHook, OperationHelper):
             PipelineJob. Metrics produced by the PipelineJob as system.Metric Artifacts will be associated as
             metrics to the current Experiment Run. Pipeline parameters will be associated as parameters to
             the current Experiment Run.
+        :param reserved_ip_ranges: Optional. A list of names for the reserved IP ranges under the VPC
+            network that can be used for this PipelineJob. If set, the PipelineJob will only use IP
+            addresses from these ranges.
         """
         self._pipeline_job = self.get_pipeline_job_object(
             display_name=display_name,
@@ -245,6 +256,7 @@ class PipelineJobHook(GoogleBaseHook, OperationHelper):
         self._pipeline_job.submit(
             service_account=service_account,
             network=network,
+            reserved_ip_ranges=reserved_ip_ranges,
             create_request_timeout=create_request_timeout,
             experiment=experiment,
         )
@@ -272,6 +284,7 @@ class PipelineJobHook(GoogleBaseHook, OperationHelper):
         network: str | None = None,
         create_request_timeout: float | None = None,
         experiment: str | experiment_resources.Experiment | None = None,
+        reserved_ip_ranges: list[str] | None = None,
         # END: run param
     ) -> PipelineJob:
         """
@@ -324,6 +337,9 @@ class PipelineJobHook(GoogleBaseHook, OperationHelper):
             Metrics produced by the PipelineJob as system.Metric Artifacts will be associated as metrics
             to the current Experiment Run. Pipeline parameters will be associated as parameters to
             the current Experiment Run.
+        :param reserved_ip_ranges: Optional. A list of names for the reserved IP ranges under the VPC
+            network that can be used for this PipelineJob. If set, the PipelineJob will only use IP
+            addresses from these ranges.
         """
         self._pipeline_job = self.get_pipeline_job_object(
             display_name=display_name,
@@ -342,6 +358,7 @@ class PipelineJobHook(GoogleBaseHook, OperationHelper):
         self._pipeline_job.submit(
             service_account=service_account,
             network=network,
+            reserved_ip_ranges=reserved_ip_ranges,
             create_request_timeout=create_request_timeout,
             experiment=experiment,
         )
@@ -547,14 +564,14 @@ class PipelineJobAsyncHook(GoogleBaseAsyncHook):
         self,
         region: str | None = None,
     ) -> PipelineServiceAsyncClient:
-        if region and region != "global":
-            client_options = ClientOptions(api_endpoint=f"{region}-aiplatform.googleapis.com:443")
-        else:
-            client_options = ClientOptions()
+        sync_hook = await self.get_sync_hook()
+
         return PipelineServiceAsyncClient(
-            credentials=await self.get_credentials(),
+            credentials=sync_hook.get_credentials(),
             client_info=CLIENT_INFO,
-            client_options=client_options,
+            client_options=sync_hook.get_client_options(
+                api_endpoint_override=sync_hook._get_api_endpoint(region=region)
+            ),
         )
 
     async def get_pipeline_job(

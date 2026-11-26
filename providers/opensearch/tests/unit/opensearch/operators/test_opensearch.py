@@ -20,25 +20,24 @@ import pytest
 from opensearchpy import Document, Keyword, Text
 
 from airflow.models import DAG
+from airflow.providers.common.compat.sdk import timezone
 from airflow.providers.opensearch.operators.opensearch import (
     OpenSearchAddDocumentOperator,
     OpenSearchCreateIndexOperator,
     OpenSearchQueryOperator,
 )
-from airflow.utils.timezone import datetime
 
 opensearchpy = pytest.importorskip("opensearchpy")
-pytestmark = pytest.mark.db_test
 
 
 TEST_DAG_ID = "unit_tests"
-DEFAULT_DATE = datetime(2018, 1, 1)
+DEFAULT_DATE = timezone.datetime(2018, 1, 1)
 EXPECTED_SEARCH_RETURN = {"status": "test"}
 
 
 class FakeDocument(Document):
     # TODO: FIXME - this Fake document has something tricky about typing
-    title = Text(fields={"raw": Keyword()})  # type: ignore[call-arg]
+    title = Text(fields={"raw": Keyword()})
     author = Text()
     published = Text()
 

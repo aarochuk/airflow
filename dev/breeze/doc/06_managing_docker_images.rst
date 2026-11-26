@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -120,13 +119,13 @@ To load the image from specific PR, you can use the following command:
 
 .. code-block:: bash
 
-     breeze ci-image load --from-pr 12345 --python 3.9 --github-token <your_github_token>
+     breeze ci-image load --from-pr 12345 --python 3.11 --github-token <your_github_token>
 
 To load the image from specific job run (for example 12538475388), you can use the following command, find the run id from github action runs.
 
 .. code-block:: bash
 
-     breeze ci-image load --from-run 12538475388 --python 3.9 --github-token <your_github_token>
+     breeze ci-image load --from-run 12538475388 --python 3.11 --github-token <your_github_token>
 
 After you load the image, you can reproduce the very exact environment that was used in the CI run by
 entering breeze container without mounting your local sources:
@@ -147,7 +146,7 @@ was used in the failing CI run. This is a powerful tool to debug and fix CI issu
 Exporting and importing CI image cache mount
 ............................................
 
-During the build, cache of ``uv`` and ``pip`` is stored in a separate "cache mount" volum that is mounted
+During the build, cache of ``uv`` and ``pip`` is stored in a separate "cache mount" volume that is mounted
 during the build. This cache mount volume is preserved between builds and can be exported and imported
 to speed up the build process in CI - where cache is stored as artifact and can be imported in the next
 build.
@@ -171,7 +170,7 @@ PROD Image tasks
 
 Users can also build Production images when they are developing them. However when you want to
 use the PROD image, the regular docker build commands are recommended. See
-`building the image <https://airflow.apache.org/docs/docker-stack/build.html>`_
+`building your image <https://airflow.apache.org/docs/docker-stack/build.html>`_
 
 .. image:: ./images/output_prod-image.svg
   :target: https://raw.githubusercontent.com/apache/airflow/main/dev/breeze/images/output_prod-image.svg
@@ -196,7 +195,7 @@ but here typical examples are presented:
 
      breeze prod-image build --additional-airflow-extras "jira"
 
-This installs additional ``jira`` extra while installing airflow in the image.
+This installs additional ``jira`` extra while installing Airflow in the image.
 
 
 .. code-block:: bash
@@ -220,10 +219,10 @@ suffix and they need to also be paired with corresponding runtime dependency add
 
 .. code-block:: bash
 
-     breeze prod-image build --python 3.9 --additional-dev-deps "libasound2-dev" \
+     breeze prod-image build --python 3.11 --additional-dev-apt-deps "libasound2-dev" \
         --additional-runtime-apt-deps "libasound2"
 
-Same as above but uses python 3.9.
+Same as above but uses python 3.11.
 
 Building PROD image
 ...................

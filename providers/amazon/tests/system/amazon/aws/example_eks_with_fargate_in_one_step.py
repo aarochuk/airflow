@@ -18,8 +18,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from airflow.models.baseoperator import chain
-from airflow.models.dag import DAG
 from airflow.providers.amazon.aws.hooks.eks import ClusterStates, FargateProfileStates
 from airflow.providers.amazon.aws.operators.eks import (
     EksCreateClusterOperator,
@@ -27,7 +25,13 @@ from airflow.providers.amazon.aws.operators.eks import (
     EksPodOperator,
 )
 from airflow.providers.amazon.aws.sensors.eks import EksClusterStateSensor, EksFargateProfileStateSensor
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.providers.common.compat.sdk import DAG, chain
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.amazon.aws.utils import ENV_ID_KEY, SystemTestContextBuilder
 from system.amazon.aws.utils.k8s import get_describe_pod_operator
@@ -53,7 +57,6 @@ with DAG(
     dag_id=DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),
-    tags=["example"],
     catchup=False,
 ) as dag:
     test_context = sys_test_context_task()
@@ -111,6 +114,26 @@ with DAG(
     # only describe the pod if the task above failed, to help diagnose
     describe_pod.trigger_rule = TriggerRule.ONE_FAILED
 
+    # Wait for fargate profile to be in stable state before deletion
+    await_fargate_profile_stable = EksFargateProfileStateSensor(
+        task_id="await_fargate_profile_stable",
+        trigger_rule=TriggerRule.ALL_DONE,
+        cluster_name=cluster_name,
+        fargate_profile_name=fargate_profile_name,
+        target_state=FargateProfileStates.ACTIVE,
+    )
+
+    # EKS can reject the DeleteFargateProfile call below with ResourceInUseException for over ten minutes
+    # after the profile turns ACTIVE, saying the cluster has an update in progress. DescribeCluster does
+    # not expose that update, so this sensor only catches a visibly UPDATING cluster; riding out the rest
+    # is left to the delete operator's ResourceInUseException retry window.
+    await_cluster_stable = EksClusterStateSensor(
+        task_id="await_cluster_stable",
+        trigger_rule=TriggerRule.ALL_DONE,
+        cluster_name=cluster_name,
+        target_state=ClusterStates.ACTIVE,
+    )
+
     # An Amazon EKS cluster can not be deleted with attached resources such as nodegroups or Fargate profiles.
     # Setting the `force` to `True` will delete any attached resources before deleting the cluster.
     delete_cluster_and_fargate_profile = EksDeleteClusterOperator(
@@ -137,6 +160,8 @@ with DAG(
         start_pod,
         # TEST TEARDOWN
         describe_pod,
+        await_fargate_profile_stable,
+        await_cluster_stable,
         delete_cluster_and_fargate_profile,
         await_delete_cluster,
     )
@@ -150,5 +175,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

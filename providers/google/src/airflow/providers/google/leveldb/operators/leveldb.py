@@ -16,13 +16,14 @@
 # under the License.
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from airflow.models import BaseOperator
 from airflow.providers.google.leveldb.hooks.leveldb import LevelDBHook
+from airflow.providers.google.version_compat import BaseOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class LevelDBOperator(BaseOperator):
@@ -44,6 +45,8 @@ class LevelDBOperator(BaseOperator):
         :param create_db_extra_options: extra options of creation LevelDBOperator. See more in the link below
             `Plyvel DB <https://plyvel.readthedocs.io/en/latest/api.html#DB>`__
     """
+
+    template_fields: Sequence[str] = ("leveldb_conn_id",)
 
     def __init__(
         self,

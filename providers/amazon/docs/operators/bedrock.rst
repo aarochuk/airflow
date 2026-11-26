@@ -21,8 +21,8 @@ Amazon Bedrock
 
 `Amazon Bedrock <https://aws.amazon.com/bedrock/>`__ is a fully managed service that
 offers a choice of high-performing foundation models (FMs) from leading AI companies
-like AI21 Labs, Anthropic, Cohere, Meta, Mistral AI, Stability AI, and Amazon via a
-single API, along with a broad set of capabilities you need to build generative AI
+like ``AI21 Labs``, ``Anthropic``, ``Cohere``, ``Meta``, ``Mistral AI``, ``Stability AI``,
+and ``Amazon`` via a single API, along with a broad set of capabilities you need to build generative AI
 applications with security, privacy, and responsible AI.
 
 Prerequisite Tasks
@@ -66,14 +66,108 @@ To invoke an Amazon Titan model you would use:
     :start-after: [START howto_operator_invoke_titan_model]
     :end-before: [END howto_operator_invoke_titan_model]
 
-To invoke a Claude V2 model using the Completions API you would use:
+To invoke a Claude Sonnet model using the Messages API you would use:
 
-.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_bedrock_retrieve_and_generate.py
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_bedrock.py
     :language: python
     :dedent: 4
     :start-after: [START howto_operator_invoke_claude_model]
     :end-before: [END howto_operator_invoke_claude_model]
 
+.. _howto/operator:BedrockCreateAgentRuntimeOperator:
+
+Create an Amazon Bedrock AgentCore Runtime
+==========================================
+
+To create an Amazon Bedrock AgentCore Runtime, you can use
+:class:`~airflow.providers.amazon.aws.operators.bedrock.BedrockCreateAgentRuntimeOperator`.
+
+AgentCore Runtime creation is asynchronous. The operator can wait until the runtime reaches
+``READY`` either synchronously or in deferrable mode.
+
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_bedrock_agentcore.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_bedrock_create_agent_runtime]
+    :end-before: [END howto_operator_bedrock_create_agent_runtime]
+
+.. _howto/operator:BedrockInvokeAgentRuntimeOperator:
+
+Invoke an Amazon Bedrock AgentCore Runtime
+==========================================
+
+To invoke an Amazon Bedrock AgentCore Runtime, you can use
+:class:`~airflow.providers.amazon.aws.operators.bedrock.BedrockInvokeAgentRuntimeOperator`.
+
+The operator waits for the runtime invocation response and returns the response body along with
+runtime response metadata such as the runtime session ID when present.
+For long-running AgentCore Runtime invocations, configure the botocore client ``read_timeout``
+through ``botocore_config``.
+
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_bedrock_agentcore.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_bedrock_invoke_agent_runtime]
+    :end-before: [END howto_operator_bedrock_invoke_agent_runtime]
+
+.. _howto/hook:BedrockAgentCoreHook:managed-agent:
+
+Consult an Amazon Bedrock AgentCore Runtime from a Common AI agent
+==================================================================
+
+To let an agent running under Common AI's ``AgentOperator`` consult an AgentCore Runtime as one
+of its tools, use
+:class:`~airflow.providers.amazon.aws.hooks.bedrock.BedrockAgentCoreHook`.
+It implements the Common AI managed-agent contract, so ``hook.agent(runtime_arn)`` can be passed
+to a ``ManagedAgentToolset`` or combined with agents on other clouds in a
+``FailoverManagedAgentClient``. The hook needs the ``common.ai`` extra of this provider, which
+installs ``apache-airflow-providers-common-ai`` and therefore requires Airflow 3.
+
+The agent is the runtime ARN and the session is AgentCore's ``runtimeSessionId``, which the
+service requires to be 33 to 256 characters long. A prompt is
+sent as ``{"prompt": ...}`` in an ``application/json`` payload; the container behind the
+runtime defines the response shape, so pass ``text_key`` in ``vendor_options`` when you know which
+field holds the answer. The hook disables botocore retries unless the connection or caller configured them,
+because an invocation's effects are unknown, and raises a terminal error for non-JSON responses
+or bodies over the size limit rather than returning something misleading.
+
+.. code-block:: python
+
+    from airflow.providers.amazon.aws.hooks.bedrock import BedrockAgentCoreHook
+    from airflow.providers.common.ai.toolsets import ManagedAgentToolset
+
+    claims = BedrockAgentCoreHook(aws_conn_id="aws_default", region_name="us-east-1").agent(
+        "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/claims"
+    )
+    toolset = ManagedAgentToolset(
+        claims,
+        tool_name="ask_claims_agent",
+        description="Reviews an insurance claim and returns a coverage determination.",
+        vendor_options={"text_key": "determination"},
+    )
+
+For long-running invocations run as a pipeline step in their own right, use
+:class:`~airflow.providers.amazon.aws.operators.bedrock.BedrockInvokeAgentRuntimeOperator`
+instead; a toolset call blocks a worker thread for the duration of the call.
+
+.. _howto/operator:BedrockDeleteAgentRuntimeOperator:
+
+Delete an Amazon Bedrock AgentCore Runtime
+==========================================
+
+To delete an Amazon Bedrock AgentCore Runtime, you can use
+:class:`~airflow.providers.amazon.aws.operators.bedrock.BedrockDeleteAgentRuntimeOperator`.
+
+The operator accepts the runtime ID, which can be extracted from the ARN returned by
+:class:`~airflow.providers.amazon.aws.operators.bedrock.BedrockCreateAgentRuntimeOperator`.
+By default, it waits until the runtime deletion is complete. Set ``wait_for_completion=False``
+to return immediately after submitting the delete request.
+
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_bedrock_agentcore.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_bedrock_delete_agent_runtime]
+    :end-before: [END howto_operator_bedrock_delete_agent_runtime]
 
 .. _howto/operator:BedrockCustomizeModelOperator:
 
@@ -237,6 +331,32 @@ Example using a PDF file in an Amazon S3 Bucket:
     :start-after: [START howto_operator_bedrock_external_sources_rag]
     :end-before: [END howto_operator_bedrock_external_sources_rag]
 
+.. _howto/operator:BedrockBatchInferenceOperator:
+
+Create an Amazon Bedrock Batch Inference Job
+============================================
+
+To creates a batch inference job to invoke a model on multiple prompts, you can use
+:class:`~airflow.providers.amazon.aws.operators.bedrock.BedrockBatchInferenceOperator`.
+
+The input must be formatted in jsonl and uploaded to an Amazon S3 bucket.  Please see
+https://docs.aws.amazon.com/bedrock/latest/userguide/batch-inference.html for details.
+
+NOTE: Jobs are added to a queue and processed in order.  Given the potential wait times,
+and the fact that the optional timeout parameter is measured in hours, deferrable mode is
+recommended over "wait_for_completion" in this case.
+
+By default the operator waits for the job to complete. Set ``success_state="scheduled"`` to stop
+waiting once Bedrock has queued the job. This applies to both "wait_for_completion" and deferrable mode.
+
+Example using an Amazon Bedrock Batch Inference Job:
+
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_bedrock_batch_inference.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_bedrock_batch_inference]
+    :end-before: [END howto_operator_bedrock_batch_inference]
+
 
 Sensors
 -------
@@ -298,9 +418,99 @@ To wait on the state of an Amazon Bedrock data ingestion job until it reaches a 
     :start-after: [START howto_sensor_bedrock_ingest_data]
     :end-before: [END howto_sensor_bedrock_ingest_data]
 
+.. _howto/sensor:BedrockBatchInferenceSensor:
+
+Wait for an Amazon Bedrock batch inference job
+==============================================
+
+To wait on the state of an Amazon Bedrock batch inference job until it reaches the "Scheduled" or "Completed"
+state you can use :class:`~airflow.providers.amazon.aws.sensors.bedrock.BedrockBatchInferenceScheduledSensor`
+
+Bedrock adds batch inference jobs to a queue, and they may take some time to complete.  If you want to wait
+for the job to complete, use TargetState.COMPLETED for the success_state, but if you only want to wait until
+the service confirms that the job is in the queue, use TargetState.SCHEDULED.
+
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_bedrock_batch_inference.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_sensor_bedrock_batch_inference_scheduled]
+    :end-before: [END howto_sensor_bedrock_batch_inference_scheduled]
+
+.. _howto/operator:BedrockCreateGuardrailOperator:
+
+Create a Guardrail
+~~~~~~~~~~~~~~~~~~
+
+To create an Amazon Bedrock guardrail, use
+:class:`~airflow.providers.amazon.aws.operators.bedrock.BedrockCreateGuardrailOperator`.
+
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_bedrock_guardrail.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_bedrock_create_guardrail]
+    :end-before: [END howto_operator_bedrock_create_guardrail]
+
+.. _howto/operator:BedrockCreateGuardrailVersionOperator:
+
+Create a Guardrail Version
+--------------------------
+
+To create a versioned snapshot of an Amazon Bedrock guardrail, use
+:class:`~airflow.providers.amazon.aws.operators.bedrock.BedrockCreateGuardrailVersionOperator`.
+
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_bedrock_guardrail.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_bedrock_create_guardrail_version]
+    :end-before: [END howto_operator_bedrock_create_guardrail_version]
+
+.. _howto/operator:BedrockDeleteGuardrailOperator:
+
+Delete a Guardrail
+------------------
+
+To delete an Amazon Bedrock guardrail, use
+:class:`~airflow.providers.amazon.aws.operators.bedrock.BedrockDeleteGuardrailOperator`.
+
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_bedrock_guardrail.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_bedrock_delete_guardrail]
+    :end-before: [END howto_operator_bedrock_delete_guardrail]
+
+
+
+.. _howto/operator:BedrockCreateEvaluationJobOperator:
+
+Create an Evaluation Job
+------------------------
+
+To create an Amazon Bedrock model evaluation job, use
+:class:`~airflow.providers.amazon.aws.operators.bedrock.BedrockCreateEvaluationJobOperator`.
+
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_bedrock_evaluation.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_bedrock_create_evaluation_job]
+    :end-before: [END howto_operator_bedrock_create_evaluation_job]
+
 Reference
 ---------
 
 * `AWS boto3 library documentation for Amazon Bedrock <https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock.html>`__
 * `AWS boto3 library documentation for Amazon Bedrock Runtime <https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-runtime.html>`__
 * `AWS boto3 library documentation for Amazon Bedrock Agents <https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agent.html>`__
+
+.. _howto/operator:BedrockUpdateGuardrailOperator:
+
+Update a Guardrail
+------------------
+
+To update an Amazon Bedrock guardrail configuration, use
+:class:`~airflow.providers.amazon.aws.operators.bedrock.BedrockUpdateGuardrailOperator`.
+
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_bedrock_guardrail.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_bedrock_update_guardrail]
+    :end-before: [END howto_operator_bedrock_update_guardrail]

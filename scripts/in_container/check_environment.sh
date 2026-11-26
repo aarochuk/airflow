@@ -31,13 +31,21 @@ EXIT_CODE=0
 
 . "$( dirname "${BASH_SOURCE[0]}" )/check_connectivity.sh"
 
+export COLOR_YELLOW=$'\e[33m'
+export COLOR_RESET=$'\e[0m'
+
 function check_service {
     local label=$1
     local call=$2
     local max_check=${3:=1}
+    local initial_delay="${4:-0}"
 
-   check_service_connection "${label}" "${call}" "${max_check}"
-   EXIT_CODE=$?
+    if [[ ${initial_delay} != 0 ]]; then
+        echo "${COLOR_YELLOW}Adding initial delay. Waiting ${initial_delay} seconds before checking ${label}.${COLOR_RESET}"
+        sleep "${initial_delay}"
+    fi
+    check_service_connection "${label}" "${call}" "${max_check}"
+    EXIT_CODE=$?
 }
 
 function check_db_backend {
@@ -53,10 +61,23 @@ function check_db_backend {
     elif [[ ${BACKEND} == "sqlite" ]]; then
         return
     elif [[ ${BACKEND} == "none" ]]; then
-        echo "${COLOR_YELLOW}WARNING: Using no database backend!${COLOR_RESET}"
-        return
+        echo "${COLOR_YELLOW}WARNING: Using no database backend${COLOR_RESET}"
+
+        if [[ ${START_AIRFLOW=} == "true" ]]; then
+            echo "${COLOR_RED}ERROR: 'start-airflow' cannot be used with --backend=none${COLOR_RESET}"
+            echo "${COLOR_RED}Supported values are: [postgres,mysql,sqlite,custom]${COLOR_RESET}"
+            echo "${COLOR_RED}Please specify one using '--backend'${COLOR_RESET}"
+            exit 1
+        fi
+    elif [[ ${BACKEND} == "custom" ]]; then
+        echo "${COLOR_YELLOW}WARNING: Using custom database backend. Only officially supported backends are tested.${COLOR_RESET}"
+
+        if [[ -z ${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=} ]]; then
+            echo "${COLOR_RED}ERROR: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN must be set when using --backend=custom${COLOR_RESET}"
+            exit 1
+        fi
     else
-        echo "Unknown backend. Supported values: [postgres,mysql,mssql,sqlite]. Current value: [${BACKEND}]"
+        echo "${COLOR_RED}ERROR: Unknown backend. Supported values: [postgres,mysql,sqlite,custom]. Current value: [${BACKEND}]${COLOR_RESET}"
         exit 1
     fi
 }
@@ -81,8 +102,6 @@ function startairflow_if_requested() {
         echo
         export AIRFLOW__CORE__LOAD_EXAMPLES=${LOAD_EXAMPLES}
 
-        . "$( dirname "${BASH_SOURCE[0]}" )/configure_environment.sh"
-
         if airflow db migrate
         then
             if [[ ${LOAD_DEFAULT_CONNECTIONS=} == "true" || ${LOAD_DEFAULT_CONNECTIONS=} == "True" ]]; then
@@ -100,14 +119,25 @@ function startairflow_if_requested() {
             AIRFLOW__DATABASE__LOAD_DEFAULT_CONNECTIONS=${LOAD_DEFAULT_CONNECTIONS} airflow db init
         fi
 
-        if airflow config get-value core auth_manager | grep -q "FabAuthManager"; then
-            airflow users create -u admin -p admin -f Thor -l Adminstra -r Admin -e admin@email.domain || true
-        else
-            echo "Skipping user creation as auth manager different from Fab is used"
+        local auth_manager="${AIRFLOW__CORE__AUTH_MANAGER:-}"
+        if [[ -z "${auth_manager}" ]]; then
+            auth_manager=$(airflow config get-value core auth_manager || true)
         fi
+        if [[ "${auth_manager}" == *FabAuthManager* ]]; then
+            airflow users create -u admin -p admin -f Thor -l Adminstra -r Admin -e admin@email.domain || true
 
-        . "$( dirname "${BASH_SOURCE[0]}" )/run_init_script.sh"
-
+            # Create all roles for testing if CREATE_ALL_ROLES is set
+            if [[ "${CREATE_ALL_ROLES}" == "true" ]]; then
+                echo "Creating all test roles for FabAuthManager..."
+                airflow users create -u viewer -p viewer -f Test -l Viewer -r Viewer -e viewer@email.domain || true
+                airflow users create -u user -p user -f Test -l User -r User -e user@email.domain || true
+                airflow users create -u op -p op -f Test -l Op -r Op -e op@email.domain || true
+                airflow users create -u testadmin -p testadmin -f Test -l TestAdmin -r Admin -e testadmin@email.domain || true
+                echo "All test roles created successfully for FabAuthManager."
+            fi
+        else
+            echo "SimpleAuthManager detected. All roles (admin, viewer, user, op) are always available via configuration in .dev/breeze/src/airflow_breeze/files/simple_auth_manager_passwords.json"
+        fi
     fi
     return $?
 }
@@ -129,6 +159,9 @@ if [[ ${INTEGRATION_MONGO} == "true" ]]; then
 fi
 if [[ ${INTEGRATION_REDIS} == "true" ]]; then
     check_service "Redis" "run_nc redis 6379" 50
+fi
+if [[ ${INTEGRATION_OTEL} == "true" ]]; then
+    check_service "Jaeger" "run_nc jaeger 16686" 50
 fi
 if [[ ${INTEGRATION_CELERY} == "true" ]]; then
     check_service "Redis" "run_nc redis 6379" 50
@@ -152,6 +185,11 @@ if [[ ${INTEGRATION_PINOT} == "true" ]]; then
     check_service "Pinot (Broker API)" "${CMD}" 50
 fi
 
+if [[ ${INTEGRATION_POLARIS} == "true" ]]; then
+    CMD="curl --max-time 1 -f http://polaris:8182/q/health"
+    check_service "Apache Polaris" "${CMD}" 50
+fi
+
 if [[ ${INTEGRATION_QDRANT} == "true" ]]; then
     check_service "Qdrant" "run_nc qdrant 6333" 50
     CMD="curl -f -X GET 'http://qdrant:6333/collections'"
@@ -172,6 +210,10 @@ fi
 
 if [[ ${INTEGRATION_YDB} == "true" ]]; then
     check_service "YDB Cluster" "run_nc ydb 2136" 50
+fi
+
+if [[ ${INTEGRATION_TINKERPOP} == "true" ]]; then
+    check_service "gremlin" "run_nc gremlin 8182" 100 30
 fi
 
 if [[ ${EXIT_CODE} != 0 ]]; then

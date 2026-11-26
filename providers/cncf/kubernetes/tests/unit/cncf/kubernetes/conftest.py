@@ -18,10 +18,32 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 DATA_FILE_DIRECTORY = Path(__file__).resolve().parent / "data_files"
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "no_wait_patch_disabled: disable autouse WaitRetryAfterOrExponential patch"
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_retry_wait(request):
+    # Skip patching if test has marker
+    if request.node.get_closest_marker("no_wait_patch_disabled"):
+        yield
+        return
+    patcher = mock.patch(
+        "airflow.providers.cncf.kubernetes.kubernetes_helper_functions.WaitRetryAfterOrExponential.__call__",
+        return_value=0,
+    )
+    patcher.start()
+    yield
+    patcher.stop()
 
 
 @pytest.fixture
@@ -30,7 +52,7 @@ def data_file():
     if not DATA_FILE_DIRECTORY.exists():
         msg = f"Data Directory {DATA_FILE_DIRECTORY.as_posix()!r} does not exist."
         raise FileNotFoundError(msg)
-    elif not DATA_FILE_DIRECTORY.is_dir():
+    if not DATA_FILE_DIRECTORY.is_dir():
         msg = f"Data Directory {DATA_FILE_DIRECTORY.as_posix()!r} expected to be a directory."
         raise NotADirectoryError(msg)
 

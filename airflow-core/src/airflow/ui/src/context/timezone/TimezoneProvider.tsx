@@ -16,27 +16,35 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { useMemo, type PropsWithChildren } from "react";
+import type { PropsWithChildren } from "react";
+
 import { useLocalStorage } from "usehooks-ts";
 
-import { useConfig } from "src/queries/useConfig";
+import { TIMEZONE_KEY } from "src/constants/localStorage";
 
 import { TimezoneContext, type TimezoneContextType } from "./Context";
 
-const TIMEZONE_KEY = "timezone";
+const isValidTimezone = (tz: string | undefined): boolean => {
+  if (tz === undefined || tz === "") {
+    return false;
+  }
+
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: tz });
+
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 export const TimezoneProvider = ({ children }: PropsWithChildren) => {
-  const defaultUITimezone = useConfig("default_ui_timezone");
+  const systemTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-  const [selectedTimezone, setSelectedTimezone] = useLocalStorage(
-    TIMEZONE_KEY,
-    typeof defaultUITimezone === "string" ? defaultUITimezone : "UTC",
-  );
+  const [storedTimezone, setSelectedTimezone] = useLocalStorage(TIMEZONE_KEY, systemTimezone);
+  const selectedTimezone = isValidTimezone(storedTimezone) ? storedTimezone : "UTC";
 
-  const value = useMemo<TimezoneContextType>(
-    () => ({ selectedTimezone, setSelectedTimezone }),
-    [selectedTimezone, setSelectedTimezone],
-  );
+  const value: TimezoneContextType = { selectedTimezone, setSelectedTimezone };
 
   return <TimezoneContext.Provider value={value}>{children}</TimezoneContext.Provider>;
 };

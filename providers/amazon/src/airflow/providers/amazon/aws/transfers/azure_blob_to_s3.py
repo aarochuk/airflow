@@ -22,18 +22,19 @@ import tempfile
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from airflow.providers.amazon.aws.utils.transfer import strip_overlapping_folder_markers
+from airflow.providers.common.compat.sdk import BaseOperator
 
 try:
     from airflow.providers.microsoft.azure.hooks.wasb import WasbHook
 except ModuleNotFoundError as e:
-    from airflow.exceptions import AirflowOptionalProviderFeatureException
+    from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException
 
     raise AirflowOptionalProviderFeatureException(e)
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class AzureBlobStorageToS3Operator(BaseOperator):
@@ -42,19 +43,19 @@ class AzureBlobStorageToS3Operator(BaseOperator):
 
     .. seealso::
         For more information on how to use this operator, take a look at the guide:
-        :ref:`howto/operator:AzureBlobStorageToGCSOperator`
+        :ref:`howto/operator:AzureBlobStorageToS3Operator`
 
     :param wasb_conn_id: Reference to the wasb connection.
     :param container_name: Name of the container
     :param prefix: Prefix string which filters objects whose name begin with
         this prefix. (templated)
     :param delimiter: The delimiter by which you want to filter the objects. (templated)
-        For e.g to lists the CSV files from in a directory in GCS you would use
+        For e.g. to lists the CSV files from in a directory in GCS you would use
         delimiter='.csv'.
     :param aws_conn_id: Connection id of the S3 connection to use
     :param dest_s3_key: The base S3 key to be used to store the files. (templated)
     :param dest_verify: Whether or not to verify SSL certificates for S3 connection.
-        By default SSL certificates are verified.
+        By default, SSL certificates are verified.
         You can provide the following values:
 
         - ``False``: do not validate SSL certificates. SSL will still be used
@@ -82,6 +83,8 @@ class AzureBlobStorageToS3Operator(BaseOperator):
         "prefix",
         "delimiter",
         "dest_s3_key",
+        "wasb_conn_id",
+        "aws_conn_id",
     )
 
     def __init__(
@@ -137,6 +140,14 @@ class AzureBlobStorageToS3Operator(BaseOperator):
             container_name=self.container_name, prefix=self.prefix, endswith=self.delimiter
         )
 
+        files, dropped_keys = strip_overlapping_folder_markers(files)
+        if dropped_keys:
+            self.log.info(
+                "Skipping %s Azure Blob folder-marker key(s) (omitted from transfer and XCom output): %s",
+                len(dropped_keys),
+                dropped_keys,
+            )
+
         if not self.replace:
             # if we are not replacing -> list all files in the S3 bucket
             # and only keep those files which are present in
@@ -149,7 +160,7 @@ class AzureBlobStorageToS3Operator(BaseOperator):
             existing_files = existing_files or []
             # remove the prefix for the existing files to allow the match
             existing_files = [file.replace(f"{prefix}/", "", 1) for file in existing_files]
-            files = list(set(files) - set(existing_files))
+            files = sorted(set(files) - set(existing_files))
 
         if files:
             for file in files:

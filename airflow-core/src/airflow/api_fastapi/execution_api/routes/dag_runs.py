@@ -20,34 +20,81 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
+from cadwyn import VersionedAPIRouter
 from fastapi import HTTPException, Query, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import NoResultFound
 
 from airflow.api.common.trigger_dag import trigger_dag
-from airflow.api_fastapi.common.db.common import SessionDep
-from airflow.api_fastapi.common.router import AirflowRouter
+from airflow.api_fastapi.common.dagbag import DagBagDep, get_dag_for_run, resolve_run_on_latest_version
+from airflow.api_fastapi.common.db.common import AsyncSessionDep, SessionDep
 from airflow.api_fastapi.common.types import UtcDateTime
+from airflow.api_fastapi.compat import HTTP_422_UNPROCESSABLE_CONTENT
 from airflow.api_fastapi.execution_api.datamodels.dagrun import DagRunStateResponse, TriggerDAGRunPayload
-from airflow.exceptions import DagRunAlreadyExists
+from airflow.api_fastapi.execution_api.datamodels.taskinstance import DagRun
+from airflow.api_fastapi.execution_api.datamodels.token import TIToken
+from airflow.api_fastapi.execution_api.security import (
+    CurrentTIToken,
+    DagInGrantedBundle,
+    ExecutionAPIRoute,
+    ExecutionOrDagParseToken,
+)
+from airflow.exceptions import DagNotPartitionedError, DagRunAlreadyExists, InvalidPartitionKeyError
 from airflow.models.dag import DagModel
-from airflow.models.dagbag import DagBag
-from airflow.models.dagrun import DagRun
-from airflow.utils.types import DagRunTriggeredByType
+from airflow.models.dagrun import DagRun as DagRunModel
+from airflow.models.taskinstance import TaskInstance
+from airflow.utils.state import DagRunState
+from airflow.utils.types import DagRunTriggeredByType, DagRunType
 
-router = AirflowRouter()
-
+router = VersionedAPIRouter(route_class=ExecutionAPIRoute)
 
 log = logging.getLogger(__name__)
+
+
+@router.only_exists_in_older_versions
+@router.get("/{dag_id}/previous")
+def get_previous_dagrun_compat(
+    dag_id: str,
+    logical_date: UtcDateTime,
+    session: SessionDep,
+    state: DagRunState | None = None,
+):
+    """
+    Redirect old previous dag run request to the new endpoint.
+
+    This endpoint must be put before ``get_dag_run`` so not to be shadowed.
+    Newer client versions would not see this endpoint, and be routed to
+    ``get_dag_run`` below instead.
+    """
+    return get_previous_dagrun(dag_id, logical_date, session, state)
+
+
+@router.get(
+    "/{dag_id}/{run_id}",
+    responses={status.HTTP_404_NOT_FOUND: {"description": "Dag run not found"}},
+)
+def get_dag_run(dag_id: str, run_id: str, session: SessionDep) -> DagRun:
+    """Get detail of a Dag run."""
+    dr = session.scalar(select(DagRunModel).where(DagRunModel.dag_id == dag_id, DagRunModel.run_id == run_id))
+    if dr is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={
+                "reason": "not_found",
+                "message": f"Dag run with dag_id '{dag_id}' and run_id '{run_id}' was not found",
+            },
+        )
+    return DagRun.model_validate(dr)
 
 
 @router.post(
     "/{dag_id}/{run_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     responses={
-        status.HTTP_400_BAD_REQUEST: {"description": "DAG has import errors and cannot be triggered"},
-        status.HTTP_404_NOT_FOUND: {"description": "DAG not found for the given dag_id"},
-        status.HTTP_409_CONFLICT: {"description": "DAG Run already exists for the given dag_id"},
-        status.HTTP_422_UNPROCESSABLE_ENTITY: {"description": "Invalid payload"},
+        status.HTTP_400_BAD_REQUEST: {"description": "Dag has import errors or the run type is not allowed"},
+        status.HTTP_404_NOT_FOUND: {"description": "Dag not found for the given dag_id"},
+        status.HTTP_409_CONFLICT: {"description": "Dag run already exists for the given dag_id"},
+        HTTP_422_UNPROCESSABLE_CONTENT: {"description": "Invalid payload"},
     },
 )
 def trigger_dag_run(
@@ -55,13 +102,14 @@ def trigger_dag_run(
     run_id: str,
     payload: TriggerDAGRunPayload,
     session: SessionDep,
-):
-    """Trigger a DAG Run."""
-    dm = session.scalar(select(DagModel).where(DagModel.is_active, DagModel.dag_id == dag_id).limit(1))
+    token: TIToken = CurrentTIToken,
+) -> None:
+    """Trigger a Dag run."""
+    dm = session.scalar(select(DagModel).where(~DagModel.is_stale, DagModel.dag_id == dag_id).limit(1))
     if not dm:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            detail={"reason": "not_found", "message": f"DAG with dag_id: '{dag_id}' not found"},
+            detail={"reason": "not_found", "message": f"Dag with dag_id: '{dag_id}' not found"},
         )
 
     if dm.has_import_errors:
@@ -69,18 +117,37 @@ def trigger_dag_run(
             status.HTTP_400_BAD_REQUEST,
             detail={
                 "reason": "import_errors",
-                "message": f"DAG with dag_id: '{dag_id}' has import errors and cannot be triggered",
+                "message": f"Dag with dag_id '{dag_id}' has import errors and cannot be triggered",
             },
         )
+
+    if dm.allowed_run_types is not None and DagRunType.OPERATOR_TRIGGERED not in dm.allowed_run_types:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={
+                "reason": "denied_run_type",
+                "message": f"Dag with dag_id '{dag_id}' does not allow operator-triggered runs",
+            },
+        )
+
+    # Inherit triggering_user_name from the calling task's DagRun so chains of
+    # TriggerDagRunOperator preserve the original human user across child runs.
+    parent_ti = session.get(TaskInstance, token.id)
+    triggering_user_name = parent_ti.dag_run.triggering_user_name if parent_ti else None
 
     try:
         trigger_dag(
             dag_id=dag_id,
             run_id=run_id,
+            run_type=DagRunType.OPERATOR_TRIGGERED,
             conf=payload.conf,
             logical_date=payload.logical_date,
+            run_after=payload.run_after,
             triggered_by=DagRunTriggeredByType.OPERATOR,
+            triggering_user_name=triggering_user_name,
             replace_microseconds=False,
+            partition_key=payload.partition_key,
+            note=payload.note,
             session=session,
         )
     except DagRunAlreadyExists:
@@ -88,31 +155,50 @@ def trigger_dag_run(
             status.HTTP_409_CONFLICT,
             detail={
                 "reason": "already_exists",
-                "message": f"A DAG Run already exists for DAG {dag_id} with run id {run_id}",
+                "message": f"A run already exists for Dag '{dag_id}' with run_id '{run_id}'",
             },
         )
+    except DagNotPartitionedError as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"reason": "not_partitioned", "message": str(e)},
+        )
+    except InvalidPartitionKeyError as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"reason": "invalid_partition_key", "message": str(e)},
+        ) from e
+    except ValueError as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={
+                "reason": "value_error",
+                "message": str(e),
+            },
+        ) from e
 
 
 @router.post(
     "/{dag_id}/{run_id}/clear",
     status_code=status.HTTP_204_NO_CONTENT,
     responses={
-        status.HTTP_400_BAD_REQUEST: {"description": "DAG has import errors and cannot be triggered"},
-        status.HTTP_404_NOT_FOUND: {"description": "DAG not found for the given dag_id"},
-        status.HTTP_422_UNPROCESSABLE_ENTITY: {"description": "Invalid payload"},
+        status.HTTP_400_BAD_REQUEST: {"description": "Dag has import errors and cannot be triggered"},
+        status.HTTP_404_NOT_FOUND: {"description": "Dag not found for the given dag_id"},
+        HTTP_422_UNPROCESSABLE_CONTENT: {"description": "Invalid payload"},
     },
 )
 def clear_dag_run(
     dag_id: str,
     run_id: str,
     session: SessionDep,
-):
-    """Clear a DAG Run."""
-    dm = session.scalar(select(DagModel).where(DagModel.is_active, DagModel.dag_id == dag_id).limit(1))
+    dag_bag: DagBagDep,
+) -> None:
+    """Clear a Dag run."""
+    dm = session.scalar(select(DagModel).where(~DagModel.is_stale, DagModel.dag_id == dag_id).limit(1))
     if not dm:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            detail={"reason": "not_found", "message": f"DAG with dag_id: '{dag_id}' not found"},
+            detail={"reason": "not_found", "message": f"Dag with dag_id: '{dag_id}' not found"},
         )
 
     if dm.has_import_errors:
@@ -120,59 +206,90 @@ def clear_dag_run(
             status.HTTP_400_BAD_REQUEST,
             detail={
                 "reason": "import_errors",
-                "message": f"DAG with dag_id: '{dag_id}' has import errors and cannot be triggered",
+                "message": f"Dag with dag_id '{dag_id}' has import errors and cannot be triggered",
             },
         )
 
-    dag_bag = DagBag(dag_folder=dm.fileloc, read_dags_from_db=True)
-    dag = dag_bag.get_dag(dag_id)
-    dag.clear(run_id=run_id)
+    dag_run = session.scalar(
+        select(DagRunModel).where(DagRunModel.dag_id == dag_id, DagRunModel.run_id == run_id)
+    )
+    if dag_run is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={"reason": "not_found", "message": f"Dag run with run_id: '{run_id}' not found"},
+        )
+    dag = get_dag_for_run(dag_bag, dag_run=dag_run, session=session)
+
+    resolved_run_on_latest = resolve_run_on_latest_version(None, dag_id, session)
+    dag.clear(run_id=run_id, run_on_latest_version=resolved_run_on_latest)
 
 
 @router.get(
     "/{dag_id}/{run_id}/state",
-    responses={
-        status.HTTP_404_NOT_FOUND: {"description": "DAG not found for the given dag_id"},
-    },
+    responses={status.HTTP_404_NOT_FOUND: {"description": "Dag run not found"}},
 )
-def get_dagrun_state(
+async def get_dagrun_state(
     dag_id: str,
     run_id: str,
-    session: SessionDep,
+    session: AsyncSessionDep,
 ) -> DagRunStateResponse:
-    """Get a DAG Run State."""
-    dag_run = session.scalar(select(DagRun).where(DagRun.dag_id == dag_id, DagRun.run_id == run_id))
-    if dag_run is None:
+    """Get a Dag run State."""
+    try:
+        state: DagRunState = (
+            await session.scalars(
+                select(DagRunModel.state).where(DagRunModel.dag_id == dag_id, DagRunModel.run_id == run_id)
+            )
+        ).one()
+    except NoResultFound:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             detail={
                 "reason": "not_found",
-                "message": f"The DagRun with dag_id: `{dag_id}` and run_id: `{run_id}` was not found",
+                "message": f"Dag run with dag_id '{dag_id}' and run_id '{run_id}' was not found",
             },
         )
-
-    return DagRunStateResponse(state=dag_run.state)
+    return DagRunStateResponse(state=state)
 
 
 @router.get("/count", status_code=status.HTTP_200_OK)
-def get_dr_count(
+async def get_dr_count(
     dag_id: str,
-    session: SessionDep,
+    session: AsyncSessionDep,
     logical_dates: Annotated[list[UtcDateTime] | None, Query()] = None,
     run_ids: Annotated[list[str] | None, Query()] = None,
     states: Annotated[list[str] | None, Query()] = None,
 ) -> int:
-    """Get the count of DAG runs matching the given criteria."""
-    query = select(func.count()).select_from(DagRun).where(DagRun.dag_id == dag_id)
-
+    """Get the count of Dag runs matching the given criteria."""
+    stmt = select(func.count()).select_from(DagRunModel).where(DagRunModel.dag_id == dag_id)
     if logical_dates:
-        query = query.where(DagRun.logical_date.in_(logical_dates))
-
+        stmt = stmt.where(DagRunModel.logical_date.in_(logical_dates))
     if run_ids:
-        query = query.where(DagRun.run_id.in_(run_ids))
-
+        stmt = stmt.where(DagRunModel.run_id.in_(run_ids))
     if states:
-        query = query.where(DagRun.state.in_(states))
+        stmt = stmt.where(DagRunModel.state.in_(states))
+    return (await session.scalar(stmt)) or 0
 
-    count = session.scalar(query)
-    return count or 0
+
+@router.get(
+    "/previous",
+    status_code=status.HTTP_200_OK,
+    dependencies=[ExecutionOrDagParseToken, DagInGrantedBundle],
+)
+def get_previous_dagrun(
+    dag_id: str,
+    logical_date: UtcDateTime,
+    session: SessionDep,
+    state: Annotated[DagRunState | None, Query()] = None,
+) -> DagRun | None:
+    """Get the previous Dag run before the given logical date, optionally filtered by state."""
+    stmt = (
+        select(DagRunModel)
+        .where(DagRunModel.dag_id == dag_id, DagRunModel.logical_date < logical_date)
+        .order_by(DagRunModel.logical_date.desc())
+        .limit(1)
+    )
+    if state:
+        stmt = stmt.where(DagRunModel.state == state)
+    if not (dag_run := session.scalar(stmt)):
+        return None
+    return DagRun.model_validate(dag_run)

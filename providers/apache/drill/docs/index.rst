@@ -55,7 +55,7 @@
     :maxdepth: 1
     :caption: Resources
 
-    Example DAGs <https://github.com/apache/airflow/tree/providers-apache-drill/|version|/providers/apache/drill/tests/system/apache/drill>
+    Example Dags <https://github.com/apache/airflow/tree/providers-apache-drill/|version|/providers/apache/drill/tests/system/apache/drill>
     PyPI Repository <https://pypi.org/project/apache-airflow-providers-apache-drill/>
     Installing from sources <installing-providers-from-sources>
 
@@ -76,7 +76,7 @@ apache-airflow-providers-apache-drill package
 `Apache Drill <https://drill.apache.org/>`__.
 
 
-Release: 3.0.1
+Release: 3.3.4
 
 Provider package
 ----------------
@@ -87,41 +87,23 @@ All classes for this package are included in the ``airflow.providers.apache.dril
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-apache-drill``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-=======================================  ===========================
-PIP package                              Version required
-=======================================  ===========================
-``apache-airflow``                       ``>=2.9.0``
-``apache-airflow-providers-common-sql``  ``>=1.20.0``
-``sqlalchemy-drill``                     ``>=1.1.0,!=1.1.6,!=1.1.7``
-=======================================  ===========================
-
-Cross provider package dependencies
------------------------------------
-
-Those are dependencies that might be needed in order to use all the features of the package.
-You need to install the specified provider distributions in order to use them.
-
-You can install such cross-provider dependencies when installing from PyPI. For example:
-
-.. code-block:: bash
-
-    pip install apache-airflow-providers-apache-drill[common.sql]
-
-
-============================================================================================================  ==============
-Dependent package                                                                                             Extra
-============================================================================================================  ==============
-`apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_  ``common.sql``
-============================================================================================================  ==============
+==========================================  ===========================
+PIP package                                 Version required
+==========================================  ===========================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-sql``     ``>=1.32.0``
+``apache-airflow-providers-common-compat``  ``>=1.8.0``
+``sqlalchemy-drill``                        ``>=1.1.0,!=1.1.6,!=1.1.7``
+==========================================  ===========================
 
 Downloading official packages
 -----------------------------
@@ -129,5 +111,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-apache-drill 3.0.1 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_drill-3.0.1.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_drill-3.0.1.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_drill-3.0.1.tar.gz.sha512>`__)
-* `The apache-airflow-providers-apache-drill 3.0.1 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_drill-3.0.1-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_drill-3.0.1-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_drill-3.0.1-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-apache-drill 3.3.4 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_drill-3.3.4.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_drill-3.3.4.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_drill-3.3.4.tar.gz.sha512>`__)
+* `The apache-airflow-providers-apache-drill 3.3.4 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_drill-3.3.4-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_drill-3.3.4-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_drill-3.3.4-py3-none-any.whl.sha512>`__)

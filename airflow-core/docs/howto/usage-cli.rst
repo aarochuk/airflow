@@ -44,7 +44,7 @@ For permanent (but not global) airflow activation, use:
 
   register-python-argcomplete airflow >> ~/.bashrc
 
-For one-time activation of argcomplete for airflow only, use:
+For one-time activation of argcomplete for Airflow only, use:
 
 .. code-block:: bash
 
@@ -65,22 +65,22 @@ Creating a Connection
 
 For information on creating connections using the CLI, see :ref:`connection/cli`
 
-Exporting DAG structure as an image
+Exporting Dag structure as an image
 -----------------------------------
 
-Airflow lets you print or save your DAG structure as an image. This is useful for documenting or sharing your DAG structure. You'll need to have `Graphviz <https://graphviz.gitlab.io/download/>`_ installed.
+Airflow lets you print or save your Dag structure as an image. This is useful for documenting or sharing your Dag structure. You'll need to have `Graphviz <https://graphviz.gitlab.io/download/>`_ installed.
 
-For example, to print the ``example_complex`` DAG to the terminal:
+For example, to print the ``example_complex`` Dag to the terminal:
 
 .. code-block:: bash
 
   airflow dags show example_complex
 
-This will print the rendered DAG structure (similar to :ref:`Graph <ui:graph-view>`) to the screen in DOT format.
+This will print the rendered Dag structure to the screen in DOT format.
 
 Multiple file formats are supported. To use them, add the argument ``--save [filename].[format]``.
 
-To save the ``example_complex`` DAG as a PNG file:
+To save the ``example_complex`` Dag as a PNG file:
 
 .. code-block:: bash
 
@@ -91,7 +91,7 @@ This will save the following image as a file:
 .. figure:: /img/usage_cli_export.png
     :width: 100%
 
-    Example DAG representation
+    Example Dag representation
 
 The following file formats are supported:
 
@@ -133,24 +133,34 @@ The following file formats are supported:
  * ``xlib``
  * ``x11``
 
-By default, Airflow looks for dags in the directory specified by the ``dags_folder`` option in the
-``[core]`` section of the ``airflow.cfg`` file. You can select a new directory with the ``--subdir`` argument.
+By default, Airflow looks for DAGs in the directory specified by the ``dags_folder`` option in the
+``[core]`` section of the ``airflow.cfg`` file.
 
-Display dag structure
+.. note::
+
+   The ``--subdir`` argument is no longer supported in Airflow 3.x.
+
+   To test a DAG from a specific file, use:
+
+   .. code-block:: bash
+
+      airflow dags test <DAG_ID> -f <path_to_dag_file>
+
+Display Dag structure
 ---------------------
 
-Sometimes you will work on dags that contain complex dependencies. It is helpful then to preview
-the DAG to see if it is correct.
+Sometimes you will work on Dags that contain complex dependencies. It is helpful then to preview
+the Dag to see if it is correct.
 
 If you have macOS, you can use `iTerm2 <https://iterm2.com/>`__ together with
-the `imgcat <https://www.iterm2.com/documentation-images.html>`__ script to display the DAG structure in the
+the `imgcat <https://www.iterm2.com/documentation-images.html>`__ script to display the Dag structure in the
 console. You also need to have `Graphviz <https://graphviz.gitlab.io/download/>`_ installed.
 
 Other terminals do not support the display of high-quality graphics. You can convert the image to a text
 form, but its resolution will prevent you from reading it.
 
 To do this, you should use the ``--imgcat`` switch in the ``airflow dags show`` command. For example, if you
-want to display ``example_bash_operator`` DAG  then you can use the following command:
+want to display ``example_bash_operator`` Dag  then you can use the following command:
 
 .. code-block:: bash
 
@@ -160,7 +170,7 @@ You will see a similar result as in the screenshot below.
 
 .. figure:: /img/usage_cli_imgcat.png
 
-    Preview of DAG in iTerm2
+    Preview of Dag in iTerm2
 
 Formatting commands output
 --------------------------
@@ -211,13 +221,84 @@ Purge history from metadata database
 
 The ``db clean`` command works by deleting from each table the records older than the provided ``--clean-before-timestamp``.
 
-You can optionally provide a list of tables to perform deletes on. If no list of tables is supplied, all tables will be included.
+You can use the ``--dry-run`` option to print the tables that would be cleaned, the configuration used for each, and the row counts, without deleting anything.
 
-You can use the ``--dry-run`` option to print the row counts in the primary tables to be cleaned.
+You can optionally provide a list of tables to perform deletes on with ``--tables``. If no list of tables is supplied, all tables will be included.
 
-By default, ``db clean`` will archive purged rows in tables of the form ``_airflow_deleted__<table>__<timestamp>``.  If you don't want the data preserved in this way, you may supply argument ``--skip-archive``.
+.. note::
 
-When you encounter an error without using ``--skip-archive``,  ``_airflow_deleted__<table>__<timestamp>`` would still exist in the DB. You can use  ``db drop-archived`` command to manually drop these tables.
+  ``--tables`` sets where cleanup starts, not the full list of tables it touches. Each table has a
+  configured list of dependent tables, and those are cleaned first, so that their rows are archived
+  too. Asking for ``--tables trigger`` therefore also cleans ``task_instance``,
+  ``xcom_v1`` and ``xcom_v2``, all of which the ``--dry-run`` output lists.
+
+  ``--tables xcom`` selects both XCom stores. ``--tables task_instance_history`` selects only
+  older tries from ``task_instance``. Selecting ``xcom_v2`` also removes legacy values
+  shadowed by the selected v2 rows, so those values cannot reappear after cleanup.
+
+  That list is maintained per table rather than derived from the schema, so it does not cover every
+  foreign key. A table left off it can still lose rows to a cascading delete when its parent is
+  cleaned, and those rows are neither listed in the dry run nor archived. See
+  `Beware cascading deletes`_ below.
+
+.. note::
+
+  Cleaning the ``asset_event`` table also drops any queued-but-not-yet-consumed asset events. This mainly
+  affects Dags waiting on a multi-asset condition, where a pending event can be purged before the condition
+  is met, meaning the Dag will not be triggered by it.
+
+You can filter cleanup to specific DAGs using ``--dag-ids`` (comma-separated list), or exclude specific DAGs using ``--exclude-dag-ids`` (comma-separated list).
+
+.. warning::
+
+  Both options only reach tables whose cleanup configuration declares a DAG column. Every other table is
+  cleaned whatever you pass, so ``--exclude-dag-ids`` does not preserve everything connected to the DAGs
+  you name -- ``trigger``, ``callback`` and ``import_error`` declare none, for instance, so the filters
+  never narrow them.
+
+  The ``--dry-run`` output shows a ``dag_id_column`` for each table it would clean. Where that column is
+  ``None``, the DAG filters do not apply to that table.
+
+To clean events for specific assets, pass ``--asset-ids`` with a comma-separated list of positive integer
+asset IDs. This requires explicitly selecting only ``--tables asset_event``; omitted or additional tables
+are rejected. The timestamp cutoff still applies, and any Dag filters further restrict the events by
+``source_dag_id``. Existing cascading deletes, including queued events, still apply.
+
+.. code-block:: bash
+
+    airflow db clean --tables asset_event --asset-ids 1,2 --clean-before-timestamp '2024-01-01T00:00:00+00:00' --dry-run
+
+By default, ``db clean`` will archive purged rows in tables of the form ``_airflow_deleted__<table>__<timestamp>``. Cascading attempt data may use a unique suffix instead of a timestamp. If you supply ``--skip-archive``, the command deletes rows directly from the source tables without creating archive tables.
+
+When you encounter an error without using ``--skip-archive``, an archive table may remain in the DB. You can use ``db drop-archived`` to remove it. ``db export-archived`` and ``db drop-archived`` also accept the pre-upgrade names ``xcom`` and ``task_instance_history`` to find older archives.
+
+Detecting cleanup failures
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+By default, ``db clean`` suppresses per-table errors (such as a database ``statement_timeout``
+being exceeded on a very large table) and exits with code 0 even if one or more tables were not
+cleaned. A WARNING is emitted in the logs listing which tables were skipped due to errors.
+
+To make the command exit with a non-zero code whenever any table cleanup fails — useful when
+``airflow db clean`` is invoked from a DAG task and you want the task to turn red on failure —
+pass ``--error-on-cleanup-failure``:
+
+.. code-block:: bash
+
+    airflow db clean \
+        --clean-before-timestamp "$(date -u -d '21 days ago' '+%Y-%m-%dT%H:%M:%S+00:00')" \
+        --yes \
+        --error-on-cleanup-failure
+
+When ``--error-on-cleanup-failure`` is set, the raised ``RuntimeError`` includes the list of
+tables that failed cleanup, so the command still surfaces which tables were not cleaned.
+
+.. tip::
+
+    On large deployments where the archival ``CREATE TABLE … AS SELECT`` step itself can time
+    out, combining ``--error-on-cleanup-failure`` with ``--skip-archive`` is recommended.
+    ``--skip-archive`` deletes rows directly without the intermediate archive table, making the
+    operation both faster and less likely to hit ``statement_timeout``.
 
 Export the purged records from the archive tables
 -------------------------------------------------
@@ -249,15 +330,15 @@ Beware cascading deletes
 
 Keep in mind that some tables have foreign key relationships defined with ``ON DELETE CASCADE`` so deletes in one table may trigger deletes in others.  For example, the ``task_instance`` table keys to the ``dag_run`` table, so if a DagRun record is deleted, all of its associated task instances will also be deleted.
 
-Special handling for DAG runs
+Special handling for Dag runs
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Commonly, Airflow determines which DagRun to run next by looking up the latest DagRun.  If you delete all DAG runs, Airflow may schedule an old DAG run that was already completed, e.g. if you have set ``catchup=True``.  So the ``db clean`` command will preserve the latest non-manually-triggered DAG run to preserve continuity in scheduling.
+Commonly, Airflow determines which DagRun to run next by looking up the latest DagRun.  If you delete all Dag runs, Airflow may schedule an old Dag run that was already completed, e.g. if you have set ``catchup=True``.  So the ``db clean`` command will preserve the latest non-manually-triggered Dag run to preserve continuity in scheduling.
 
-Considerations for backfillable dags
+Considerations for backfillable Dags
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Not all dags are designed for use with Airflow's backfill command.  But for those which are, special care is warranted.  If you delete DAG runs, and if you run backfill over a range of dates that includes the deleted DAG runs, those runs will be recreated and run again.  For this reason, if you have dags that fall into this category you may want to refrain from deleting DAG runs and only clean other large tables such as task instance and log etc.
+Not all Dags are designed for use with Airflow's backfill command.  But for those which are, special care is warranted.  If you delete Dag runs, and if you run backfill over a range of dates that includes the deleted Dag runs, those runs will be recreated and run again.  For this reason, if you have Dags that fall into this category you may want to refrain from deleting Dag runs and only clean other large tables such as task instance and log etc.
 
 .. _cli-db-migrate:
 
@@ -291,8 +372,24 @@ For a mapping between Airflow version and Alembic revision see :doc:`/migrations
 
 .. note::
 
-    It's highly recommended that you reserialize your dags with ``dags reserialize`` after you finish downgrading your Airflow environment (meaning, after you've downgraded the Airflow version installed in your Python environment, not immediately after you've downgraded the database).
-    This is to ensure that the serialized dags are compatible with the downgraded version of Airflow.
+    It's highly recommended that you reserialize your Dags with ``dags reserialize`` after you finish downgrading your Airflow environment (meaning, after you've downgraded the Airflow version installed in your Python environment, not immediately after you've downgraded the database).
+    This is to ensure that the serialized Dags are compatible with the downgraded version of Airflow.
+
+.. _cli-reserialize-dags:
+
+Reserializing Dags
+------------------
+
+The ``dags reserialize`` command parses the Dag files visible to it and updates their
+serialized representation in the metadata database. It is a maintenance command, useful
+for example to refresh serialized Dags after upgrading or downgrading Airflow.
+
+.. note::
+
+    ``airflow dags reserialize`` serializes the Dag files visible to the process
+    running it. It does not deploy or synchronize Dag source files, and does not
+    replace normal Dag Processor bundle refreshes. In a distributed deployment,
+    run it from an environment that sees the same Dag bundle contents as the Dag Processor.
 
 .. _cli-export-connections:
 
@@ -381,10 +478,10 @@ JSON example output:
     airflow_db={"conn_type": "mysql", "login": "root", "password": "plainpassword", "host": "mysql", "schema": "airflow"}
     druid_broker_default={"conn_type": "druid", "host": "druid-broker", "port": 8082, "extra": "{\"endpoint\": \"druid/v2/sql\"}"}
 
-Testing for DAG Import Errors
+Testing for Dag Import Errors
 -----------------------------
-The CLI can be used to check whether any discovered dags have import errors via the ``list-import-errors`` subcommand. It is possible to create an automation step which fails if any dags cannot be imported by checking the command output, particularly when used with ``--output`` to generate a standard file format.
-For example, the default output when there are no errors is ``No data found``, and the json output is ``[]``. The check can then be run in CI or pre-commit to speed up the review process and testing.
+The CLI can be used to check whether any discovered Dags have import errors via the ``list-import-errors`` subcommand. It is possible to create an automation step which fails if any Dags cannot be imported by checking the command output, particularly when used with ``--output`` to generate a standard file format.
+For example, the default output when there are no errors is ``No data found``, and the json output is ``[]``. The check can then be run in CI or as prek hook to speed up the review process and testing.
 
 Example command that fails if there are any errors, using `jq <https://jqlang.github.io/jq/>`__ to parse the output:
 
@@ -402,7 +499,7 @@ Example in a Jenkins pipeline:
 
 .. code-block:: groovy
 
-    stage('All dags are loadable') {
+    stage('All Dags are loadable') {
         steps {
             sh 'airflow dags list-import-errors | tee import_errors.txt && jq -e \'select(type=="array" and length == 0)\' import_errors.txt'
         }

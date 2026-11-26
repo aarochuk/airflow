@@ -16,8 +16,7 @@
  specific language governing permissions and limitations
  under the License.
 
-#}
- .. Licensed to the Apache Software Foundation (ASF) under one
+#} .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
     regarding copyright ownership.  The ASF licenses this file
@@ -49,7 +48,4 @@ Package {{ PACKAGE_PIP_NAME }}
 This is detailed commit list of changes for versions provider package: ``{{PROVIDER_ID}}``.
 For high-level changelog, see :doc:`package information including changelog <index>`.
 
-{%- if DETAILED_CHANGES_PRESENT %}
-
-{{ DETAILED_CHANGES_RST | safe }}
-{%- endif %}
+.. airflow-providers-commits::

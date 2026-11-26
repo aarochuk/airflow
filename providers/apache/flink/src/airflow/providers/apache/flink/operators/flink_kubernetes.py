@@ -21,13 +21,13 @@ from collections.abc import Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
 from airflow.providers.cncf.kubernetes.hooks.kubernetes import KubernetesHook
+from airflow.providers.common.compat.sdk import BaseOperator
 
 if TYPE_CHECKING:
     from kubernetes.client import CoreV1Api
 
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class FlinkKubernetesOperator(BaseOperator):
@@ -56,7 +56,7 @@ class FlinkKubernetesOperator(BaseOperator):
         If not specified, default value is ``~/.kube/config``
     """
 
-    template_fields: Sequence[str] = ("application_file", "namespace")
+    template_fields: Sequence[str] = ("application_file", "namespace", "kubernetes_conn_id")
     template_ext: Sequence[str] = (".yaml", ".yml", ".json")
     ui_color = "#f4a460"
 

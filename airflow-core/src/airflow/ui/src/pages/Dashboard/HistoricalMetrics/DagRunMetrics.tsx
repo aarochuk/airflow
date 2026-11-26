@@ -16,42 +16,57 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Heading, HStack } from "@chakra-ui/react";
+import { Box, Separator, Heading, HStack, Stack } from "@chakra-ui/react";
 import type { DAGRunStates } from "openapi-gen/requests/types.gen";
+import { useTranslation } from "react-i18next";
 import { FiBarChart } from "react-icons/fi";
-
-import { StateBadge } from "src/components/StateBadge";
 
 import { MetricSection } from "./MetricSection";
 
 type DagRunMetricsProps = {
+  readonly countsAreLowerBounds: boolean;
   readonly dagRunStates: DAGRunStates;
-  readonly endDate: string;
+  readonly endDate?: string;
   readonly startDate: string;
-  readonly total: number;
 };
 
 const DAGRUN_STATES: Array<keyof DAGRunStates> = ["queued", "running", "success", "failed"];
 
-export const DagRunMetrics = ({ dagRunStates, endDate, startDate, total }: DagRunMetricsProps) => (
-  <Box borderRadius={5} borderWidth={1} p={2}>
-    <HStack mb={4}>
-      <StateBadge colorPalette="blue" fontSize="md" variant="solid">
+export const DagRunMetrics = ({
+  countsAreLowerBounds,
+  dagRunStates,
+  endDate,
+  startDate,
+}: DagRunMetricsProps) => {
+  const { t: translate } = useTranslation();
+  const total = Object.values(dagRunStates).reduce((sum, count) => sum + count, 0);
+  // The total is only a lower bound when the counts are, so percentages would be wrong.
+  const isTotalTruncated = countsAreLowerBounds;
+  // "0+" would be meaningless.
+  const isLowerBound = (count: number) => countsAreLowerBounds && count > 0;
+
+  return (
+    <Box borderRadius={5} borderWidth={1} p={4}>
+      <HStack>
         <FiBarChart />
-        {total}
-      </StateBadge>
-      <Heading size="md">Dag Runs</Heading>
-    </HStack>
-    {DAGRUN_STATES.map((state) => (
-      <MetricSection
-        endDate={endDate}
-        key={state}
-        kind="dag_runs"
-        runs={dagRunStates[state]}
-        startDate={startDate}
-        state={state}
-        total={total}
-      />
-    ))}
-  </Box>
-);
+        <Heading size="md">{translate("dagRun", { count: 2 })}</Heading>
+      </HStack>
+      <Separator my={3} />
+      <Stack gap={4}>
+        {DAGRUN_STATES.map((state) => (
+          <MetricSection
+            capped={isLowerBound(dagRunStates[state])}
+            endDate={endDate}
+            isTotalTruncated={isTotalTruncated}
+            key={state}
+            kind="dag_runs"
+            runs={dagRunStates[state]}
+            startDate={startDate}
+            state={state}
+            total={total}
+          />
+        ))}
+      </Stack>
+    </Box>
+  );
+};

@@ -16,36 +16,42 @@
     under the License.
 
 .. _dynamic-task-mapping:
+.. _mapped-tasks:
 
-====================
-Dynamic Task Mapping
-====================
+============
+Mapped tasks
+============
 
-Dynamic Task Mapping allows a way for a workflow to create a number of tasks at runtime based upon current data, rather than the DAG author having to know in advance how many tasks would be needed.
+Task mapping, also called dynamic task mapping, allows a way for a workflow to create a number of tasks at runtime based upon current data, rather than the Dag author having to know in advance how many tasks would be needed.
 
-This is similar to defining your tasks in a for loop, but instead of having the DAG file fetch the data and do that itself, the scheduler can do this based on the output of a previous task. Right before a mapped task is executed the scheduler will create *n* copies of the task, one for each input.
+This is similar to defining your tasks in a for loop, but instead of having the DAG file fetch the data and do that itself, the scheduler can do this based on the output of an upstream task.
+Unlike a Python for-loop executed at DAG parse time, task mapping defers task creation until runtime, allowing the scheduler to determine the exact number of task instances based on upstream task outputs.
+Right before a mapped task is executed the scheduler will create *n* copies of the task, one for each input.
 
 It is also possible to have a task operate on the collected output of a mapped task, commonly known as map and reduce.
+
+.. seealso::
+   Not sure whether you need mapped tasks or a loop? See :ref:`loops-and-mapped-tasks`.
 
 Simple mapping
 ==============
 
-In its simplest form you can map over a list defined directly in your DAG file using the ``expand()`` function instead of calling your task directly.
+In its simplest form you can map over a list defined directly in your Dag file using the ``expand()`` function instead of calling your task directly.
 
-If you want to see a simple usage of Dynamic Task Mapping, you can look below:
+If you want to see a simple usage of task mapping, you can look below:
 
 .. exampleinclude:: /../src/airflow/example_dags/example_dynamic_task_mapping.py
     :language: python
 
 This will show ``Total was 9`` in the task logs when executed.
 
-This is the resulting DAG structure:
+This is the resulting Dag structure:
 
-.. image:: /img/mapping-simple-graph.png
+.. image:: /img/ui-light/mapping_simple_graph.png
 
 The grid view also provides visibility into your mapped tasks in the details panel:
 
-.. image:: /img/mapping-simple-grid.png
+.. image:: /img/ui-dark/grid_mapped_task.png
 
 .. note:: Only keyword arguments are allowed to be passed to ``expand()``.
 
@@ -88,7 +94,7 @@ The grid view also provides visibility into your mapped tasks in the details pan
 Task-generated Mapping
 ----------------------
 
-The above examples we've shown could all be achieved with a ``for`` loop in the DAG file, but the real power of dynamic task mapping comes from being able to have a task generate the list to iterate over.
+The above examples we've shown could all be achieved with a ``for`` loop in the Dag file, but the real power of dynamic task mapping comes from being able to have a task generate the list to iterate over.
 
 .. code-block:: python
 
@@ -112,13 +118,13 @@ The ``make_list`` task runs as a normal task and must return a list or dict (see
 .. warning:: Task-generated mapping cannot be utilized with ``TriggerRule.ALWAYS``
 
     Assigning ``trigger_rule=TriggerRule.ALWAYS`` in task-generated mapping is not allowed, as expanded parameters are undefined with the task's immediate execution.
-    This is enforced at the time of the DAG parsing, for both tasks and mapped tasks groups, and will raise an error if you try to use it.
+    This is enforced at the time of the Dag parsing, for both tasks and mapped tasks groups, and will raise an error if you try to use it.
     In the recent example, setting ``trigger_rule=TriggerRule.ALWAYS`` in the ``consumer`` task will raise an error since ``make_list`` is a task-generated mapping.
 
 Repeated mapping
 ----------------
 
-The result of one mapped task can also be used as input to the next mapped task.
+The result of one mapped task can also be used as input to the downstream mapped task.
 
 .. code-block:: python
 
@@ -187,7 +193,6 @@ By default, mapped tasks are assigned an integer index. It is possible to overri
 
     from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 
-
     # The two expanded task instances will be named "2024-01-01" and "2024-01-02".
     SQLExecuteQueryOperator.partial(
         ...,
@@ -203,7 +208,7 @@ Since the template is rendered after the main execution block, it is possible to
 
 .. code-block:: python
 
-    from airflow.providers.standard.operators.python import get_current_context
+    from airflow.sdk import get_current_context
 
 
     @task(map_index_template="{{ my_variable }}")
@@ -253,11 +258,10 @@ In this example, you have a regular data delivery to an S3 bucket and want to ap
 
     from datetime import datetime
 
-    from airflow import DAG
-    from airflow.decorators import task
+    from airflow.sdk import DAG
+    from airflow.sdk import task
     from airflow.providers.amazon.aws.hooks.s3 import S3Hook
     from airflow.providers.amazon.aws.operators.s3 import S3ListOperator
-
 
     with DAG(dag_id="mapped_s3", start_date=datetime(2020, 4, 7)) as dag:
         list_filenames = S3ListOperator(
@@ -364,7 +368,7 @@ In the above example, task ``convert_to_yaml`` is expanded into two task instanc
 Value references in a task group function
 -----------------------------------------
 
-One important distinction between a task function (``@task``) and a task *group* function (``@task_group``) is, since a task group does not have an associated worker, code in a task group function cannot resolve arguments passed into it; the real value and is only resolved when the reference is passed into a task.
+One important distinction between a task function (``@task``) and a task *group* function (``@task_group``) is, since a task group does not have an associated worker, code in a task group function cannot resolve arguments passed into it; the real value is only resolved when the reference is passed into a task.
 
 For example, this code will *not* work:
 
@@ -388,7 +392,7 @@ For example, this code will *not* work:
 
 When code in ``my_task_group`` is executed, ``value`` would still only be a reference, not the real value, so the ``if not value`` branch will not work as you likely want. However, if you pass that reference into a task, it will become resolved when the task is executed, and the three ``my_task`` instances will therefore receive 1, 2, and 3, respectively.
 
-It is, therefore, important to remember that, if you intend to perform any logic to a value passed into a task group function, you must always use a task to run the logic, such as  ``@task.branch`` (or ``BranchPythonOperator``) for conditions, and task mapping methods for loops.
+It is, therefore, important to remember that, if you intend to perform any logic on a value passed into a task group function, you must always use a task to run the logic, such as ``@task.branch`` (or ``BranchPythonOperator``) for conditions, and ``expand()`` to iterate over values. To repeat a group of tasks, see :ref:`loops-and-mapped-tasks`.
 
 .. note:: Task-mapping in a mapped task group is not permitted
 
@@ -528,8 +532,9 @@ Since it is common to want to transform the output data format for task mapping,
 
 There are a couple of things to note:
 
-#. The callable argument of :func:`map()` (``create_copy_kwargs`` in the example) **must not** be a task, but a plain Python function. The transformation is as a part of the "pre-processing" of the downstream task (i.e. ``copy_files``), not a standalone task in the DAG.
+#. The callable argument of :func:`map()` (``create_copy_kwargs`` in the example) **must not** be a task, but a plain Python function. The transformation is as a part of the "pre-processing" of the downstream task (i.e. ``copy_files``), not a standalone task in the Dag.
 #. The callable always take exactly one positional argument. This function is called for each item in the iterable used for task-mapping, similar to how Python's built-in :func:`map()` works.
+#. If the upstream value is a dict, the callable receives each item as a ``(key, value)`` tuple.
 #. Since the callable is executed as a part of the downstream task, you can use any existing techniques to write the task function. To mark a component as skipped, for example, you should raise ``AirflowSkipException``. Note that returning ``None`` **does not** work here.
 
 Combining upstream data (aka "zipping")
@@ -589,7 +594,7 @@ Another common pattern to combine input sources is to run the same task against 
     download_file.override(task_id="download_file_a").expand(filename=list_filenames_a.output)
     download_file.override(task_id="download_file_b").expand(filename=list_filenames_b.output)
 
-The DAG, however, would be both more scalable and easier to inspect if the tasks can be combined into one. This can done with ``concat``:
+The Dag, however, would be both more scalable and easier to inspect if the tasks can be combined into one. This can done with ``concat``:
 
 .. code-block:: python
 
@@ -648,8 +653,8 @@ Placing limits on mapped tasks
 
 There are two limits that you can place on a task:
 
-  #. the number of mapped task instances can be created as the result of expansion.
-  #. The number of the mapped task can run at once.
+  #. the number of mapped task instances that can be created as the result of expansion.
+  #. The number of the mapped task instances that can run at once.
 
 - **Limiting number of mapped task**
 
@@ -676,3 +681,33 @@ Automatically skipping zero-length maps
 =======================================
 
 If the input is empty (zero length), no new tasks will be created and the mapped task will be marked as ``SKIPPED``.
+
+This can be useful when a Dag discovers work to do at runtime, but sometimes there is no work for that run.
+For example, a scan-and-repair Dag can return an empty list when it does not find anything to repair.
+In that case, the mapped task is skipped, and a downstream summary task can still treat the run as a successful no-op if it uses a trigger rule that allows skipped upstream tasks.
+
+.. code-block:: python
+
+    from airflow.sdk import TriggerRule, task
+
+
+    @task
+    def find_work_items():
+        # Return an empty list when no files, records, or partitions need repair.
+        return []
+
+
+    @task
+    def repair(item): ...
+
+
+    @task(trigger_rule=TriggerRule.NONE_FAILED)
+    def summarize(repaired_items):
+        if not repaired_items:
+            print("No work found; nothing to repair.")
+            return
+        print(f"Repaired {len(repaired_items)} item(s).")
+
+
+    repaired_items = repair.expand(item=find_work_items())
+    summarize(repaired_items)

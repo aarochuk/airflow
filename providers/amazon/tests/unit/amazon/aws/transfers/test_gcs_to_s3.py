@@ -75,6 +75,39 @@ class TestGCSToS3Operator:
                 user_project=None,
             )
 
+    @pytest.mark.parametrize(
+        "match_glob",
+        [
+            pytest.param("**/*.csv", id="value_supplied"),
+            pytest.param("", id="empty_string_is_still_supplied"),
+        ],
+    )
+    @mock.patch("airflow.providers.google.__version__", "10.2.0")
+    def test_init__match_glob_rejected_on_older_google_provider(self, match_glob):
+        """Supplying match_glob requires apache-airflow-providers-google>=10.3.0.
+
+        The check asks whether the argument was supplied, not whether its value is truthy,
+        so an empty string is rejected too - it was supplied.
+        """
+        with pytest.raises(ValueError, match=r"requires 'apache-airflow-providers-google>=10\.3\.0'"):
+            GCSToS3Operator(
+                task_id=TASK_ID,
+                gcs_bucket=GCS_BUCKET,
+                dest_s3_key=S3_BUCKET,
+                match_glob=match_glob,
+            )
+
+    @mock.patch("airflow.providers.google.__version__", "10.2.0")
+    def test_init__match_glob_omitted_is_accepted_on_older_google_provider(self):
+        """Omitting match_glob leaves nothing to reject, whatever the google provider version."""
+        operator = GCSToS3Operator(
+            task_id=TASK_ID,
+            gcs_bucket=GCS_BUCKET,
+            dest_s3_key=S3_BUCKET,
+        )
+
+        assert operator.match_glob is None
+
     @mock.patch("airflow.providers.amazon.aws.transfers.gcs_to_s3.GCSHook")
     def test_execute_incremental(self, mock_hook):
         mock_hook.return_value.list.return_value = MOCK_FILES
@@ -186,6 +219,47 @@ class TestGCSToS3Operator:
             uploaded_files = operator.execute(None)
             assert sorted(MOCK_FILES) == sorted(uploaded_files)
             assert sorted(MOCK_FILES) == sorted(hook.list_keys("bucket", delimiter="/"))
+
+    @mock.patch("airflow.providers.amazon.aws.transfers.gcs_to_s3.GCSHook")
+    def test_execute_skips_overlapping_folder_markers(self, mock_hook):
+        mock_hook.return_value.list.return_value = ["src/", "src/airflow.png", "lonely/"]
+        with NamedTemporaryFile() as f:
+            gcs_provide_file = mock_hook.return_value.provide_file
+            gcs_provide_file.return_value.__enter__.return_value.name = f.name
+
+            operator = GCSToS3Operator(
+                task_id=TASK_ID,
+                gcs_bucket=GCS_BUCKET,
+                dest_aws_conn_id="aws_default",
+                dest_s3_key=S3_BUCKET,
+                replace=True,
+            )
+            hook, _ = _create_test_bucket()
+
+            uploaded_files = operator.execute(None)
+            assert uploaded_files == ["lonely/", "src/airflow.png"]
+            assert hook.list_keys("bucket") == ["lonely/", "src/airflow.png"]
+
+    @mock.patch("airflow.providers.amazon.aws.transfers.gcs_to_s3.GCSHook")
+    def test_execute_skips_markers_without_a_basename_when_flattening(self, mock_hook):
+        mock_hook.return_value.list.return_value = ["src/", "src/airflow.png", "lonely/"]
+        with NamedTemporaryFile() as f:
+            gcs_provide_file = mock_hook.return_value.provide_file
+            gcs_provide_file.return_value.__enter__.return_value.name = f.name
+
+            operator = GCSToS3Operator(
+                task_id=TASK_ID,
+                gcs_bucket=GCS_BUCKET,
+                dest_aws_conn_id="aws_default",
+                dest_s3_key="s3://bucket/dest/",
+                flatten_structure=True,
+                replace=True,
+            )
+            hook, _ = _create_test_bucket()
+
+            uploaded_files = operator.execute(None)
+            assert uploaded_files == ["src/airflow.png"]
+            assert hook.list_keys("bucket") == ["dest/airflow.png"]
 
     @mock.patch("airflow.providers.amazon.aws.transfers.gcs_to_s3.GCSHook")
     def test_execute_with_replace(self, mock_hook):
@@ -329,3 +403,148 @@ class TestGCSToS3Operator:
             uploaded_files = operator.execute(None)
             assert sorted(MOCK_FILES) == sorted(uploaded_files)
             assert hook.check_for_prefix(bucket_name="bucket", prefix=PREFIX + "/", delimiter="/") is True
+
+    @mock.patch("airflow.providers.amazon.aws.transfers.gcs_to_s3.GCSHook")
+    def test_execute_with_flatten_structure(self, mock_hook):
+        """Test that flatten_structure parameter flattens directory structure."""
+        mock_files_with_paths = ["dir1/subdir1/file1.csv", "dir2/subdir2/file2.csv", "dir3/file3.csv"]
+        mock_hook.return_value.list.return_value = mock_files_with_paths
+
+        with NamedTemporaryFile() as f:
+            gcs_provide_file = mock_hook.return_value.provide_file
+            gcs_provide_file.return_value.__enter__.return_value.name = f.name
+
+            operator = GCSToS3Operator(
+                task_id=TASK_ID,
+                gcs_bucket=GCS_BUCKET,
+                prefix=PREFIX,
+                dest_aws_conn_id="aws_default",
+                dest_s3_key=S3_BUCKET,
+                replace=False,
+                flatten_structure=True,
+            )
+            hook, _ = _create_test_bucket()
+
+            uploaded_files = operator.execute(None)
+
+            # Verify all files were uploaded
+            assert sorted(mock_files_with_paths) == sorted(uploaded_files)
+
+            # Verify files are stored with flattened structure (only filenames)
+            expected_s3_keys = ["file1.csv", "file2.csv", "file3.csv"]
+            actual_keys = hook.list_keys("bucket", delimiter="/")
+            assert sorted(expected_s3_keys) == sorted(actual_keys)
+
+    @mock.patch("airflow.providers.amazon.aws.transfers.gcs_to_s3.GCSHook")
+    def test_execute_with_flatten_structure_duplicate_filenames(self, mock_hook):
+        """Test that flatten_structure handles duplicate filenames correctly."""
+        mock_files_with_duplicates = [
+            "dir1/file.csv",
+            "dir2/file.csv",  # Same filename as above
+            "dir3/other.csv",
+        ]
+        mock_hook.return_value.list.return_value = mock_files_with_duplicates
+
+        with NamedTemporaryFile() as f:
+            gcs_provide_file = mock_hook.return_value.provide_file
+            gcs_provide_file.return_value.__enter__.return_value.name = f.name
+
+            operator = GCSToS3Operator(
+                task_id=TASK_ID,
+                gcs_bucket=GCS_BUCKET,
+                prefix=PREFIX,
+                dest_aws_conn_id="aws_default",
+                dest_s3_key=S3_BUCKET,
+                replace=False,
+                flatten_structure=True,
+            )
+            _, _ = _create_test_bucket()
+
+            # Mock the logging to verify warning is logged
+            mock_path = "airflow.providers.amazon.aws.transfers.gcs_to_s3.GCSToS3Operator.log"
+            with mock.patch(mock_path) as mock_log:
+                uploaded_files = operator.execute(None)
+
+                # Only one of the duplicate files should be uploaded
+                assert len(uploaded_files) == 2
+                assert "dir3/other.csv" in uploaded_files
+                first_or_second = "dir1/file.csv" in uploaded_files or "dir2/file.csv" in uploaded_files
+                assert first_or_second
+
+                # Verify warning was logged for duplicate
+                mock_log.warning.assert_called()
+
+    def test_execute_with_flatten_structure_and_keep_directory_structure_warning(self):
+        """Test warning when both flatten_structure and keep_directory_structure are True."""
+        mock_path = "airflow.providers.amazon.aws.transfers.gcs_to_s3.GCSToS3Operator.log"
+        with mock.patch(mock_path) as mock_log:
+            GCSToS3Operator(
+                task_id=TASK_ID,
+                gcs_bucket=GCS_BUCKET,
+                prefix=PREFIX,
+                dest_aws_conn_id="aws_default",
+                dest_s3_key=S3_BUCKET,
+                flatten_structure=True,
+                keep_directory_structure=True,  # This should trigger warning
+            )
+
+            # Verify warning was logged during initialization
+            expected_warning = "flatten_structure=True takes precedence over keep_directory_structure=True"
+            mock_log.warning.assert_called_once_with(expected_warning)
+
+    @pytest.mark.parametrize(
+        ("flatten_structure", "input_path", "expected_output"),
+        [
+            # Tests with flatten_structure=True
+            (True, "dir1/subdir1/file.csv", "file.csv"),
+            (True, "path/to/deep/nested/file.txt", "file.txt"),
+            (True, "simple.txt", "simple.txt"),
+            (True, "", ""),
+            # Tests with flatten_structure=False (preserves original paths)
+            (False, "dir1/subdir1/file.csv", "dir1/subdir1/file.csv"),
+            (False, "path/to/deep/nested/file.txt", "path/to/deep/nested/file.txt"),
+            (False, "simple.txt", "simple.txt"),
+            (False, "", ""),
+        ],
+    )
+    def test_transform_file_path(self, flatten_structure, input_path, expected_output):
+        """Test _transform_file_path method with various flatten_structure settings."""
+        operator = GCSToS3Operator(
+            task_id=TASK_ID,
+            gcs_bucket=GCS_BUCKET,
+            dest_s3_key=S3_BUCKET,
+            flatten_structure=flatten_structure,
+        )
+
+        result = operator._transform_file_path(input_path)
+        assert result == expected_output
+
+    @pytest.mark.parametrize(
+        ("gcs_prefix", "dest_s3_key", "expected_input", "expected_output"),
+        [
+            ("dir/pre", "s3://bucket/dest_dir/", "dir/pre", "dest_dir/"),
+            ("dir/pre", "s3://bucket/dest_dir", "dir/pre", "dest_dir"),
+            ("dir/pre/", "s3://bucket/dest_dir/", "dir/pre/", "dest_dir/"),
+            ("dir/pre", "s3://bucket/", "dir/pre", "/"),
+            ("dir/pre", "s3://bucket", "dir/pre", "/"),
+            ("", "s3://bucket/", "/", "/"),
+            ("", "s3://bucket", "/", "/"),
+        ],
+    )
+    def test_get_openlineage_facets_on_start(self, gcs_prefix, dest_s3_key, expected_input, expected_output):
+        operator = GCSToS3Operator(
+            task_id=TASK_ID,
+            gcs_bucket=GCS_BUCKET,
+            prefix=gcs_prefix,
+            dest_s3_key=dest_s3_key,
+        )
+
+        result = operator.get_openlineage_facets_on_start()
+        assert not result.job_facets
+        assert not result.run_facets
+        assert len(result.outputs) == 1
+        assert len(result.inputs) == 1
+        assert result.outputs[0].namespace == S3_BUCKET.rstrip("/")
+        assert result.outputs[0].name == expected_output
+        assert result.inputs[0].namespace == f"gs://{GCS_BUCKET}"
+        assert result.inputs[0].name == expected_input

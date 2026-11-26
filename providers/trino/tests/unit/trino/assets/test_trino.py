@@ -21,11 +21,12 @@ import urllib.parse
 
 import pytest
 
-from airflow.providers.trino.assets.trino import sanitize_uri
+from airflow.providers.common.compat.assets import Asset
+from airflow.providers.trino.assets.trino import convert_asset_to_openlineage, create_asset, sanitize_uri
 
 
 @pytest.mark.parametrize(
-    "original, normalized",
+    ("original", "normalized"),
     [
         pytest.param(
             "trino://example.com:1234/catalog/schema/table",
@@ -51,11 +52,33 @@ def test_sanitize_uri_pass(original: str, normalized: str) -> None:
         pytest.param("trino://", id="blank"),
         pytest.param("trino:///catalog/schema/table", id="no-host"),
         pytest.param("trino://example.com/catalog/table", id="missing-component"),
-        pytest.param("trino://example.com:abcd/catalog/schema/table", id="non-port"),
         pytest.param("trino://example.com/catalog/schema/table/column", id="extra-component"),
     ],
 )
 def test_sanitize_uri_fail(value: str) -> None:
     uri_i = urllib.parse.urlsplit(value)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="URI format trino:// must contain"):
         sanitize_uri(uri_i)
+
+
+def test_sanitize_uri_fail_non_port() -> None:
+    uri_i = urllib.parse.urlsplit("trino://example.com:abcd/catalog/schema/table")
+    with pytest.raises(ValueError, match="Port could not be cast to integer value as 'abcd'"):
+        sanitize_uri(uri_i)
+
+
+def test_create_asset() -> None:
+    result = create_asset(host="example.com", catalog="hive", schema="default", table="users")
+    assert result == Asset(uri="trino://example.com:8080/hive/default/users")
+
+
+def test_create_asset_custom_port() -> None:
+    result = create_asset(host="example.com", port=9090, catalog="hive", schema="default", table="users")
+    assert result == Asset(uri="trino://example.com:9090/hive/default/users")
+
+
+def test_convert_asset_to_openlineage() -> None:
+    asset = Asset(uri="trino://example.com:8080/hive/default/users")
+    ol_dataset = convert_asset_to_openlineage(asset=asset, lineage_context=None)
+    assert ol_dataset.namespace == "trino://example.com:8080"
+    assert ol_dataset.name == "hive.default.users"

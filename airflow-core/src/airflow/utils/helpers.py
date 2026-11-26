@@ -21,23 +21,23 @@ import copy
 import itertools
 import re
 import signal
-from collections.abc import Generator, Iterable, Mapping, MutableMapping
-from datetime import datetime
-from functools import cache, reduce
-from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast
+from collections.abc import Callable, Generator, Iterable, MutableMapping
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 from urllib.parse import urljoin
 
 from lazy_object_proxy import Proxy
 
 from airflow.configuration import conf
 from airflow.exceptions import AirflowException
-from airflow.utils.types import NOTSET
+from airflow.serialization.definitions.notset import is_arg_set
 
 if TYPE_CHECKING:
-    import jinja2
+    from datetime import datetime
 
-    from airflow.models.taskinstance import TaskInstance
-    from airflow.sdk.definitions.context import Context
+    import jinja2
+    from typing_extensions import TypeIs
+
+    CT = TypeVar("CT", str, datetime)
 
 KEY_REGEX = re.compile(r"^[\w.-]+$")
 GROUP_KEY_REGEX = re.compile(r"^[\w-]+$")
@@ -51,57 +51,23 @@ def validate_key(k: str, max_length: int = 250):
     """Validate value used as a key."""
     if not isinstance(k, str):
         raise TypeError(f"The key has to be a string and is {type(k)}:{k}")
-    if len(k) > max_length:
-        raise AirflowException(f"The key: {k} has to be less than {max_length} characters")
+    if (length := len(k)) > max_length:
+        raise ValueError(f"The key has to be less than {max_length} characters, not {length}")
     if not KEY_REGEX.match(k):
-        raise AirflowException(
+        raise ValueError(
             f"The key {k!r} has to be made of alphanumeric characters, dashes, "
             f"dots and underscores exclusively"
         )
+    if ".." in k and not conf.getboolean("core", "allow_double_dot_in_ids", fallback=False):
+        raise ValueError(f"The key {k!r} must not contain consecutive dots ('..') to prevent path traversal")
 
 
-def validate_instance_args(instance: object, expected_arg_types: dict[str, Any]) -> None:
-    """Validate that the instance has the expected types for the arguments."""
-    for arg_name, expected_arg_type in expected_arg_types.items():
-        instance_arg_value = getattr(instance, arg_name, None)
-        if instance_arg_value is not None and not isinstance(instance_arg_value, expected_arg_type):
-            raise TypeError(
-                f"'{arg_name}' has an invalid type {type(instance_arg_value)} with value "
-                f"{instance_arg_value}, expected type is {expected_arg_type}"
-            )
-
-
-def validate_group_key(k: str, max_length: int = 200):
-    """Validate value used as a group key."""
-    if not isinstance(k, str):
-        raise TypeError(f"The key has to be a string and is {type(k)}:{k}")
-    if len(k) > max_length:
-        raise AirflowException(f"The key has to be less than {max_length} characters")
-    if not GROUP_KEY_REGEX.match(k):
-        raise AirflowException(
-            f"The key {k!r} has to be made of alphanumeric characters, dashes and underscores exclusively"
-        )
-
-
-def alchemy_to_dict(obj: Any) -> dict | None:
-    """Transform a SQLAlchemy model instance into a dictionary."""
-    if not obj:
-        return None
-    output = {}
-    for col in obj.__table__.columns:
-        value = getattr(obj, col.name)
-        if isinstance(value, datetime):
-            value = value.isoformat()
-        output[col.name] = value
-    return output
-
-
-def ask_yesno(question: str, default: bool | None = None) -> bool:
+def ask_yesno(question: str, default: bool | None = None, output_fn=print) -> bool:
     """Get a yes or no answer from the user."""
     yes = {"yes", "y"}
     no = {"no", "n"}
 
-    print(question)
+    output_fn(question)
     while True:
         choice = input().lower()
         if choice == "" and default is not None:
@@ -110,10 +76,10 @@ def ask_yesno(question: str, default: bool | None = None) -> bool:
             return True
         if choice in no:
             return False
-        print("Please respond with y/yes or n/no.")
+        output_fn("Please respond with y/yes or n/no.")
 
 
-def prompt_with_timeout(question: str, timeout: int, default: bool | None = None) -> bool:
+def prompt_with_timeout(question: str, timeout: int, default: bool | None = None, output_fn=print) -> bool:
     """Ask the user a question and timeout if they don't respond."""
 
     def handler(signum, frame):
@@ -122,12 +88,20 @@ def prompt_with_timeout(question: str, timeout: int, default: bool | None = None
     signal.signal(signal.SIGALRM, handler)
     signal.alarm(timeout)
     try:
-        return ask_yesno(question, default)
+        return ask_yesno(question, default, output_fn=output_fn)
     finally:
         signal.alarm(0)
 
 
-def is_container(obj: Any) -> bool:
+@overload
+def is_container(obj: None | int | Iterable[int] | range) -> TypeIs[Iterable[int]]: ...
+
+
+@overload
+def is_container(obj: None | CT | Iterable[CT]) -> TypeIs[Iterable[CT]]: ...
+
+
+def is_container(obj) -> bool:
     """Test if an object is a container (iterable) but not a string."""
     if isinstance(obj, Proxy):
         # Proxy of any object is considered a container because it implements __iter__
@@ -137,29 +111,12 @@ def is_container(obj: Any) -> bool:
     return hasattr(obj, "__iter__") and not isinstance(obj, str)
 
 
-def as_tuple(obj: Any) -> tuple:
-    """Return obj as a tuple if obj is a container, otherwise return a tuple containing obj."""
-    if is_container(obj):
-        return tuple(obj)
-    else:
-        return tuple([obj])
-
-
 def chunks(items: list[T], chunk_size: int) -> Generator[list[T], None, None]:
     """Yield successive chunks of a given size from a list of items."""
     if chunk_size <= 0:
         raise ValueError("Chunk size must be a positive integer")
     for i in range(0, len(items), chunk_size):
         yield items[i : i + chunk_size]
-
-
-def reduce_in_chunks(fn: Callable[[S, list[T]], S], iterable: list[T], initializer: S, chunk_size: int = 0):
-    """Split the list of items into chunks of a given size and pass each chunk through the reducer."""
-    if not iterable:
-        return initializer
-    if chunk_size == 0:
-        chunk_size = len(iterable)
-    return reduce(fn, chunks(iterable, chunk_size), initializer)
 
 
 def as_flattened_list(iterable: Iterable[Iterable[T]]) -> list[T]:
@@ -178,52 +135,7 @@ def parse_template_string(template_string: str) -> tuple[str, None] | tuple[None
 
     if "{{" in template_string:  # jinja mode
         return None, jinja2.Template(template_string)
-    else:
-        return template_string, None
-
-
-@cache
-def log_filename_template_renderer() -> Callable[..., str]:
-    template = conf.get("logging", "log_filename_template")
-
-    if "{{" in template:
-        import jinja2
-
-        return jinja2.Template(template).render
-    else:
-
-        def f_str_format(ti: TaskInstance, try_number: int | None = None):
-            return template.format(
-                dag_id=ti.dag_id,
-                task_id=ti.task_id,
-                logical_date=ti.logical_date.isoformat(),
-                try_number=try_number or ti.try_number,
-            )
-
-        return f_str_format
-
-
-def render_log_filename(ti: TaskInstance, try_number, filename_template) -> str:
-    """
-    Given task instance, try_number, filename_template, return the rendered log filename.
-
-    :param ti: task instance
-    :param try_number: try_number of the task
-    :param filename_template: filename template, which can be jinja template or
-        python string template
-    """
-    filename_template, filename_jinja_template = parse_template_string(filename_template)
-    if filename_jinja_template:
-        jinja_context = ti.get_template_context()
-        jinja_context["try_number"] = try_number
-        return render_template_to_string(filename_jinja_template, jinja_context)
-
-    return filename_template.format(
-        dag_id=ti.dag_id,
-        task_id=ti.task_id,
-        logical_date=ti.logical_date.isoformat(),
-        try_number=try_number,
-    )
+    return template_string, None
 
 
 def convert_camel_to_snake(camel_str: str) -> str:
@@ -259,8 +171,8 @@ def build_airflow_dagrun_url(dag_id: str, run_id: str) -> str:
     For example:
     http://localhost:8080/dags/hi/runs/manual__2025-02-23T18:27:39.051358+00:00_RZa1at4Q
     """
-    baseurl = conf.get("api", "base_url")
-    return urljoin(baseurl, f"dags/{dag_id}/runs/{run_id}")
+    baseurl = conf.get("api", "base_url", fallback="/")
+    return urljoin(baseurl.rstrip("/") + "/", f"dags/{dag_id}/runs/{run_id}")
 
 
 # The 'template' argument is typed as Any because the jinja2.Template is too
@@ -295,16 +207,6 @@ def render_template(template: Any, context: MutableMapping[str, Any], *, native:
     return "".join(nodes)
 
 
-def render_template_to_string(template: jinja2.Template, context: Context) -> str:
-    """Shorthand to ``render_template(native=False)`` with better typing support."""
-    return render_template(template, cast("MutableMapping[str, Any]", context), native=False)
-
-
-def render_template_as_native(template: jinja2.Template, context: Context) -> Any:
-    """Shorthand to ``render_template(native=True)`` with better typing support."""
-    return render_template(template, cast("MutableMapping[str, Any]", context), native=True)
-
-
 def exactly_one(*args) -> bool:
     """
     Return True if exactly one of args is "truthy", and False otherwise.
@@ -326,14 +228,7 @@ def at_most_one(*args) -> bool:
 
     If user supplies an iterable, we raise ValueError and force them to unpack.
     """
-
-    def is_set(val):
-        if val is NOTSET:
-            return False
-        else:
-            return bool(val)
-
-    return sum(map(is_set, args)) in (0, 1)
+    return sum(is_arg_set(a) and bool(a) for a in args) in (0, 1)
 
 
 def prune_dict(val: Any, mode="strict"):
@@ -348,7 +243,7 @@ def prune_dict(val: Any, mode="strict"):
     def is_empty(x):
         if mode == "strict":
             return x is None
-        elif mode == "truthy":
+        if mode == "truthy":
             return bool(x) is False
         raise ValueError("allowable values for `mode` include 'truthy' and 'strict'")
 
@@ -357,39 +252,49 @@ def prune_dict(val: Any, mode="strict"):
         for k, v in val.items():
             if is_empty(v):
                 continue
-            elif isinstance(v, (list, dict)):
+            if isinstance(v, (list, dict)):
                 new_val = prune_dict(v, mode=mode)
                 if not is_empty(new_val):
                     new_dict[k] = new_val
             else:
                 new_dict[k] = v
         return new_dict
-    elif isinstance(val, list):
+    if isinstance(val, list):
         new_list = []
         for v in val:
             if is_empty(v):
                 continue
-            elif isinstance(v, (list, dict)):
+            if isinstance(v, (list, dict)):
                 new_val = prune_dict(v, mode=mode)
                 if not is_empty(new_val):
                     new_list.append(new_val)
             else:
                 new_list.append(v)
         return new_list
-    else:
-        return val
+    return val
 
 
-def prevent_duplicates(kwargs1: dict[str, Any], kwargs2: Mapping[str, Any], *, fail_reason: str) -> None:
-    """
-    Ensure *kwargs1* and *kwargs2* do not contain common keys.
+__deprecated_imports = {
+    "render_template_as_native": "airflow.sdk.definitions.context",
+    "render_template_to_string": "airflow.sdk.definitions.context",
+    "prevent_duplicates": "airflow.sdk.definitions.mappedoperator",
+}
 
-    :raises TypeError: If common keys are found.
-    """
-    duplicated_keys = set(kwargs1).intersection(kwargs2)
-    if not duplicated_keys:
-        return
-    if len(duplicated_keys) == 1:
-        raise TypeError(f"{fail_reason} argument: {duplicated_keys.pop()}")
-    duplicated_keys_display = ", ".join(sorted(duplicated_keys))
-    raise TypeError(f"{fail_reason} arguments: {duplicated_keys_display}")
+
+def __getattr__(name: str):
+    """Provide backward compatibility for moved functions in this module."""
+    try:
+        modpath = __deprecated_imports[name]
+    except KeyError:
+        raise AttributeError(f"module '{__name__}' has no attribute '{name}'") from None
+
+    import importlib
+    import warnings
+
+    warnings.warn(
+        f"{__name__}.{name} is deprecated. Use {modpath}.{name} instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    mod = importlib.import_module(modpath)
+    return getattr(mod, name)

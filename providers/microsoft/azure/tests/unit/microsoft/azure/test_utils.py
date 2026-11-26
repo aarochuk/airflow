@@ -17,21 +17,31 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import ExitStack, contextmanager
 from json import JSONDecodeError
 from typing import Any
 from unittest import mock
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from aiohttp import ClientSession
+from azure.core import AsyncPipelineClient
+from azure.core.credentials_async import AsyncTokenCredential
+from azure.core.pipeline.transport._aiohttp import AioHttpTransport
+from azure.identity.aio._internal import AadClient
 from httpx import Headers, Response
+from kiota_abstractions.authentication import AuthenticationProvider, BaseBearerTokenAuthenticationProvider
+from kiota_authentication_azure.azure_identity_access_token_provider import AzureIdentityAccessTokenProvider
+from kiota_http.httpx_request_adapter import HttpxRequestAdapter
 from msgraph_core import APIVersion
 
+from airflow.providers.common.compat.sdk import BaseHook
 from airflow.providers.microsoft.azure.utils import (
     AzureIdentityCredentialAdapter,
     add_managed_identity_connection_widgets,
     get_async_default_azure_credential,
     get_field,
-    # _get_default_azure_credential
     get_sync_default_azure_credential,
     parse_blob_account_url,
 )
@@ -51,7 +61,7 @@ def test_get_field_warns_on_dupe():
 
 
 @pytest.mark.parametrize(
-    "input, expected",
+    ("input", "expected"),
     [
         (dict(this_param="non-prefixed"), "non-prefixed"),
         (dict(this_param=None), None),
@@ -76,6 +86,10 @@ def test_get_field_non_prefixed(input, expected):
 
 
 def test_add_managed_identity_connection_widgets():
+    pytest.importorskip("airflow.providers.fab")
+    # TODO: remove this because fab5 is available now, but it requires recursively fixing tests
+    pytest.importorskip("flask_appbuilder")
+
     class FakeHook:
         @classmethod
         @add_managed_identity_connection_widgets
@@ -139,7 +153,7 @@ class TestAzureIdentityCredentialAdapter:
 
 
 @pytest.mark.parametrize(
-    "host, login, expected_url",
+    ("host", "login", "expected_url"),
     [
         (None, None, "https://None.blob.core.windows.net/"),  # to maintain existing behaviour
         (None, "storage_account", "https://storage_account.blob.core.windows.net/"),
@@ -177,6 +191,7 @@ def get_airflow_connection(
     api_version: APIVersion | str | None = APIVersion.v1.value,
     authority: str | None = None,
     disable_instance_discovery: bool = False,
+    allowed_hosts: str | None = None,
 ):
     from airflow.models import Connection
 
@@ -188,6 +203,9 @@ def get_airflow_connection(
         "authority": authority,
         "disable_instance_discovery": disable_instance_discovery,
     }
+
+    if allowed_hosts:
+        extra["allowed_hosts"] = allowed_hosts
 
     if azure_tenant_id:
         extra["tenantId"] = azure_tenant_id
@@ -234,3 +252,67 @@ def mock_response(status_code, content: Any = None, headers: dict | None = None)
     response.content = content
     response.json.side_effect = JSONDecodeError("", "", 0)
     return response
+
+
+@contextmanager
+def patch_hook(side_effect: Callable = get_airflow_connection):
+    from asgiref.sync import sync_to_async
+
+    with ExitStack() as stack:
+        patches = [
+            patch.object(BaseHook, "get_connection", side_effect=side_effect),
+            patch.object(BaseHook, "aget_connection", side_effect=sync_to_async(side_effect))
+            if hasattr(BaseHook, "aget_connection")
+            else None,
+        ]
+        entered = [stack.enter_context(p) for p in patches if p is not None]
+        yield entered  # expose entered mocks to the caller
+
+
+@contextmanager
+def patch_hook_and_request_adapter(response, side_effect: Callable = get_airflow_connection):
+    with patch_hook(side_effect=side_effect) as hook_mocks:
+        with patch.object(HttpxRequestAdapter, "get_http_response_message") as mock_get_http_response:
+            if isinstance(response, Exception):
+                mock_get_http_response.side_effect = response
+            else:
+                mock_get_http_response.return_value = response
+
+            yield [*hook_mocks, mock_get_http_response]
+
+
+def mock_token_credentials(closed: bool | None = None):
+    _has_been_opened = False if closed is None else not closed
+    transport = Mock(spec=AioHttpTransport, _has_been_opened=_has_been_opened)
+    transport.session = None if closed is None else Mock(spec=ClientSession, closed=closed)
+    pipeline = Mock(spec=AsyncPipelineClient)
+    pipeline._transport = transport
+    client = Mock(spec=AadClient)
+    client._pipeline = pipeline
+    credentials = Mock(spec=AsyncTokenCredential)
+    credentials._client = client
+    credentials.get_token_info = AsyncMock()
+    return credentials
+
+
+def mock_authentication_provider(closed: bool | None = None) -> AuthenticationProvider:
+    from airflow.providers.microsoft.azure.hooks.msgraph import CachedAsyncTokenCredential
+
+    access_token_provider = Mock(spec=AzureIdentityAccessTokenProvider)
+    access_token_provider._credentials = CachedAsyncTokenCredential(
+        credential=mock_token_credentials(closed=closed)
+    )
+    return BaseBearerTokenAuthenticationProvider(access_token_provider=access_token_provider)
+
+
+class TaskStateStore:
+    """In-memory stand-in for ``context["task_state_store"]``."""
+
+    def __init__(self, **values):
+        self.values = dict(values)
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+    def set(self, key, value, *, retention=None):
+        self.values[key] = value

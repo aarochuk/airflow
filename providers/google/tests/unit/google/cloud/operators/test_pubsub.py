@@ -17,14 +17,17 @@
 # under the License.
 from __future__ import annotations
 
+import warnings
 from typing import Any
 from unittest import mock
 
 import pytest
 from google.api_core.gapic_v1.method import DEFAULT
+from google.cloud import pubsub_v1
 from google.cloud.pubsub_v1.types import ReceivedMessage
 
-from airflow.exceptions import TaskDeferred
+from airflow.exceptions import AirflowProviderDeprecationWarning
+from airflow.providers.common.compat.sdk import TaskDeferred
 from airflow.providers.google.cloud.operators.pubsub import (
     PubSubCreateSubscriptionOperator,
     PubSubCreateTopicOperator,
@@ -33,6 +36,7 @@ from airflow.providers.google.cloud.operators.pubsub import (
     PubSubPublishMessageOperator,
     PubSubPullOperator,
 )
+from airflow.providers.google.cloud.triggers.pubsub import PubsubPullTrigger
 
 TASK_ID = "test-task-id"
 TEST_PROJECT = "test-project"
@@ -206,6 +210,103 @@ class TestPubSubSubscriptionCreateOperator:
         )
         assert response == TEST_SUBSCRIPTION
 
+    @pytest.mark.parametrize(
+        ("project_id", "subscription", "subscription_project_id", "expected_input", "expected_output"),
+        [
+            (
+                TEST_PROJECT,
+                TEST_SUBSCRIPTION,
+                None,
+                f"topic:{TEST_PROJECT}:{TEST_TOPIC}",
+                f"subscription:{TEST_PROJECT}:{TEST_SUBSCRIPTION}",
+            ),
+            (
+                TEST_PROJECT,
+                TEST_SUBSCRIPTION,
+                "another-project",
+                f"topic:{TEST_PROJECT}:{TEST_TOPIC}",
+                f"subscription:another-project:{TEST_SUBSCRIPTION}",
+            ),
+            (
+                TEST_PROJECT,
+                None,
+                None,
+                f"topic:{TEST_PROJECT}:{TEST_TOPIC}",
+                f"subscription:{TEST_PROJECT}:generated",
+            ),
+            (
+                TEST_PROJECT,
+                None,
+                "another-project",
+                f"topic:{TEST_PROJECT}:{TEST_TOPIC}",
+                "subscription:another-project:generated",
+            ),
+            (
+                None,
+                None,
+                None,
+                f"topic:connection-project:{TEST_TOPIC}",
+                "subscription:connection-project:generated",
+            ),
+        ],
+    )
+    @mock.patch("airflow.providers.google.cloud.operators.pubsub.PubSubHook")
+    def test_get_openlineage_facets(
+        self,
+        mock_hook,
+        project_id,
+        subscription,
+        subscription_project_id,
+        expected_input,
+        expected_output,
+    ):
+        operator = PubSubCreateSubscriptionOperator(
+            task_id=TASK_ID,
+            project_id=project_id,
+            topic=TEST_TOPIC,
+            subscription=subscription,
+            subscription_project_id=subscription_project_id,
+        )
+        mock_hook.return_value.create_subscription.return_value = subscription or "generated"
+        mock_hook.return_value.project_id = project_id or "connection-project"
+        context = mock.MagicMock()
+        response = operator.execute(context=context)
+        mock_hook.return_value.create_subscription.assert_called_once_with(
+            project_id=project_id,
+            topic=TEST_TOPIC,
+            subscription=subscription,
+            subscription_project_id=subscription_project_id,
+            ack_deadline_secs=10,
+            fail_if_exists=False,
+            push_config=None,
+            retain_acked_messages=None,
+            message_retention_duration=None,
+            labels=None,
+            enable_message_ordering=False,
+            expiration_policy=None,
+            filter_=None,
+            dead_letter_policy=None,
+            retry_policy=None,
+            retry=DEFAULT,
+            timeout=None,
+            metadata=(),
+        )
+
+        if subscription:
+            assert response == TEST_SUBSCRIPTION
+        else:
+            assert response == "generated"
+
+        result = operator.get_openlineage_facets_on_complete(operator)
+        assert not result.run_facets
+        assert not result.job_facets
+        assert len(result.inputs) == 1
+        assert result.inputs[0].namespace == "pubsub"
+        assert result.inputs[0].name == expected_input
+        assert len(result.outputs) == 1
+        assert result.outputs[0].namespace == "pubsub"
+        assert result.outputs[0].name == expected_output
+
 
 class TestPubSubSubscriptionDeleteOperator:
     @mock.patch("airflow.providers.google.cloud.operators.pubsub.PubSubHook")
@@ -255,6 +356,81 @@ class TestPubSubPublishOperator:
             project_id=TEST_PROJECT, topic=TEST_TOPIC, messages=TEST_MESSAGES_ORDERING_KEY
         )
 
+    @mock.patch("airflow.providers.google.cloud.operators.pubsub.PubSubHook")
+    def test_publish_with_open_telemetry_tracing(self, mock_hook):
+        operator = PubSubPublishMessageOperator(
+            task_id=TASK_ID,
+            project_id=TEST_PROJECT,
+            topic=TEST_TOPIC,
+            messages=TEST_MESSAGES,
+            enable_open_telemetry_tracing=True,
+        )
+
+        operator.execute(None)
+        mock_hook.assert_called_once_with(
+            gcp_conn_id="google_cloud_default",
+            impersonation_chain=None,
+            enable_message_ordering=False,
+            enable_open_telemetry_tracing=True,
+        )
+        mock_hook.return_value.publish.assert_called_once_with(
+            project_id=TEST_PROJECT, topic=TEST_TOPIC, messages=TEST_MESSAGES
+        )
+
+    @mock.patch("airflow.providers.google.cloud.operators.pubsub.PubSubHook")
+    def test_publish_with_ordering_and_tracing(self, mock_hook):
+        operator = PubSubPublishMessageOperator(
+            task_id=TASK_ID,
+            project_id=TEST_PROJECT,
+            topic=TEST_TOPIC,
+            messages=TEST_MESSAGES_ORDERING_KEY,
+            enable_message_ordering=True,
+            enable_open_telemetry_tracing=True,
+        )
+
+        operator.execute(None)
+        mock_hook.assert_called_once_with(
+            gcp_conn_id="google_cloud_default",
+            impersonation_chain=None,
+            enable_message_ordering=True,
+            enable_open_telemetry_tracing=True,
+        )
+        mock_hook.return_value.publish.assert_called_once_with(
+            project_id=TEST_PROJECT, topic=TEST_TOPIC, messages=TEST_MESSAGES_ORDERING_KEY
+        )
+
+    @pytest.mark.parametrize(
+        ("project_id", "expected_dataset"),
+        [
+            # 1. project_id provided
+            (TEST_PROJECT, f"topic:{TEST_PROJECT}:{TEST_TOPIC}"),
+            # 2. project_id not provided (use project_id from connection)
+            (None, f"topic:connection-project:{TEST_TOPIC}"),
+        ],
+    )
+    @mock.patch("airflow.providers.google.cloud.operators.pubsub.PubSubHook")
+    def test_get_openlineage_facets(self, mock_hook, project_id, expected_dataset):
+        operator = PubSubPublishMessageOperator(
+            task_id=TASK_ID,
+            project_id=project_id,
+            topic=TEST_TOPIC,
+            messages=TEST_MESSAGES,
+        )
+
+        operator.execute(None)
+        mock_hook.return_value.publish.assert_called_once_with(
+            project_id=project_id, topic=TEST_TOPIC, messages=TEST_MESSAGES
+        )
+        mock_hook.return_value.project_id = project_id or "connection-project"
+
+        result = operator.get_openlineage_facets_on_complete(operator)
+        assert not result.run_facets
+        assert not result.job_facets
+        assert len(result.inputs) == 0
+        assert len(result.outputs) == 1
+        assert result.outputs[0].namespace == "pubsub"
+        assert result.outputs[0].name == expected_dataset
+
 
 class TestPubSubPullOperator:
     def _generate_messages(self, count):
@@ -272,16 +448,24 @@ class TestPubSubPullOperator:
     def _generate_dicts(self, count):
         return [ReceivedMessage.to_dict(m) for m in self._generate_messages(count)]
 
+    @pytest.mark.parametrize("return_immediately", [True, False])
     @mock.patch("airflow.providers.google.cloud.operators.pubsub.PubSubHook")
-    def test_execute_no_messages(self, mock_hook):
+    def test_execute_no_messages(self, mock_hook, return_immediately):
         operator = PubSubPullOperator(
             task_id=TASK_ID,
             project_id=TEST_PROJECT,
             subscription=TEST_SUBSCRIPTION,
+            return_immediately=return_immediately,
         )
 
         mock_hook.return_value.pull.return_value = []
         assert operator.execute({}) == []
+        mock_hook.return_value.pull.assert_called_once_with(
+            project_id=TEST_PROJECT,
+            subscription=TEST_SUBSCRIPTION,
+            max_messages=5,
+            return_immediately=return_immediately,
+        )
 
     @mock.patch("airflow.providers.google.cloud.operators.pubsub.PubSubHook")
     def test_execute_with_ack_messages(self, mock_hook):
@@ -290,6 +474,7 @@ class TestPubSubPullOperator:
             project_id=TEST_PROJECT,
             subscription=TEST_SUBSCRIPTION,
             ack_messages=True,
+            return_immediately=True,
         )
 
         generated_messages = self._generate_messages(5)
@@ -327,6 +512,7 @@ class TestPubSubPullOperator:
             project_id=TEST_PROJECT,
             subscription=TEST_SUBSCRIPTION,
             messages_callback=messages_callback,
+            return_immediately=True,
         )
 
         mock_hook.return_value.pull.return_value = generated_messages
@@ -341,19 +527,148 @@ class TestPubSubPullOperator:
         assert response == messages_callback_return_value
 
     @pytest.mark.db_test
+    @pytest.mark.parametrize("return_immediately", [True, False])
     @mock.patch("airflow.providers.google.cloud.operators.pubsub.PubSubHook")
-    def test_execute_deferred(self, mock_hook, create_task_instance_of_operator):
+    def test_execute_deferred(self, mock_hook, return_immediately):
         """
         Asserts that a task is deferred and a PubSubPullOperator will be fired
         when the PubSubPullOperator is executed with deferrable=True.
         """
-        ti = create_task_instance_of_operator(
-            PubSubPullOperator,
-            dag_id="dag_id",
+        task = PubSubPullOperator(
             task_id=TASK_ID,
             project_id=TEST_PROJECT,
             subscription=TEST_SUBSCRIPTION,
             deferrable=True,
+            return_immediately=return_immediately,
         )
-        with pytest.raises(TaskDeferred) as _:
-            ti.task.execute(mock.MagicMock())
+        with pytest.raises(TaskDeferred) as exc:
+            task.execute(mock.MagicMock())
+
+        assert isinstance(exc.value.trigger, PubsubPullTrigger)
+        assert exc.value.trigger.return_immediately is return_immediately
+
+    @mock.patch("airflow.providers.google.cloud.operators.pubsub.PubSubHook")
+    def test_get_openlineage_facets(self, mock_hook):
+        operator = PubSubPullOperator(
+            task_id=TASK_ID,
+            project_id=TEST_PROJECT,
+            subscription=TEST_SUBSCRIPTION,
+            return_immediately=True,
+        )
+
+        generated_messages = self._generate_messages(5)
+        generated_dicts = self._generate_dicts(5)
+        mock_hook.return_value.pull.return_value = generated_messages
+
+        assert generated_dicts == operator.execute({})
+        mock_hook.return_value.pull.assert_called_once_with(
+            project_id=TEST_PROJECT, subscription=TEST_SUBSCRIPTION, max_messages=5, return_immediately=True
+        )
+
+        result = operator.get_openlineage_facets_on_complete(operator)
+        assert not result.run_facets
+        assert not result.job_facets
+        assert len(result.inputs) == 0
+        assert len(result.outputs) == 1
+        assert result.outputs[0].namespace == "pubsub"
+        assert result.outputs[0].name == f"subscription:{TEST_PROJECT}:{TEST_SUBSCRIPTION}"
+
+    @mock.patch("airflow.providers.google.cloud.operators.pubsub.PubSubHook")
+    def test_execute_complete_use_message_callback(self, mock_hook):
+        test_message = [
+            {
+                "ack_id": "UAYWLF1GSFE3GQhoUQ5PXiM_NSAoRRIJB08CKF15MU0sQVhwaFENGXJ9YHxrUxsDV0ECel1RGQdoTm11H4GglfRLQ1RrWBIHB01Vel5TEwxoX11wBnm4vPO6v8vgfwk9OpX-8tltO6ywsP9GZiM9XhJLLD5-LzlFQV5AEkwkDERJUytDCypYEU4EISE-MD5FU0Q",
+                "message": {
+                    "data": "aGkgZnJvbSBjbG91ZCBjb25zb2xlIQ==",
+                    "message_id": "12165864188103151",
+                    "publish_time": "2024-08-28T11:49:50.962Z",
+                    "attributes": {},
+                    "ordering_key": "",
+                },
+                "delivery_attempt": 0,
+            }
+        ]
+
+        received_messages = [pubsub_v1.types.ReceivedMessage(msg) for msg in test_message]
+
+        messages_callback_return_value = "custom_message_from_callback"
+
+        def messages_callback(
+            pulled_messages: list[ReceivedMessage],
+            context: dict[str, Any],
+        ):
+            assert pulled_messages == received_messages
+
+            assert isinstance(context, dict)
+            for key in context.keys():
+                assert isinstance(key, str)
+
+            return messages_callback_return_value
+
+        operator = PubSubPullOperator(
+            task_id="test_task",
+            ack_messages=True,
+            project_id=TEST_PROJECT,
+            subscription=TEST_SUBSCRIPTION,
+            deferrable=True,
+            messages_callback=messages_callback,
+            return_immediately=True,
+        )
+        mock_hook.return_value.pull.return_value = received_messages
+
+        with mock.patch.object(operator.log, "info") as mock_log_info:
+            resp = operator.execute_complete(context={}, event={"status": "success", "message": test_message})
+        mock_log_info.assert_called_with("Sensor pulls messages: %s", test_message)
+        assert resp == messages_callback_return_value
+
+    @mock.patch("airflow.providers.google.cloud.operators.pubsub.PubSubHook")
+    def test_execute_complete_use_default_message_callback(self, mock_hook):
+        test_message = [
+            {
+                "ack_id": "UAYWLF1GSFE3GQhoUQ5PXiM_NSAoRRIJB08CKF15MU0sQVhwaFENGXJ9YHxrUxsDV0ECel1RGQdoTm11H4GglfRLQ1RrWBIHB01Vel5TEwxoX11wBnm4vPO6v8vgfwk9OpX-8tltO6ywsP9GZiM9XhJLLD5-LzlFQV5AEkwkDERJUytDCypYEU4EISE-MD5FU0Q",
+                "message": {
+                    "data": "aGkgZnJvbSBjbG91ZCBjb25zb2xlIQ==",
+                    "message_id": "12165864188103151",
+                    "publish_time": "2024-08-28T11:49:50.962Z",
+                    "attributes": {},
+                    "ordering_key": "",
+                },
+                "delivery_attempt": 0,
+            }
+        ]
+        received_messages = [pubsub_v1.types.ReceivedMessage(msg) for msg in test_message]
+
+        operator = PubSubPullOperator(
+            task_id="test_task",
+            ack_messages=True,
+            project_id=TEST_PROJECT,
+            subscription=TEST_SUBSCRIPTION,
+            deferrable=True,
+            return_immediately=True,
+        )
+        mock_hook.return_value.pull.return_value = received_messages
+
+        with mock.patch.object(operator.log, "info") as mock_log_info:
+            resp = operator.execute_complete(context={}, event={"status": "success", "message": test_message})
+        mock_log_info.assert_called_with("Sensor pulls messages: %s", test_message)
+        assert resp == [ReceivedMessage.to_dict(m) for m in received_messages]
+
+    def test_pubsub_pull_operator_deprecation_warning(self):
+        with pytest.warns(AirflowProviderDeprecationWarning, match="return_immediately"):
+            operator = PubSubPullOperator(
+                task_id=TASK_ID,
+                project_id=TEST_PROJECT,
+                subscription=TEST_SUBSCRIPTION,
+            )
+        assert operator.return_immediately is True
+
+    @pytest.mark.parametrize("return_immediately", [True, False])
+    def test_pubsub_pull_operator_no_deprecation_warning_when_explicit(self, return_immediately):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", AirflowProviderDeprecationWarning)
+            PubSubPullOperator(
+                task_id=TASK_ID,
+                project_id=TEST_PROJECT,
+                subscription=TEST_SUBSCRIPTION,
+                return_immediately=return_immediately,
+            )

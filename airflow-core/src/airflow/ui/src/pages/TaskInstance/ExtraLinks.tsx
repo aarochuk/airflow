@@ -17,33 +17,67 @@
  * under the License.
  */
 import { Box, Button, Heading, HStack } from "@chakra-ui/react";
-import { useParams } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import { useParams, useSearchParams } from "react-router-dom";
 
 import { useTaskInstanceServiceGetExtraLinks } from "openapi/queries";
 
-export const ExtraLinks = () => {
+import { SearchParamsKeys } from "src/constants/searchParams";
+import { useTaskInstanceCoordinates } from "src/hooks/useTaskInstanceCoordinates";
+import { getLinkTarget, getSafeExternalUrl } from "src/utils/links";
+
+type ExtraLinksProps = {
+  readonly refetchInterval: number | false;
+};
+
+export const ExtraLinks = ({ refetchInterval }: ExtraLinksProps) => {
+  const { t: translate } = useTranslation("dag");
   const { dagId = "", mapIndex = "-1", runId = "", taskId = "" } = useParams();
+  const [searchParams] = useSearchParams();
+  const coordinates = useTaskInstanceCoordinates();
+  const tryNumberParam = searchParams.get(SearchParamsKeys.TRY_NUMBER);
+  const tryNumber = tryNumberParam === null ? undefined : parseInt(tryNumberParam, 10);
 
-  const { data } = useTaskInstanceServiceGetExtraLinks({
-    dagId,
-    dagRunId: runId,
-    mapIndex: parseInt(mapIndex, 10),
-    taskId,
-  });
+  const { data } = useTaskInstanceServiceGetExtraLinks(
+    {
+      ...coordinates,
+      dagId,
+      dagRunId: runId,
+      mapIndex: parseInt(mapIndex, 10),
+      taskId,
+      tryNumber,
+    },
+    undefined,
+    {
+      refetchInterval,
+    },
+  );
 
-  return data && Object.keys(data).length > 0 ? (
+  return data && Object.keys(data.extra_links).length > 0 ? (
     <Box py={1}>
-      <Heading size="sm">Extra Links</Heading>
+      <Heading size="sm">{translate("extraLinks")}</Heading>
       <HStack gap={2} py={2}>
-        {Object.entries(data).map(([key, value], _) =>
-          value === null ? undefined : (
-            <Button asChild colorPalette="blue" key={key} variant="surface">
-              <a href={value} rel="noreferrer" target="_blank">
+        {Object.entries(data.extra_links).map(([key, url]) => {
+          if (url === null) {
+            return undefined;
+          }
+
+          const safeUrl = getSafeExternalUrl(url);
+
+          if (safeUrl === undefined) {
+            return undefined;
+          }
+
+          const target = getLinkTarget(safeUrl);
+
+          return (
+            <Button asChild key={key} variant="surface">
+              <a href={safeUrl} rel="noopener noreferrer" target={target}>
                 {key}
               </a>
             </Button>
-          ),
-        )}
+          );
+        })}
       </HStack>
     </Box>
   ) : undefined;

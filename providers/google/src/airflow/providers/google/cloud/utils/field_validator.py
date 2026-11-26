@@ -23,11 +23,11 @@ is sent in the API request to Google Cloud (via ``googleclient`` API usually).
 
 Context
 -------
-The specification mostly focuses on helping Airflow DAG developers in the development
+The specification mostly focuses on helping Airflow Dag developers in the development
 phase. You can build your own Google Cloud operator (such as GcfDeployOperator for example) which
 can have built-in validation specification for the particular API. It's super helpful
 when developer plays with different fields and their values at the initial phase of
-DAG development. Most of the Google Cloud APIs perform their own validation on the
+Dag development. Most of the Google Cloud APIs perform their own validation on the
 server side, but most of the requests are asynchronous and you need to wait for result
 of the operation. This takes precious times and slows
 down iteration over the API. BodyFieldValidator is meant to be used on the client side
@@ -134,10 +134,9 @@ Here are the guidelines that you should follow to make validation forward-compat
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from typing import Callable
+from collections.abc import Callable, Sequence
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.utils.log.logging_mixin import LoggingMixin
 
 COMPOSITE_FIELD_TYPES = ["union", "dict", "list"]
@@ -438,7 +437,8 @@ class GcpBodyFieldValidator(LoggingMixin):
         all_field_names = {
             spec["name"]
             for spec in self._validation_specs
-            if spec.get("type") != "union" and spec.get("api_version") != self._api_version
+            if spec.get("type") != "union"
+            and (not spec.get("api_version") or spec.get("api_version") == self._api_version)
         }
         all_union_fields = [spec for spec in self._validation_specs if spec.get("type") == "union"]
         for union_field in all_union_fields:
@@ -446,7 +446,10 @@ class GcpBodyFieldValidator(LoggingMixin):
                 nested_union_spec["name"]
                 for nested_union_spec in union_field["fields"]
                 if nested_union_spec.get("type") != "union"
-                and nested_union_spec.get("api_version") != self._api_version
+                and (
+                    not nested_union_spec.get("api_version")
+                    or nested_union_spec.get("api_version") == self._api_version
+                )
             )
         for field_name in body_to_validate:
             if field_name not in all_field_names:

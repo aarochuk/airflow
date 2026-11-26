@@ -21,7 +21,7 @@ import itertools
 
 import pytest
 
-from airflow.decorators import setup, task, teardown
+from airflow.sdk import setup, task, teardown
 from airflow.sdk.bases.operator import BaseOperator
 from airflow.sdk.definitions.dag import DAG
 
@@ -41,35 +41,34 @@ def get_task_attr(task_like, attr):
 def make_task(name, type_, setup_=False, teardown_=False):
     if type_ == "classic" and setup_:
         return BaseOperator(task_id=name).as_setup()
-    elif type_ == "classic" and teardown_:
+    if type_ == "classic" and teardown_:
         return BaseOperator(task_id=name).as_teardown()
-    elif type_ == "classic":
+    if type_ == "classic":
         return BaseOperator(task_id=name)
-    elif setup_:
+    if setup_:
 
         @setup
         def setuptask():
             pass
 
         return setuptask.override(task_id=name)()
-    elif teardown_:
+    if teardown_:
 
         @teardown
         def teardowntask():
             pass
 
         return teardowntask.override(task_id=name)()
-    else:
 
-        @task
-        def my_task():
-            pass
+    @task
+    def my_task():
+        pass
 
-        return my_task.override(task_id=name)()
+    return my_task.override(task_id=name)()
 
 
 @pytest.mark.parametrize(
-    "setup_type, work_type, teardown_type", itertools.product(["classic", "taskflow"], repeat=3)
+    ("setup_type", "work_type", "teardown_type"), itertools.product(["classic", "taskflow"], repeat=3)
 )
 def test_as_teardown(setup_type, work_type, teardown_type):
     """
@@ -102,7 +101,7 @@ def test_as_teardown(setup_type, work_type, teardown_type):
 
 
 @pytest.mark.parametrize(
-    "setup_type, work_type, teardown_type", itertools.product(["classic", "taskflow"], repeat=3)
+    ("setup_type", "work_type", "teardown_type"), itertools.product(["classic", "taskflow"], repeat=3)
 )
 def test_as_teardown_oneline(setup_type, work_type, teardown_type):
     """

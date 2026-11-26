@@ -16,24 +16,44 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { RouterProvider, createMemoryRouter } from "react-router-dom";
+import { RouterProvider, createMemoryRouter, matchRoutes, type RouteObject } from "react-router-dom";
 
 import { TimezoneProvider } from "src/context/timezone";
 import { routerConfig } from "src/router";
 import { BaseWrapper } from "src/utils/Wrapper";
 
 type Props = {
-  readonly initialEntries: Array<string>;
+  readonly initialEntries?: Array<string>;
+  readonly router?: ReturnType<typeof createAppRouter>;
 };
 
-export const AppWrapper = ({ initialEntries }: Props) => {
-  const router = createMemoryRouter(routerConfig, { basename: "/", initialEntries });
+export const preloadAppRoutes = async (initialEntries: Array<string>) => {
+  const routeLoaders = new Set<() => Promise<unknown>>();
 
-  return (
-    <BaseWrapper>
-      <TimezoneProvider>
-        <RouterProvider router={router} />
-      </TimezoneProvider>
-    </BaseWrapper>
+  for (const entry of initialEntries) {
+    for (const { route } of matchRoutes(routerConfig as Array<RouteObject>, entry) ?? []) {
+      if (typeof route.lazy === "function") {
+        routeLoaders.add(route.lazy);
+      }
+    }
+  }
+
+  await Promise.all([...routeLoaders].map((loadRoute) => loadRoute()));
+};
+
+export const createAppRouter = (initialEntries: Array<string>, initialIndex?: number) =>
+  createMemoryRouter(
+    // Strip the config loader from tests
+    routerConfig.map((route) => ({ ...route, loader: undefined })),
+    { basename: "/", initialEntries, initialIndex },
   );
-};
+
+const rootEntries = ["/"];
+
+export const AppWrapper = ({ initialEntries = rootEntries, router }: Props) => (
+  <BaseWrapper>
+    <TimezoneProvider>
+      <RouterProvider router={router ?? createAppRouter(initialEntries)} />
+    </TimezoneProvider>
+  </BaseWrapper>
+);

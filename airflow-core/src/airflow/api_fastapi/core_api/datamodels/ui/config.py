@@ -16,31 +16,34 @@
 # under the License.
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import ConfigDict, field_serializer
 
-from airflow.api_fastapi.common.types import UIAlert
+from airflow.api_fastapi.common.types import Theme, UIAlert
+from airflow.api_fastapi.core_api.base import BaseModel
 
 
 class ConfigResponse(BaseModel):
     """configuration serializer."""
 
-    navbar_color: str
-    navbar_text_color: str
-    navbar_hover_color: str
-    navbar_text_hover_color: str
-    navbar_logo_text_color: str
-    page_size: int
+    model_config = ConfigDict(json_schema_mode_override="validation")
+
+    fallback_page_limit: int
     auto_refresh_interval: int
-    default_ui_timezone: str
     hide_paused_dags_by_default: bool
     instance_name: str
-    instance_name_has_markup: bool
     enable_swagger_ui: bool
     require_confirmation_dag_change: bool
     default_wrap: bool
-    warn_deployment_exposure: bool
-    audit_view_excluded_events: str
-    audit_view_included_events: str
     test_connection: str
-    state_color_mapping: dict
     dashboard_alert: list[UIAlert]
+    show_external_log_redirect: bool
+    external_log_name: str | None = None
+    theme: Theme | None
+    multi_team: bool
+    rerun_with_latest_version: bool | None = None
+
+    @field_serializer("theme")
+    def serialize_theme(self, theme: Theme | None) -> dict | None:
+        if theme is None:
+            return None
+        return theme.model_dump(exclude_none=True)

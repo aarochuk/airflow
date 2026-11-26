@@ -17,24 +17,40 @@
 # under the License.
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
-import sys
 import warnings
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, Column, Integer, String, Text, delete, select
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, delete, or_, select
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
-from sqlalchemy.orm import declared_attr, reconstructor, synonym
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column, reconstructor, synonym
 
-from airflow.configuration import ensure_secrets_loaded
+from airflow._shared.secrets_backend.base import accepts_kwarg, call_secrets_backend_method
+from airflow._shared.secrets_masker import mask_secret
+from airflow.configuration import conf, ensure_secrets_loaded
+from airflow.crypto import get_fernet
 from airflow.models.base import ID_LEN, Base
-from airflow.models.crypto import get_fernet
-from airflow.sdk.execution_time.secrets_masker import mask_secret
-from airflow.secrets.cache import SecretCache
+from airflow.process_context import should_use_task_sdk_api_path
+
+# AirflowSecretsBackendAccessDenied was added to task-sdk in 1.2.2. When
+# airflow-core is installed alongside an older published task-sdk (e.g. 1.2.1 or earlier),
+# the import fails at module load time. The fallback class is never raised by
+# old task-sdk, so the except clause below simply never fires — behaviour is
+# identical to pre-1.2.2 task-sdk.
+try:
+    from airflow.sdk.exceptions import AirflowSecretsBackendAccessDenied
+except ImportError:
+
+    class AirflowSecretsBackendAccessDenied(PermissionError):  # type: ignore[no-redef]
+        """Compat stub — never raised by task-sdk <1.2.2."""
+
+
 from airflow.secrets.metastore import MetastoreBackend
 from airflow.utils.log.logging_mixin import LoggingMixin
-from airflow.utils.session import provide_session
+from airflow.utils.session import NEW_SESSION, create_session, provide_session
+from airflow.utils.sqlalchemy import build_upsert_stmt, get_dialect_name
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -48,17 +64,23 @@ class Variable(Base, LoggingMixin):
     __tablename__ = "variable"
     __NO_DEFAULT_SENTINEL = object()
 
-    id = Column(Integer, primary_key=True)
-    key = Column(String(ID_LEN), unique=True)
-    _val = Column("val", Text().with_variant(MEDIUMTEXT, "mysql"))
-    description = Column(Text)
-    is_encrypted = Column(Boolean, unique=False, default=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String(ID_LEN), unique=True)
+    _val: Mapped[str] = mapped_column("val", Text().with_variant(MEDIUMTEXT, "mysql"))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_encrypted: Mapped[bool] = mapped_column(Boolean, unique=False, default=False)
+    team_name: Mapped[str | None] = mapped_column(
+        String(50),
+        ForeignKey("team.name", ondelete="SET NULL"),
+        nullable=True,
+    )
 
-    def __init__(self, key=None, val=None, description=None):
+    def __init__(self, key=None, val=None, description=None, team_name=None):
         super().__init__()
         self.key = key
         self.val = val
         self.description = description
+        self.team_name = team_name
 
     @reconstructor
     def on_db_load(self):
@@ -89,6 +111,11 @@ class Variable(Base, LoggingMixin):
     def set_val(self, value):
         """Encode the specified value with Fernet Key and store it in Variables Table."""
         if value is not None:
+            if not isinstance(value, str):
+                raise TypeError(
+                    f"Variable value must be a string, got {type(value).__name__}. "
+                    "Use Variable.set(key, value, serialize_json=True) to store non-string values."
+                )
             fernet = get_fernet()
             self._val = fernet.encrypt(bytes(value, "utf-8")).decode()
             self.is_encrypted = fernet.is_encrypted
@@ -99,7 +126,15 @@ class Variable(Base, LoggingMixin):
         return synonym("_val", descriptor=property(cls.get_val, cls.set_val))
 
     @classmethod
-    def setdefault(cls, key, default, description=None, deserialize_json=False):
+    def setdefault(
+        cls,
+        key: str,
+        default: Any,
+        description: str | None = None,
+        deserialize_json: bool = False,
+        *,
+        session: Session | None = None,
+    ) -> Any:
         """
         Return the current value for a key or store the default value and return it.
 
@@ -111,18 +146,22 @@ class Variable(Base, LoggingMixin):
         :param description: Default value to set Description of the Variable
         :param deserialize_json: Store this as a JSON encoded value in the DB
             and un-encode it when retrieving a value
-        :param session: Session
+        :param session: Existing SQLAlchemy Session. Callers holding an open transaction must pass it.
         :return: Mixed
         """
-        obj = Variable.get(key, default_var=None, deserialize_json=deserialize_json)
+        obj = Variable.get(key, default_var=None, deserialize_json=deserialize_json, session=session)
         if obj is None:
             if default is not None:
-                Variable.set(key=key, value=default, description=description, serialize_json=deserialize_json)
+                Variable.set(
+                    key=key,
+                    value=default,
+                    description=description,
+                    serialize_json=deserialize_json,
+                    session=session,
+                )
                 return default
-            else:
-                raise ValueError("Default Value must be set")
-        else:
-            return obj
+            raise ValueError("Default Value must be set")
+        return obj
 
     @classmethod
     def get(
@@ -130,6 +169,9 @@ class Variable(Base, LoggingMixin):
         key: str,
         default_var: Any = __NO_DEFAULT_SENTINEL,
         deserialize_json: bool = False,
+        team_name: str | None = None,
+        *,
+        session: Session | None = None,
     ) -> Any:
         """
         Get a value for an Airflow Variable Key.
@@ -137,86 +179,153 @@ class Variable(Base, LoggingMixin):
         :param key: Variable Key
         :param default_var: Default value of the Variable if the Variable doesn't exist
         :param deserialize_json: Deserialize the value to a Python dict
+        :param team_name: Team name associated to the task trying to access the variable (if any)
+        :param session: Existing SQLAlchemy Session. Callers holding an open transaction must pass it.
         """
         # TODO: This is not the best way of having compat, but it's "better than erroring" for now. This still
         # means SQLA etc is loaded, but we can't avoid that unless/until we add import shims as a big
         # back-compat layer
 
-        # If this is set it means are in some kind of execution context (Task, Dag Parse or Triggerer perhaps)
+        # If this is set it means we are in some kind of execution context (Task, Dag Parse or Triggerer perhaps)
         # and should use the Task SDK API server path
-        if hasattr(sys.modules.get("airflow.sdk.execution_time.task_runner"), "SUPERVISOR_COMMS"):
+        if should_use_task_sdk_api_path():
+            if session is not None:
+                raise ValueError(
+                    "Variable.get() cannot use a metadata database session from an execution context; "
+                    "reads there go through the Execution API. Use airflow.sdk.Variable.get() instead."
+                )
             warnings.warn(
-                "Using Variable.get from `airflow.models` is deprecated. Please use `from airflow.sdk import"
-                "Variable` instead",
+                "Using Variable.get from `airflow.models` is deprecated."
+                "Please use `get` on Variable from sdk(`airflow.sdk.Variable`) instead",
                 DeprecationWarning,
                 stacklevel=1,
             )
             from airflow.sdk import Variable as TaskSDKVariable
-            from airflow.sdk.definitions._internal.types import NOTSET
 
-            return TaskSDKVariable.get(
-                key,
-                default=NOTSET if default_var is cls.__NO_DEFAULT_SENTINEL else default_var,
-                deserialize_json=deserialize_json,
+            default_kwargs = {} if default_var is cls.__NO_DEFAULT_SENTINEL else {"default": default_var}
+            var_val = TaskSDKVariable.get(key, deserialize_json=deserialize_json, **default_kwargs)
+            if isinstance(var_val, str):
+                mask_secret(var_val, key)
+
+            return var_val
+
+        if team_name and not conf.getboolean("core", "multi_team"):
+            raise ValueError(
+                "Multi-team mode is not configured in the Airflow environment but the task trying to access the variable belongs to a team"
             )
 
-        var_val = Variable.get_variable_from_secrets(key=key)
+        var_val = Variable.get_variable_from_secrets(key=key, team_name=team_name, session=session)
         if var_val is None:
             if default_var is not cls.__NO_DEFAULT_SENTINEL:
                 return default_var
-            else:
-                raise KeyError(f"Variable {key} does not exist")
-        else:
-            if deserialize_json:
-                obj = json.loads(var_val)
-                mask_secret(obj, key)
-                return obj
-            else:
-                mask_secret(var_val, key)
-                return var_val
+            raise KeyError(f"Variable {key} does not exist.")
+        if deserialize_json:
+            obj = json.loads(var_val)
+            mask_secret(obj, key)
+            return obj
+        mask_secret(var_val, key)
+        return var_val
 
     @staticmethod
-    @provide_session
     def set(
         key: str,
         value: Any,
         description: str | None = None,
         serialize_json: bool = False,
-        session: Session = None,
+        team_name: str | None = None,
+        session: Session | None = None,
     ) -> None:
         """
         Set a value for an Airflow Variable with a given Key.
 
-        This operation overwrites an existing variable.
+        This operation overwrites an existing variable using the session's dialect-specific upsert operation.
 
         :param key: Variable Key
-        :param value: Value to set for the Variable
+        :param value: Value to set for the Variable. Non-string values are coerced with ``str()``
+            unless ``serialize_json=True``, so pass ``serialize_json=True`` to store them as JSON
+            that ``deserialize_json=True`` can read back.
         :param description: Description of the Variable
         :param serialize_json: Serialize the value to a JSON string
-        :param session: Session
+        :param team_name: Team name associated to the variable (if any)
+        :param session: optional session, use if provided or create a new one
         """
+        # TODO: This is not the best way of having compat, but it's "better than erroring" for now. This still
+        # means SQLA etc is loaded, but we can't avoid that unless/until we add import shims as a big
+        # back-compat layer
+
+        # If this is set it means we are in some kind of execution context (Task, Dag Parse or Triggerer perhaps)
+        # and should use the Task SDK API server path
+        if should_use_task_sdk_api_path():
+            warnings.warn(
+                "Using Variable.set from `airflow.models` is deprecated."
+                "Please use `set` on Variable from sdk(`airflow.sdk.Variable`) instead",
+                DeprecationWarning,
+                stacklevel=1,
+            )
+            from airflow.sdk import Variable as TaskSDKVariable
+
+            TaskSDKVariable.set(
+                key=key,
+                value=value,
+                description=description,
+                serialize_json=serialize_json,
+            )
+            return
+
+        if team_name and not conf.getboolean("core", "multi_team"):
+            raise ValueError(
+                "Multi-team mode is not configured in the Airflow environment. To assign a team to a variable, multi-mode must be enabled."
+            )
+
         # check if the secret exists in the custom secrets' backend.
-        Variable.check_for_write_conflict(key=key)
+        from airflow.sdk import SecretCache
+
+        Variable.check_for_write_conflict(key=key, team_name=team_name)
         if serialize_json:
             stored_value = json.dumps(value, indent=2)
         else:
             stored_value = str(value)
 
-        Variable.delete(key, session=session)
-        session.add(Variable(key=key, val=stored_value, description=description))
-        session.flush()
-        # invalidate key in cache for faster propagation
-        # we cannot save the value set because it's possible that it's shadowed by a custom backend
-        # (see call to check_for_write_conflict above)
-        SecretCache.invalidate_variable(key)
+        ctx: contextlib.AbstractContextManager
+        if session is not None:
+            ctx = contextlib.nullcontext(session)
+        else:
+            ctx = create_session()
+
+        with ctx as session:
+            new_variable = Variable(key=key, val=stored_value, description=description, team_name=team_name)
+
+            val = new_variable._val
+            is_encrypted = new_variable.is_encrypted
+
+            upsert_values = dict(
+                key=key,
+                val=val,
+                description=description,
+                is_encrypted=is_encrypted,
+                team_name=team_name,
+            )
+            update_fields = dict(
+                val=val,
+                description=description,
+                is_encrypted=is_encrypted,
+            )
+            stmt = build_upsert_stmt(
+                get_dialect_name(session), Variable, ["key"], upsert_values, update_fields
+            )
+            session.execute(stmt)
+            # invalidate key in cache for faster propagation
+            # we cannot save the value set because it's possible that it's shadowed by a custom backend
+            # (see call to check_for_write_conflict above)
+            SecretCache.invalidate_variable(key, team_name=team_name)
 
     @staticmethod
-    @provide_session
     def update(
         key: str,
         value: Any,
         serialize_json: bool = False,
-        session: Session = None,
+        team_name: str | None = None,
+        session: Session | None = None,
     ) -> None:
         """
         Update a given Airflow Variable with the Provided value.
@@ -224,31 +333,117 @@ class Variable(Base, LoggingMixin):
         :param key: Variable Key
         :param value: Value to set for the Variable
         :param serialize_json: Serialize the value to a JSON string
-        :param session: Session
+        :param team_name: Team name associated to the variable (if any)
+        :param session: optional session, use if provided or create a new one
         """
-        Variable.check_for_write_conflict(key=key)
+        # TODO: This is not the best way of having compat, but it's "better than erroring" for now. This still
+        # means SQLA etc is loaded, but we can't avoid that unless/until we add import shims as a big
+        # back-compat layer
 
-        if Variable.get_variable_from_secrets(key=key) is None:
+        # If this is set it means are in some kind of execution context (Task, Dag Parse or Triggerer perhaps)
+        # and should use the Task SDK API server path
+        if should_use_task_sdk_api_path():
+            warnings.warn(
+                "Using Variable.update from `airflow.models` is deprecated."
+                "Please use `set` on Variable from sdk(`airflow.sdk.Variable`) instead as it is an upsert.",
+                DeprecationWarning,
+                stacklevel=1,
+            )
+            from airflow.sdk import Variable as TaskSDKVariable
+
+            # set is an upsert command, it can handle updates too
+            TaskSDKVariable.set(
+                key=key,
+                value=value,
+                serialize_json=serialize_json,
+            )
+            return
+
+        if team_name and not conf.getboolean("core", "multi_team"):
+            raise ValueError(
+                "Multi-team mode is not configured in the Airflow environment. To assign a team to a variable, multi-mode must be enabled."
+            )
+
+        Variable.check_for_write_conflict(key=key, team_name=team_name)
+
+        if Variable.get_variable_from_secrets(key=key, team_name=team_name, session=session) is None:
             raise KeyError(f"Variable {key} does not exist")
-        obj = session.scalar(select(Variable).where(Variable.key == key))
-        if obj is None:
-            raise AttributeError(f"Variable {key} does not exist in the Database and cannot be updated.")
 
-        Variable.set(
-            key=key, value=value, description=obj.description, serialize_json=serialize_json, session=session
-        )
+        ctx: contextlib.AbstractContextManager
+        if session is not None:
+            ctx = contextlib.nullcontext(session)
+        else:
+            ctx = create_session()
+
+        with ctx as session:
+            obj = session.scalar(
+                select(Variable).where(
+                    Variable.key == key, or_(Variable.team_name == team_name, Variable.team_name.is_(None))
+                )
+            )
+            if obj is None:
+                raise AttributeError(f"Variable {key} does not exist in the Database and cannot be updated.")
+
+            Variable.set(
+                key=key,
+                value=value,
+                description=obj.description,
+                serialize_json=serialize_json,
+                team_name=team_name,
+                session=session,
+            )
 
     @staticmethod
-    @provide_session
-    def delete(key: str, session: Session = None) -> int:
+    def delete(key: str, team_name: str | None = None, session: Session | None = None) -> int:
         """
         Delete an Airflow Variable for a given key.
 
         :param key: Variable Keys
+        :param team_name: Team name associated to the task trying to delete the variable (if any)
+        :param session: optional session, use if provided or create a new one
         """
-        rows = session.execute(delete(Variable).where(Variable.key == key)).rowcount
-        SecretCache.invalidate_variable(key)
-        return rows
+        # TODO: This is not the best way of having compat, but it's "better than erroring" for now. This still
+        # means SQLA etc is loaded, but we can't avoid that unless/until we add import shims as a big
+        # back-compat layer
+
+        # If this is set it means are in some kind of execution context (Task, Dag Parse or Triggerer perhaps)
+        # and should use the Task SDK API server path
+        if should_use_task_sdk_api_path():
+            warnings.warn(
+                "Using Variable.delete from `airflow.models` is deprecated."
+                "Please use `delete` on Variable from sdk(`airflow.sdk.Variable`) instead",
+                DeprecationWarning,
+                stacklevel=1,
+            )
+            from airflow.sdk import Variable as TaskSDKVariable
+
+            TaskSDKVariable.delete(
+                key=key,
+            )
+            return 1
+
+        if team_name and not conf.getboolean("core", "multi_team"):
+            raise ValueError(
+                "Multi-team mode is not configured in the Airflow environment but the task trying to delete the variable belongs to a team"
+            )
+
+        from airflow.sdk import SecretCache
+
+        ctx: contextlib.AbstractContextManager
+        if session is not None:
+            ctx = contextlib.nullcontext(session)
+        else:
+            ctx = create_session()
+
+        with ctx as session:
+            result = session.execute(
+                delete(Variable).where(
+                    Variable.key == key, or_(Variable.team_name == team_name, Variable.team_name.is_(None))
+                )
+            )
+            rows = getattr(result, "rowcount", 0) or 0
+            SecretCache.invalidate_variable(key, team_name=team_name)
+            return rows
 
     def rotate_fernet_key(self):
         """Rotate Fernet Key."""
@@ -257,7 +452,7 @@ class Variable(Base, LoggingMixin):
             self._val = fernet.rotate(self._val.encode("utf-8")).decode()
 
     @staticmethod
-    def check_for_write_conflict(key: str) -> None:
+    def check_for_write_conflict(key: str, team_name: str | None = None) -> None:
         """
         Log a warning if a variable exists outside the metastore.
 
@@ -266,11 +461,15 @@ class Variable(Base, LoggingMixin):
         subsequent reads will not read the set value.
 
         :param key: Variable Key
+        :param team_name: Team name the variable is being written for, so the check resolves
+            against the same scope the write will use
         """
         for secrets_backend in ensure_secrets_loaded():
             if not isinstance(secrets_backend, MetastoreBackend):
                 try:
-                    var_val = secrets_backend.get_variable(key=key)
+                    var_val = call_secrets_backend_method(
+                        secrets_backend.get_variable, team_name=team_name, key=key
+                    )
                     if var_val is not None:
                         _backend_name = type(secrets_backend).__name__
                         log.warning(
@@ -282,37 +481,65 @@ class Variable(Base, LoggingMixin):
                             _backend_name,
                             _backend_name,
                         )
-                        return
+                        return None
                 except Exception:
                     log.exception(
                         "Unable to retrieve variable from secrets backend (%s). "
                         "Checking subsequent secrets backend.",
                         type(secrets_backend).__name__,
                     )
-            return None
+        return None
 
     @staticmethod
-    def get_variable_from_secrets(key: str) -> str | None:
+    def get_variable_from_secrets(
+        key: str, team_name: str | None = None, *, session: Session | None = None
+    ) -> str | None:
         """
         Get Airflow Variable by iterating over all Secret Backends.
 
         :param key: Variable Key
+        :param team_name: Team name associated to the task trying to access the variable (if any)
+        :param session: Existing session to reuse for the metadata database lookup. Callers that
+            already hold a transaction must pass it, otherwise ``MetastoreBackend`` opens the same
+            scoped session and commits it, which detaches the caller's objects and is rejected
+            outright under ``prohibit_commit``.
         :return: Variable Value
         """
+        from airflow.sdk import SecretCache
+
         # check cache first
         # enabled only if SecretCache.init() has been called first
         try:
-            return SecretCache.get_variable(key)
+            return SecretCache.get_variable(key, team_name=team_name)
         except SecretCache.NotPresentException:
             pass  # continue business
 
         var_val = None
         # iterate over backends if not in cache (or expired)
         for secrets_backend in ensure_secrets_loaded():
+            # Only the metastore Variable backend touches the metadata database, so it is the only
+            # one offered a session, and only when its own override accepts one.  A subclass that
+            # overrides get_variable without the parameter raises TypeError, which the handler
+            # below swallows into a false "not found" that then gets cached.
+            session_kwargs: dict[str, Session] = {}
+            if (
+                session is not None
+                and isinstance(secrets_backend, MetastoreBackend)
+                and accepts_kwarg(secrets_backend.get_variable, "session")
+            ):
+                session_kwargs["session"] = session
             try:
-                var_val = secrets_backend.get_variable(key=key)
+                var_val = call_secrets_backend_method(
+                    secrets_backend.get_variable,
+                    team_name=team_name,
+                    key=key,
+                    **session_kwargs,
+                )
                 if var_val is not None:
                     break
+            except AirflowSecretsBackendAccessDenied:
+                # Authoritative deny — must NOT fall through to a less-restrictive backend.
+                raise
             except Exception:
                 log.exception(
                     "Unable to retrieve variable from secrets backend (%s). "
@@ -320,5 +547,19 @@ class Variable(Base, LoggingMixin):
                     type(secrets_backend).__name__,
                 )
 
-        SecretCache.save_variable(key, var_val)  # we save None as well
+        SecretCache.save_variable(key, var_val, team_name=team_name)  # we save None as well
         return var_val
+
+    @staticmethod
+    @provide_session
+    def get_team_name(variable_key: str, *, session=NEW_SESSION) -> str | None:
+        stmt = select(Variable.team_name).where(Variable.key == variable_key)
+        return session.scalar(stmt)
+
+    @staticmethod
+    @provide_session
+    def get_key_to_team_name_mapping(
+        variable_keys: list[str], *, session=NEW_SESSION
+    ) -> dict[str, str | None]:
+        stmt = select(Variable.key, Variable.team_name).where(Variable.key.in_(variable_keys))
+        return {key: team_name for key, team_name in session.execute(stmt)}

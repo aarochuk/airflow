@@ -20,18 +20,21 @@ from __future__ import annotations
 
 import inspect
 import logging
-import logging.config
-from unittest.mock import MagicMock
+import sqlite3
+from contextlib import closing
+from unittest.mock import MagicMock, PropertyMock, patch
 
+import pandas as pd
+import polars as pl
 import pytest
+from sqlalchemy import event
+from sqlalchemy.engine import Inspector
 
-from airflow.config_templates.airflow_local_settings import DEFAULT_LOGGING_CONFIG
 from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.models import Connection
 from airflow.providers.common.sql.dialects.dialect import Dialect
 from airflow.providers.common.sql.hooks.handlers import fetch_all_handler
 from airflow.providers.common.sql.hooks.sql import DbApiHook, resolve_dialects
-from airflow.utils.session import provide_session
 
 from tests_common.test_utils.common_sql import mock_db_hook
 from tests_common.test_utils.providers import get_provider_min_airflow_version
@@ -47,15 +50,18 @@ class DBApiHookForTests(DbApiHook):
     get_conn = MagicMock(name="conn")
 
 
-@provide_session
 @pytest.fixture(autouse=True)
-def create_connection(session):
-    conn = session.query(Connection).filter(Connection.conn_id == DEFAULT_CONN_ID).first()
-    conn.host = HOST
-    conn.login = None
-    conn.password = PASSWORD
-    conn.extra = None
-    session.commit()
+def create_connection(create_connection_without_db):
+    create_connection_without_db(
+        Connection(
+            conn_id=DEFAULT_CONN_ID,
+            conn_type="sqlite",
+            host=HOST,
+            login=None,
+            password=PASSWORD,
+            extra=None,
+        )
+    )
 
 
 def get_cursor_descriptions(fields: list[str]) -> list[tuple[str]]:
@@ -67,8 +73,16 @@ index = 0
 
 @pytest.mark.db_test
 @pytest.mark.parametrize(
-    "return_last, split_statements, sql, cursor_calls,"
-    "cursor_descriptions, cursor_results, hook_descriptions, hook_results, ",
+    (
+        "return_last",
+        "split_statements",
+        "sql",
+        "cursor_calls",
+        "cursor_descriptions",
+        "cursor_results",
+        "hook_descriptions",
+        "hook_results",
+    ),
     [
         pytest.param(
             True,
@@ -223,7 +237,6 @@ def test_query(
 
 class TestDbApiHook:
     def setup_method(self, **kwargs):
-        logging.config.dictConfig(DEFAULT_LOGGING_CONFIG)
         logging.root.disabled = True
 
     @pytest.mark.db_test
@@ -237,9 +250,8 @@ class TestDbApiHook:
     )
     def test_no_query(self, empty_statement):
         dbapi_hook = mock_db_hook(DbApiHook)
-        with pytest.raises(ValueError) as err:
+        with pytest.raises(ValueError, match="List of SQL statements is empty"):
             dbapi_hook.run(sql=empty_statement)
-        assert err.value.args[0] == "List of SQL statements is empty"
 
     @pytest.mark.db_test
     def test_placeholder_config_from_extra(self):
@@ -306,3 +318,248 @@ class TestDbApiHook:
     def test_uri_with_schema(self):
         dbapi_hook = mock_db_hook(DbApiHook, conn_params={"schema": "other_schema"})
         assert dbapi_hook.get_uri() == "//login:password@host:1234/other_schema"
+
+    @pytest.mark.db_test
+    @pytest.mark.parametrize(
+        ("df_type", "expected_type"),
+        [
+            ("test_default_df_type", pd.DataFrame),
+            ("pandas", pd.DataFrame),
+            ("polars", pl.DataFrame),
+        ],
+    )
+    def test_get_df_with_df_type(db, df_type, expected_type):
+        dbapi_hook = mock_db_hook(DbApiHook)
+        if df_type == "test_default_df_type":
+            df = dbapi_hook.get_df("SQL")
+            assert isinstance(df, pd.DataFrame)
+        else:
+            df = dbapi_hook.get_df("SQL", df_type=df_type)
+            assert isinstance(df, expected_type)
+
+
+class TestDbApiHookGetSqlalchemyEngine:
+    """SQLAlchemy resolves a bare ``postgresql`` scheme to the psycopg2 DB-API by default, which
+    may not be installed now that it's an optional extra of apache-airflow-providers-postgres."""
+
+    @pytest.mark.db_test
+    @patch("airflow.providers.common.sql.hooks.sql._is_sqlalchemy_2", return_value=True)
+    @patch("airflow.providers.common.sql.hooks.sql.find_spec")
+    @patch("airflow.providers.common.sql.hooks.sql.create_engine")
+    def test_falls_back_to_psycopg_when_psycopg2_import_fails(
+        self, mock_create_engine, mock_find_spec, mock_is_sqlalchemy_2, caplog
+    ):
+        mock_find_spec.return_value = object()
+        mock_create_engine.side_effect = [ModuleNotFoundError("No module named 'psycopg2'"), MagicMock()]
+        dbapi_hook = mock_db_hook(DbApiHook, conn_params={"conn_type": "postgresql"})
+
+        dbapi_hook.get_sqlalchemy_engine()
+
+        assert mock_create_engine.call_count == 2
+        retried_url = mock_create_engine.call_args.kwargs["url"]
+        assert retried_url.drivername == "postgresql+psycopg"
+        assert (
+            "SQLAlchemy could not load a DB-API driver for the bare 'postgresql://' URL; "
+            "retrying with psycopg (v3) ('postgresql+psycopg')."
+        ) in caplog.text
+
+    @pytest.mark.db_test
+    @patch("airflow.providers.common.sql.hooks.sql._is_sqlalchemy_2", return_value=False)
+    @patch("airflow.providers.common.sql.hooks.sql.find_spec")
+    @patch("airflow.providers.common.sql.hooks.sql.create_engine")
+    def test_falls_back_to_psycopg2_when_sqlalchemy_below_2(
+        self, mock_create_engine, mock_find_spec, mock_is_sqlalchemy_2, caplog
+    ):
+        # SQLAlchemy 1.4 (shipped with Airflow 2.11) has no native "postgresql+psycopg" dialect,
+        # so even when psycopg (v3) is importable the retry must use psycopg2, not psycopg.
+        mock_find_spec.return_value = object()
+        mock_create_engine.side_effect = [ModuleNotFoundError("No module named 'psycopg2'"), MagicMock()]
+        dbapi_hook = mock_db_hook(DbApiHook, conn_params={"conn_type": "postgresql"})
+
+        dbapi_hook.get_sqlalchemy_engine()
+
+        assert mock_create_engine.call_count == 2
+        retried_url = mock_create_engine.call_args.kwargs["url"]
+        assert retried_url.drivername == "postgresql+psycopg2"
+        assert (
+            "SQLAlchemy could not load a DB-API driver for the bare 'postgresql://' URL; "
+            "retrying with 'postgresql+psycopg2'."
+        ) in caplog.text
+
+    @pytest.mark.db_test
+    @patch("airflow.providers.common.sql.hooks.sql.find_spec")
+    @patch("airflow.providers.common.sql.hooks.sql.create_engine")
+    def test_falls_back_to_psycopg2_when_psycopg_unavailable(
+        self, mock_create_engine, mock_find_spec, caplog
+    ):
+        mock_find_spec.side_effect = lambda name: None if name == "psycopg" else object()
+        mock_create_engine.side_effect = [ModuleNotFoundError("No module named 'psycopg2'"), MagicMock()]
+        dbapi_hook = mock_db_hook(DbApiHook, conn_params={"conn_type": "postgresql"})
+
+        dbapi_hook.get_sqlalchemy_engine()
+
+        assert mock_create_engine.call_count == 2
+        retried_url = mock_create_engine.call_args.kwargs["url"]
+        assert retried_url.drivername == "postgresql+psycopg2"
+        assert (
+            "SQLAlchemy could not load a DB-API driver for the bare 'postgresql://' URL; "
+            "retrying with 'postgresql+psycopg2'."
+        ) in caplog.text
+
+    @pytest.mark.db_test
+    @patch("airflow.providers.common.sql.hooks.sql.find_spec", return_value=None)
+    @patch("airflow.providers.common.sql.hooks.sql.create_engine")
+    def test_reraises_when_no_postgres_driver_is_available(self, mock_create_engine, mock_find_spec):
+        original_error = ModuleNotFoundError("No module named 'psycopg2'")
+        mock_create_engine.side_effect = original_error
+        dbapi_hook = mock_db_hook(DbApiHook, conn_params={"conn_type": "postgresql"})
+
+        with pytest.raises(ModuleNotFoundError, match="psycopg2"):
+            dbapi_hook.get_sqlalchemy_engine()
+        mock_create_engine.assert_called_once()
+
+    @pytest.mark.db_test
+    @patch("airflow.providers.common.sql.hooks.sql.create_engine")
+    def test_does_not_retry_for_non_postgres_schemes(self, mock_create_engine):
+        original_error = ModuleNotFoundError("No module named 'some_other_driver'")
+        mock_create_engine.side_effect = original_error
+        dbapi_hook = mock_db_hook(DbApiHook, conn_params={"conn_type": "mysql"})
+
+        with pytest.raises(ModuleNotFoundError, match="some_other_driver"):
+            dbapi_hook.get_sqlalchemy_engine()
+        mock_create_engine.assert_called_once()
+
+
+class TestDbApiHookGetTableSchema:
+    @pytest.mark.db_test
+    def test_get_table_schema(self):
+        dbapi_hook = mock_db_hook(DbApiHook)
+        mock_inspector = MagicMock()
+        mock_inspector.get_columns.return_value = [
+            {"name": "id", "type": "INTEGER", "nullable": True},
+            {"name": "name", "type": "VARCHAR(255)", "nullable": False},
+        ]
+        with patch.object(
+            type(dbapi_hook), "inspector", new_callable=PropertyMock, return_value=mock_inspector
+        ):
+            result = dbapi_hook.get_table_schema("users")
+
+        assert result == [
+            {"name": "id", "type": "INTEGER"},
+            {"name": "name", "type": "VARCHAR(255)"},
+        ]
+        mock_inspector.get_columns.assert_called_once_with("users", schema=None)
+
+    @pytest.mark.db_test
+    def test_get_table_schema_with_schema(self):
+        dbapi_hook = mock_db_hook(DbApiHook)
+        mock_inspector = MagicMock()
+        mock_inspector.get_columns.return_value = [
+            {"name": "col1", "type": "TEXT"},
+        ]
+        with patch.object(
+            type(dbapi_hook), "inspector", new_callable=PropertyMock, return_value=mock_inspector
+        ):
+            dbapi_hook.get_table_schema("my_table", schema="my_schema")
+
+        mock_inspector.get_columns.assert_called_once_with("my_table", schema="my_schema")
+
+
+class TestDbApiHookGetTableComments:
+    @pytest.mark.db_test
+    @pytest.mark.parametrize(
+        ("inspector_result", "expected"),
+        [
+            pytest.param({"text": "Customer orders"}, "Customer orders", id="has-comment"),
+            pytest.param({"text": None}, None, id="comment-is-none"),
+            pytest.param({}, None, id="no-text-key"),
+            pytest.param(NotImplementedError(), None, id="dialect-unsupported"),
+        ],
+    )
+    def test_get_table_comment(self, inspector_result, expected):
+        dbapi_hook = mock_db_hook(DbApiHook)
+        mock_inspector = MagicMock(spec=Inspector)
+        if isinstance(inspector_result, Exception):
+            mock_inspector.get_table_comment.side_effect = inspector_result
+        else:
+            mock_inspector.get_table_comment.return_value = inspector_result
+        with patch.object(
+            type(dbapi_hook), "inspector", new_callable=PropertyMock, return_value=mock_inspector
+        ):
+            result = dbapi_hook.get_table_comment("orders", schema="sales")
+
+        assert result == expected
+        mock_inspector.get_table_comment.assert_called_once_with("orders", schema="sales")
+
+    @pytest.mark.db_test
+    def test_get_table_columns_with_comments(self):
+        dbapi_hook = mock_db_hook(DbApiHook)
+        mock_inspector = MagicMock(spec=Inspector)
+        mock_inspector.get_columns.return_value = [
+            {"name": "id", "type": "INTEGER", "comment": "Primary key"},
+            {"name": "name", "type": "VARCHAR(255)", "comment": None},
+            {"name": "note", "type": "TEXT", "comment": ""},
+            {"name": "created", "type": "TIMESTAMP"},
+        ]
+        with patch.object(
+            type(dbapi_hook), "inspector", new_callable=PropertyMock, return_value=mock_inspector
+        ):
+            result = dbapi_hook.get_table_columns_with_comments("users", schema="s")
+
+        assert result == [
+            {"name": "id", "type": "INTEGER", "comment": "Primary key"},
+            {"name": "name", "type": "VARCHAR(255)"},
+            {"name": "note", "type": "TEXT"},
+            {"name": "created", "type": "TIMESTAMP"},
+        ]
+        mock_inspector.get_columns.assert_called_once_with("users", schema="s")
+
+    def test_comment_methods_on_dialect_without_comment_support(self, tmp_path):
+        db_path = tmp_path / "plain.db"
+        with closing(sqlite3.connect(db_path)) as conn:
+            conn.execute("CREATE TABLE users (id INTEGER)")
+        hook = DBApiHookForTests(conn_id=DEFAULT_CONN_ID)
+        with patch.object(hook, "get_uri", autospec=True, return_value=f"sqlite:///{db_path}"):
+            assert hook.get_table_comment("users") is None
+            assert hook.get_table_columns_with_comments("users") == [{"name": "id", "type": "INTEGER"}]
+
+
+def test_inspector_is_cached():
+    """inspector should return the same object on repeated access (not create N engines)."""
+    hook = DBApiHookForTests(conn_id=DEFAULT_CONN_ID)
+    mock_engine = MagicMock()
+    with patch.object(hook, "get_sqlalchemy_engine", return_value=mock_engine) as mock_get_engine:
+        inspector1 = hook.inspector
+        inspector2 = hook.inspector
+        assert inspector1 is inspector2
+        mock_get_engine.assert_called_once()
+
+
+def test_inspector_closes_its_dbapi_connections_after_each_inspection(tmp_path):
+    """A cached inspector must not hold a pooled DBAPI connection open for the hook's lifetime."""
+    db_path = tmp_path / "inspect.db"
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("CREATE TABLE users (id INTEGER, name TEXT)")
+    hook = DBApiHookForTests(conn_id=DEFAULT_CONN_ID)
+    opened, closed = [], []
+    real_get_sqlalchemy_engine = hook.get_sqlalchemy_engine
+
+    def get_sqlalchemy_engine_with_listeners(engine_kwargs=None):
+        engine = real_get_sqlalchemy_engine(engine_kwargs)
+        event.listen(engine, "connect", lambda dbapi_conn, _record: opened.append(dbapi_conn))
+        event.listen(engine, "close", lambda dbapi_conn, _record: closed.append(dbapi_conn))
+        return engine
+
+    with (
+        patch.object(hook, "get_uri", autospec=True, return_value=f"sqlite:///{db_path}"),
+        patch.object(
+            hook, "get_sqlalchemy_engine", autospec=True, side_effect=get_sqlalchemy_engine_with_listeners
+        ),
+    ):
+        columns = hook.get_table_schema("users")
+        table_names = hook.inspector.get_table_names()
+
+    assert columns == [{"name": "id", "type": "INTEGER"}, {"name": "name", "type": "TEXT"}]
+    assert table_names == ["users"]
+    assert opened
+    assert closed == opened

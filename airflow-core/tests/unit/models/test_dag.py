@@ -18,11 +18,13 @@
 from __future__ import annotations
 
 import datetime
-import itertools
 import logging
 import os
 import pickle
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,81 +35,107 @@ import jinja2
 import pendulum
 import pytest
 import time_machine
-from sqlalchemy import inspect, select
+from sqlalchemy import delete, func, inspect, select, update
 
 from airflow import settings
+from airflow._shared.module_loading import qualname
+from airflow._shared.timezones import timezone
+from airflow._shared.timezones.timezone import datetime as datetime_tz
 from airflow.configuration import conf
-from airflow.decorators import setup, task as task_decorator, teardown
-from airflow.exceptions import (
-    AirflowException,
-    ParamValidationError,
-    UnknownExecutorException,
-)
-from airflow.models import DagBag
+from airflow.dag_processing.dagbag import BundleDagBag, DagBag
+from airflow.exceptions import AirflowException, DagNotPartitionedError, InvalidPartitionKeyError
 from airflow.models.asset import (
-    AssetActive,
     AssetAliasModel,
     AssetDagRunQueue,
     AssetEvent,
     AssetModel,
     TaskOutletAssetReference,
 )
-from airflow.models.baseoperator import BaseOperator
 from airflow.models.dag import (
-    DAG,
     DagModel,
     DagOwnerAttributes,
     DagTag,
-    ExecutorLoader,
-    get_asset_triggered_next_run_info,
+    clear_team_name_cache,
+    get_next_data_interval,
+    get_run_data_interval,
+    infer_automated_data_interval,
 )
-from airflow.models.dag_version import DagVersion
+from airflow.models.dagbag import DBDagBag
+from airflow.models.dagbundle import DagBundleModel
 from airflow.models.dagrun import DagRun
+from airflow.models.deadline_alert import DeadlineAlert as DeadlineAlertModel
+from airflow.models.dynamic_region import DynamicRegion
+from airflow.models.hitl import HITLDetail
 from airflow.models.serialized_dag import SerializedDagModel
 from airflow.models.taskinstance import TaskInstance as TI
+from airflow.models.trigger import handle_event_submit
+from airflow.models.variable import Variable
+from airflow.models.xcom import XComModel
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.sdk import TaskGroup
+from airflow.sdk import (
+    DAG,
+    BaseOperator,
+    CronPartitionTimetable,
+    PartitionedAtRuntime,
+    TaskGroup,
+    Variable as SdkVariable,
+    setup,
+    task as task_decorator,
+    task_group,
+    teardown,
+)
 from airflow.sdk.definitions._internal.contextmanager import TaskGroupContext
+from airflow.sdk.definitions._internal.loop import create_loop
 from airflow.sdk.definitions._internal.templater import NativeEnvironment, SandboxedEnvironment
 from airflow.sdk.definitions.asset import Asset, AssetAlias, AssetAll, AssetAny
+from airflow.sdk.definitions.callback import AsyncCallback
+from airflow.sdk.definitions.deadline import DeadlineAlert, DeadlineReference
 from airflow.sdk.definitions.param import Param
-from airflow.security import permissions
+from airflow.sdk.exceptions import TaskAwaitingInput
+from airflow.sdk.execution_time.hitl import upsert_hitl_detail
+from airflow.serialization.definitions.dag import SerializedDAG
+from airflow.serialization.encoders import coerce_to_core_timetable
+from airflow.serialization.serialized_objects import LazyDeserializedDAG
+from airflow.task.trigger_rule import TriggerRule
 from airflow.timetables.base import DagRunInfo, DataInterval, TimeRestriction, Timetable
 from airflow.timetables.simple import (
     AssetTriggeredTimetable,
     NullTimetable,
     OnceTimetable,
 )
-from airflow.utils import timezone
-from airflow.utils.file import list_py_file_paths
+from airflow.triggers.base import TriggerEvent
 from airflow.utils.session import create_session
-from airflow.utils.state import DagRunState, State, TaskInstanceState
-from airflow.utils.timezone import datetime as datetime_tz
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.utils.sqlalchemy import with_row_locks
+from airflow.utils.state import DagRunState, DagSchedulingState, State, TaskInstanceState
 from airflow.utils.types import DagRunTriggeredByType, DagRunType
-from airflow.utils.weight_rule import WeightRule
 
 from tests_common.test_utils.asserts import assert_queries_count
+from tests_common.test_utils.config import conf_vars
+from tests_common.test_utils.dag import create_scheduler_dag, sync_dag_to_db
 from tests_common.test_utils.db import (
     clear_db_assets,
     clear_db_dag_bundles,
     clear_db_dags,
     clear_db_runs,
     clear_db_serialized_dags,
+    clear_db_teams,
 )
 from tests_common.test_utils.mapping import expand_mapped_task
 from tests_common.test_utils.mock_plugins import mock_plugin_manager
+from tests_common.test_utils.taskinstance import run_task_instance
 from tests_common.test_utils.timetables import cron_timetable, delta_timetable
 from unit.models import DEFAULT_DATE
 from unit.plugins.priority_weight_strategy import (
+    DecreasingPriorityStrategy,
     FactorPriorityWeightStrategy,
     StaticTestPriorityWeightStrategy,
     TestPriorityWeightStrategyPlugin,
 )
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import ScalarResult
     from sqlalchemy.orm import Session
 
 pytestmark = pytest.mark.db_test
@@ -117,11 +145,15 @@ TEST_DATE = datetime_tz(2015, 1, 2, 0, 0)
 repo_root = Path(__file__).parents[2]
 
 
+async def empty_callback_for_deadline():
+    """Used in a number of tests to confirm that Deadlines and DeadlineAlerts function correctly."""
+    pass
+
+
 @pytest.fixture
 def clear_dags():
     clear_db_dags()
     clear_db_serialized_dags()
-    clear_db_dag_bundles()
     yield
     clear_db_dags()
     clear_db_serialized_dags()
@@ -135,13 +167,24 @@ def clear_assets():
     clear_db_assets()
 
 
-TEST_DAGS_FOLDER = Path(__file__).parent.parent / "dags"
+TEST_DAGS_FOLDER = Path(__file__).parents[1] / "dags"
 
 
 @pytest.fixture
 def test_dags_bundle(configure_testing_dag_bundle):
     with configure_testing_dag_bundle(TEST_DAGS_FOLDER):
         yield
+
+
+def test_infer_automated_data_interval_uses_asset_triggered_behavior():
+    class CustomAssetTriggeredTimetable(Timetable):
+        asset_triggered = True
+
+    logical_date = timezone.datetime(2026, 6, 21)
+
+    assert infer_automated_data_interval(CustomAssetTriggeredTimetable(), logical_date) == DataInterval.exact(
+        logical_date
+    )
 
 
 def _create_dagrun(
@@ -157,12 +200,13 @@ def _create_dagrun(
     logical_date = timezone.coerce_datetime(logical_date)
     if not isinstance(data_interval, DataInterval):
         data_interval = DataInterval(*map(timezone.coerce_datetime, data_interval))
-    run_id = dag.timetable.generate_run_id(
+    scheduler_dag = sync_dag_to_db(dag)
+    run_id = scheduler_dag.timetable.generate_run_id(
         run_type=run_type,
-        run_after=logical_date or data_interval.end,  # type: ignore
+        run_after=logical_date or data_interval.end,
         data_interval=data_interval,
     )
-    return dag.create_dagrun(
+    return scheduler_dag.create_dagrun(
         run_id=run_id,
         logical_date=logical_date,
         data_interval=data_interval,
@@ -181,30 +225,184 @@ class TestDag:
         clear_db_dags()
         clear_db_assets()
 
+    @conf_vars({("core", "load_examples"): "false"})
+    def test_dag_test_auto_parses_when_not_serialized(self, test_dags_bundle, session):
+        """
+        DAG.test() should auto-parse and sync the DAG if it's not serialized yet.
+        """
+
+        dag_id = "test_example_bash_operator"
+
+        dagbag = DagBag(dag_folder=os.fspath(TEST_DAGS_FOLDER))
+        dag = dagbag.dags.get(dag_id)
+
+        # Ensure not serialized yet
+        assert DBDagBag().get_latest_version_of_dag(dag_id, session=session) is None
+        assert session.scalar(select(DagRun).where(DagRun.dag_id == dag_id)) is None
+
+        dr = dag.test()
+        assert dr is not None
+
+        # Serialized DAG should now exist and DagRun would be created
+        set = DBDagBag().get_latest_version_of_dag(dag_id, session=session)
+        assert set is not None
+        assert session.scalar(select(DagRun).where(DagRun.dag_id == dag_id)) is not None
+
+    @conf_vars({("core", "load_examples"): "false"})
+    def test_dag_test_syncs_sibling_for_trigger_dagrun(self, test_dags_bundle, session):
+        """
+        Regression test for #64884.
+
+        ``DAG.test()`` must sync sibling DAGs in the bundle even when the parent
+        DAG is already serialized in the metadata DB. Otherwise a parent that
+        uses ``TriggerDagRunOperator`` to fire a sibling fails with a 404 from
+        the in-process Execution API because the sibling was never written.
+        """
+        parent_id = "test_dag_test_trigger_parent"
+        target_id = "test_dag_test_trigger_target"
+
+        dagbag = DagBag(dag_folder=os.fspath(TEST_DAGS_FOLDER))
+        parent = dagbag.dags.get(parent_id)
+        assert parent is not None
+
+        # Pre-sync ONLY the parent: simulates the state where the parent was
+        # written previously (e.g. by an earlier dag.test() invocation or by
+        # the DAG processor) but the trigger target has never been synced.
+        sync_dag_to_db(parent, bundle_name="testing")
+        session.commit()
+
+        assert DBDagBag().get_latest_version_of_dag(parent_id, session=session) is not None
+        assert DBDagBag().get_latest_version_of_dag(target_id, session=session) is None
+
+        dr = parent.test()
+
+        assert dr.state == DagRunState.SUCCESS
+        assert DBDagBag().get_latest_version_of_dag(target_id, session=session) is not None
+        assert session.scalar(select(DagRun).where(DagRun.dag_id == target_id)) is not None
+
+    @conf_vars({("core", "load_examples"): "false"})
+    def test_dag_test_syncs_sibling_for_dynamic_trigger_dagrun(self, test_dags_bundle, session):
+        """
+        Regression test for the dynamic-DAG variant of #64884.
+
+        The bundle re-walk in ``DAG.test()`` must not run under
+        ``_airflow_parsing_context_manager(dag_id=self.dag_id)``: DAG files that
+        use ``get_parsing_context().dag_id`` to early-return would otherwise
+        emit only the parent and the trigger target would be omitted from the
+        bag, leaving it missing from the metadata DB.
+        """
+        parent_id = "test_dag_test_dynamic_trigger_parent"
+        target_id = "test_dag_test_dynamic_trigger_target"
+
+        dagbag = DagBag(dag_folder=os.fspath(TEST_DAGS_FOLDER))
+        parent = dagbag.dags.get(parent_id)
+        assert parent is not None
+
+        sync_dag_to_db(parent, bundle_name="testing")
+        session.commit()
+
+        assert DBDagBag().get_latest_version_of_dag(target_id, session=session) is None
+
+        dr = parent.test()
+
+        assert dr.state == DagRunState.SUCCESS
+        assert DBDagBag().get_latest_version_of_dag(target_id, session=session) is not None
+        assert session.scalar(select(DagRun).where(DagRun.dag_id == target_id)) is not None
+
+    @conf_vars({("core", "load_examples"): "false"})
+    def test_dag_test_falls_back_when_recorded_bundle_no_longer_configured(
+        self, configure_dag_bundles, session
+    ):
+        """
+        If a parent DAG's recorded ``DagModel.bundle_name`` no longer appears in
+        the current bundle config (renamed/removed), ``DAG.test()`` must walk
+        all configured bundles instead of silently skipping the sync.
+        """
+        parent_id = "test_dag_test_trigger_parent"
+        target_id = "test_dag_test_trigger_target"
+
+        dagbag = DagBag(dag_folder=os.fspath(TEST_DAGS_FOLDER))
+        parent = dagbag.dags.get(parent_id)
+        assert parent is not None
+
+        # Record the parent under a bundle name that we will NOT include in the
+        # configured bundle list below.
+        sync_dag_to_db(parent, bundle_name="ghost-bundle")
+        session.merge(DagBundleModel(name="ghost-bundle"))
+        session.commit()
+
+        with configure_dag_bundles({"current": TEST_DAGS_FOLDER}):
+            dr = parent.test()
+
+        assert dr.state == DagRunState.SUCCESS
+        assert DBDagBag().get_latest_version_of_dag(target_id, session=session) is not None
+        assert session.scalar(select(DagRun).where(DagRun.dag_id == target_id)) is not None
+
+    @conf_vars({("core", "load_examples"): "false"})
+    def test_dag_test_only_syncs_owning_bundle_when_parent_already_serialized(
+        self, configure_dag_bundles, session
+    ):
+        """
+        When the parent DAG is already in the DB, ``DAG.test()`` should only
+        re-walk the bundle that owns it, not every configured bundle. Confirms
+        that the perf-sensitive optimization in the fix is in effect.
+        """
+        parent_id = "test_dag_test_trigger_parent"
+
+        dagbag = DagBag(dag_folder=os.fspath(TEST_DAGS_FOLDER))
+        parent = dagbag.dags.get(parent_id)
+        assert parent is not None
+
+        sync_dag_to_db(parent, bundle_name="testing")
+        # The owning bundle row needs to exist before dag.test() commits its
+        # bundle-sync; ``configure_dag_bundles`` only writes the unrelated bundle.
+        session.merge(DagBundleModel(name="testing"))
+        session.commit()
+
+        with configure_dag_bundles(
+            {
+                "testing": TEST_DAGS_FOLDER,
+                "unrelated": TEST_DAGS_FOLDER,
+            }
+        ):
+            instantiated: list[str] = []
+            real_init = BundleDagBag.__init__
+
+            def _spy(self, *args, **kwargs):
+                instantiated.append(kwargs.get("bundle_name", ""))
+                real_init(self, *args, **kwargs)
+
+            with mock.patch.object(BundleDagBag, "__init__", _spy):
+                dr = parent.test()
+
+        assert dr.state == DagRunState.SUCCESS
+        # Only the owning bundle should have been parsed.
+        assert "testing" in instantiated
+        assert "unrelated" not in instantiated
+
+    def test_dag_test_runtime_start_date_decoupled_from_logical_date(self, dag_maker, time_machine):
+        """
+        Ensure DAG.test() decouples its execution start_date from historical logical_dates.
+        """
+        past_logical_date = pendulum.datetime(2024, 1, 1, tz="UTC")
+        frozen_now = pendulum.datetime(2026, 6, 22, 12, 0, 0, tz="UTC")
+
+        time_machine.move_to(frozen_now, tick=False)
+
+        with dag_maker(dag_id="test_runtime_duration_isolation", start_date=past_logical_date) as dag:
+            EmptyOperator(task_id="task1")
+
+        # Run dag.test against the DB
+        dr = dag.test(logical_date=past_logical_date)
+
+        # Assert directly on the created DagRun object returned from the DB
+        assert dr.logical_date == past_logical_date
+        assert dr.start_date == frozen_now
+
     def teardown_method(self) -> None:
         clear_db_runs()
         clear_db_dags()
         clear_db_assets()
-
-    @staticmethod
-    def _clean_up(dag_id: str):
-        with create_session() as session:
-            session.query(DagRun).filter(DagRun.dag_id == dag_id).delete(synchronize_session=False)
-            session.query(TI).filter(TI.dag_id == dag_id).delete(synchronize_session=False)
-
-    @staticmethod
-    def _occur_before(a, b, list_):
-        """
-        Assert that a occurs before b in the list.
-        """
-        a_index = -1
-        b_index = -1
-        for i, e in enumerate(list_):
-            if e.task_id == a:
-                a_index = i
-            if e.task_id == b:
-                b_index = i
-        return 0 <= a_index < b_index
 
     def test_dag_naive_default_args_start_date(self):
         dag = DAG("DAG", schedule=None, default_args={"start_date": datetime.datetime(2018, 1, 1)})
@@ -220,95 +418,12 @@ class TestDag:
         dag = DAG("DAG", schedule=None, default_args={"start_date": None})
         assert dag.timezone == settings.TIMEZONE
 
-    def test_dag_task_priority_weight_total(self):
-        width = 5
-        depth = 5
-        weight = 5
-        pattern = re.compile("stage(\\d*).(\\d*)")
-        # Fully connected parallel tasks. i.e. every task at each parallel
-        # stage is dependent on every task in the previous stage.
-        # Default weight should be calculated using downstream descendants
-        with DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"}) as dag:
-            pipeline = [
-                [EmptyOperator(task_id=f"stage{i}.{j}", priority_weight=weight) for j in range(width)]
-                for i in range(depth)
-            ]
-            for upstream, downstream in zip(pipeline, pipeline[1:]):
-                for up_task, down_task in itertools.product(upstream, downstream):
-                    down_task.set_upstream(up_task)
-
-            for task in dag.task_dict.values():
-                match = pattern.match(task.task_id)
-                task_depth = int(match.group(1))
-                # the sum of each stages after this task + itself
-                correct_weight = ((depth - (task_depth + 1)) * width + 1) * weight
-
-                calculated_weight = task.priority_weight_total
-                assert calculated_weight == correct_weight
-
-    def test_dag_task_priority_weight_total_using_upstream(self):
-        # Same test as above except use 'upstream' for weight calculation
-        weight = 3
-        width = 5
-        depth = 5
-        pattern = re.compile("stage(\\d*).(\\d*)")
-        with DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"}) as dag:
-            pipeline = [
-                [
-                    EmptyOperator(
-                        task_id=f"stage{i}.{j}",
-                        priority_weight=weight,
-                        weight_rule=WeightRule.UPSTREAM,
-                    )
-                    for j in range(width)
-                ]
-                for i in range(depth)
-            ]
-            for upstream, downstream in zip(pipeline, pipeline[1:]):
-                for up_task, down_task in itertools.product(upstream, downstream):
-                    down_task.set_upstream(up_task)
-
-            for task in dag.task_dict.values():
-                match = pattern.match(task.task_id)
-                task_depth = int(match.group(1))
-                # the sum of each stages after this task + itself
-                correct_weight = (task_depth * width + 1) * weight
-
-                calculated_weight = task.priority_weight_total
-                assert calculated_weight == correct_weight
-
-    def test_dag_task_priority_weight_total_using_absolute(self):
-        # Same test as above except use 'absolute' for weight calculation
-        weight = 10
-        width = 5
-        depth = 5
-        with DAG("dag", schedule=None, start_date=DEFAULT_DATE, default_args={"owner": "owner1"}) as dag:
-            pipeline = [
-                [
-                    EmptyOperator(
-                        task_id=f"stage{i}.{j}",
-                        priority_weight=weight,
-                        weight_rule=WeightRule.ABSOLUTE,
-                    )
-                    for j in range(width)
-                ]
-                for i in range(depth)
-            ]
-            for upstream, downstream in zip(pipeline, pipeline[1:]):
-                for up_task, down_task in itertools.product(upstream, downstream):
-                    down_task.set_upstream(up_task)
-
-            for task in dag.task_dict.values():
-                # the sum of each stages after this task + itself
-                correct_weight = weight
-                calculated_weight = task.priority_weight_total
-                assert calculated_weight == correct_weight
-
     @pytest.mark.parametrize(
-        "cls, expected",
+        ("cls", "expected"),
         [
             (StaticTestPriorityWeightStrategy, 99),
             (FactorPriorityWeightStrategy, 3),
+            (DecreasingPriorityStrategy, 4),
         ],
     )
     def test_dag_task_custom_weight_strategy(self, cls, expected):
@@ -328,223 +443,6 @@ class TestDag:
         )
         ti = dr.get_task_instance(task.task_id)
         assert ti.priority_weight == expected
-
-    def test_get_num_task_instances(self):
-        test_dag_id = "test_get_num_task_instances_dag"
-        test_task_id = "task_1"
-
-        test_dag = DAG(dag_id=test_dag_id, schedule=None, start_date=DEFAULT_DATE)
-        test_task = EmptyOperator(task_id=test_task_id, dag=test_dag)
-
-        dr1 = _create_dagrun(
-            test_dag,
-            run_type=DagRunType.MANUAL,
-            logical_date=DEFAULT_DATE,
-            data_interval=(DEFAULT_DATE, DEFAULT_DATE),
-        )
-        dr2 = _create_dagrun(
-            test_dag,
-            run_type=DagRunType.MANUAL,
-            logical_date=DEFAULT_DATE + datetime.timedelta(days=1),
-            data_interval=(
-                DEFAULT_DATE + datetime.timedelta(days=1),
-                DEFAULT_DATE + datetime.timedelta(days=1),
-            ),
-        )
-        dr3 = _create_dagrun(
-            test_dag,
-            run_type=DagRunType.MANUAL,
-            logical_date=DEFAULT_DATE + datetime.timedelta(days=2),
-            data_interval=(
-                DEFAULT_DATE + datetime.timedelta(days=2),
-                DEFAULT_DATE + datetime.timedelta(days=2),
-            ),
-        )
-        dr4 = _create_dagrun(
-            test_dag,
-            run_type=DagRunType.MANUAL,
-            logical_date=DEFAULT_DATE + datetime.timedelta(days=3),
-            data_interval=(
-                DEFAULT_DATE + datetime.timedelta(days=2),
-                DEFAULT_DATE + datetime.timedelta(days=2),
-            ),
-        )
-
-        ti1 = TI(task=test_task, run_id=dr1.run_id)
-        ti1.refresh_from_db()
-        ti1.state = None
-        ti2 = TI(task=test_task, run_id=dr2.run_id)
-        ti2.refresh_from_db()
-        ti2.state = State.RUNNING
-        ti3 = TI(task=test_task, run_id=dr3.run_id)
-        ti3.refresh_from_db()
-        ti3.state = State.QUEUED
-        ti4 = TI(task=test_task, run_id=dr4.run_id)
-        ti4.refresh_from_db()
-        ti4.state = State.RUNNING
-        session = settings.Session()
-        session.merge(ti1)
-        session.merge(ti2)
-        session.merge(ti3)
-        session.merge(ti4)
-        session.commit()
-
-        assert DAG.get_num_task_instances(test_dag_id, task_ids=["fakename"], session=session) == 0
-        assert DAG.get_num_task_instances(test_dag_id, task_ids=[test_task_id], session=session) == 4
-        assert (
-            DAG.get_num_task_instances(test_dag_id, task_ids=["fakename", test_task_id], session=session) == 4
-        )
-        assert (
-            DAG.get_num_task_instances(test_dag_id, task_ids=[test_task_id], states=[None], session=session)
-            == 1
-        )
-        assert (
-            DAG.get_num_task_instances(
-                test_dag_id, task_ids=[test_task_id], states=[State.RUNNING], session=session
-            )
-            == 2
-        )
-        assert (
-            DAG.get_num_task_instances(
-                test_dag_id, task_ids=[test_task_id], states=[None, State.RUNNING], session=session
-            )
-            == 3
-        )
-        assert (
-            DAG.get_num_task_instances(
-                test_dag_id,
-                task_ids=[test_task_id],
-                states=[None, State.QUEUED, State.RUNNING],
-                session=session,
-            )
-            == 4
-        )
-        session.close()
-
-    def test_get_task_instances_before(self):
-        BASE_DATE = timezone.datetime(2022, 7, 20, 20)
-
-        test_dag_id = "test_get_task_instances_before"
-        test_task_id = "the_task"
-
-        test_dag = DAG(dag_id=test_dag_id, schedule=None, start_date=BASE_DATE)
-        EmptyOperator(task_id=test_task_id, dag=test_dag)
-
-        session = settings.Session()
-
-        def dag_run_before(delta_h=0, type=DagRunType.SCHEDULED):
-            dagrun = test_dag.create_dagrun(
-                state=State.SUCCESS,
-                run_type=type,
-                run_id=f"test_{delta_h}",
-                logical_date=None,
-                data_interval=None,
-                run_after=None,
-                session=session,
-                triggered_by=DagRunTriggeredByType.TEST,
-            )
-            dagrun.start_date = dagrun.run_after = dagrun.logical_date = BASE_DATE + timedelta(hours=delta_h)
-            return dagrun
-
-        dr1 = dag_run_before(delta_h=-1, type=DagRunType.MANUAL)  # H19
-        dr2 = dag_run_before(delta_h=-2, type=DagRunType.MANUAL)  # H18
-        dr3 = dag_run_before(delta_h=-3, type=DagRunType.MANUAL)  # H17
-        dr4 = dag_run_before(delta_h=-4, type=DagRunType.MANUAL)  # H16
-        dr5 = dag_run_before(delta_h=-5)  # H15
-        dr6 = dag_run_before(delta_h=-6)  # H14
-        dr7 = dag_run_before(delta_h=-7)  # H13
-        dr8 = dag_run_before(delta_h=-8)  # H12
-
-        session.commit()
-
-        REF_DATE = BASE_DATE
-
-        assert set([dr.run_id for dr in [dr1]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=1, session=session)
-            ]
-        )
-        assert set([dr.run_id for dr in [dr1, dr2, dr3]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=3, session=session)
-            ]
-        )
-        assert set([dr.run_id for dr in [dr1, dr2, dr3, dr4, dr5]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=5, session=session)
-            ]
-        )
-        assert set([dr.run_id for dr in [dr1, dr2, dr3, dr4, dr5, dr6, dr7]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=7, session=session)
-            ]
-        )
-        assert set([dr.run_id for dr in [dr1, dr2, dr3, dr4, dr5, dr6, dr7, dr8]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=9, session=session)
-            ]
-        )
-        assert set([dr.run_id for dr in [dr1, dr2, dr3, dr4, dr5, dr6, dr7, dr8]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=10, session=session)
-            ]
-        )  # stays constrained to available ones
-
-        REF_DATE = BASE_DATE + timedelta(hours=-3.5)
-
-        assert set([dr.run_id for dr in [dr4]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=1, session=session)
-            ]
-        )
-        assert set([dr.run_id for dr in [dr4, dr5, dr6]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=3, session=session)
-            ]
-        )
-        assert set([dr.run_id for dr in [dr4, dr5, dr6, dr7, dr8]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=5, session=session)
-            ]
-        )
-        assert set([dr.run_id for dr in [dr4, dr5, dr6, dr7, dr8]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=6, session=session)
-            ]
-        )  # stays constrained to available ones
-
-        REF_DATE = BASE_DATE + timedelta(hours=-8)
-
-        assert set([dr.run_id for dr in [dr8]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=0, session=session)
-            ]
-        )
-        assert set([dr.run_id for dr in [dr8]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=1, session=session)
-            ]
-        )
-        assert set([dr.run_id for dr in [dr8]]) == set(
-            [
-                ti.run_id
-                for ti in test_dag.get_task_instances_before(base_date=REF_DATE, num=10, session=session)
-            ]
-        )
-
-        session.close()
 
     def test_user_defined_filters_macros(self):
         def jinja_udf(name):
@@ -581,7 +479,7 @@ class TestDag:
         assert jinja_env.undefined is jinja2.Undefined
 
     @pytest.mark.parametrize(
-        "use_native_obj, force_sandboxed, expected_env",
+        ("use_native_obj", "force_sandboxed", "expected_env"),
         [
             (False, True, SandboxedEnvironment),
             (False, False, SandboxedEnvironment),
@@ -632,11 +530,12 @@ class TestDag:
 
         assert task.test_field == ["{{ ds }}", "some_string"]
 
-    def test_create_dagrun_when_schedule_is_none_and_empty_start_date(self):
+    def test_create_dagrun_when_schedule_is_none_and_empty_start_date(self, testing_dag_bundle):
         # Check that we don't get an AttributeError 'start_date' for self.start_date when schedule is none
         dag = DAG("dag_with_none_schedule_and_empty_start_date", schedule=None)
         dag.add_task(BaseOperator(task_id="task_without_start_date"))
-        dagrun = dag.create_dagrun(
+        scheduler_dag = sync_dag_to_db(dag)
+        dagrun = scheduler_dag.create_dagrun(
             run_id="test",
             state=State.RUNNING,
             run_type=DagRunType.MANUAL,
@@ -647,51 +546,63 @@ class TestDag:
         )
         assert dagrun is not None
 
-    def test_dagtag_repr(self):
+    def test_dagtag_repr(self, testing_dag_bundle):
         clear_db_dags()
         dag = DAG("dag-test-dagtag", schedule=None, start_date=DEFAULT_DATE, tags=["tag-1", "tag-2"])
-        dag.sync_to_db()
+        session = settings.Session()
+        orm_dag = DagModel(
+            dag_id=dag.dag_id,
+            bundle_name="testing",
+            is_stale=False,
+        )
+        session.add(orm_dag)
+        session.flush()
+
+        sync_dag_to_db(dag)
         with create_session() as session:
             assert {"tag-1", "tag-2"} == {
-                repr(t) for t in session.query(DagTag).filter(DagTag.dag_id == "dag-test-dagtag").all()
+                repr(t)
+                for t in session.scalars(select(DagTag).where(DagTag.dag_id == "dag-test-dagtag")).all()
             }
 
     def test_bulk_write_to_db(self, testing_dag_bundle):
         clear_db_dags()
         dags = [
-            DAG(f"dag-bulk-sync-{i}", schedule=None, start_date=DEFAULT_DATE, tags=["test-dag"])
+            create_scheduler_dag(
+                DAG(f"dag-bulk-sync-{i}", schedule=None, start_date=DEFAULT_DATE, tags=["test-dag"])
+            )
             for i in range(4)
         ]
 
         with assert_queries_count(6):
-            DAG.bulk_write_to_db("testing", None, dags)
+            SerializedDAG.bulk_write_to_db("testing", None, dags)
         with create_session() as session:
             assert {"dag-bulk-sync-0", "dag-bulk-sync-1", "dag-bulk-sync-2", "dag-bulk-sync-3"} == {
-                row[0] for row in session.query(DagModel.dag_id).all()
+                row[0] for row in session.execute(select(DagModel.dag_id)).all()
             }
             assert {
                 ("dag-bulk-sync-0", "test-dag"),
                 ("dag-bulk-sync-1", "test-dag"),
                 ("dag-bulk-sync-2", "test-dag"),
                 ("dag-bulk-sync-3", "test-dag"),
-            } == set(session.query(DagTag.dag_id, DagTag.name).all())
+            } == set(session.execute(select(DagTag.dag_id, DagTag.name)).all())
 
-            for row in session.query(DagModel.last_parsed_time).all():
+            for row in session.execute(select(DagModel.last_parsed_time)).all():
                 assert row[0] is not None
 
         # Re-sync should do fewer queries
         with assert_queries_count(9):
-            DAG.bulk_write_to_db("testing", None, dags)
+            SerializedDAG.bulk_write_to_db("testing", None, dags)
         with assert_queries_count(9):
-            DAG.bulk_write_to_db("testing", None, dags)
+            SerializedDAG.bulk_write_to_db("testing", None, dags)
         # Adding tags
         for dag in dags:
             dag.tags.add("test-dag2")
         with assert_queries_count(10):
-            DAG.bulk_write_to_db("testing", None, dags)
+            SerializedDAG.bulk_write_to_db("testing", None, dags)
         with create_session() as session:
             assert {"dag-bulk-sync-0", "dag-bulk-sync-1", "dag-bulk-sync-2", "dag-bulk-sync-3"} == {
-                row[0] for row in session.query(DagModel.dag_id).all()
+                row[0] for row in session.execute(select(DagModel.dag_id)).all()
             }
             assert {
                 ("dag-bulk-sync-0", "test-dag"),
@@ -702,38 +613,38 @@ class TestDag:
                 ("dag-bulk-sync-2", "test-dag2"),
                 ("dag-bulk-sync-3", "test-dag"),
                 ("dag-bulk-sync-3", "test-dag2"),
-            } == set(session.query(DagTag.dag_id, DagTag.name).all())
+            } == set(session.execute(select(DagTag.dag_id, DagTag.name)).all())
         # Removing tags
         for dag in dags:
             dag.tags.remove("test-dag")
         with assert_queries_count(10):
-            DAG.bulk_write_to_db("testing", None, dags)
+            SerializedDAG.bulk_write_to_db("testing", None, dags)
         with create_session() as session:
             assert {"dag-bulk-sync-0", "dag-bulk-sync-1", "dag-bulk-sync-2", "dag-bulk-sync-3"} == {
-                row[0] for row in session.query(DagModel.dag_id).all()
+                row[0] for row in session.execute(select(DagModel.dag_id)).all()
             }
             assert {
                 ("dag-bulk-sync-0", "test-dag2"),
                 ("dag-bulk-sync-1", "test-dag2"),
                 ("dag-bulk-sync-2", "test-dag2"),
                 ("dag-bulk-sync-3", "test-dag2"),
-            } == set(session.query(DagTag.dag_id, DagTag.name).all())
+            } == set(session.execute(select(DagTag.dag_id, DagTag.name)).all())
 
-            for row in session.query(DagModel.last_parsed_time).all():
+            for row in session.execute(select(DagModel.last_parsed_time)).all():
                 assert row[0] is not None
 
         # Removing all tags
         for dag in dags:
             dag.tags = set()
         with assert_queries_count(10):
-            DAG.bulk_write_to_db("testing", None, dags)
+            SerializedDAG.bulk_write_to_db("testing", None, dags)
         with create_session() as session:
             assert {"dag-bulk-sync-0", "dag-bulk-sync-1", "dag-bulk-sync-2", "dag-bulk-sync-3"} == {
-                row[0] for row in session.query(DagModel.dag_id).all()
+                row[0] for row in session.execute(select(DagModel.dag_id)).all()
             }
-            assert not set(session.query(DagTag.dag_id, DagTag.name).all())
+            assert not set(session.execute(select(DagTag.dag_id, DagTag.name)).all())
 
-            for row in session.query(DagModel.last_parsed_time).all():
+            for row in session.execute(select(DagModel.last_parsed_time)).all():
                 assert row[0] is not None
 
     def test_bulk_write_to_db_single_dag(self, testing_dag_bundle):
@@ -742,26 +653,28 @@ class TestDag:
         """
         clear_db_dags()
         dags = [
-            DAG(f"dag-bulk-sync-{i}", schedule=None, start_date=DEFAULT_DATE, tags=["test-dag"])
+            create_scheduler_dag(
+                DAG(f"dag-bulk-sync-{i}", schedule=None, start_date=DEFAULT_DATE, tags=["test-dag"])
+            )
             for i in range(1)
         ]
 
         with assert_queries_count(6):
-            DAG.bulk_write_to_db("testing", None, dags)
+            SerializedDAG.bulk_write_to_db("testing", None, dags)
         with create_session() as session:
-            assert {"dag-bulk-sync-0"} == {row[0] for row in session.query(DagModel.dag_id).all()}
+            assert {"dag-bulk-sync-0"} == {row[0] for row in session.execute(select(DagModel.dag_id)).all()}
             assert {
                 ("dag-bulk-sync-0", "test-dag"),
-            } == set(session.query(DagTag.dag_id, DagTag.name).all())
+            } == set(session.execute(select(DagTag.dag_id, DagTag.name)).all())
 
-            for row in session.query(DagModel.last_parsed_time).all():
+            for row in session.execute(select(DagModel.last_parsed_time)).all():
                 assert row[0] is not None
 
         # Re-sync should do fewer queries
         with assert_queries_count(8):
-            DAG.bulk_write_to_db("testing", None, dags)
+            SerializedDAG.bulk_write_to_db("testing", None, dags)
         with assert_queries_count(8):
-            DAG.bulk_write_to_db("testing", None, dags)
+            SerializedDAG.bulk_write_to_db("testing", None, dags)
 
     def test_bulk_write_to_db_multiple_dags(self, testing_dag_bundle):
         """
@@ -769,48 +682,50 @@ class TestDag:
         """
         clear_db_dags()
         dags = [
-            DAG(f"dag-bulk-sync-{i}", schedule=None, start_date=DEFAULT_DATE, tags=["test-dag"])
+            create_scheduler_dag(
+                DAG(f"dag-bulk-sync-{i}", schedule=None, start_date=DEFAULT_DATE, tags=["test-dag"])
+            )
             for i in range(4)
         ]
 
         with assert_queries_count(6):
-            DAG.bulk_write_to_db("testing", None, dags)
+            SerializedDAG.bulk_write_to_db("testing", None, dags)
         with create_session() as session:
             assert {"dag-bulk-sync-0", "dag-bulk-sync-1", "dag-bulk-sync-2", "dag-bulk-sync-3"} == {
-                row[0] for row in session.query(DagModel.dag_id).all()
+                row[0] for row in session.execute(select(DagModel.dag_id)).all()
             }
             assert {
                 ("dag-bulk-sync-0", "test-dag"),
                 ("dag-bulk-sync-1", "test-dag"),
                 ("dag-bulk-sync-2", "test-dag"),
                 ("dag-bulk-sync-3", "test-dag"),
-            } == set(session.query(DagTag.dag_id, DagTag.name).all())
+            } == set(session.execute(select(DagTag.dag_id, DagTag.name)).all())
 
-            for row in session.query(DagModel.last_parsed_time).all():
+            for row in session.execute(select(DagModel.last_parsed_time)).all():
                 assert row[0] is not None
 
         # Re-sync should do fewer queries
         with assert_queries_count(9):
-            DAG.bulk_write_to_db("testing", None, dags)
+            SerializedDAG.bulk_write_to_db("testing", None, dags)
         with assert_queries_count(9):
-            DAG.bulk_write_to_db("testing", None, dags)
+            SerializedDAG.bulk_write_to_db("testing", None, dags)
 
     @pytest.mark.parametrize("interval", [None, "@daily"])
     def test_bulk_write_to_db_interval_save_runtime(self, testing_dag_bundle, interval):
         mock_active_runs_of_dags = mock.MagicMock(side_effect=DagRun.active_runs_of_dags)
         with mock.patch.object(DagRun, "active_runs_of_dags", mock_active_runs_of_dags):
             dags_null_timetable = [
-                DAG("dag-interval-None", schedule=None, start_date=TEST_DATE),
-                DAG("dag-interval-test", schedule=interval, start_date=TEST_DATE),
+                create_scheduler_dag(DAG("dag-interval-None", schedule=None, start_date=TEST_DATE)),
+                create_scheduler_dag(DAG("dag-interval-test", schedule=interval, start_date=TEST_DATE)),
             ]
-            DAG.bulk_write_to_db("testing", None, dags_null_timetable, session=settings.Session())
+            SerializedDAG.bulk_write_to_db("testing", None, dags_null_timetable)
             if interval:
                 mock_active_runs_of_dags.assert_called_once()
             else:
                 mock_active_runs_of_dags.assert_not_called()
 
     @pytest.mark.parametrize(
-        "state,catchup,expected_next_dagrun",
+        ("state", "catchup", "expected_next_dagrun"),
         [
             # With catchup=True, next_dagrun is the start date
             (DagRunState.RUNNING, True, DEFAULT_DATE),
@@ -832,21 +747,21 @@ class TestDag:
             catchup=catchup,
         )
         dag.max_active_runs = 1
-
         EmptyOperator(task_id="dummy", dag=dag, owner="airflow")
 
-        session = settings.Session()
-        dag.clear()
-        DAG.bulk_write_to_db("testing", None, [dag], session=session)
+        scheduler_dag = sync_dag_to_db(dag)
+        scheduler_dag.clear()
 
+        session = settings.Session()
         model = session.get(DagModel, dag.dag_id)
+        current_time = timezone.utcnow()
 
         if expected_next_dagrun is None:
             # For catchup=False, next_dagrun will be around the current date (not DEFAULT_DATE)
             # Instead of comparing exact dates, verify it's relatively recent and not the old start date
-            current_time = timezone.utcnow()
 
-            # Verify it's not using the old DEFAULT_DATE from 2016 and is after that since we are picking up present date.
+            # Verify it's not using the old DEFAULT_DATE from 2016 and is after
+            # that since we are picking up present date.
             assert model.next_dagrun.year >= DEFAULT_DATE.year
             assert model.next_dagrun.month >= DEFAULT_DATE.month
 
@@ -864,38 +779,43 @@ class TestDag:
             assert model.next_dagrun == expected_next_dagrun
             assert model.next_dagrun_create_after == expected_next_dagrun + timedelta(days=1)
 
-        dr = dag.create_dagrun(
+        assert model.exceeds_max_non_backfill is False
+
+        dr = scheduler_dag.create_dagrun(
             run_id="test",
             state=state,
             logical_date=model.next_dagrun,
             run_type=DagRunType.SCHEDULED,
             session=session,
-            data_interval=(model.next_dagrun, model.next_dagrun),
+            data_interval=(model.next_dagrun, model.next_dagrun + timedelta(days=1)),
             run_after=model.next_dagrun_create_after,
             triggered_by=DagRunTriggeredByType.TEST,
         )
         assert dr is not None
-        DAG.bulk_write_to_db("testing", None, [dag])
+        SerializedDAG.bulk_write_to_db("testing", None, [dag])
+        model = session.get(DagModel, dag.dag_id)
+        # Check that exceeds_max_non_backfill is set correctly
+        assert model.exceeds_max_non_backfill is True
+        # Check that running bulk_write_to_db again doesn't change exceeds_max_non_backfill
+        SerializedDAG.bulk_write_to_db("testing", None, [dag])
+        model = session.get(DagModel, dag.dag_id)
+        assert model.exceeds_max_non_backfill is True
 
-        model = session.get(DagModel, dag.dag_id)
-        # We signal "at max active runs" by saying this run is never eligible to be created
-        assert model.next_dagrun_create_after is None
-        # test that bulk_write_to_db again doesn't update next_dagrun_create_after
-        DAG.bulk_write_to_db("testing", None, [dag])
-        model = session.get(DagModel, dag.dag_id)
-        assert model.next_dagrun_create_after is None
+        if catchup is True:
+            assert model.next_dagrun_create_after == DEFAULT_DATE + timedelta(days=2)
+        else:
+            assert model.next_dagrun_create_after > current_time + timedelta(days=-2)  # allow for fuzz
 
     def test_bulk_write_to_db_has_import_error(self, testing_dag_bundle):
         """
         Test that DagModel.has_import_error is set to false if no import errors.
         """
         dag = DAG(dag_id="test_has_import_error", schedule=None, start_date=DEFAULT_DATE)
-
         EmptyOperator(task_id="dummy", dag=dag, owner="airflow")
 
         session = settings.Session()
-        dag.clear()
-        DAG.bulk_write_to_db("testing", None, [dag], session=session)
+        scheduler_dag = sync_dag_to_db(dag, session=session)
+        scheduler_dag.clear()
 
         model = session.get(DagModel, dag.dag_id)
 
@@ -909,7 +829,7 @@ class TestDag:
         # assert
         assert model.has_import_errors
         # parse
-        DAG.bulk_write_to_db("testing", None, [dag])
+        SerializedDAG.bulk_write_to_db("testing", None, [dag])
 
         model = session.get(DagModel, dag.dag_id)
         # assert that has_import_error is now false
@@ -941,24 +861,24 @@ class TestDag:
         )
 
         session = settings.Session()
-        dag1.clear()
-        DAG.bulk_write_to_db("testing", None, [dag1, dag2], session=session)
+        create_scheduler_dag(dag1).clear()
+        SerializedDAG.bulk_write_to_db("testing", None, [dag1, dag2], session=session)
         session.commit()
-        stored_assets = {x.uri: x for x in session.query(AssetModel).all()}
+        stored_assets = {x.uri: x for x in session.scalars(select(AssetModel)).all()}
         asset1_orm = stored_assets[a1.uri]
         asset2_orm = stored_assets[a2.uri]
         asset3_orm = stored_assets[a3.uri]
         assert stored_assets[uri1].extra == {"should": "be used"}
-        assert [x.dag_id for x in asset1_orm.consuming_dags] == [dag_id1]
+        assert [x.dag_id for x in asset1_orm.scheduled_dags] == [dag_id1]
         assert [(x.task_id, x.dag_id) for x in asset1_orm.producing_tasks] == [(task_id, dag_id2)]
         assert set(
-            session.query(
-                TaskOutletAssetReference.task_id,
-                TaskOutletAssetReference.dag_id,
-                TaskOutletAssetReference.asset_id,
-            )
-            .filter(TaskOutletAssetReference.dag_id.in_((dag_id1, dag_id2)))
-            .all()
+            session.execute(
+                select(
+                    TaskOutletAssetReference.task_id,
+                    TaskOutletAssetReference.dag_id,
+                    TaskOutletAssetReference.asset_id,
+                ).where(TaskOutletAssetReference.dag_id.in_((dag_id1, dag_id2)))
+            ).all()
         ) == {
             (task_id, dag_id1, asset2_orm.id),
             (task_id, dag_id1, asset3_orm.id),
@@ -973,64 +893,23 @@ class TestDag:
         EmptyOperator(task_id=task_id, dag=dag1, outlets=[a2])
         dag2 = DAG(dag_id=dag_id2, start_date=DEFAULT_DATE, schedule=None)
         EmptyOperator(task_id=task_id, dag=dag2)
-        DAG.bulk_write_to_db("testing", None, [dag1, dag2], session=session)
+
+        SerializedDAG.bulk_write_to_db("testing", None, [dag1, dag2], session=session)
         session.commit()
         session.expunge_all()
-        stored_assets = {x.uri: x for x in session.query(AssetModel).all()}
+        stored_assets = {x.uri: x for x in session.scalars(select(AssetModel)).all()}
         asset1_orm = stored_assets[a1.uri]
         asset2_orm = stored_assets[a2.uri]
-        assert [x.dag_id for x in asset1_orm.consuming_dags] == []
+        assert [x.dag_id for x in asset1_orm.scheduled_dags] == []
         assert set(
-            session.query(
-                TaskOutletAssetReference.task_id,
-                TaskOutletAssetReference.dag_id,
-                TaskOutletAssetReference.asset_id,
-            )
-            .filter(TaskOutletAssetReference.dag_id.in_((dag_id1, dag_id2)))
-            .all()
+            session.execute(
+                select(
+                    TaskOutletAssetReference.task_id,
+                    TaskOutletAssetReference.dag_id,
+                    TaskOutletAssetReference.asset_id,
+                ).where(TaskOutletAssetReference.dag_id.in_((dag_id1, dag_id2)))
+            ).all()
         ) == {(task_id, dag_id1, asset2_orm.id)}
-
-    @staticmethod
-    def _find_assets_activation(session) -> tuple[list[AssetModel], list[AssetModel]]:
-        assets = session.execute(
-            select(AssetModel, AssetActive)
-            .outerjoin(
-                AssetActive,
-                (AssetModel.name == AssetActive.name) & (AssetModel.uri == AssetActive.uri),
-            )
-            .order_by(AssetModel.uri)
-        ).all()
-        return [a for a, v in assets if not v], [a for a, v in assets if v]
-
-    def test_bulk_write_to_db_does_not_activate(self, dag_maker, testing_dag_bundle, session):
-        """
-        Assets are not activated on write, but later in the scheduler by the SchedulerJob.
-        """
-        # Create four assets - two that have references and two that are unreferenced and marked as
-        # orphans
-        asset1 = Asset(uri="test://asset1", name="asset1", group="test-group")
-        asset2 = Asset(uri="test://asset2", name="asset2", group="test-group")
-        asset3 = Asset(uri="test://asset3", name="asset3", group="test-group")
-        asset4 = Asset(uri="test://asset4", name="asset4", group="test-group")
-
-        dag1 = DAG(dag_id="assets-1", start_date=DEFAULT_DATE, schedule=[asset1])
-        BashOperator(dag=dag1, task_id="task", bash_command="echo 1", outlets=[asset3])
-        DAG.bulk_write_to_db("testing", None, [dag1], session=session)
-
-        assert session.scalars(select(AssetModel).order_by(AssetModel.uri)).all() == [asset1, asset3]
-        assert session.scalars(select(AssetActive)).all() == []
-
-        dag1 = DAG(dag_id="assets-1", start_date=DEFAULT_DATE, schedule=[asset1, asset2])
-        BashOperator(dag=dag1, task_id="task", bash_command="echo 1", outlets=[asset3, asset4])
-        DAG.bulk_write_to_db("testing", None, [dag1], session=session)
-
-        assert session.scalars(select(AssetModel).order_by(AssetModel.uri)).all() == [
-            asset1,
-            asset2,
-            asset3,
-            asset4,
-        ]
-        assert session.scalars(select(AssetActive)).all() == []
 
     def test_bulk_write_to_db_asset_aliases(self, testing_dag_bundle):
         """
@@ -1047,11 +926,12 @@ class TestDag:
         EmptyOperator(task_id=task_id, dag=dag1, outlets=[asset_alias_1, asset_alias_2, asset_alias_3])
         dag2 = DAG(dag_id=dag_id2, start_date=DEFAULT_DATE, schedule=None)
         EmptyOperator(task_id=task_id, dag=dag2, outlets=[asset_alias_2_2, asset_alias_3])
+
         session = settings.Session()
-        DAG.bulk_write_to_db("testing", None, [dag1, dag2], session=session)
+        SerializedDAG.bulk_write_to_db("testing", None, [dag1, dag2], session=session)
         session.commit()
 
-        stored_asset_alias_models = {x.name: x for x in session.query(AssetAliasModel).all()}
+        stored_asset_alias_models = {x.name: x for x in session.scalars(select(AssetAliasModel)).all()}
         asset_alias_1_orm = stored_asset_alias_models[asset_alias_1.name]
         asset_alias_2_orm = stored_asset_alias_models[asset_alias_2.name]
         asset_alias_3_orm = stored_asset_alias_models[asset_alias_3.name]
@@ -1078,7 +958,6 @@ class TestDag:
 
     def test_existing_dag_is_paused_after_limit(self, testing_dag_bundle):
         def add_failed_dag_run(dag, id, logical_date):
-            dag_v = DagVersion.get_latest_version(dag_id=dag.dag_id)
             dr = dag.create_dagrun(
                 run_type=DagRunType.MANUAL,
                 run_id="run_id_" + id,
@@ -1086,8 +965,8 @@ class TestDag:
                 state=State.FAILED,
                 data_interval=(logical_date, logical_date),
                 run_after=logical_date,
-                dag_version=dag_v,
                 triggered_by=DagRunTriggeredByType.TEST,
+                session=session,
             )
             ti_op1 = dr.get_task_instance(task_id=op1.task_id, session=session)
             ti_op1.set_state(state=TaskInstanceState.FAILED, session=session)
@@ -1098,41 +977,208 @@ class TestDag:
         op1 = BashOperator(task_id="task", bash_command="exit 1;")
         dag.add_task(op1)
         session = settings.Session()
-        dag.sync_to_db(session=session)
-        SerializedDagModel.write_dag(dag, bundle_name="testing")
-        assert not dag.get_is_paused()
+        orm_dag = DagModel(
+            dag_id=dag.dag_id,
+            bundle_name="testing",
+            is_stale=False,
+        )
+        session.add(orm_dag)
+        session.flush()
+
+        scheduler_dag = sync_dag_to_db(dag, session=session)
+        orm_dag = session.get(DagModel, dag.dag_id)
+        assert not orm_dag.is_paused
+        orm_dag.set_scheduling_state(DagSchedulingState.DRAINING)
+        session.flush()
 
         # dag should be paused after 2 failed dag_runs
-        add_failed_dag_run(
-            dag,
-            "1",
-            TEST_DATE,
+        add_failed_dag_run(scheduler_dag, "1", TEST_DATE)
+        add_failed_dag_run(scheduler_dag, "2", TEST_DATE + timedelta(days=1))
+        orm_dag = session.get(DagModel, dag.dag_id)
+        assert orm_dag.is_paused
+        assert not orm_dag.is_draining
+
+    @staticmethod
+    def _add_dag_run(scheduler_dag, op1, session, run_id, logical_date, run_after, ti_state, run_state):
+        """Create a dagrun, set the task-instance state, and call update_state.
+
+        update_state triggers _check_last_n_dagruns_failed only when the run
+        transitions to FAILED, so it is a no-op for SUCCESS runs.
+        """
+        dr = scheduler_dag.create_dagrun(
+            run_type=DagRunType.MANUAL,
+            run_id=run_id,
+            logical_date=logical_date,
+            state=run_state,
+            data_interval=(logical_date, logical_date),
+            run_after=run_after,
+            triggered_by=DagRunTriggeredByType.TEST,
+            session=session,
         )
-        add_failed_dag_run(dag, "2", TEST_DATE + timedelta(days=1))
-        assert dag.get_is_paused()
-        dag.clear()
-        self._clean_up(dag_id)
+        ti = dr.get_task_instance(task_id=op1.task_id, session=session)
+        ti.set_state(state=ti_state, session=session)
+        dr.update_state(session=session)
+        return dr
+
+    def test_dag_paused_after_limit_orders_by_run_after(self, testing_dag_bundle):
+        """Verify _check_last_n_dagruns_failed orders by run_after, not logical_date.
+
+        Create three runs where run_after ordering differs from logical_date ordering.
+        The two most-recent runs by run_after are FAILED, while the oldest (which has the
+        latest logical_date) is SUCCESS.  The DAG should be paused because the check
+        must use run_after ordering.
+        """
+        dag_id = "dag_paused_orders_by_run_after"
+        dag = DAG(dag_id, schedule=None, is_paused_upon_creation=False, max_consecutive_failed_dag_runs=2)
+        op1 = BashOperator(task_id="task", bash_command="exit 1;")
+        dag.add_task(op1)
+        session = settings.Session()
+        orm_dag = DagModel(
+            dag_id=dag.dag_id,
+            bundle_name="testing",
+            is_stale=False,
+        )
+        session.add(orm_dag)
+        session.flush()
+
+        scheduler_dag = sync_dag_to_db(dag, session=session)
+        assert not session.get(DagModel, dag.dag_id).is_paused
+
+        # Run 1: oldest by run_after but LATEST logical_date — SUCCESS.
+        # update_state is a no-op here because _check_last_n_dagruns_failed
+        # is only invoked on the FAILED branch.
+        self._add_dag_run(
+            scheduler_dag,
+            op1,
+            session,
+            run_id="run_success",
+            logical_date=TEST_DATE + timedelta(days=10),
+            run_after=TEST_DATE,
+            ti_state=TaskInstanceState.SUCCESS,
+            run_state=State.SUCCESS,
+        )
+
+        # Run 2: second by run_after, earlier logical_date — FAILED
+        self._add_dag_run(
+            scheduler_dag,
+            op1,
+            session,
+            run_id="run_fail_1",
+            logical_date=TEST_DATE + timedelta(days=1),
+            run_after=TEST_DATE + timedelta(days=1),
+            ti_state=TaskInstanceState.FAILED,
+            run_state=State.FAILED,
+        )
+
+        # After one failure, DAG should NOT be paused yet
+        session.expire_all()
+        assert not session.get(DagModel, dag.dag_id).is_paused
+
+        # Run 3: most recent by run_after, middle logical_date — FAILED
+        self._add_dag_run(
+            scheduler_dag,
+            op1,
+            session,
+            run_id="run_fail_2",
+            logical_date=TEST_DATE + timedelta(days=2),
+            run_after=TEST_DATE + timedelta(days=2),
+            ti_state=TaskInstanceState.FAILED,
+            run_state=State.FAILED,
+        )
+
+        # Last 2 runs by run_after are both FAILED, DAG should be paused.
+        # If the code incorrectly ordered by logical_date, it would pick
+        # the SUCCESS run (logical_date=TEST_DATE+10d) and one FAILED run,
+        # and the DAG would NOT be paused.
+        session.expire_all()
+        assert session.get(DagModel, dag.dag_id).is_paused
+
+    def test_dag_not_paused_when_latest_by_run_after_succeeds(self, testing_dag_bundle):
+        """Verify _check_last_n_dagruns_failed does not pause when most recent run_after runs pass.
+
+          run_after order:  Run1(day0,FAILED) Run2(day1,SUCCESS) Run3(day2,FAILED)
+          logical_date order: Run1(day10,FAILED) Run2(day5,SUCCESS) Run3(day6,FAILED)
+
+        By run_after the last 2 are Run2(SUCCESS) and Run3(FAILED) → only 1 consecutive
+        failure → DAG must NOT be paused.
+        """
+        dag_id = "dag_not_paused_run_after_ordering"
+        dag = DAG(dag_id, schedule=None, is_paused_upon_creation=False, max_consecutive_failed_dag_runs=2)
+        op1 = BashOperator(task_id="task", bash_command="exit 1;")
+        dag.add_task(op1)
+        session = settings.Session()
+        orm_dag = DagModel(
+            dag_id=dag.dag_id,
+            bundle_name="testing",
+            is_stale=False,
+        )
+        session.add(orm_dag)
+        session.flush()
+
+        scheduler_dag = sync_dag_to_db(dag, session=session)
+
+        # Run 1: oldest by run_after — FAILED.
+        self._add_dag_run(
+            scheduler_dag,
+            op1,
+            session,
+            run_id="run_fail_old",
+            logical_date=TEST_DATE + timedelta(days=10),
+            run_after=TEST_DATE,
+            ti_state=TaskInstanceState.FAILED,
+            run_state=State.FAILED,
+        )
+
+        # Run 2: middle by run_after, middle logical_date — SUCCESS.
+        self._add_dag_run(
+            scheduler_dag,
+            op1,
+            session,
+            run_id="run_success_mid",
+            logical_date=TEST_DATE + timedelta(days=5),
+            run_after=TEST_DATE + timedelta(days=1),
+            ti_state=TaskInstanceState.SUCCESS,
+            run_state=State.SUCCESS,
+        )
+
+        # Run 3: most recent by run_after — FAILED.
+        # This triggers _check_last_n_dagruns_failed.
+        self._add_dag_run(
+            scheduler_dag,
+            op1,
+            session,
+            run_id="run_fail_latest",
+            logical_date=TEST_DATE + timedelta(days=6),
+            run_after=TEST_DATE + timedelta(days=2),
+            ti_state=TaskInstanceState.FAILED,
+            run_state=State.FAILED,
+        )
+
+        # Correct (run_after) ordering: last 2 are Run2(SUCCESS) and Run3(FAILED) → not paused.
+        # Wrong (logical_date) ordering: last 2 are Run1(+10d, FAILED) and Run3(+6d, FAILED) → paused.
+        session.expire_all()
+        assert not session.get(DagModel, dag.dag_id).is_paused
 
     def test_dag_is_deactivated_upon_dagfile_deletion(self, dag_maker):
         dag_id = "old_existing_dag"
         with dag_maker(dag_id, schedule=None, is_paused_upon_creation=True) as dag:
             ...
         session = settings.Session()
-        dag.sync_to_db(session=session)
+        sync_dag_to_db(dag, session=session)
 
-        orm_dag = session.query(DagModel).filter(DagModel.dag_id == dag_id).one()
+        orm_dag = session.scalar(select(DagModel).where(DagModel.dag_id == dag_id))
 
-        assert orm_dag.is_active
+        assert not orm_dag.is_stale
 
         DagModel.deactivate_deleted_dags(
             bundle_name=orm_dag.bundle_name,
-            rel_filelocs=list_py_file_paths(settings.DAGS_FOLDER),
+            rel_filelocs=[],
         )
 
-        orm_dag = session.query(DagModel).filter(DagModel.dag_id == dag_id).one()
-        assert not orm_dag.is_active
+        orm_dag = session.scalar(select(DagModel).where(DagModel.dag_id == dag_id))
+        assert orm_dag.is_stale
 
-        session.execute(DagModel.__table__.delete().where(DagModel.dag_id == dag_id))
+        session.execute(delete(DagModel).where(DagModel.dag_id == dag_id))
         session.close()
 
     def test_dag_naive_default_args_start_date_with_timezone(self):
@@ -1145,7 +1191,7 @@ class TestDag:
         dag = DAG("DAG", schedule=None, default_args=default_args)
         assert dag.timezone.name == local_tz.name
 
-    def test_schedule_dag_no_previous_runs(self):
+    def test_schedule_dag_no_previous_runs(self, testing_dag_bundle):
         """
         Tests scheduling a dag with no previous runs
         """
@@ -1153,7 +1199,8 @@ class TestDag:
         dag = DAG(dag_id=dag_id, schedule=None)
         dag.add_task(BaseOperator(task_id="faketastic", owner="Also fake", start_date=TEST_DATE))
 
-        dag_run = dag.create_dagrun(
+        scheduler_dag = sync_dag_to_db(dag)
+        dag_run = scheduler_dag.create_dagrun(
             run_id="test",
             run_type=DagRunType.SCHEDULED,
             logical_date=TEST_DATE,
@@ -1171,11 +1218,9 @@ class TestDag:
         )
         assert dag_run.state == State.RUNNING
         assert dag_run.run_type != DagRunType.MANUAL
-        dag.clear()
-        self._clean_up(dag_id)
 
-    @patch("airflow.models.dag.Stats")
-    def test_dag_handle_callback_crash(self, mock_stats):
+    @patch("airflow._shared.observability.metrics.stats.incr")
+    def test_dag_handle_callback_crash(self, mock_incr, testing_dag_bundle):
         """
         Tests avoid crashes from calling dag callbacks exceptions
         """
@@ -1192,8 +1237,10 @@ class TestDag:
         when = TEST_DATE
         dag.add_task(BaseOperator(task_id="faketastic", owner="Also fake", start_date=when))
 
+        scheduler_dag = sync_dag_to_db(dag)
+
         with create_session() as session:
-            dag_run = dag.create_dagrun(
+            dag_run = scheduler_dag.create_dagrun(
                 run_id="test",
                 state=State.RUNNING,
                 logical_date=when,
@@ -1205,18 +1252,15 @@ class TestDag:
             )
 
             # should not raise any exception
-            dag.handle_callback(dag_run, success=False)
-            dag.handle_callback(dag_run, success=True)
+            dag_run.execute_dag_callbacks(dag=dag, success=False, session=session)
+            dag_run.execute_dag_callbacks(dag=dag, success=True, session=session)
 
-        mock_stats.incr.assert_called_with(
+        mock_incr.assert_called_with(
             "dag.callback_exceptions",
             tags={"dag_id": "test_dag_callback_crash"},
         )
 
-        dag.clear()
-        self._clean_up(dag_id)
-
-    def test_dag_handle_callback_with_removed_task(self, dag_maker, session):
+    def test_dag_handle_callback_with_removed_task(self, dag_maker, session, testing_dag_bundle):
         """
         Tests avoid crashes when a removed task is the last one in the list of task instance
         """
@@ -1231,8 +1275,9 @@ class TestDag:
             EmptyOperator(task_id="faketastic")
             task_removed = EmptyOperator(task_id="removed_task")
 
+        scheduler_dag = sync_dag_to_db(dag)
         with create_session() as session:
-            dag_run = dag.create_dagrun(
+            dag_run = scheduler_dag.create_dagrun(
                 run_id="test",
                 state=State.RUNNING,
                 logical_date=TEST_DATE,
@@ -1248,14 +1293,17 @@ class TestDag:
             assert dag_run.get_task_instance(task_removed.task_id).state == TaskInstanceState.REMOVED
 
             # should not raise any exception
-            dag.handle_callback(dag_run, success=True)
-            dag.handle_callback(dag_run, success=False)
+            dag_run.execute_dag_callbacks(dag=dag, success=False, session=session)
+            dag_run.execute_dag_callbacks(dag=dag, success=True, session=session)
 
-        dag.clear()
-        self._clean_up(dag_id)
-
-    @pytest.mark.parametrize("catchup,expected_next_dagrun", [(True, DEFAULT_DATE), (False, None)])
-    def test_next_dagrun_after_fake_scheduled_previous(self, catchup, expected_next_dagrun):
+    @time_machine.travel(timezone.datetime(2025, 11, 11))
+    @pytest.mark.parametrize(
+        ("catchup", "expected_next_dagrun"),
+        [(True, DEFAULT_DATE + datetime.timedelta(hours=1)), (False, None)],
+    )
+    def test_next_dagrun_after_fake_scheduled_previous(
+        self, catchup, expected_next_dagrun, testing_dag_bundle
+    ):
         """
         Test scheduling a dag where there is a prior DagRun
         which has the same run_id as the next run should have.
@@ -1266,45 +1314,45 @@ class TestDag:
         dag = DAG(dag_id=dag_id, schedule=delta, start_date=DEFAULT_DATE, catchup=catchup)
         dag.add_task(BaseOperator(task_id="faketastic", owner="Also fake", start_date=DEFAULT_DATE))
 
+        session = settings.Session()
+        orm_dag = DagModel(
+            dag_id=dag.dag_id,
+            bundle_name="testing",
+            is_stale=False,
+        )
+        session.add(orm_dag)
+        session.flush()
+
         _create_dagrun(
             dag,
             run_type=DagRunType.SCHEDULED,
             logical_date=DEFAULT_DATE,
             state=State.SUCCESS,
-            data_interval=(DEFAULT_DATE, DEFAULT_DATE),
+            data_interval=(DEFAULT_DATE, DEFAULT_DATE + delta),
         )
-        dag.sync_to_db()
+        sync_dag_to_db(dag)
         with create_session() as session:
             model = session.get(DagModel, dag.dag_id)
 
         if expected_next_dagrun is None:
-            # For catchup=False, next_dagrun should be based on the current date
-            current_time = timezone.utcnow()
             # Verify it's not using the old default date
-            assert model.next_dagrun.year == current_time.year
-            assert model.next_dagrun.month == current_time.month
+            assert model.next_dagrun.year == 2025
+            assert model.next_dagrun.month == 11
             # Verify next_dagrun_create_after is scheduled after next_dagrun
             assert model.next_dagrun_create_after > model.next_dagrun
         else:
-            # For catchup=True, even though there is a run for this date already,
-            # it is marked as manual/external, so we should create a scheduled one anyway!
             assert model.next_dagrun == expected_next_dagrun
             assert model.next_dagrun_create_after == expected_next_dagrun + delta
 
-        self._clean_up(dag_id)
-
-    def test_schedule_dag_once(self):
+    def test_schedule_dag_once(self, testing_dag_bundle):
         """
         Tests scheduling a dag scheduled for @once - should be scheduled the first time
         it is called, and not scheduled the second.
         """
         dag_id = "test_schedule_dag_once"
-        dag = DAG(dag_id=dag_id, schedule="@once", start_date=TEST_DATE)
-        assert isinstance(dag.timetable, OnceTimetable)
-        dag.add_task(BaseOperator(task_id="faketastic", owner="Also fake", start_date=TEST_DATE))
-
-        # Sync once to create the DagModel
-        dag.sync_to_db()
+        with DAG(dag_id=dag_id, schedule="@once", start_date=TEST_DATE) as dag:
+            BaseOperator(task_id="faketastic", owner="Also fake", start_date=TEST_DATE)
+        assert qualname(dag.timetable) == "airflow.sdk.definitions.timetables.simple.OnceTimetable"
 
         _create_dagrun(
             dag,
@@ -1315,13 +1363,12 @@ class TestDag:
         )
 
         # Then sync again after creating the dag run -- this should update next_dagrun
-        dag.sync_to_db()
+        SerializedDAG.bulk_write_to_db("testing", None, [dag])
         with create_session() as session:
             model = session.get(DagModel, dag.dag_id)
 
         assert model.next_dagrun is None
         assert model.next_dagrun_create_after is None
-        self._clean_up(dag_id)
 
     def test_fractional_seconds(self):
         """
@@ -1346,7 +1393,6 @@ class TestDag:
 
         assert start_date == run.logical_date, "dag run logical_date loses precision"
         assert start_date == run.start_date, "dag run start_date loses precision "
-        self._clean_up(dag_id)
 
     def test_rich_comparison_ops(self):
         test_dag_id = "test_rich_comparison_ops"
@@ -1359,14 +1405,10 @@ class TestDag:
 
         dag_eq = DAG(test_dag_id, schedule=None, default_args=args)
 
-        dag_diff_load_time = DAG(test_dag_id, schedule=None, default_args=args)
         dag_diff_name = DAG(test_dag_id + "_neq", schedule=None, default_args=args)
 
         dag_subclass = DAGsubclass(test_dag_id, schedule=None, default_args=args)
         dag_subclass_diff_name = DAGsubclass(test_dag_id + "2", schedule=None, default_args=args)
-
-        for dag_ in [dag_eq, dag_diff_name, dag_subclass, dag_subclass_diff_name]:
-            dag_.last_loaded = dag.last_loaded
 
         # test identity equality
         assert dag == dag
@@ -1374,7 +1416,6 @@ class TestDag:
         # test dag (in)equality based on _comps
         assert dag_eq == dag
         assert dag_diff_name != dag
-        assert dag_diff_load_time != dag
 
         # test dag inequality based on type even if _comps happen to match
         assert dag_subclass != dag
@@ -1385,7 +1426,6 @@ class TestDag:
 
         # dags are ordered based on dag_id no matter what the type is
         assert dag < dag_diff_name
-        assert dag > dag_diff_load_time
         assert dag < dag_subclass_diff_name
 
         # greater than should have been created automatically by functools
@@ -1397,20 +1437,29 @@ class TestDag:
         assert hash(dag_diff_name) != hash(dag)
         assert hash(dag_subclass) != hash(dag)
 
-    def test_get_paused_dag_ids(self):
+    def test_get_paused_dag_ids(self, testing_dag_bundle):
         dag_id = "test_get_paused_dag_ids"
         dag = DAG(dag_id, schedule=None, is_paused_upon_creation=True)
-        dag.sync_to_db()
+        session = settings.Session()
+        orm_dag = DagModel(
+            dag_id=dag.dag_id,
+            bundle_name="testing",
+            is_stale=False,
+            is_paused=True,  # Set is_paused to match DAG's is_paused_upon_creation
+        )
+        session.add(orm_dag)
+        session.flush()
+        sync_dag_to_db(dag)
         assert DagModel.get_dagmodel(dag_id) is not None
 
         paused_dag_ids = DagModel.get_paused_dag_ids([dag_id])
         assert paused_dag_ids == {dag_id}
 
         with create_session() as session:
-            session.query(DagModel).filter(DagModel.dag_id == dag_id).delete(synchronize_session=False)
+            session.execute(delete(DagModel).where(DagModel.dag_id == dag_id))
 
     @pytest.mark.parametrize(
-        "schedule_arg, expected_timetable, interval_description",
+        ("schedule_arg", "expected_timetable", "interval_description"),
         [
             (None, NullTimetable(), "Never, external triggers only"),
             ("@daily", cron_timetable("0 0 * * *"), "At 00:00"),
@@ -1429,7 +1478,7 @@ class TestDag:
     ):
         dag = DAG("test_schedule_arg", schedule=schedule_arg, start_date=TEST_DATE)
         assert dag.timetable == expected_timetable
-        assert dag.timetable.description == interval_description
+        assert coerce_to_core_timetable(dag.timetable).description == interval_description
 
     def test_timetable_and_description_from_asset(self):
         uri = "test://asset"
@@ -1437,10 +1486,10 @@ class TestDag:
             "test_schedule_interval_arg", schedule=[Asset(uri=uri, group="test-group")], start_date=TEST_DATE
         )
         assert dag.timetable == AssetTriggeredTimetable(Asset(uri=uri, group="test-group"))
-        assert dag.timetable.description == "Triggered by assets"
+        assert coerce_to_core_timetable(dag.timetable).description == "Triggered by assets"
 
     @pytest.mark.parametrize(
-        "timetable, expected_description",
+        ("timetable", "expected_description"),
         [
             (NullTimetable(), "Never, external triggers only"),
             (cron_timetable("0 0 * * *"), "At 00:00"),
@@ -1462,12 +1511,13 @@ class TestDag:
     def test_description_from_timetable(self, timetable, expected_description):
         dag = DAG("test_schedule_description", schedule=timetable, start_date=TEST_DATE)
         assert dag.timetable == timetable
-        assert dag.timetable.description == expected_description
+        assert coerce_to_core_timetable(dag.timetable).description == expected_description
 
-    def test_create_dagrun_job_id_is_set(self):
+    def test_create_dagrun_job_id_is_set(self, testing_dag_bundle):
         job_id = 42
         dag = DAG(dag_id="test_create_dagrun_job_id_is_set", schedule=None)
-        dr = dag.create_dagrun(
+        scheduler_dag = sync_dag_to_db(dag)
+        dr = scheduler_dag.create_dagrun(
             run_id="test_create_dagrun_job_id_is_set",
             logical_date=DEFAULT_DATE,
             data_interval=(DEFAULT_DATE, DEFAULT_DATE),
@@ -1479,42 +1529,177 @@ class TestDag:
         )
         assert dr.creating_job_id == job_id
 
-    def test_dag_add_task_checks_trigger_rule(self):
-        # A non fail stop dag should allow any trigger rule
-        from airflow.exceptions import FailFastDagInvalidTriggerRule
-        from airflow.utils.trigger_rule import TriggerRule
+    def test_create_dagrun_note_is_set(self, testing_dag_bundle):
+        note = "This is a test note"
+        dag = DAG(dag_id="test_create_dagrun_note_is_set", schedule=None)
+        scheduler_dag = sync_dag_to_db(dag)
+        dr = scheduler_dag.create_dagrun(
+            run_id="test_create_dagrun_note_is_set",
+            logical_date=DEFAULT_DATE,
+            data_interval=(DEFAULT_DATE, DEFAULT_DATE),
+            run_after=DEFAULT_DATE,
+            run_type=DagRunType.MANUAL,
+            state=State.NONE,
+            note=note,
+            triggered_by=DagRunTriggeredByType.TEST,
+        )
+        assert dr.note == note
 
-        task_with_non_default_trigger_rule = EmptyOperator(
-            task_id="task_with_non_default_trigger_rule", trigger_rule=TriggerRule.ALWAYS
-        )
-        non_fail_fast_dag = DAG(
-            dag_id="test_dag_add_task_checks_trigger_rule",
-            schedule=None,
-            start_date=DEFAULT_DATE,
-            fail_fast=False,
-        )
-        non_fail_fast_dag.add_task(task_with_non_default_trigger_rule)
+    @pytest.mark.parametrize(
+        ("partition_key", "expected_cm"),
+        [
+            (None, nullcontext()),
+            (
+                "my-key",
+                pytest.raises(DagNotPartitionedError, match="not a partitioned Dag"),
+            ),
+            (
+                123,
+                pytest.raises(DagNotPartitionedError, match="not a partitioned Dag"),
+            ),
+        ],
+    )
+    def test_create_dagrun_partition_key(self, partition_key, expected_cm, dag_maker):
+        with dag_maker("test_create_dagrun_partition_key"):
+            ...
+        with expected_cm:
+            dr = dag_maker.create_dagrun(
+                run_id="test_create_dagrun_partition_key",
+                run_after=DEFAULT_DATE,
+                run_type=DagRunType.MANUAL,
+                state=State.NONE,
+                triggered_by=DagRunTriggeredByType.TEST,
+                partition_key=partition_key,
+            )
+            assert dr.partition_key == partition_key
 
-        # a fail stop dag should allow default trigger rule
-        from airflow.models.abstractoperator import DEFAULT_TRIGGER_RULE
+    def test_create_dagrun_partition_key_accepted_for_partitioned_dag(self, dag_maker):
+        """create_dagrun accepts a str partition_key when the Dag uses a partitioned timetable."""
+        with dag_maker(
+            "test_create_dagrun_partitioned",
+            schedule=CronPartitionTimetable("@daily", timezone="UTC"),
+        ):
+            ...
+        dr = dag_maker.create_dagrun(
+            run_id="test_create_dagrun_partitioned",
+            run_after=DEFAULT_DATE,
+            run_type=DagRunType.MANUAL,
+            state=State.NONE,
+            triggered_by=DagRunTriggeredByType.TEST,
+            partition_key="my-key",
+        )
+        assert dr.partition_key == "my-key"
 
-        fail_fast_dag = DAG(
-            dag_id="test_dag_add_task_checks_trigger_rule",
-            schedule=None,
-            start_date=DEFAULT_DATE,
-            fail_fast=True,
-        )
-        task_with_default_trigger_rule = EmptyOperator(
-            task_id="task_with_default_trigger_rule", trigger_rule=DEFAULT_TRIGGER_RULE
-        )
-        fail_fast_dag.add_task(task_with_default_trigger_rule)
+    def test_create_dagrun_int_partition_key_rejected_for_partitioned_dag(self, dag_maker):
+        """DagRun-level type check rejects int partition_key even for partitioned Dags."""
+        with dag_maker(
+            "test_create_dagrun_partitioned_int_key",
+            schedule=PartitionedAtRuntime(),
+        ):
+            ...
+        with pytest.raises(
+            ValueError,
+            match=r"Expected partition_key to be a `str` or `None` but got `int`",
+        ):
+            dag_maker.create_dagrun(
+                run_id="test_create_dagrun_partitioned_int_key",
+                run_after=DEFAULT_DATE,
+                run_type=DagRunType.MANUAL,
+                state=State.NONE,
+                triggered_by=DagRunTriggeredByType.TEST,
+                partition_key=123,
+            )
 
-        # a fail stop dag should not allow a non-default trigger rule
-        task_with_non_default_trigger_rule = EmptyOperator(
-            task_id="task_with_non_default_trigger_rule", trigger_rule=TriggerRule.ALWAYS
+    def test_create_dagrun_partition_key_validated_against_requested_version(self, dag_maker, session):
+        """create_dagrun validates partition_key against the requested bundle version, not the latest."""
+        dag_id = "test_create_dagrun_partition_key_bundle_version"
+
+        with dag_maker(
+            dag_id,
+            schedule=CronPartitionTimetable("@daily", timezone="UTC"),
+            bundle_version="v1",
+            session=session,
+        ):
+            EmptyOperator(task_id="task")
+
+        with dag_maker(dag_id, schedule=None, bundle_version="v2", session=session):
+            EmptyOperator(task_id="task")
+        session.commit()
+
+        scheduler_dag_v2 = dag_maker.serialized_dag
+
+        # Latest (v2) is not partitioned, but the requested v1 is: the key must be
+        # accepted against v1 rather than rejected against the latest dag.
+        dr = scheduler_dag_v2.create_dagrun(
+            run_id="manual__partition_key_from_v1",
+            run_after=DEFAULT_DATE,
+            run_type=DagRunType.MANUAL,
+            state=State.NONE,
+            triggered_by=DagRunTriggeredByType.TEST,
+            partition_key="my-key",
+            bundle_version="v1",
+            session=session,
         )
-        with pytest.raises(FailFastDagInvalidTriggerRule):
-            fail_fast_dag.add_task(task_with_non_default_trigger_rule)
+        assert dr.partition_key == "my-key"
+
+    @pytest.mark.need_serialized_dag
+    @pytest.mark.parametrize(
+        ("partition_key", "schedule", "should_raise"),
+        [
+            ("my-key", None, True),
+            (None, None, False),
+            ("my-key", CronPartitionTimetable("@daily", timezone="UTC"), False),
+            ("my-key", PartitionedAtRuntime(), False),
+        ],
+    )
+    def test_serialized_dag_validate_partition_key(
+        self,
+        partition_key,
+        schedule,
+        should_raise,
+        dag_maker,
+    ):
+        """SerializedDAG.validate_partition_key raises for non-partitioned Dags and accepts for partitioned."""
+        with dag_maker("test_validate_partition_key", schedule=schedule):
+            ...
+        sdag = dag_maker.serialized_dag
+        if should_raise:
+            with pytest.raises(DagNotPartitionedError, match="not a partitioned Dag"):
+                sdag.validate_partition_key(partition_key)
+        else:
+            sdag.validate_partition_key(partition_key)  # must not raise
+
+    @pytest.mark.need_serialized_dag
+    @pytest.mark.parametrize(
+        ("partition_key", "exc_type", "match"),
+        [
+            ("", InvalidPartitionKeyError, "empty or whitespace-only"),
+            ("   ", InvalidPartitionKeyError, "empty or whitespace-only"),
+            ("a" * 251, InvalidPartitionKeyError, "at most 250 characters"),
+        ],
+        ids=["empty", "whitespace", "over_limit"],
+    )
+    def test_validate_partition_key_rejects_invalid_content(self, partition_key, exc_type, match, dag_maker):
+        """validate_partition_key raises InvalidPartitionKeyError for empty or over-length keys."""
+        with dag_maker(
+            "test_validate_partition_key_content",
+            schedule=CronPartitionTimetable("@daily", timezone="UTC"),
+        ):
+            ...
+        sdag = dag_maker.serialized_dag
+        with pytest.raises(exc_type, match=match):
+            sdag.validate_partition_key(partition_key)
+
+    @pytest.mark.need_serialized_dag
+    def test_validate_partition_key_accepts_exactly_max_length(self, dag_maker):
+        """validate_partition_key accepts a key of exactly 250 characters."""
+        with dag_maker(
+            "test_validate_partition_key_at_limit",
+            schedule=CronPartitionTimetable("@daily", timezone="UTC"),
+        ):
+            ...
+        sdag = dag_maker.serialized_dag
+        sdag.validate_partition_key("a" * 250)  # must not raise
 
     def test_dag_add_task_sets_default_task_group(self):
         dag = DAG(dag_id="test_dag_add_task_sets_default_task_group", schedule=None, start_date=DEFAULT_DATE)
@@ -1529,29 +1714,83 @@ class TestDag:
         assert task_group.get_child_by_label("task_with_task_group") == task_with_task_group
         assert dag.get_task("task_group.task_with_task_group") == task_with_task_group
 
-    @pytest.mark.parametrize("dag_run_state", [DagRunState.QUEUED, DagRunState.RUNNING])
-    def test_clear_set_dagrun_state(self, dag_run_state):
-        dag_id = "test_clear_set_dagrun_state"
-        self._clean_up(dag_id)
-        task_id = "t1"
-        dag = DAG(dag_id, schedule=None, start_date=DEFAULT_DATE, max_active_runs=1)
-        t_1 = EmptyOperator(task_id=task_id, dag=dag)
+    @pytest.mark.parametrize(
+        ("excluded", "remaining"),
+        [
+            (None, {"outside", "body.work", "body.__loop_gate", "mapped"}),
+            (set(), {"outside", "body.work", "body.__loop_gate", "mapped"}),
+            ({("outside", -1)}, {"body.work", "body.__loop_gate", "mapped"}),
+            ({"body.work"}, {"outside", "body.__loop_gate", "mapped"}),
+            ({("body.work", -1)}, {"outside", "body.__loop_gate", "mapped"}),
+            ({("mapped", 0)}, {"outside", "body.work", "body.__loop_gate", "mapped"}),
+        ],
+    )
+    @pytest.mark.need_serialized_dag
+    def test_clear_selection_excludes_public_map_indexes(self, dag_maker, session, excluded, remaining):
+        @task_group
+        def body():
+            EmptyOperator(task_id="work")
 
-        session = settings.Session()
-        dagrun_1 = _create_dagrun(
-            dag,
+        with dag_maker(serialized=True) as dag:
+            create_loop(body, max_iterations=3)
+            EmptyOperator(task_id="outside")
+            PythonOperator.partial(task_id="mapped", python_callable=list).expand(op_kwargs=[{}, {}])
+        dr = dag_maker.create_dagrun(session=session)
+        root = DynamicRegion.get_or_create(
+            dag_id=dr.dag_id, run_id=dr.run_id, node_id="body", session=session
+        )
+        session.add(root)
+        session.flush()
+        first_pass = next(ti for ti in dr.task_instances if ti.task_id == "body.work")
+        first_pass.region_id, first_pass.region_index = root.id, 0
+        for index in (1, 2):
+            session.add(
+                TI(
+                    task=dag.get_task("body.work"),
+                    run_id=dr.run_id,
+                    dag_version_id=dr.created_dag_version_id,
+                    region_id=root.id,
+                    region_index=index,
+                )
+            )
+        session.flush()
+        selected = list(
+            dag._get_task_instances(
+                task_ids=None,
+                start_date=None,
+                end_date=None,
+                run_id=dr.run_id,
+                state=None,
+                exclude_task_ids=excluded,
+                exclude_run_ids=None,
+                session=session,
+            )
+        )
+        assert {ti.task_id for ti in selected} == remaining
+        if excluded == {("mapped", 0)}:
+            assert [ti.region_index for ti in selected if ti.task_id == "mapped"] == [1]
+        if "body.work" in remaining:
+            assert {ti.region_index for ti in selected if ti.task_id == "body.work"} == {0, 1, 2}
+
+    @pytest.mark.parametrize("dag_run_state", [DagRunState.QUEUED, DagRunState.RUNNING])
+    @pytest.mark.need_serialized_dag
+    def test_clear_set_dagrun_state(self, dag_run_state, dag_maker, session):
+        dag_id = "test_clear_set_dagrun_state"
+
+        with dag_maker(dag_id, start_date=DEFAULT_DATE, max_active_runs=1) as dag:
+            task_id = "t1"
+            EmptyOperator(task_id=task_id)
+
+        dr = dag_maker.create_dagrun(
             run_type=DagRunType.BACKFILL_JOB,
             state=State.FAILED,
             start_date=DEFAULT_DATE,
             logical_date=DEFAULT_DATE,
-            data_interval=(DEFAULT_DATE, DEFAULT_DATE),
+            session=session,
         )
-        session.merge(dagrun_1)
-
-        task_instance_1 = TI(t_1, run_id=dagrun_1.run_id, state=State.RUNNING)
-        task_instance_1.refresh_from_db()
-        session.merge(task_instance_1)
         session.commit()
+        session.refresh(dr)
+        assert dr.state == "failed"
 
         dag.clear(
             start_date=DEFAULT_DATE,
@@ -1559,21 +1798,18 @@ class TestDag:
             dag_run_state=dag_run_state,
             session=session,
         )
-
-        dagruns = session.query(DagRun).filter(DagRun.dag_id == dag_id).all()
-
-        assert len(dagruns) == 1
-        dagrun: DagRun = dagruns[0]
-        assert dagrun.state == dag_run_state
+        session.refresh(dr)
+        assert dr.state == dag_run_state
 
     @pytest.mark.parametrize("dag_run_state", [DagRunState.QUEUED, DagRunState.RUNNING])
-    @pytest.mark.need_serialized_dag
-    def test_clear_set_dagrun_state_for_mapped_task(self, dag_maker, dag_run_state):
+    def test_clear_set_dagrun_state_for_mapped_task(self, session, dag_run_state, dag_maker):
         dag_id = "test_clear_set_dagrun_state"
-        self._clean_up(dag_id)
+
         task_id = "t1"
 
-        with dag_maker(dag_id, schedule=None, start_date=DEFAULT_DATE, max_active_runs=1) as dag:
+        with dag_maker(
+            dag_id, schedule=None, start_date=DEFAULT_DATE, max_active_runs=1, serialized=True
+        ) as dag:
 
             @task_decorator
             def make_arg_lists():
@@ -1584,9 +1820,7 @@ class TestDag:
 
             PythonOperator.partial(task_id=task_id, python_callable=consumer).expand(op_args=make_arg_lists())
 
-        session = dag_maker.session
-        dagrun_1 = _create_dagrun(
-            dag,
+        dagrun_1 = dag_maker.create_dagrun(
             run_type=DagRunType.BACKFILL_JOB,
             state=DagRunState.FAILED,
             start_date=DEFAULT_DATE,
@@ -1594,6 +1828,7 @@ class TestDag:
             data_interval=(DEFAULT_DATE, DEFAULT_DATE),
             session=session,
         )
+
         # Get the (de)serialized MappedOperator
         mapped = dag.get_task(task_id)
         expand_mapped_task(mapped, dagrun_1.run_id, "make_arg_lists", length=2, session=session)
@@ -1613,20 +1848,20 @@ class TestDag:
             dag_run_state=dag_run_state,
             session=session,
         )
-        session.refresh(upstream_ti)
-        session.refresh(ti)
         session.refresh(ti2)
-        assert upstream_ti.state is None  # cleared
-        assert ti.state is None  # cleared
+        assert dagrun_1.get_task_instance("make_arg_lists", session=session).state is None  # cleared
+        assert dagrun_1.get_task_instance(task_id, map_index=0, session=session).state is None  # cleared
         assert ti2.state == State.SUCCESS  # not cleared
-        dagruns = session.query(DagRun).filter(DagRun.dag_id == dag_id).all()
+        dagruns = session.scalars(select(DagRun).where(DagRun.dag_id == dag_id)).all()
 
         assert len(dagruns) == 1
         dagrun: DagRun = dagruns[0]
         assert dagrun.state == dag_run_state
 
-    def test_dag_test_basic(self):
+    def test_dag_test_basic(self, testing_dag_bundle):
         dag = DAG(dag_id="test_local_testing_conn_file", schedule=None, start_date=DEFAULT_DATE)
+        sync_dag_to_db(dag)
+
         mock_object = mock.MagicMock()
 
         @task_decorator
@@ -1636,12 +1871,67 @@ class TestDag:
 
         with dag:
             check_task()
+        sync_dag_to_db(dag)
 
         dag.test()
         mock_object.assert_called_once()
 
-    def test_dag_test_with_dependencies(self):
+    @pytest.mark.parametrize("succeed_on_last_try", [False, True])
+    def test_dag_test_retries_use_consecutive_attempts(self, testing_dag_bundle, succeed_on_last_try):
+        attempts = []
+        dag = DAG(dag_id="test_dag_test_retry_attempts", schedule=None, start_date=DEFAULT_DATE)
+
+        @task_decorator(retries=2, retry_delay=timedelta(0))
+        def retry_task(ti):
+            attempts.append((ti.id, ti.try_number))
+            if not succeed_on_last_try or ti.try_number < 3:
+                raise RuntimeError("Retry this attempt")
+
+        with dag:
+            retry_task()
+        sync_dag_to_db(dag)
+
+        dr = dag.test()
+
+        ti = dr.get_task_instance("retry_task")
+        assert ti is not None
+        assert [try_number for _, try_number in attempts] == [1, 2, 3]
+        assert len({attempt_id for attempt_id, _ in attempts}) == 3
+        assert (ti.id, ti.try_number) == attempts[-1]
+        assert ti.max_tries == 2
+        assert ti.state == (TaskInstanceState.SUCCESS if succeed_on_last_try else TaskInstanceState.FAILED)
+        assert dr.state == (DagRunState.SUCCESS if succeed_on_last_try else DagRunState.FAILED)
+
+    def test_dag_test_without_logical_date_keeps_other_runs_task_instances(self, testing_dag_bundle, session):
+        dag = DAG(dag_id="test_dateless_dag_test", schedule=None, start_date=DEFAULT_DATE)
+
+        @task_decorator
+        def check_task():
+            pass
+
+        with dag:
+            check_task()
+
+        _create_dagrun(
+            dag,
+            logical_date=DEFAULT_DATE,
+            data_interval=(DEFAULT_DATE, DEFAULT_DATE),
+            run_type=DagRunType.SCHEDULED,
+            state=DagRunState.SUCCESS,
+        )
+        run_id = session.scalar(select(DagRun.run_id).where(DagRun.dag_id == dag.dag_id))
+        session.execute(update(TI).where(TI.run_id == run_id).values(state=TaskInstanceState.SUCCESS))
+        session.commit()
+
+        dag.test(logical_date=None)
+
+        session.expire_all()
+        states = session.scalars(select(TI.state).where(TI.run_id == run_id)).all()
+        assert states == [TaskInstanceState.SUCCESS]
+
+    def test_dag_test_with_dependencies(self, testing_dag_bundle):
         dag = DAG(dag_id="test_local_testing_conn_file", schedule=None, start_date=DEFAULT_DATE)
+        sync_dag_to_db(dag)
         mock_object = mock.MagicMock()
 
         @task_decorator
@@ -1655,11 +1945,110 @@ class TestDag:
 
         with dag:
             check_task_2(check_task())
+        sync_dag_to_db(dag)
 
         dag.test()
         mock_object.assert_called_with("output of first task")
 
-    def test_dag_test_with_fail_handler(self):
+    def test_dag_test_threads_of_a_task_push_and_read_xcoms(self, testing_dag_bundle, session):
+        """A task's own threads make SDK calls while others are served: each gets its own answer."""
+        dag = DAG(dag_id="test_dag_test_xcoms_from_threads", schedule=None, start_date=DEFAULT_DATE)
+
+        @task_decorator
+        def produce(ti=None):
+            def work(x):
+                for n in range(5):
+                    ti.xcom_push(key=f"k{n}_{x}", value=x)
+                    assert ti.xcom_pull(task_ids="produce", key=f"k{n}_{x}") == x
+                return x
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                return sorted(pool.map(work, range(8)))
+
+        with dag:
+            produce()
+        sync_dag_to_db(dag)
+
+        dr = dag.test()
+
+        assert dr.state == DagRunState.SUCCESS
+        keys = set(
+            session.scalars(
+                select(XComModel.key).where(XComModel.dag_id == dag.dag_id, XComModel.run_id == dr.run_id)
+            )
+        )
+        assert {f"k{n}_{x}" for n in range(5) for x in range(8)} <= keys
+
+    def test_dag_test_threads_of_a_task_read_variables_while_another_is_served(
+        self, testing_dag_bundle, session
+    ):
+        """
+        A Variable lookup must not miss while another thread's request is served: hiding the comms
+        from the whole process sent it to the fallback secrets backends, which do not have a
+        Variable stored in the metadata database.
+        """
+        Variable.set(key="in_process_db_variable", value="v", session=session)
+        session.commit()
+        dag = DAG(dag_id="test_dag_test_variables_from_threads", schedule=None, start_date=DEFAULT_DATE)
+
+        @task_decorator
+        def read(ti=None):
+            def work(x):
+                for _ in range(25):
+                    assert SdkVariable.get("in_process_db_variable") == "v"
+                    ti.xcom_push(key=f"k_{x}", value=x)
+                return x
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                return sorted(pool.map(work, range(8)))
+
+        with dag:
+            read()
+        sync_dag_to_db(dag)
+
+        assert dag.test().state == DagRunState.SUCCESS
+
+    @pytest.mark.parametrize("callback_error", [None, RuntimeError])
+    def test_dag_test_retry_callback_keeps_attempt_live(self, testing_dag_bundle, callback_error):
+        observed = []
+
+        def on_retry(context):
+            ti = context["ti"]
+            ti.xcom_push(key="retry_callback", value="written")
+            value = ti.xcom_pull(task_ids=ti.task_id, key="retry_callback")
+            with create_session() as session:
+                stored_ti = session.get(TI, ti.id)
+                observed.append((ti.id, stored_ti.state if stored_ti else None, ti.end_date, value))
+            if callback_error:
+                raise callback_error("callback failed")
+
+        with DAG(dag_id="test_retry_callback_live_attempt", schedule=None, start_date=DEFAULT_DATE) as dag:
+
+            @task_decorator(retries=1, retry_delay=timedelta(0), on_retry_callback=on_retry)
+            def fail_once(**context):
+                if context["ti"].try_number == 1:
+                    raise RuntimeError("retry this attempt")
+
+            fail_once()
+        sync_dag_to_db(dag)
+
+        dr = dag.test()
+
+        assert dr.state == DagRunState.SUCCESS
+        assert len(observed) == 1
+        old_id, state_during_callback, end_date, value = observed[0]
+        assert state_during_callback == TaskInstanceState.RUNNING
+        assert value == "written"
+        with create_session() as session:
+            history = session.get(TI, old_id)
+            assert history is not None
+            assert history.working_set is None
+            assert history.end_date == end_date
+            ti = dr.get_task_instance("fail_once", session=session)
+            assert ti.id != old_id
+            assert ti.try_number == 2
+
+    def test_dag_test_with_fail_handler(self, testing_dag_bundle):
         mock_handle_object_1 = mock.MagicMock()
         mock_handle_object_2 = mock.MagicMock()
 
@@ -1668,8 +2057,8 @@ class TestDag:
             mock_handle_object_1(f"task {ti.task_id} failed...")
 
         def handle_dag_failure(context):
-            ti = context["task_instance"]
-            mock_handle_object_2(f"dag {ti.dag_id} run failed...")
+            dag_id = context["dag"].dag_id
+            mock_handle_object_2(f"dag {dag_id} run failed...")
 
         dag = DAG(
             dag_id="test_local_testing_conn_file",
@@ -1681,6 +2070,7 @@ class TestDag:
 
         mock_task_object_1 = mock.MagicMock()
         mock_task_object_2 = mock.MagicMock()
+        sync_dag_to_db(dag)
 
         @task_decorator
         def check_task():
@@ -1694,9 +2084,9 @@ class TestDag:
 
         with dag:
             check_task_2(check_task())
+        sync_dag_to_db(dag)
 
         dr = dag.test()
-
         ti1 = dr.get_task_instance("check_task")
         ti2 = dr.get_task_instance("check_task_2")
 
@@ -1710,7 +2100,129 @@ class TestDag:
         mock_task_object_1.assert_called()
         mock_task_object_2.assert_not_called()
 
-    def test_dag_connection_file(self, tmp_path):
+    @staticmethod
+    def _make_awaiting_input_dag(dag_id, resume_calls):
+        """Build a Dag whose single task parks in AWAITING_INPUT (Human-in-the-loop)."""
+
+        class AskOperator(BaseOperator):
+            def execute(self, context):
+                upsert_hitl_detail(
+                    ti_id=context["task_instance"].id,
+                    options=["Approve", "Reject"],
+                    subject="Deploy?",
+                    multiple=False,
+                    params={},
+                )
+                raise TaskAwaitingInput(method_name="execute_complete")
+
+            def execute_complete(self, context, event):
+                resume_calls.append((event["chosen_options"], event["params_input"]))
+                return event["chosen_options"]
+
+        dag = DAG(dag_id=dag_id, schedule=None, start_date=DEFAULT_DATE)
+        with dag:
+            AskOperator(task_id="ask")
+        sync_dag_to_db(dag)
+        return dag
+
+    @pytest.mark.execution_timeout(60)
+    def test_dag_test_hitl_task_stays_parked_until_external_response(
+        self, testing_dag_bundle, monkeypatch, caplog
+    ):
+        """
+        The dag.test() contract for Human-in-the-loop: a task that parks in AWAITING_INPUT is
+        never resolved by dag.test() itself. The run waits until a response recorded from
+        outside (here through an independent session, the way the API response handler does)
+        flips it back to SCHEDULED, at which point the loop resumes it.
+
+        The loop's time.sleep is the synchronization point: patching it to deliver the
+        external response keeps the test deterministic, with no real-time waits.
+        """
+        resume_calls: list = []
+        dag = self._make_awaiting_input_dag("test_dag_test_hitl_external", resume_calls)
+
+        parked_states_seen = []
+        spins = 0
+
+        def deliver_external_response():
+            """Record an Approve through an independent session, as the API handler would."""
+            with create_session(scoped=False) as external_session:
+                parked_ti = external_session.scalar(
+                    select(TI).where(
+                        TI.dag_id == "test_dag_test_hitl_external",
+                        TI.task_id == "ask",
+                        TI.state == TaskInstanceState.AWAITING_INPUT,
+                    )
+                )
+                if parked_ti is None:
+                    return
+                parked_states_seen.append(parked_ti.state)
+                detail = external_session.get(HITLDetail, parked_ti.id)
+                detail.chosen_options = ["Approve"]
+                detail.params_input = {}
+                detail.responded_at = timezone.utcnow()
+                detail.responded_by = {"id": "external", "name": "external"}
+                external_session.add(detail)
+                handle_event_submit(
+                    TriggerEvent(detail.as_resume_event_payload()),
+                    task_instance=parked_ti,
+                    session=external_session,
+                )
+
+        def respond_once_waiting(seconds):
+            # Replaces the loop's real sleep to keep the test fast, and delivers the response
+            # only once dag.test() has logged that it is parked on the HITL task -- so the
+            # assertions below prove the task resumed through the new awaiting_input branch
+            # rather than any other path.
+            nonlocal spins
+            spins += 1
+            assert spins < 50, "dag.test() never logged that it was waiting on the parked task"
+            if "Waiting for Human-in-the-loop input" in caplog.text:
+                deliver_external_response()
+
+        monkeypatch.setattr(time, "sleep", respond_once_waiting)
+
+        with caplog.at_level(logging.INFO, logger="airflow.sdk.definitions.dag"):
+            dr = dag.test()
+
+        # The task must take the new "waiting for input" branch, not the old "unrunnable" one.
+        assert "Waiting for Human-in-the-loop input" in caplog.text
+        assert "No tasks to run" not in caplog.text
+
+        ti = dr.get_task_instance("ask")
+        assert ti is not None
+        assert ti.state == TaskInstanceState.SUCCESS
+        assert parked_states_seen == [TaskInstanceState.AWAITING_INPUT]
+        assert resume_calls == [(["Approve"], {})]
+
+    @pytest.mark.execution_timeout(60)
+    def test_dag_test_preserves_defer_kwargs_through_inline_trigger(self, testing_dag_bundle):
+        """dag.test() must keep defer()-time kwargs when the inline trigger yields an event."""
+        from airflow.providers.standard.triggers.temporal import TimeDeltaTrigger
+
+        seen_kwargs: list = []
+
+        class DeferKwargOperator(BaseOperator):
+            def execute(self, context):
+                self.defer(
+                    trigger=TimeDeltaTrigger(datetime.timedelta(seconds=0)),
+                    method_name="resume",
+                    kwargs={"vpc_id": "vpc-abc123"},
+                )
+
+            def resume(self, context, event=None, vpc_id=""):
+                seen_kwargs.append(vpc_id)
+
+        dag = DAG(dag_id="test_dag_test_defer_kwargs", schedule=None, start_date=DEFAULT_DATE)
+        with dag:
+            DeferKwargOperator(task_id="defer_task")
+        sync_dag_to_db(dag)
+
+        dag.test()
+
+        assert seen_kwargs == ["vpc-abc123"]  # was [""] before the fix
+
+    def test_dag_connection_file(self, tmp_path, testing_dag_bundle):
         test_connections_string = """
 ---
 my_postgres_conn:
@@ -1718,6 +2230,7 @@ my_postgres_conn:
     conn_type: postgres
         """
         dag = DAG(dag_id="test_local_testing_conn_file", schedule=None, start_date=DEFAULT_DATE)
+        sync_dag_to_db(dag)
 
         @task_decorator
         def check_task():
@@ -1735,65 +2248,75 @@ my_postgres_conn:
         dag.test(conn_file_path=os.fspath(path))
 
     @pytest.mark.parametrize(
-        "ti_state_begin, ti_state_end",
+        ("ti_state_begin", "ti_state_end"),
         [
-            *((state, None) for state in State.task_states if state != TaskInstanceState.RUNNING),
+            *(
+                (state, None)
+                for state in State.task_states
+                if state not in (TaskInstanceState.RUNNING, TaskInstanceState.RESTARTING)
+            ),
             (TaskInstanceState.RUNNING, TaskInstanceState.RESTARTING),
+            (TaskInstanceState.RESTARTING, TaskInstanceState.RESTARTING),
         ],
     )
     def test_clear_dag(
         self,
         ti_state_begin: TaskInstanceState | None,
         ti_state_end: TaskInstanceState | None,
+        dag_maker,
+        session,
     ):
         dag_id = "test_clear_dag"
-        self._clean_up(dag_id)
-        task_id = "t1"
-        dag = DAG(dag_id, schedule=None, start_date=DEFAULT_DATE, max_active_runs=1)
-        _ = EmptyOperator(task_id=task_id, dag=dag)
 
-        session = settings.Session()  # type: ignore
-        dagrun_1 = dag.create_dagrun(
+        task_id = "t1"
+        with dag_maker(
+            dag_id,
+            schedule=None,
+            start_date=DEFAULT_DATE,
+            max_active_runs=1,
+            serialized=True,
+        ) as dag:
+            EmptyOperator(task_id=task_id)
+
+        session = settings.get_session()()
+        dagrun_1 = dag_maker.create_dagrun(
             run_id="backfill",
             run_type=DagRunType.BACKFILL_JOB,
             state=DagRunState.RUNNING,
             start_date=DEFAULT_DATE,
             logical_date=DEFAULT_DATE,
-            data_interval=(DEFAULT_DATE, DEFAULT_DATE),
-            run_after=DEFAULT_DATE,
-            triggered_by=DagRunTriggeredByType.TEST,
+            # triggered_by=DagRunTriggeredByType.TEST,
+            session=session,
         )
-        session.merge(dagrun_1)
 
-        task_instance_1 = dagrun_1.get_task_instance(task_id)
+        task_instance_1 = dagrun_1.get_task_instance(task_id, session=session)
         if TYPE_CHECKING:
             assert task_instance_1
         task_instance_1.state = ti_state_begin
         task_instance_1.job_id = 123
-        session.merge(task_instance_1)
         session.commit()
 
-        dag.clear(
+        create_scheduler_dag(dag).clear(
             start_date=DEFAULT_DATE,
             end_date=DEFAULT_DATE + datetime.timedelta(days=1),
             session=session,
         )
 
-        task_instances = session.query(TI).filter(TI.dag_id == dag_id).all()
+        task_instances = session.scalars(select(TI).where(TI.dag_id == dag_id)).all()
 
         assert len(task_instances) == 1
         task_instance: TI = task_instances[0]
         assert task_instance.state == ti_state_end
-        self._clean_up(dag_id)
 
     def test_next_dagrun_info_once(self):
         dag = DAG("test_scheduler_dagrun_once", start_date=timezone.datetime(2015, 1, 1), schedule="@once")
+        scheduler_dag = create_scheduler_dag(dag)
 
-        next_info = dag.next_dagrun_info(None)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=None)
         assert next_info
         assert next_info.logical_date == timezone.datetime(2015, 1, 1)
 
-        next_info = dag.next_dagrun_info(next_info.data_interval)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=next_info)
         assert next_info is None
 
     def test_next_dagrun_info_catchup(self):
@@ -1801,7 +2324,7 @@ my_postgres_conn:
         Test to check that a DAG with catchup = False only schedules beginning now, not back to the start date
         """
 
-        def make_dag(dag_id, schedule, start_date, catchup):
+        def make_dag(dag_id, schedule, start_date, catchup) -> SerializedDAG:
             default_args = {
                 "owner": "airflow",
                 "depends_on_past": False,
@@ -1819,7 +2342,7 @@ my_postgres_conn:
             op3 = EmptyOperator(task_id="t3", dag=dag)
             op1 >> op2 >> op3
 
-            return dag
+            return create_scheduler_dag(dag)
 
         now = timezone.utcnow()
         six_hours_ago_to_the_hour = (now - datetime.timedelta(hours=6)).replace(
@@ -1834,7 +2357,8 @@ my_postgres_conn:
             start_date=six_hours_ago_to_the_hour,
             catchup=False,
         )
-        next_date, _ = dag1.next_dagrun_info(None)
+        info = dag1.next_dagrun_info(last_automated_run_info=None)
+        next_date = info.run_after
         # The DR should be scheduled in the last half an hour, not 6 hours ago
         assert next_date > half_an_hour_ago
         assert next_date < timezone.utcnow()
@@ -1846,7 +2370,8 @@ my_postgres_conn:
             catchup=False,
         )
 
-        next_date, _ = dag2.next_dagrun_info(None)
+        info = dag2.next_dagrun_info(last_automated_run_info=None)
+        next_date = info.run_after
         # The DR should be scheduled in the last 2 hours, not 6 hours ago
         assert next_date > two_hours_ago
         # The DR should be scheduled BEFORE now
@@ -1859,7 +2384,8 @@ my_postgres_conn:
             catchup=False,
         )
 
-        next_date, _ = dag3.next_dagrun_info(None)
+        info = dag3.next_dagrun_info(last_automated_run_info=None)
+        next_date = info.run_after
         # The DR should be scheduled in the last 2 hours, not 6 hours ago
         assert next_date == six_hours_ago_to_the_hour
 
@@ -1876,13 +2402,14 @@ my_postgres_conn:
             schedule=schedule,
             catchup=False,
         )
+        scheduler_dag = create_scheduler_dag(dag)
 
-        next_info = dag.next_dagrun_info(None)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=None)
         assert next_info
         assert next_info.logical_date == timezone.datetime(2020, 1, 4)
 
         # The date to create is in the future, this is handled by "DagModel.dags_needing_dagruns"
-        next_info = dag.next_dagrun_info(next_info.data_interval)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=next_info)
         assert next_info
         assert next_info.logical_date == timezone.datetime(2020, 1, 5)
 
@@ -1898,31 +2425,36 @@ my_postgres_conn:
             schedule=timedelta(days=1),
             catchup=True,
         )
+        scheduler_dag = create_scheduler_dag(dag)
 
-        next_info = dag.next_dagrun_info(None)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=None)
         assert next_info
         assert next_info.logical_date == timezone.datetime(2020, 5, 1)
 
-        next_info = dag.next_dagrun_info(next_info.data_interval)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=next_info)
         assert next_info
         assert next_info.logical_date == timezone.datetime(2020, 5, 2)
 
-        next_info = dag.next_dagrun_info(next_info.data_interval)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=next_info)
         assert next_info
         assert next_info.logical_date == timezone.datetime(2020, 5, 3)
 
         # The date to create is in the future, this is handled by "DagModel.dags_needing_dagruns"
-        next_info = dag.next_dagrun_info(next_info.data_interval)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=next_info)
         assert next_info
         assert next_info.logical_date == timezone.datetime(2020, 5, 4)
 
-    @pytest.mark.usefixtures("clear_all_logger_handlers")
     def test_next_dagrun_info_timetable_exception(self, caplog):
         """Test the DAG does not crash the scheduler if the timetable raises an exception."""
 
         class FailingTimetable(Timetable):
-            def next_dagrun_info(self, last_automated_data_interval, restriction):
+            def next_dagrun_info(self, last_automated_run_info, restriction):
                 raise RuntimeError("this fails")
+
+        def _find_registered_custom_timetable(s):
+            if s == qualname(FailingTimetable):
+                return FailingTimetable
+            raise ValueError(f"unexpected class {s!r}")
 
         dag = DAG(
             "test_next_dagrun_info_timetable_exception",
@@ -1930,24 +2462,32 @@ my_postgres_conn:
             schedule=FailingTimetable(),
             catchup=True,
         )
+        with (
+            mock.patch(
+                "airflow.serialization.encoders.find_registered_custom_timetable",
+                _find_registered_custom_timetable,
+            ),
+            mock.patch(
+                "airflow.serialization.decoders.find_registered_custom_timetable",
+                _find_registered_custom_timetable,
+            ),
+        ):
+            scheduler_dag = create_scheduler_dag(dag)
 
         def _check_logs(records: list[logging.LogRecord], data_interval: DataInterval) -> None:
             assert len(records) == 1
             record = records[0]
             assert record.exc_info is not None, "Should contain exception"
-            assert record.getMessage() == (
-                f"Failed to fetch run info after data interval {data_interval} "
-                f"for DAG 'test_next_dagrun_info_timetable_exception'"
-            )
+            assert record.message == "Failed to fetch run info"
 
         with caplog.at_level(level=logging.ERROR):
-            next_info = dag.next_dagrun_info(None)
+            next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=None)
         assert next_info is None, "failed next_dagrun_info should return None"
         _check_logs(caplog.records, data_interval=None)
         caplog.clear()
         data_interval = DataInterval(timezone.datetime(2020, 5, 1), timezone.datetime(2020, 5, 2))
         with caplog.at_level(level=logging.ERROR):
-            next_info = dag.next_dagrun_info(data_interval)
+            next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=data_interval)
         assert next_info is None, "failed next_dagrun_info should return None"
         _check_logs(caplog.records, data_interval)
 
@@ -1970,8 +2510,9 @@ my_postgres_conn:
             catchup=True,
         )
         EmptyOperator(task_id="dummy", dag=dag, owner="airflow")
+        scheduler_dag = create_scheduler_dag(dag)
 
-        next_info = dag.next_dagrun_info(None)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=None)
         assert next_info
         assert next_info.logical_date == timezone.datetime(2016, 1, 2, 5, 4)
 
@@ -1982,8 +2523,9 @@ my_postgres_conn:
             catchup=True,
         )
         EmptyOperator(task_id="dummy", dag=dag, owner="airflow")
+        scheduler_dag = create_scheduler_dag(dag)
 
-        next_info = dag.next_dagrun_info(None)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=None)
         assert next_info
         assert next_info.logical_date == timezone.datetime(2016, 1, 1, 10, 10)
 
@@ -1996,8 +2538,9 @@ my_postgres_conn:
             catchup=False,
         )
         EmptyOperator(task_id="dummy", dag=dag, owner="airflow")
+        scheduler_dag = create_scheduler_dag(dag)
 
-        next_info = dag.next_dagrun_info(None)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=None)
         assert next_info
         # With catchup=False, next_dagrun should be based on the current date
         # Verify it's not using the old start_date
@@ -2016,8 +2559,9 @@ my_postgres_conn:
             catchup=False,
         )
         EmptyOperator(task_id="dummy", dag=dag, owner="airflow")
+        scheduler_dag = create_scheduler_dag(dag)
 
-        next_info = dag.next_dagrun_info(None)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=None)
         assert next_info
         # With catchup=False, next_dagrun should be based on the current date
         # Verify it's not using the old start_date
@@ -2031,92 +2575,21 @@ my_postgres_conn:
         dag = DAG(
             "test_scheduler_dagrun_29_feb", start_date=timezone.datetime(2024, 1, 1), schedule="0 0 29 2 *"
         )
+        scheduler_dag = create_scheduler_dag(dag)
 
-        next_info = dag.next_dagrun_info(None)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=None)
         assert next_info
         assert next_info.logical_date == timezone.datetime(2024, 2, 29)
 
-        next_info = dag.next_dagrun_info(next_info.data_interval)
+        next_info = scheduler_dag.next_dagrun_info(last_automated_run_info=next_info)
         assert next_info.logical_date == timezone.datetime(2028, 2, 29)
         assert next_info.data_interval.start == timezone.datetime(2028, 2, 29)
         assert next_info.data_interval.end == timezone.datetime(2032, 2, 29)
 
-    @pytest.mark.parametrize(
-        "fab_version, perms, expected_exception, expected_perms",
-        [
-            pytest.param(
-                "1.2.0",
-                {
-                    "role1": {permissions.ACTION_CAN_READ, permissions.ACTION_CAN_EDIT},
-                    "role3": {permissions.RESOURCE_DAG_RUN: {permissions.ACTION_CAN_CREATE}},
-                    # will raise error in old FAB with new access control format
-                },
-                AirflowException,
-                None,
-                id="old_fab_new_access_control_format",
-            ),
-            pytest.param(
-                "1.2.0",
-                {
-                    "role1": [
-                        permissions.ACTION_CAN_READ,
-                        permissions.ACTION_CAN_EDIT,
-                        permissions.ACTION_CAN_READ,
-                    ],
-                },
-                None,
-                {"role1": {permissions.ACTION_CAN_READ, permissions.ACTION_CAN_EDIT}},
-                id="old_fab_old_access_control_format",
-            ),
-            pytest.param(
-                "1.3.0",
-                {
-                    "role1": {permissions.ACTION_CAN_READ, permissions.ACTION_CAN_EDIT},  # old format
-                    "role3": {permissions.RESOURCE_DAG_RUN: {permissions.ACTION_CAN_CREATE}},  # new format
-                },
-                None,
-                {
-                    "role1": {
-                        permissions.RESOURCE_DAG: {permissions.ACTION_CAN_READ, permissions.ACTION_CAN_EDIT}
-                    },
-                    "role3": {permissions.RESOURCE_DAG_RUN: {permissions.ACTION_CAN_CREATE}},
-                },
-                id="new_fab_mixed_access_control_format",
-            ),
-        ],
-    )
-    def test_access_control_format(self, fab_version, perms, expected_exception, expected_perms):
-        if expected_exception:
-            with patch("airflow.providers.fab.__version__", fab_version):
-                with pytest.raises(
-                    expected_exception,
-                    match="Please upgrade the FAB provider to a version >= 1.3.0 to allow use the Dag Level Access Control new format.",
-                ):
-                    DAG(dag_id="dag_test", schedule=None, access_control=perms)
-        else:
-            with patch("airflow.providers.fab.__version__", fab_version):
-                dag = DAG(dag_id="dag_test", schedule=None, access_control=perms)
-            assert dag.access_control == expected_perms
-
-    def test_validate_executor_field_executor_not_configured(self):
-        dag = DAG("test-dag", schedule=None)
-        EmptyOperator(task_id="t1", dag=dag, executor="test.custom.executor")
-        with pytest.raises(
-            UnknownExecutorException,
-            match="The specified executor test.custom.executor for task t1 is not configured",
-        ):
-            dag.validate()
-
-    def test_validate_executor_field(self):
-        with patch.object(ExecutorLoader, "lookup_executor_name_by_str"):
-            dag = DAG("test-dag", schedule=None)
-            EmptyOperator(task_id="t1", dag=dag, executor="test.custom.executor")
-            dag.validate()
-
-    def test_validate_params_on_trigger_dag(self):
+    def test_validate_params_on_trigger_dag(self, testing_dag_bundle):
         dag = DAG("dummy-dag", schedule=None, params={"param1": Param(type="string")})
-        with pytest.raises(ParamValidationError, match="No value passed and Param has no default value"):
-            dag.create_dagrun(
+        with pytest.raises(ValueError, match="No value passed"):
+            sync_dag_to_db(dag).create_dagrun(
                 run_id="test_dagrun_missing_param",
                 run_type=DagRunType.MANUAL,
                 state=State.RUNNING,
@@ -2127,10 +2600,8 @@ my_postgres_conn:
             )
 
         dag = DAG("dummy-dag", schedule=None, params={"param1": Param(type="string")})
-        with pytest.raises(
-            ParamValidationError, match="Invalid input for param param1: None is not of type 'string'"
-        ):
-            dag.create_dagrun(
+        with pytest.raises(ValueError, match="None is not of type 'string'"):
+            sync_dag_to_db(dag).create_dagrun(
                 run_id="test_dagrun_missing_param",
                 run_type=DagRunType.MANUAL,
                 state=State.RUNNING,
@@ -2142,7 +2613,7 @@ my_postgres_conn:
             )
 
         dag = DAG("dummy-dag", schedule=None, params={"param1": Param(type="string")})
-        dag.create_dagrun(
+        sync_dag_to_db(dag).create_dagrun(
             run_id="test_dagrun_missing_param",
             run_type=DagRunType.MANUAL,
             state=State.RUNNING,
@@ -2153,17 +2624,23 @@ my_postgres_conn:
             triggered_by=DagRunTriggeredByType.TEST,
         )
 
-    def test_dag_owner_links(self):
+    def test_dag_owner_links(self, testing_dag_bundle):
         dag = DAG(
             "dag",
             schedule=None,
             start_date=DEFAULT_DATE,
             owner_links={"owner1": "https://mylink.com", "owner2": "mailto:someone@yoursite.com"},
         )
-
-        assert dag.owner_links == {"owner1": "https://mylink.com", "owner2": "mailto:someone@yoursite.com"}
         session = settings.Session()
-        dag.sync_to_db(session=session)
+        orm_dag = DagModel(
+            dag_id=dag.dag_id,
+            bundle_name="testing",
+            is_stale=False,
+        )
+        session.add(orm_dag)
+        session.flush()
+        assert dag.owner_links == {"owner1": "https://mylink.com", "owner2": "mailto:someone@yoursite.com"}
+        sync_dag_to_db(dag, session=session)
 
         expected_owners = {"dag": {"owner1": "https://mylink.com", "owner2": "mailto:someone@yoursite.com"}}
         orm_dag_owners = DagOwnerAttributes.get_all(session)
@@ -2171,31 +2648,129 @@ my_postgres_conn:
 
         # Test dag owner links are removed completely
         dag = DAG("dag", schedule=None, start_date=DEFAULT_DATE)
-        dag.sync_to_db(session=session)
+        sync_dag_to_db(dag, session=session)
 
-        orm_dag_owners = session.query(DagOwnerAttributes).all()
+        orm_dag_owners = session.scalars(select(DagOwnerAttributes)).all()
         assert not orm_dag_owners
 
-    def test_get_bundle_name(self, testing_dag_bundle):
-        dag = DAG("dag")
+    @pytest.mark.need_serialized_dag
+    @pytest.mark.parametrize(
+        ("reference_type", "reference_column"),
+        [
+            pytest.param(DeadlineReference.DAGRUN_LOGICAL_DATE, "logical_date", id="logical_date"),
+            pytest.param(DeadlineReference.DAGRUN_QUEUED_AT, "queued_at", id="queued_at"),
+            pytest.param(DeadlineReference.FIXED_DATETIME(DEFAULT_DATE), "NONE", id="fixed_deadline"),
+        ],
+    )
+    def test_dagrun_deadline(self, reference_type, reference_column, testing_dag_bundle, session):
+        interval = datetime.timedelta(hours=1)
+        dag = DAG(
+            dag_id="test_deadline",
+            schedule=datetime.timedelta(days=1),
+            deadline=DeadlineAlert(
+                reference=reference_type,
+                interval=interval,
+                callback=AsyncCallback(empty_callback_for_deadline),
+            ),
+        )
 
-        # until we've sycned, it'll be None
-        assert dag.get_bundle_name() is None
+        # Sync the DAG to the database to create DeadlineAlert records
+        scheduler_dag = sync_dag_to_db(dag, session=session)
 
-        DAG.bulk_write_to_db("testing", None, [dag])
-        assert dag.get_bundle_name() == "testing"
+        dr = scheduler_dag.create_dagrun(
+            run_id="test_dagrun_deadline",
+            run_type=DagRunType.SCHEDULED,
+            state=State.QUEUED,
+            logical_date=TEST_DATE,
+            run_after=TEST_DATE,
+            triggered_by=DagRunTriggeredByType.TEST,
+        )
+        session.flush()
+        dr = session.merge(dr)
 
-    def test_get_bundle_version(self, testing_dag_bundle):
-        dag = DAG("dag")
+        assert len(dr.deadlines) == 1
+        assert dr.deadlines[0].deadline_time == getattr(dr, reference_column, DEFAULT_DATE) + interval
 
-        # until we've sycned, it'll be None
-        assert dag.get_bundle_version() is None
+    def test_dag_with_multiple_deadlines(self, testing_dag_bundle, session):
+        """Test that a Dag with multiple deadlines stores all deadlines and persists on re-serialization."""
+        deadlines = [
+            DeadlineAlert(
+                reference=DeadlineReference.DAGRUN_QUEUED_AT,
+                interval=datetime.timedelta(minutes=5),
+                callback=AsyncCallback(empty_callback_for_deadline),
+            ),
+            DeadlineAlert(
+                reference=DeadlineReference.DAGRUN_QUEUED_AT,
+                interval=datetime.timedelta(minutes=10),
+                callback=AsyncCallback(empty_callback_for_deadline),
+            ),
+            DeadlineAlert(
+                reference=DeadlineReference.DAGRUN_LOGICAL_DATE,
+                interval=datetime.timedelta(hours=1),
+                callback=AsyncCallback(empty_callback_for_deadline),
+            ),
+        ]
+        expected_num_deadlines = 3
 
-        # Now, it can be none or a str
-        DAG.bulk_write_to_db("testing", None, [dag])
-        assert dag.get_bundle_version() is None
-        DAG.bulk_write_to_db("testing", "abc", [dag])
-        assert dag.get_bundle_version() == "abc"
+        dag = DAG(
+            dag_id="test_multiple_deadlines",
+            schedule=datetime.timedelta(days=1),
+            deadline=deadlines,
+        )
+
+        scheduler_dag = sync_dag_to_db(dag, session=session)
+
+        deadline_alerts = session.scalars(select(DeadlineAlertModel)).all()
+        assert len(deadline_alerts) == expected_num_deadlines
+        initial_uuids = {alert.id for alert in deadline_alerts}
+
+        # Re-serialize the Dag
+        SerializedDagModel.write_dag(
+            LazyDeserializedDAG.from_dag(dag),
+            bundle_name="testing",
+            session=session,
+        )
+        session.commit()
+
+        # Verify deadline alerts still exist after re-serialization
+        stored_alerts = session.scalars(
+            select(DeadlineAlertModel).where(DeadlineAlertModel.id.in_(initial_uuids))
+        ).all()
+        assert len(stored_alerts) == expected_num_deadlines
+
+        intervals = sorted(
+            alert.interval["__data__"] if isinstance(alert.interval, dict) else alert.interval
+            for alert in stored_alerts
+        )
+        assert intervals == [300.0, 600.0, 3600.0]
+
+        # Now create a dagrun and verify deadlines are created
+        dr = scheduler_dag.create_dagrun(
+            run_id="test_multiple_deadlines",
+            run_type=DagRunType.SCHEDULED,
+            state=State.QUEUED,
+            logical_date=TEST_DATE,
+            run_after=TEST_DATE,
+            triggered_by=DagRunTriggeredByType.TEST,
+        )
+        session.flush()
+        dr = session.merge(dr)
+
+        # Check that all deadlines were created
+        assert len(dr.deadlines) == expected_num_deadlines
+
+        # Verify each deadline has correct properties
+        deadline_times = [d.deadline_time for d in dr.deadlines]
+        expected_times = [
+            dr.queued_at + datetime.timedelta(minutes=5),
+            dr.queued_at + datetime.timedelta(minutes=10),
+            dr.logical_date + datetime.timedelta(hours=1),
+        ]
+
+        # Sort both lists to compare regardless of order
+        deadline_times.sort()
+        expected_times.sort()
+        assert deadline_times == expected_times
 
 
 class TestDagModel:
@@ -2203,25 +2778,25 @@ class TestDagModel:
         clear_db_dags()
         clear_db_assets()
         clear_db_runs()
-
-    def setup_method(self):
-        self._clean()
+        clear_db_dag_bundles()
+        clear_db_teams()
 
     def teardown_method(self):
         self._clean()
 
-    def test_dags_needing_dagruns_not_too_early(self):
+    def test_dags_needing_dagruns_not_too_early(self, testing_dag_bundle):
         dag = DAG(dag_id="far_future_dag", schedule=None, start_date=timezone.datetime(2038, 1, 1))
         EmptyOperator(task_id="dummy", dag=dag, owner="airflow")
 
         session = settings.Session()
         orm_dag = DagModel(
             dag_id=dag.dag_id,
+            bundle_name="testing",
             max_active_tasks=1,
             has_task_concurrency_limits=False,
             next_dagrun=dag.start_date,
             next_dagrun_create_after=timezone.datetime(2038, 1, 2),
-            is_active=True,
+            is_stale=False,
         )
         session.add(orm_dag)
         session.flush()
@@ -2250,9 +2825,14 @@ class TestDagModel:
         assert dag_models == []
 
         # add queue records so we'll need a run
-        dag_model = session.query(DagModel).filter(DagModel.dag_id == dag.dag_id).one()
+        dag_model = session.scalar(select(DagModel).where(DagModel.dag_id == dag.dag_id))
         asset_model: AssetModel = dag_model.schedule_assets[0]
-        session.add(AssetDagRunQueue(asset_id=asset_model.id, target_dag_id=dag_model.dag_id))
+        event = AssetEvent(asset_id=asset_model.id, timestamp=timezone.utcnow())
+        session.add(event)
+        session.flush()
+        session.add(
+            AssetDagRunQueue(asset_id=asset_model.id, target_dag_id=dag_model.dag_id, asset_event_id=event.id)
+        )
         session.flush()
         query, _ = DagModel.dags_needing_dagruns(session)
         dag_models = query.all()
@@ -2274,6 +2854,221 @@ class TestDagModel:
         query, _ = DagModel.dags_needing_dagruns(session)
         dag_models = query.all()
         assert dag_models == [dag_model]
+
+    def test_dags_needing_dagruns_ignores_consumed_adrq(self, dag_maker, session):
+        asset_a = Asset(uri="test://asset-a", group="test-group")
+        asset_b = Asset(uri="test://asset-b", group="test-group")
+        with dag_maker(
+            session=session,
+            dag_id="my_dag",
+            schedule=[asset_a, asset_b],
+            start_date=pendulum.now().add(days=-2),
+        ):
+            EmptyOperator(task_id="dummy")
+        dag_model = dag_maker.dag_model
+        a_id, b_id = (
+            session.scalar(select(AssetModel.id).where(AssetModel.uri == asset.uri))
+            for asset in (asset_a, asset_b)
+        )
+
+        def _queue_event(asset_id):
+            event = AssetEvent(asset_id=asset_id, timestamp=timezone.utcnow())
+            session.add(event)
+            session.flush()
+            session.add(
+                AssetDagRunQueue(asset_id=asset_id, target_dag_id=dag_model.dag_id, asset_event_id=event.id)
+            )
+            session.flush()
+            return event
+
+        # A stale row for A (event already consumed) and a fresh event for B
+        # do not satisfy the condition.
+        prior_run = dag_maker.create_dagrun(
+            run_type=DagRunType.ASSET_TRIGGERED,
+            state=DagRunState.SUCCESS,
+            logical_date=pendulum.now("UTC"),
+        )
+        prior_run.consumed_asset_events.append(_queue_event(a_id))
+        _queue_event(b_id)
+        query, triggered_date_by_dag = DagModel.dags_needing_dagruns(session)
+        assert query.all() == []
+        assert triggered_date_by_dag == {}
+
+        # A fresh event for A does.
+        _queue_event(a_id)
+        query, triggered_date_by_dag = DagModel.dags_needing_dagruns(session)
+        assert query.all() == [dag_model]
+        assert set(triggered_date_by_dag) == {dag_model.dag_id}
+
+    def test_dags_needing_dagruns_skips_adrq_when_serialized_dag_missing(
+        self, session, caplog, testing_dag_bundle
+    ):
+        """ADRQ rows for a Dag without SerializedDagModel must be skipped (no triggered_date_by_dag).
+
+        Rows must remain in ``asset_dag_run_queue`` so the scheduler can re-evaluate on a later run once
+        ``SerializedDagModel`` exists (``dags_needing_dagruns`` only drops them from the in-memory
+        candidate set, it does not delete ORM rows).
+        """
+        orphan_dag_id = "adrq_no_serialized_dag"
+        orphan_uri = "test://asset_for_orphan_adrq"
+        session.add(AssetModel(uri=orphan_uri))
+        session.flush()
+        asset_id = session.scalar(select(AssetModel.id).where(AssetModel.uri == orphan_uri))
+
+        dag_model = DagModel(
+            dag_id=orphan_dag_id,
+            bundle_name="testing",
+            max_active_tasks=1,
+            has_task_concurrency_limits=False,
+            max_consecutive_failed_dag_runs=0,
+            next_dagrun=timezone.datetime(2038, 1, 1),
+            next_dagrun_create_after=timezone.datetime(2038, 1, 2),
+            is_stale=False,
+            has_import_errors=False,
+            is_paused=False,
+            asset_expression={"any": [{"uri": orphan_uri}]},
+        )
+        session.add(dag_model)
+        session.flush()
+
+        event = AssetEvent(asset_id=asset_id, timestamp=timezone.utcnow())
+        session.add(event)
+        session.flush()
+        session.add(AssetDagRunQueue(asset_id=asset_id, target_dag_id=orphan_dag_id, asset_event_id=event.id))
+        session.flush()
+
+        with caplog.at_level(logging.DEBUG, logger="airflow.models.dag"):
+            _query, triggered_date_by_dag = DagModel.dags_needing_dagruns(session)
+
+        assert orphan_dag_id not in triggered_date_by_dag
+        assert (
+            "Dags have queued asset events (ADRQ), but are not found in the serialized_dag table."
+            in caplog.text
+        )
+        assert orphan_dag_id in caplog.text
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(AssetDagRunQueue)
+                .where(AssetDagRunQueue.target_dag_id == orphan_dag_id)
+            )
+            == 1
+        )
+
+    def test_dags_needing_dagruns_missing_serialized_debug_lists_sorted_dag_ids(
+        self, session, caplog, testing_dag_bundle
+    ):
+        """When multiple dags lack SerializedDagModel, the debug log lists dag_ids sorted."""
+        session.add_all(
+            [
+                AssetModel(uri="test://ds_ghost_z"),
+                AssetModel(uri="test://ds_ghost_a"),
+            ]
+        )
+        session.flush()
+        id_z = session.scalar(select(AssetModel.id).where(AssetModel.uri == "test://ds_ghost_z"))
+        id_a = session.scalar(select(AssetModel.id).where(AssetModel.uri == "test://ds_ghost_a"))
+        far = timezone.datetime(2038, 1, 1)
+        far_after = timezone.datetime(2038, 1, 2)
+        session.add_all(
+            [
+                DagModel(
+                    dag_id="ghost_z",
+                    bundle_name="testing",
+                    max_active_tasks=1,
+                    has_task_concurrency_limits=False,
+                    max_consecutive_failed_dag_runs=0,
+                    next_dagrun=far,
+                    next_dagrun_create_after=far_after,
+                    is_stale=False,
+                    has_import_errors=False,
+                    is_paused=False,
+                    asset_expression={"any": [{"uri": "test://ds_ghost_z"}]},
+                ),
+                DagModel(
+                    dag_id="ghost_a",
+                    bundle_name="testing",
+                    max_active_tasks=1,
+                    has_task_concurrency_limits=False,
+                    max_consecutive_failed_dag_runs=0,
+                    next_dagrun=far,
+                    next_dagrun_create_after=far_after,
+                    is_stale=False,
+                    has_import_errors=False,
+                    is_paused=False,
+                    asset_expression={"any": [{"uri": "test://ds_ghost_a"}]},
+                ),
+            ]
+        )
+        session.flush()
+
+        event_z = AssetEvent(asset_id=id_z, timestamp=timezone.utcnow())
+        event_a = AssetEvent(asset_id=id_a, timestamp=timezone.utcnow())
+        session.add_all([event_z, event_a])
+        session.flush()
+        session.add_all(
+            [
+                AssetDagRunQueue(asset_id=id_z, target_dag_id="ghost_z", asset_event_id=event_z.id),
+                AssetDagRunQueue(asset_id=id_a, target_dag_id="ghost_a", asset_event_id=event_a.id),
+            ]
+        )
+        session.flush()
+
+        with caplog.at_level(logging.DEBUG, logger="airflow.models.dag"):
+            _query, triggered_date_by_dag = DagModel.dags_needing_dagruns(session)
+
+        assert "ghost_a" not in triggered_date_by_dag
+        assert "ghost_z" not in triggered_date_by_dag
+        msg = next(
+            r.message
+            for r in caplog.records
+            if "Dags have queued asset events (ADRQ), but are not found in the serialized_dag table."
+            in r.message
+        )
+        assert msg.index("ghost_a") < msg.index("ghost_z")
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(AssetDagRunQueue)
+                .where(AssetDagRunQueue.target_dag_id.in_(("ghost_a", "ghost_z")))
+            )
+            == 2
+        )
+
+    def test_dags_needing_dagruns_query_count(self, dag_maker, session):
+        """Test that dags_needing_dagruns avoids N+1 on adrq.asset access."""
+        num_assets = 10
+        assets = [Asset(uri=f"test://asset{i}", group="test-group") for i in range(num_assets)]
+
+        with dag_maker(
+            session=session,
+            dag_id="my_dag",
+            max_active_runs=10,
+            schedule=assets,
+            start_date=pendulum.now().add(days=-2),
+        ):
+            EmptyOperator(task_id="dummy")
+
+        dag_model = dag_maker.dag_model
+        asset_models = dag_model.schedule_assets
+        assert len(asset_models) == num_assets
+        for asset_model in asset_models:
+            event = AssetEvent(asset_id=asset_model.id, timestamp=timezone.utcnow())
+            session.add(event)
+            session.flush()
+            session.add(
+                AssetDagRunQueue(
+                    asset_id=asset_model.id, target_dag_id=dag_model.dag_id, asset_event_id=event.id
+                )
+            )
+        session.flush()
+
+        # Clear identity map so N+1 on adrq.asset is exposed
+        session.expire_all()
+
+        with assert_queries_count(6):
+            query, _ = DagModel.dags_needing_dagruns(session)
+            query.all()
 
     def test_dags_needing_dagruns_asset_aliases(self, dag_maker, session):
         # link asset_alias hello_alias to asset hello
@@ -2299,7 +3094,12 @@ class TestDagModel:
 
         # add queue records so we'll need a run
         dag_model = dag_maker.dag_model
-        session.add(AssetDagRunQueue(asset_id=asset_model.id, target_dag_id=dag_model.dag_id))
+        event = AssetEvent(asset_id=asset_model.id, timestamp=timezone.utcnow())
+        session.add(event)
+        session.flush()
+        session.add(
+            AssetDagRunQueue(asset_id=asset_model.id, target_dag_id=dag_model.dag_id, asset_event_id=event.id)
+        )
         session.flush()
         query, _ = DagModel.dags_needing_dagruns(session)
         dag_models = query.all()
@@ -2328,8 +3128,9 @@ class TestDagModel:
     def test_dags_needing_dagruns_asset_refs(self, dag_maker, session, ref):
         asset = Asset(name="1", uri="s3://bucket/assets/1")
 
-        with dag_maker(dag_id="producer", schedule=None, session=session):
+        with dag_maker(dag_id="producer", schedule=None, session=session) as dag:
             op = EmptyOperator(task_id="op", outlets=asset)
+        ser_op = dag.get_task(op.task_id)
 
         dr: DagRun = dag_maker.create_dagrun()
 
@@ -2343,14 +3144,43 @@ class TestDagModel:
 
         # Upstream triggered, now we need a run.
         ti = dr.get_task_instance("op")
-        ti.refresh_from_task(op)
-        ti.run()
+        ti.refresh_from_task(ser_op)
+        run_task_instance(ti, op)
 
         assert session.scalars(select(AssetDagRunQueue.target_dag_id)).all() == ["consumer"]
         query, _ = DagModel.dags_needing_dagruns(session)
         assert [dm.dag_id for dm in query] == ["consumer"]
 
-    def test_max_active_runs_not_none(self):
+    @pytest.mark.want_activate_assets
+    @pytest.mark.need_serialized_dag
+    def test_dags_needing_dagruns_checking_stale_adrq(self, dag_maker, session):
+        asset = Asset(name="1", uri="s3://bucket/assets/1")
+        dag_id_to_test = "test"
+
+        # Dag 'test' depends on an outlet in 'producer'.
+        with dag_maker(dag_id="producer", schedule=None, session=session) as dag:
+            op = EmptyOperator(task_id="op", outlets=asset)
+        dr = dag_maker.create_dagrun()
+        outlet_ti = dr.get_task_instance("op")
+        outlet_ti.refresh_from_task(dag.get_task(op.task_id))
+        with dag_maker(dag_id=dag_id_to_test, schedule=asset, session=session):
+            pass
+
+        # An adrq should be created when the outlet task is run.
+        run_task_instance(outlet_ti, op)
+        query, _ = DagModel.dags_needing_dagruns(session)
+        assert [dm.dag_id for dm in query] == [dag_id_to_test]
+        assert session.scalars(select(AssetDagRunQueue.target_dag_id)).all() == [dag_id_to_test]
+
+        # Now the dag is changed to NOT depend on 'producer'.
+        # Rerunning dags_needing_dagruns should clear up that adrq.
+        with dag_maker(dag_id=dag_id_to_test, schedule=None, session=session):
+            pass
+        query, _ = DagModel.dags_needing_dagruns(session)
+        assert query.all() == []
+        assert session.scalars(select(AssetDagRunQueue.target_dag_id)).all() == []
+
+    def test_max_active_runs_not_none(self, testing_dag_bundle):
         dag = DAG(
             dag_id="test_max_active_runs_not_none",
             schedule=None,
@@ -2361,10 +3191,11 @@ class TestDagModel:
         session = settings.Session()
         orm_dag = DagModel(
             dag_id=dag.dag_id,
+            bundle_name="testing",
             has_task_concurrency_limits=False,
             next_dagrun=None,
             next_dagrun_create_after=None,
-            is_active=True,
+            is_stale=False,
         )
         # assert max_active_runs updated
         assert orm_dag.max_active_runs == 16
@@ -2375,7 +3206,74 @@ class TestDagModel:
         session.rollback()
         session.close()
 
-    def test_dags_needing_dagruns_only_unpaused(self):
+    @pytest.mark.parametrize(
+        ("is_paused", "is_draining", "expected"),
+        [
+            (False, False, DagSchedulingState.ACTIVE),
+            (False, True, DagSchedulingState.DRAINING),
+            (True, False, DagSchedulingState.PAUSED),
+        ],
+    )
+    def test_scheduling_state(self, is_paused, is_draining, expected):
+        dag_model = DagModel(
+            dag_id="test_scheduling_state",
+            bundle_name="testing",
+            is_paused=is_paused,
+            is_draining=is_draining,
+        )
+
+        assert dag_model.scheduling_state == expected
+
+    @pytest.mark.parametrize("state", list(DagSchedulingState))
+    def test_set_scheduling_state(self, state):
+        dag_model = DagModel(dag_id="test_set_scheduling_state", bundle_name="testing")
+
+        dag_model.set_scheduling_state(state)
+
+        assert dag_model.scheduling_state == state
+        assert dag_model.is_paused is (state == DagSchedulingState.PAUSED)
+        assert dag_model.is_draining is (state == DagSchedulingState.DRAINING)
+
+    @pytest.mark.parametrize("state", list(DagSchedulingState))
+    def test_start_drain(self, state, session, testing_dag_bundle):
+        dag_model = DagModel(dag_id="test_start_drain", bundle_name="testing")
+        dag_model.set_scheduling_state(state)
+        session.add(dag_model)
+        session.flush()
+
+        DagModel.start_drain(dag_model.dag_id, session=session)
+
+        assert dag_model.scheduling_state == DagSchedulingState.DRAINING
+
+    def test_start_drain_reads_state_committed_after_the_dag_was_loaded(self, session, testing_dag_bundle):
+        dag_model = DagModel(dag_id="test_start_drain_stale", bundle_name="testing")
+        dag_model.set_scheduling_state(DagSchedulingState.DRAINING)
+        session.add(dag_model)
+        session.flush()
+        # The drain finalizer pauses the Dag behind the back of the already-loaded object.
+        session.execute(
+            update(DagModel)
+            .where(DagModel.dag_id == dag_model.dag_id)
+            .values(is_paused=True, is_draining=False)
+            .execution_options(synchronize_session=False)
+        )
+
+        DagModel.start_drain(dag_model.dag_id, session=session)
+        session.flush()
+
+        assert session.scalar(select(DagModel.is_draining).where(DagModel.dag_id == dag_model.dag_id))
+
+    @mock.patch("airflow.models.dag.with_row_locks", autospec=True, side_effect=with_row_locks)
+    def test_start_drain_locks_the_dag_row(self, mock_with_row_locks, session, testing_dag_bundle):
+        dag_model = DagModel(dag_id="test_start_drain_lock", bundle_name="testing", is_paused=True)
+        session.add(dag_model)
+        session.flush()
+
+        DagModel.start_drain(dag_model.dag_id, session=session)
+
+        mock_with_row_locks.assert_called_once_with(mock.ANY, of=DagModel, session=session)
+
+    def test_dags_needing_dagruns_only_unpaused(self, testing_dag_bundle):
         """
         We should never create dagruns for unpaused DAGs
         """
@@ -2385,29 +3283,37 @@ class TestDagModel:
         session = settings.Session()
         orm_dag = DagModel(
             dag_id=dag.dag_id,
+            bundle_name="testing",
             has_task_concurrency_limits=False,
             next_dagrun=DEFAULT_DATE,
             next_dagrun_create_after=DEFAULT_DATE + timedelta(days=1),
-            is_active=True,
+            is_stale=False,
         )
-        session.add(orm_dag)
+        session.merge(orm_dag)
         session.flush()
 
         query, _ = DagModel.dags_needing_dagruns(session)
         needed = query.all()
-        assert needed == [orm_dag]
+        assert [d.dag_id for d in needed] == [orm_dag.dag_id]
 
         orm_dag.is_paused = True
+        session.merge(orm_dag)
         session.flush()
 
         query, _ = DagModel.dags_needing_dagruns(session)
         dag_models = query.all()
         assert dag_models == []
 
+        orm_dag.set_scheduling_state(DagSchedulingState.DRAINING)
+        session.flush()
+
+        query, _ = DagModel.dags_needing_dagruns(session)
+        assert query.all() == []
+
         session.rollback()
         session.close()
 
-    def test_dags_needing_dagruns_doesnot_send_dagmodel_with_import_errors(self, session):
+    def test_dags_needing_dagruns_doesnot_send_dagmodel_with_import_errors(self, session, testing_dag_bundle):
         """
         We check that has_import_error is false for dags
         being set to scheduler to create dagruns
@@ -2417,10 +3323,11 @@ class TestDagModel:
 
         orm_dag = DagModel(
             dag_id=dag.dag_id,
+            bundle_name="testing",
             has_task_concurrency_limits=False,
             next_dagrun=DEFAULT_DATE,
             next_dagrun_create_after=DEFAULT_DATE + timedelta(days=1),
-            is_active=True,
+            is_stale=False,
         )
         assert not orm_dag.has_import_errors
         session.add(orm_dag)
@@ -2429,28 +3336,45 @@ class TestDagModel:
         query, _ = DagModel.dags_needing_dagruns(session)
         needed = query.all()
         assert needed == [orm_dag]
+
         orm_dag.has_import_errors = True
         session.merge(orm_dag)
         session.flush()
-        query, _ = DagModel.dags_needing_dagruns(session)
-        needed = query.all()
-        assert needed == []
 
-    def test_relative_fileloc(self, session):
+        query, _ = DagModel.dags_needing_dagruns(session)
+        dag_models = query.all()
+        assert dag_models == []
+
+        session.rollback()
+        session.close()
+
+    def test_relative_fileloc(self, session, testing_dag_bundle):
         rel_path = "test_assets.py"
         bundle_path = TEST_DAGS_FOLDER
         file_path = bundle_path / rel_path
-        bag = DagBag(dag_folder=file_path, bundle_path=bundle_path)
+        bag = BundleDagBag(dag_folder=file_path, bundle_path=bundle_path, bundle_name="testing")
 
         dag = bag.get_dag("dag_with_skip_task")
-        dag.sync_to_db(session=session)
+
+        bundle_name = "testing"
+
+        dag_model = DagModel(
+            dag_id=dag.dag_id,
+            bundle_name=bundle_name,
+        )
+        session.merge(dag_model)
+        session.flush()
+
+        sync_dag_to_db(dag, session=session)
 
         assert dag.fileloc == str(file_path)
         assert dag.relative_fileloc == str(rel_path)
 
-        SerializedDagModel.write_dag(dag, bundle_name="dag_maker", session=session)
-        session.commit()
-        session.expunge_all()
+        SerializedDagModel.write_dag(
+            LazyDeserializedDAG.from_dag(dag),
+            bundle_name=bundle_name,
+            session=session,
+        )
         dm = session.get(DagModel, dag.dag_id)
         assert dm.fileloc == str(file_path)
         assert dm.relative_fileloc == str(rel_path)
@@ -2460,12 +3384,21 @@ class TestDagModel:
 
     def test__processor_dags_folder(self, session, testing_dag_bundle):
         """Only populated after deserializtion"""
+        bundle_name = "testing"
+
         dag = DAG(dag_id="test", schedule=None)
         dag.fileloc = "/abc/test.py"
-        dag.sync_to_db()
-        assert dag._processor_dags_folder is None
-        SerializedDagModel.write_dag(dag, bundle_name="testing")
-        sdm = SerializedDagModel.get(dag.dag_id, session)
+
+        dag_model = DagModel(
+            dag_id=dag.dag_id,
+            bundle_name=bundle_name,
+        )
+        session.merge(dag_model)
+        session.flush()
+
+        scheduler_dag = sync_dag_to_db(dag)
+        assert scheduler_dag._processor_dags_folder == settings.DAGS_FOLDER
+        sdm = SerializedDagModel.get(dag.dag_id, session=session)
         assert sdm.dag._processor_dags_folder == settings.DAGS_FOLDER
 
     @pytest.mark.need_serialized_dag
@@ -2478,7 +3411,7 @@ class TestDagModel:
                 EmptyOperator(task_id="task", outlets=[asset])
             dr = dag_maker.create_dagrun()
 
-            asset_id = session.query(AssetModel.id).filter_by(uri=asset.uri).scalar()
+            asset_id = session.scalar(select(AssetModel.id).where(AssetModel.uri == asset.uri))
 
             session.add(
                 AssetEvent(
@@ -2490,19 +3423,31 @@ class TestDagModel:
                 )
             )
 
-        asset1_id = session.query(AssetModel.id).filter_by(uri=asset1.uri).scalar()
-        asset2_id = session.query(AssetModel.id).filter_by(uri=asset2.uri).scalar()
+        asset1_id = session.scalar(select(AssetModel.id).where(AssetModel.uri == asset1.uri))
+        asset2_id = session.scalar(select(AssetModel.id).where(AssetModel.uri == asset2.uri))
 
         with dag_maker(dag_id="assets-consumer-multiple", schedule=[asset1, asset2]) as dag:
             pass
 
         session.flush()
+        asset_event_ids = {
+            e.asset_id: e.id
+            for e in session.scalars(
+                select(AssetEvent).where(AssetEvent.asset_id.in_([asset1_id, asset2_id]))
+            )
+        }
         session.add_all(
             [
-                AssetDagRunQueue(asset_id=asset1_id, target_dag_id=dag.dag_id, created_at=DEFAULT_DATE),
+                AssetDagRunQueue(
+                    asset_id=asset1_id,
+                    target_dag_id=dag.dag_id,
+                    asset_event_id=asset_event_ids[asset1_id],
+                    created_at=DEFAULT_DATE,
+                ),
                 AssetDagRunQueue(
                     asset_id=asset2_id,
                     target_dag_id=dag.dag_id,
+                    asset_event_id=asset_event_ids[asset2_id],
                     created_at=DEFAULT_DATE + timedelta(hours=1),
                 ),
             ]
@@ -2515,8 +3460,7 @@ class TestDagModel:
         last_queued_time = triggered_date_by_dag[dag.dag_id]
         assert last_queued_time == DEFAULT_DATE + timedelta(hours=1)
 
-    @pytest.mark.usefixtures("testing_dag_bundle")
-    def test_asset_expression(self, session: Session) -> None:
+    def test_asset_expression(self, session: Session, testing_dag_bundle) -> None:
         dag = DAG(
             dag_id="test_dag_asset_expression",
             schedule=AssetAny(
@@ -2541,9 +3485,11 @@ class TestDagModel:
             ),
             start_date=datetime.datetime.min,
         )
-        DAG.bulk_write_to_db("testing", None, [dag], session=session)
+        SerializedDAG.bulk_write_to_db("testing", None, [dag], session=session)
 
-        expression = session.scalars(select(DagModel.asset_expression).filter_by(dag_id=dag.dag_id)).one()
+        expression: ScalarResult = session.scalars(
+            select(DagModel.asset_expression).where(DagModel.dag_id == dag.dag_id)
+        ).one()
         assert expression == {
             "any": [
                 {
@@ -2610,21 +3556,201 @@ class TestDagModel:
             ]
         }
 
+    def test_get_team_name(self, testing_team):
+        session = settings.Session()
+        dag_bundle = DagBundleModel(name="testing-team")
+        dag_bundle.teams.append(testing_team)
+        session.add(dag_bundle)
+        session.flush()
+
+        dag_id = "test_get_team_name"
+        dag = DAG(dag_id, schedule=None)
+        orm_dag = DagModel(
+            dag_id=dag.dag_id,
+            bundle_name="testing-team",
+            is_stale=False,
+        )
+        session.add(orm_dag)
+        session.flush()
+        assert DagModel.get_dagmodel(dag_id) is not None
+        assert DagModel.get_team_name(dag_id, session=session) == "testing"
+
+    def test_get_team_name_no_team(self, testing_team):
+        session = settings.Session()
+        dag_bundle = DagBundleModel(name="testing")
+        session.add(dag_bundle)
+        session.flush()
+
+        dag_id = "test_get_team_name_no_team"
+        dag = DAG(dag_id, schedule=None)
+        orm_dag = DagModel(
+            dag_id=dag.dag_id,
+            bundle_name="testing",
+            is_stale=False,
+        )
+        session.add(orm_dag)
+        session.flush()
+        assert DagModel.get_dagmodel(dag_id) is not None
+        assert DagModel.get_team_name(dag_id, session=session) is None
+
+    def test_get_team_name_is_cached(self, testing_team):
+        session = settings.Session()
+        team_bundle = DagBundleModel(name="cache-team-bundle")
+        team_bundle.teams.append(testing_team)
+        no_team_bundle = DagBundleModel(name="cache-no-team-bundle")
+        session.add_all([team_bundle, no_team_bundle])
+        session.flush()
+
+        dag_id = "test_get_team_name_is_cached"
+        orm_dag = DagModel(dag_id=dag_id, bundle_name="cache-team-bundle", is_stale=False)
+        session.add(orm_dag)
+        session.flush()
+
+        clear_team_name_cache()
+        # First lookup resolves and caches the team.
+        assert DagModel.get_team_name(dag_id, session=session) == "testing"
+
+        # Reassign the Dag to a team-less bundle: the cached value is still returned,
+        # proving the lookup is served from cache rather than re-querying.
+        orm_dag.bundle_name = "cache-no-team-bundle"
+        session.flush()
+        assert DagModel.get_team_name(dag_id, session=session) == "testing"
+
+        # After clearing the cache the fresh (now team-less) value is returned.
+        clear_team_name_cache()
+        assert DagModel.get_team_name(dag_id, session=session) is None
+
+    def test_get_dag_id_to_team_name_mapping(self, testing_team):
+        session = settings.Session()
+        bundle1 = DagBundleModel(name="bundle1")
+        bundle1.teams.append(testing_team)
+        bundle2 = DagBundleModel(name="bundle2")
+        session.add(bundle1)
+        session.add(bundle2)
+        session.flush()
+
+        dag_id1 = "test_dag1"
+        dag1 = DAG(dag_id1, schedule=None)
+        orm_dag1 = DagModel(
+            dag_id=dag1.dag_id,
+            bundle_name="bundle1",
+            is_stale=False,
+        )
+        dag_id2 = "test_dag2"
+        dag2 = DAG(dag_id2, schedule=None)
+        orm_dag2 = DagModel(
+            dag_id=dag2.dag_id,
+            bundle_name="bundle2",
+            is_stale=False,
+        )
+        session.add(orm_dag1)
+        session.add(orm_dag2)
+        session.flush()
+        assert DagModel.get_dag_id_to_team_name_mapping([dag_id1, dag_id2], session=session) == {
+            dag_id1: "testing"
+        }
+
+
+class TestDagModelPartitionMapperInfo:
+    """Pure-function tests for DagModel.is_rollup_asset / has_rollup_mappers."""
+
+    @pytest.mark.parametrize(
+        ("info", "name", "uri", "expected"),
+        [
+            pytest.param([], "a", "s3://a", False, id="empty-info"),
+            pytest.param(
+                [
+                    {"name": "asset", "is_rollup": True},
+                    {"uri": "s3://asset", "is_rollup": False},
+                ],
+                "asset",
+                "s3://asset",
+                True,
+                id="name-match-wins-over-uri",
+            ),
+            pytest.param(
+                [{"uri": "s3://asset", "is_rollup": True}],
+                "asset",
+                "s3://asset",
+                True,
+                id="uri-match-fallback",
+            ),
+            pytest.param(
+                [{"name": "other", "is_rollup": True}],
+                "asset",
+                "s3://asset",
+                False,
+                id="unknown-asset",
+            ),
+        ],
+    )
+    def test_is_rollup_asset(self, info, name, uri, expected):
+        dm = DagModel(dag_id="d")
+        dm.partition_mapper_info = info
+        assert dm.is_rollup_asset(name=name, uri=uri) is expected
+
+    def test_is_rollup_asset_raises_when_field_missing(self):
+        # ``is_rollup`` is required by the TypedDict contract; a missing field
+        # signals a serialization bug that must surface, not silently default.
+        dm = DagModel(dag_id="d")
+        dm.partition_mapper_info = [{"name": "asset"}]
+        with pytest.raises(KeyError, match="is_rollup"):
+            dm.is_rollup_asset(name="asset", uri="s3://asset")
+
+    @pytest.mark.parametrize(
+        ("info", "expected"),
+        [
+            pytest.param([], False, id="empty"),
+            pytest.param(
+                [
+                    {"name": "a", "is_rollup": False},
+                    {"uri": "s3://b", "is_rollup": False},
+                ],
+                False,
+                id="no-rollup-entries",
+            ),
+            pytest.param(
+                [
+                    {"name": "a", "is_rollup": False},
+                    {"uri": "s3://b", "is_rollup": True},
+                ],
+                True,
+                id="at-least-one-rollup",
+            ),
+        ],
+    )
+    def test_has_rollup_mappers(self, info, expected):
+        dm = DagModel(dag_id="d")
+        dm.partition_mapper_info = info
+        assert dm.has_rollup_mappers is expected
+
+    def test_has_rollup_mappers_raises_when_field_missing(self):
+        # ``is_rollup`` is required by the TypedDict contract; a missing field
+        # signals a serialization bug that must surface, not silently default.
+        dm = DagModel(dag_id="d")
+        dm.partition_mapper_info = [{"name": "a"}, {"uri": "s3://b"}]
+        with pytest.raises(KeyError, match="is_rollup"):
+            _ = dm.has_rollup_mappers
+
 
 class TestQueries:
     def setup_method(self) -> None:
         clear_db_runs()
+        clear_db_dags()
 
     def teardown_method(self) -> None:
         clear_db_runs()
+        clear_db_dags()
+        clear_db_dag_bundles()
 
     @pytest.mark.parametrize("tasks_count", [3, 12])
-    def test_count_number_queries(self, tasks_count):
+    def test_count_number_queries(self, tasks_count, testing_dag_bundle):
         dag = DAG("test_dagrun_query_count", schedule=None, start_date=DEFAULT_DATE)
         for i in range(tasks_count):
             EmptyOperator(task_id=f"dummy_task_{i}", owner="test", dag=dag)
-        with assert_queries_count(5):
-            dag.create_dagrun(
+        scheduler_dag = sync_dag_to_db(dag)
+        with assert_queries_count(6):
+            scheduler_dag.create_dagrun(
                 run_id="test_dagrun_query_count",
                 run_type=DagRunType.MANUAL,
                 state=State.RUNNING,
@@ -2635,6 +3761,7 @@ class TestQueries:
             )
 
 
+@pytest.mark.need_serialized_dag
 @pytest.mark.parametrize(
     "run_id",
     ["test-run-id"],
@@ -2642,7 +3769,12 @@ class TestQueries:
 def test_set_task_instance_state(run_id, session, dag_maker):
     """Test that set_task_instance_state updates the TaskInstance state and clear downstream failed"""
     start_date = datetime_tz(2020, 1, 1)
-    with dag_maker("test_set_task_instance_state", start_date=start_date, session=session) as dag:
+    with dag_maker(
+        "test_set_task_instance_state",
+        start_date=start_date,
+        session=session,
+        serialized=True,
+    ) as dag:
         task_1 = EmptyOperator(task_id="task_1")
         task_2 = EmptyOperator(task_id="task_2")
         task_3 = EmptyOperator(task_id="task_3")
@@ -2657,14 +3789,12 @@ def test_set_task_instance_state(run_id, session, dag_maker):
     )
 
     def get_ti_from_db(task):
-        return (
-            session.query(TI)
-            .filter(
+        return session.scalar(
+            select(TI).where(
                 TI.dag_id == dag.dag_id,
                 TI.task_id == task.task_id,
                 TI.run_id == dagrun.run_id,
             )
-            .one()
         )
 
     get_ti_from_db(task_1).state = State.FAILED
@@ -2739,16 +3869,16 @@ def test_set_task_instance_state_mapped(dag_maker, session):
     )
     expand_mapped_task(mapped, dr2.run_id, "make_arg_lists", length=2, session=session)
 
-    session.query(TI).filter_by(dag_id=dag.dag_id).update({"state": TaskInstanceState.FAILED})
+    session.execute(update(TI).where(TI.dag_id == dag.dag_id).values(state=TaskInstanceState.FAILED))
 
     ti_query = (
-        session.query(TI.task_id, TI.map_index, TI.run_id, TI.state)
-        .filter(TI.dag_id == dag.dag_id, TI.task_id.in_([task_id, "downstream"]))
+        select(TI.task_id, TI.map_index, TI.run_id, TI.state)
+        .where(TI.dag_id == dag.dag_id, TI.task_id.in_([task_id, "downstream"]))
         .order_by(TI.run_id, TI.task_id, TI.map_index)
     )
 
     # Check pre-conditions
-    assert ti_query.all() == [
+    assert session.execute(ti_query).all() == [
         ("downstream", -1, dr1.run_id, TaskInstanceState.FAILED),
         (task_id, 0, dr1.run_id, TaskInstanceState.FAILED),
         (task_id, 1, dr1.run_id, TaskInstanceState.FAILED),
@@ -2767,7 +3897,7 @@ def test_set_task_instance_state_mapped(dag_maker, session):
     )
     assert dr1 in session, "Check session is passed down all the way"
 
-    assert ti_query.all() == [
+    assert session.execute(ti_query).all() == [
         ("downstream", -1, dr1.run_id, None),
         (task_id, 0, dr1.run_id, TaskInstanceState.FAILED),
         (task_id, 1, dr1.run_id, TaskInstanceState.SUCCESS),
@@ -2775,84 +3905,6 @@ def test_set_task_instance_state_mapped(dag_maker, session):
         (task_id, 0, dr2.run_id, TaskInstanceState.FAILED),
         (task_id, 1, dr2.run_id, TaskInstanceState.SUCCESS),
     ]
-
-
-def test_set_task_group_state(session, dag_maker):
-    """Test that set_task_group_state updates the TaskGroup state and clear downstream failed"""
-    start_date = datetime_tz(2020, 1, 1)
-    with dag_maker("test_set_task_group_state", start_date=start_date, session=session) as dag:
-        start = EmptyOperator(task_id="start")
-
-        with TaskGroup("section_1", tooltip="Tasks for section_1") as section_1:
-            task_1 = EmptyOperator(task_id="task_1")
-            task_2 = EmptyOperator(task_id="task_2")
-            task_3 = EmptyOperator(task_id="task_3")
-
-            task_1 >> [task_2, task_3]
-
-        task_4 = EmptyOperator(task_id="task_4")
-        task_5 = EmptyOperator(task_id="task_5")
-        task_6 = EmptyOperator(task_id="task_6")
-        task_7 = EmptyOperator(task_id="task_7")
-        task_8 = EmptyOperator(task_id="task_8")
-
-        start >> section_1 >> [task_4, task_5, task_6, task_7, task_8]
-
-    dagrun = dag_maker.create_dagrun(
-        run_id="test-run-id",
-        state=State.FAILED,
-        run_type=DagRunType.SCHEDULED,
-    )
-
-    def get_ti_from_db(task):
-        return (
-            session.query(TI)
-            .filter(
-                TI.dag_id == dag.dag_id,
-                TI.task_id == task.task_id,
-                TI.run_id == dagrun.run_id,
-            )
-            .one()
-        )
-
-    get_ti_from_db(task_1).state = State.FAILED
-    get_ti_from_db(task_2).state = State.SUCCESS
-    get_ti_from_db(task_3).state = State.UPSTREAM_FAILED
-    get_ti_from_db(task_4).state = State.SUCCESS
-    get_ti_from_db(task_5).state = State.UPSTREAM_FAILED
-    get_ti_from_db(task_6).state = State.FAILED
-    get_ti_from_db(task_7).state = State.SKIPPED
-
-    session.flush()
-
-    altered = dag.set_task_group_state(
-        group_id=section_1.group_id,
-        run_id="test-run-id",
-        state=State.SUCCESS,
-        session=session,
-    )
-
-    # After _mark_task_instance_state, task_1 is marked as SUCCESS
-    assert get_ti_from_db(task_1).state == State.SUCCESS
-    # task_2 remains as SUCCESS
-    assert get_ti_from_db(task_2).state == State.SUCCESS
-    # task_3 should be marked as SUCCESS
-    assert get_ti_from_db(task_3).state == State.SUCCESS
-    # task_4 should remain as SUCCESS
-    assert get_ti_from_db(task_4).state == State.SUCCESS
-    # task_5 and task_6 are cleared because they were in FAILED/UPSTREAM_FAILED state
-    assert get_ti_from_db(task_5).state == State.NONE
-    assert get_ti_from_db(task_6).state == State.NONE
-    # task_7 remains as SKIPPED
-    assert get_ti_from_db(task_7).state == State.SKIPPED
-    dagrun.refresh_from_db(session=session)
-    # dagrun should be set to QUEUED
-    assert dagrun.get_state() == State.QUEUED
-
-    assert {t.key for t in altered} == {
-        ("test_set_task_group_state", "section_1.task_1", dagrun.run_id, 0, -1),
-        ("test_set_task_group_state", "section_1.task_3", dagrun.run_id, 0, -1),
-    }
 
 
 def test_dag_teardowns_property_lists_all_teardown_tasks():
@@ -2891,7 +3943,7 @@ def test_dag_teardowns_property_lists_all_teardown_tasks():
 
 
 @pytest.mark.parametrize(
-    "start_date, expected_infos",
+    ("start_date", "expected_infos"),
     [
         (
             DEFAULT_DATE,
@@ -2925,50 +3977,134 @@ def test_iter_dagrun_infos_between(start_date, expected_infos):
     dag = DAG(dag_id="test_get_dates", start_date=DEFAULT_DATE, schedule="@hourly")
     EmptyOperator(task_id="dummy", dag=dag)
 
-    iterator = dag.iter_dagrun_infos_between(
+    iterator = create_scheduler_dag(dag).iter_dagrun_infos_between(
         earliest=pendulum.instance(start_date),
         latest=pendulum.instance(DEFAULT_DATE),
-        align=True,
     )
     assert expected_infos == list(iterator)
 
 
-@pytest.mark.usefixtures("clear_all_logger_handlers")
+def test_iter_dagrun_infos_between_partitioned_timetable():
+    """iter_dagrun_infos_between dispatches to iter_partition_dagrun_infos for partitioned timetables.
+
+    Verifies:
+    - Full-sequence equality: result matches direct iter_partition_dagrun_infos call.
+    - The datetime window bounds partition_date directly (no day rounding); both ends inclusive.
+    - to_date's partition is present; the tick after to_date is absent.
+    """
+    dag = DAG(
+        dag_id="test_iter_dagrun_infos_between_partitioned",
+        start_date=DEFAULT_DATE,
+        schedule=CronPartitionTimetable("0 0 * * *", timezone="UTC"),
+    )
+    EmptyOperator(task_id="dummy", dag=dag)
+    scheduler_dag = create_scheduler_dag(dag)
+
+    # Window: 3-day span so we get a non-trivial sequence to compare.
+    from_dt = pendulum.datetime(2026, 3, 10, tz="UTC")
+    to_dt = pendulum.datetime(2026, 3, 12, 23, 59, 59, tz="UTC")
+
+    result = list(scheduler_dag.iter_dagrun_infos_between(earliest=from_dt, latest=to_dt))
+
+    # Build expected sequence by calling iter_partition_dagrun_infos directly with the same window.
+    core_timetable = scheduler_dag.timetable
+    expected = list(
+        core_timetable.iter_partition_dagrun_infos(
+            earliest=from_dt,
+            latest=to_dt,
+        )
+    )
+
+    # Dispatch smoke-test: the partitioned path routes through iter_partition_dagrun_infos.
+    assert result == expected
+
+    # to_date's partition (2026-03-12) must be present (inclusive).
+    to_date_partition = pendulum.datetime(2026, 3, 12, tz="UTC")
+    assert any(info.run_after == to_date_partition for info in result)
+
+    # The partition for the day after to_date (2026-03-13) must be absent (half-open upper bound).
+    after_to_date_partition = pendulum.datetime(2026, 3, 13, tz="UTC")
+    assert not any(info.run_after == after_to_date_partition for info in result)
+
+
+def test_iter_dagrun_infos_between_partitioned_subday_window_not_widened():
+    """Guard: a sub-day window through the full iter_dagrun_infos_between chain must
+    not widen to the whole calendar day.
+
+    Pre-fix the partitioned path truncated the bounds to calendar dates and expanded them to
+    whole UTC days, so an hourly Dag backfilled for a single hour produced ~24 runs instead of 2.
+    This drives the public chain (whose signature is unchanged), so on pre-fix code it yields the
+    widened 24-tick sequence; on the fixed code it yields exactly the two ticks in the window.
+    """
+    dag = DAG(
+        dag_id="test_iter_dagrun_infos_between_partitioned_subday",
+        start_date=DEFAULT_DATE,
+        schedule=CronPartitionTimetable("0 * * * *", timezone="UTC"),
+    )
+    EmptyOperator(task_id="dummy", dag=dag)
+    scheduler_dag = create_scheduler_dag(dag)
+
+    from_dt = pendulum.datetime(2026, 3, 10, 8, tz="UTC")
+    to_dt = pendulum.datetime(2026, 3, 10, 9, tz="UTC")
+
+    result = list(scheduler_dag.iter_dagrun_infos_between(earliest=from_dt, latest=to_dt))
+
+    # Exactly the two ticks inside [08:00, 09:00] — not the 24 ticks of the whole day.
+    assert [info.run_after for info in result] == [
+        pendulum.datetime(2026, 3, 10, 8, tz="UTC"),
+        pendulum.datetime(2026, 3, 10, 9, tz="UTC"),
+    ]
+
+
 def test_iter_dagrun_infos_between_error(caplog):
     start = pendulum.instance(DEFAULT_DATE - datetime.timedelta(hours=1))
     end = pendulum.instance(DEFAULT_DATE)
 
     class FailingAfterOneTimetable(Timetable):
-        def next_dagrun_info(self, last_automated_data_interval, restriction):
+        def next_dagrun_info(self, last_automated_data_interval: DataInterval | None, restriction):
             if last_automated_data_interval is None:
                 return DagRunInfo.interval(start, end)
             raise RuntimeError("this fails")
+
+    def _get_registered_timetable(s):
+        if s == "unit.models.test_dag.FailingAfterOneTimetable":
+            return FailingAfterOneTimetable
+        raise ValueError(f"unexpected class {s!r}")
 
     dag = DAG(
         dag_id="test_iter_dagrun_infos_between_error",
         start_date=DEFAULT_DATE,
         schedule=FailingAfterOneTimetable(),
     )
-
-    iterator = dag.iter_dagrun_infos_between(earliest=start, latest=end, align=True)
-    with caplog.at_level(logging.ERROR):
-        infos = list(iterator)
+    with (
+        mock.patch(
+            "airflow.serialization.decoders.find_registered_custom_timetable",
+            _get_registered_timetable,
+        ),
+        mock.patch(
+            "airflow.serialization.encoders.find_registered_custom_timetable",
+            _get_registered_timetable,
+        ),
+        caplog.at_level(logging.ERROR),
+    ):
+        scheduler_dag = create_scheduler_dag(dag)
+        infos = list(scheduler_dag.iter_dagrun_infos_between(earliest=start, latest=end))
 
     # The second timetable.next_dagrun_info() call raises an exception, so only the first result is returned.
     assert infos == [DagRunInfo.interval(start, end)]
 
     assert caplog.record_tuples == [
         (
-            "airflow.models.dag.DAG",
+            "airflow.serialization.definitions.dag",
             logging.ERROR,
-            f"Failed to fetch run info after data interval {DataInterval(start, end)} for DAG {dag.dag_id!r}",
+            "Failed to fetch run info",
         ),
     ]
-    assert caplog.records[0].exc_info is not None, "should contain exception context"
+    assert caplog.entries[0].get("exception"), "should contain exception context"
 
 
 @pytest.mark.parametrize(
-    "logical_date, data_interval_start, data_interval_end, expected_data_interval",
+    ("logical_date", "data_interval_start", "data_interval_end", "expected_data_interval"),
     [
         pytest.param(None, None, None, None, id="no-next-run"),
         pytest.param(
@@ -2996,14 +4132,17 @@ def test_get_next_data_interval(
     dag = DAG(dag_id="test_get_next_data_interval", schedule="@daily", start_date=DEFAULT_DATE)
     dag_model = DagModel(
         dag_id="test_get_next_data_interval",
+        bundle_name="dags-folder",
         next_dagrun=logical_date,
         next_dagrun_data_interval_start=data_interval_start,
         next_dagrun_data_interval_end=data_interval_end,
     )
 
-    assert dag.get_next_data_interval(dag_model) == expected_data_interval
+    core_timetable = coerce_to_core_timetable(dag.timetable)
+    assert get_next_data_interval(core_timetable, dag_model) == expected_data_interval
 
 
+@pytest.mark.need_serialized_dag
 @pytest.mark.parametrize(
     ("dag_date", "tasks_date", "catchup", "restrict"),
     [
@@ -3061,72 +4200,6 @@ def test__time_restriction(dag_maker, dag_date, tasks_date, catchup, restrict):
     assert dag._time_restriction == restrict
 
 
-@pytest.mark.need_serialized_dag
-def test_get_asset_triggered_next_run_info(dag_maker, clear_assets):
-    asset1 = Asset(uri="test://asset1", name="test_asset1", group="test-group")
-    asset2 = Asset(uri="test://asset2", group="test-group")
-    asset3 = Asset(uri="test://asset3", group="test-group")
-    with dag_maker(dag_id="assets-1", schedule=[asset2]):
-        pass
-    dag1 = dag_maker.dag
-
-    with dag_maker(dag_id="assets-2", schedule=[asset1, asset2]):
-        pass
-    dag2 = dag_maker.dag
-
-    with dag_maker(dag_id="assets-3", schedule=[asset1, asset2, asset3]):
-        pass
-    dag3 = dag_maker.dag
-
-    session = dag_maker.session
-    asset1_id = session.query(AssetModel.id).filter_by(uri=asset1.uri).scalar()
-    session.bulk_save_objects(
-        [
-            AssetDagRunQueue(asset_id=asset1_id, target_dag_id=dag2.dag_id),
-            AssetDagRunQueue(asset_id=asset1_id, target_dag_id=dag3.dag_id),
-        ]
-    )
-    session.flush()
-
-    assets = session.query(AssetModel.uri).order_by(AssetModel.id).all()
-
-    info = get_asset_triggered_next_run_info([dag1.dag_id], session=session)
-    assert info[dag1.dag_id] == {
-        "ready": 0,
-        "total": 1,
-        "uri": assets[0].uri,
-    }
-
-    # This time, check both dag2 and dag3 at the same time (tests filtering)
-    info = get_asset_triggered_next_run_info([dag2.dag_id, dag3.dag_id], session=session)
-    assert info[dag2.dag_id] == {
-        "ready": 1,
-        "total": 2,
-        "uri": "",
-    }
-    assert info[dag3.dag_id] == {
-        "ready": 1,
-        "total": 3,
-        "uri": "",
-    }
-
-
-@pytest.mark.need_serialized_dag
-def test_get_asset_triggered_next_run_info_with_unresolved_asset_alias(dag_maker, clear_assets):
-    asset_alias1 = AssetAlias(name="alias")
-    with dag_maker(dag_id="dag-1", schedule=[asset_alias1]):
-        pass
-    dag1 = dag_maker.dag
-    session = dag_maker.session
-    session.flush()
-
-    info = get_asset_triggered_next_run_info([dag1.dag_id], session=session)
-    assert info == {}
-
-    dag1_model = DagModel.get_dagmodel(dag1.dag_id)
-    assert dag1_model.get_asset_triggered_next_run_info(session=session) is None
-
-
 @pytest.mark.parametrize(
     "run_id_type",
     [DagRunType.BACKFILL_JOB, DagRunType.SCHEDULED, DagRunType.ASSET_TRIGGERED],
@@ -3135,8 +4208,13 @@ def test_create_dagrun_disallow_manual_to_use_automated_run_id(run_id_type: DagR
     dag = DAG(dag_id="test", start_date=DEFAULT_DATE, schedule="@daily")
     run_id = DagRun.generate_run_id(run_type=run_id_type, run_after=DEFAULT_DATE, logical_date=DEFAULT_DATE)
 
-    with pytest.raises(ValueError) as ctx:
-        dag.create_dagrun(
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            f"A manual DAG run cannot use ID {run_id!r} since it is reserved for {run_id_type.value} runs"
+        ),
+    ):
+        create_scheduler_dag(dag).create_dagrun(
             run_type=DagRunType.MANUAL,
             run_id=run_id,
             logical_date=DEFAULT_DATE,
@@ -3145,9 +4223,6 @@ def test_create_dagrun_disallow_manual_to_use_automated_run_id(run_id_type: DagR
             state=DagRunState.QUEUED,
             triggered_by=DagRunTriggeredByType.TEST,
         )
-    assert str(ctx.value) == (
-        f"A manual DAG run cannot use ID {run_id!r} since it is reserved for {run_id_type.value} runs"
-    )
 
 
 class TestTaskClearingSetupTeardownBehavior:
@@ -3268,7 +4343,7 @@ class TestTaskClearingSetupTeardownBehavior:
         # now, we know that t1 is the teardown for s1, so now we know that s1 will be "torn down"
         # by the time w4 runs, so we now know that w4 no longer requires s1, so when we clear w4,
         # s1 will not also be cleared
-        self.cleared_downstream(w4) == {w4}
+        assert self.cleared_downstream(w4) == {w4}
         assert set(w1.get_upstreams_only_setups_and_teardowns()) == {s1, t1}
         assert self.cleared_downstream(w1) == {s1, w1, w2, w3, t1, w4}
         assert self.cleared_upstream(w1) == {s1, w1, t1}
@@ -3481,7 +4556,7 @@ class TestTaskClearingSetupTeardownBehavior:
             assert self.cleared_neither(s1) == {s1, t1}
 
     @pytest.mark.parametrize(
-        "upstream, downstream, expected",
+        ("upstream", "downstream", "expected"),
         [
             (False, False, {"my_teardown", "my_setup"}),
             (False, True, {"my_setup", "my_work", "my_teardown"}),
@@ -3657,7 +4732,7 @@ class TestTaskClearingSetupTeardownBehavior:
 
 
 @pytest.mark.parametrize(
-    "disable, bundle_version, expected",
+    ("disable", "bundle_version", "expected"),
     [
         (True, "some-version", None),
         (False, "some-version", "some-version"),
@@ -3689,3 +4764,188 @@ def test_disable_bundle_versioning(disable, bundle_version, expected, dag_maker,
 
     # but it only gets stamped on the dag run when bundle versioning not disabled
     assert dr.bundle_version == expected
+
+
+def test_create_dagrun_uses_resolved_bundle_version_for_integrity(dag_maker, session, clear_dags):
+    """
+    When no explicit bundle_version is passed, the live dag drives TI creation and
+    created_dag_version points to the latest serialized version.  DagRun.bundle_version
+    still records the DagModel.bundle_version for auditing purposes.
+    """
+    with dag_maker(
+        dag_id="test_dag_bundle_version_integrity",
+        session=session,
+        serialized=True,
+        bundle_version="v1",
+    ) as _dag_v1:
+        EmptyOperator(task_id="t1")
+
+    with dag_maker(
+        dag_id="test_dag_bundle_version_integrity",
+        session=session,
+        serialized=True,
+        bundle_version="v2",
+    ) as dag_v2:
+        EmptyOperator(task_id="t1")
+        EmptyOperator(task_id="t2")
+
+    dag_model = session.scalar(select(DagModel).where(DagModel.dag_id == dag_v2.dag_id))
+    dag_model.bundle_version = "v1"
+    session.commit()
+
+    dr = dag_v2.create_dagrun(
+        run_id="bundle_version_integrity",
+        run_after=pendulum.now(),
+        run_type="manual",
+        triggered_by=DagRunTriggeredByType.TEST,
+        state=None,
+    )
+
+    # DagRun.bundle_version records the DagModel value at trigger time (audit field).
+    assert dr.bundle_version == "v1"
+    # created_dag_version reflects the latest serialized version (v2), not the DagModel audit value.
+    assert dr.created_dag_version.bundle_version == "v2"
+    # TIs come from the live dag (dag_v2 with t1+t2), not from the old serialized version.
+    assert {ti.task_id for ti in dr.get_task_instances(session=session)} == {"t1", "t2"}
+
+
+def test_create_dagrun_without_bundle_version_uses_live_dag(dag_maker, session, clear_dags):
+    """
+    When no explicit bundle_version is passed, TIs are created from the live dag even if
+    DagModel.bundle_version points to an older version.  This confirms backfills and other
+    callers that don't pass bundle_version are unaffected by the bundle_version feature.
+    """
+    with dag_maker(
+        dag_id="test_dag_backfill_bundle_version",
+        session=session,
+        serialized=True,
+        bundle_version="v1",
+    ) as _dag_v1:
+        EmptyOperator(task_id="t1")
+
+    with dag_maker(
+        dag_id="test_dag_backfill_bundle_version",
+        session=session,
+        serialized=True,
+        bundle_version="v2",
+    ) as dag_v2:
+        EmptyOperator(task_id="t1")
+        EmptyOperator(task_id="t2")
+
+    dag_model = session.scalar(select(DagModel).where(DagModel.dag_id == dag_v2.dag_id))
+    dag_model.bundle_version = "v1"
+    session.commit()
+
+    dr = dag_v2.create_dagrun(
+        run_id="no_bundle_version_uses_live_dag",
+        run_after=pendulum.now(),
+        run_type="manual",
+        triggered_by=DagRunTriggeredByType.TEST,
+        state=None,
+    )
+
+    # TIs come from the live dag (dag_v2), not from the v1 serialized version.
+    assert {ti.task_id for ti in dr.get_task_instances(session=session)} == {"t1", "t2"}
+    # created_dag_version reflects the latest serialization (v2).
+    assert dr.created_dag_version.bundle_version == "v2"
+    # DagRun.bundle_version still records the DagModel value at trigger time.
+    assert dr.bundle_version == "v1"
+
+
+def test_get_run_data_interval():
+    with DAG("dag", schedule=None, start_date=DEFAULT_DATE) as dag:
+        EmptyOperator(task_id="empty_task")
+
+    dr = _create_dagrun(
+        dag,
+        logical_date=timezone.utcnow(),
+        data_interval=(DEFAULT_DATE, DEFAULT_DATE),
+        run_type=DagRunType.MANUAL,
+    )
+    timetable = coerce_to_core_timetable(dag.timetable)
+    assert get_run_data_interval(timetable, dr) == DataInterval(start=DEFAULT_DATE, end=DEFAULT_DATE)
+
+
+@pytest.mark.need_serialized_dag
+def test_get_run_data_interval_pre_aip_39():
+    with DAG(
+        "dag",
+        schedule="0 0 * * *",
+        start_date=DEFAULT_DATE,
+    ) as dag:
+        EmptyOperator(task_id="empty_task")
+
+    current_ts = timezone.utcnow()
+    dr = _create_dagrun(
+        dag,
+        logical_date=current_ts,
+        data_interval=(None, None),
+        run_type=DagRunType.MANUAL,
+    )
+    ds_start = current_ts.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    ds_end = current_ts.replace(hour=0, minute=0, second=0, microsecond=0)
+    timetable = coerce_to_core_timetable(dag.timetable)
+    assert get_run_data_interval(timetable, dr) == DataInterval(start=ds_start, end=ds_end)
+
+
+@pytest.mark.parametrize(
+    ("schedule", "next_run", "next_interval", "next_run_after", "next_partition_key", "next_partition_date"),
+    [
+        (
+            CronPartitionTimetable(
+                "0 0 * * *",
+                timezone=pendulum.UTC,
+            ),
+            None,
+            None,
+            TEST_DATE + timedelta(days=1),
+            (TEST_DATE + timedelta(days=1)).strftime(r"%Y-%m-%dT%H:%M:%S"),
+            TEST_DATE + timedelta(days=1),
+        ),
+        (
+            "0 0 * * *",
+            TEST_DATE,
+            DataInterval(start=TEST_DATE, end=TEST_DATE + timedelta(days=1)),
+            TEST_DATE + timedelta(days=1),
+            None,
+            None,
+        ),
+        (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            "@once",
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+    ],
+)
+def test_calculate_dagrun_date_fields(
+    schedule,
+    dag_maker,
+    next_run,
+    next_interval,
+    next_run_after,
+    next_partition_key,
+    next_partition_date,
+):
+    with dag_maker(schedule=schedule, catchup=True, start_date=TEST_DATE):
+        BashOperator(task_id="hi", bash_command="yo")
+
+    run = dag_maker.create_dagrun()
+    serdag = dag_maker.serialized_dag
+    dag_model = dag_maker.dag_model
+    dag_model.calculate_dagrun_date_fields(dag=serdag, reference_run=run)
+    assert dag_model.next_dagrun_data_interval == next_interval
+    assert dag_model.next_dagrun == next_run
+    assert dag_model.next_dagrun_create_after == next_run_after
+    assert dag_model.next_dagrun_partition_key == next_partition_key
+    assert dag_model.next_dagrun_partition_date == next_partition_date

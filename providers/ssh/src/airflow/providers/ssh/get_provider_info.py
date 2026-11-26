@@ -26,69 +26,43 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-ssh",
         "name": "SSH",
         "description": "`Secure Shell (SSH) <https://tools.ietf.org/html/rfc4251>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477898,
-        "versions": [
-            "4.0.1",
-            "4.0.0",
-            "3.14.0",
-            "3.13.1",
-            "3.13.0",
-            "3.12.0",
-            "3.11.2",
-            "3.11.1",
-            "3.11.0",
-            "3.10.1",
-            "3.10.0",
-            "3.9.0",
-            "3.8.1",
-            "3.8.0",
-            "3.7.3",
-            "3.7.2",
-            "3.7.1",
-            "3.7.0",
-            "3.6.0",
-            "3.5.0",
-            "3.4.0",
-            "3.3.0",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.4.4",
-            "2.4.3",
-            "2.4.2",
-            "2.4.1",
-            "2.4.0",
-            "2.3.0",
-            "2.2.0",
-            "2.1.1",
-            "2.1.0",
-            "2.0.0",
-            "1.3.0",
-            "1.2.0",
-            "1.1.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Secure Shell (SSH)",
                 "external-doc-url": "https://tools.ietf.org/html/rfc4251",
                 "logo": "/docs/integration-logos/SSH.png",
                 "tags": ["protocol"],
+                "how-to-guide": ["/docs/apache-airflow-providers-ssh/operators/ssh_remote_job.rst"],
             }
         ],
         "operators": [
             {
                 "integration-name": "Secure Shell (SSH)",
-                "python-modules": ["airflow.providers.ssh.operators.ssh"],
+                "python-modules": [
+                    "airflow.providers.ssh.operators.ssh",
+                    "airflow.providers.ssh.operators.ssh_remote_job",
+                ],
             }
         ],
         "hooks": [
             {"integration-name": "Secure Shell (SSH)", "python-modules": ["airflow.providers.ssh.hooks.ssh"]}
         ],
-        "connection-types": [
-            {"hook-class-name": "airflow.providers.ssh.hooks.ssh.SSHHook", "connection-type": "ssh"}
+        "triggers": [
+            {
+                "integration-name": "Secure Shell (SSH)",
+                "python-modules": ["airflow.providers.ssh.triggers.ssh_remote_job"],
+            }
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "paramiko>=2.9.0", "sshtunnel>=0.3.2"],
-        "devel-dependencies": [],
+        "connection-types": [
+            {
+                "hook-class-name": "airflow.providers.ssh.hooks.ssh.SSHHook",
+                "hook-name": "SSH",
+                "connection-type": "ssh",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema"],
+                    "relabeling": {"login": "Username"},
+                    "placeholders": {},
+                },
+            }
+        ],
     }

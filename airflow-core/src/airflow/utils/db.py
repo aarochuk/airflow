@@ -24,15 +24,19 @@ import itertools
 import json
 import logging
 import os
+import re
+import signal
 import sys
 import time
+import traceback
 import warnings
-from collections.abc import Generator, Iterable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
+from contextvars import ContextVar
 from tempfile import gettempdir
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
+    NoReturn,
     Protocol,
     TypeVar,
     overload,
@@ -58,7 +62,16 @@ from airflow.models import import_all_models
 from airflow.utils import helpers
 from airflow.utils.db_manager import RunDBManager
 from airflow.utils.session import NEW_SESSION, provide_session
-from airflow.utils.task_instance_session import get_current_task_instance_session
+from airflow.utils.sqlalchemy import get_dialect_name
+
+_USE_PSYCOPG3: bool
+try:
+    from importlib.util import find_spec
+
+    is_psycopg3 = find_spec("psycopg") is not None
+    _USE_PSYCOPG3 = is_psycopg3
+except (ImportError, ModuleNotFoundError):
+    _USE_PSYCOPG3 = False
 
 if TYPE_CHECKING:
     from alembic.runtime.environment import EnvironmentContext
@@ -66,7 +79,7 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Row
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.orm import Session
-    from sqlalchemy.sql.elements import ClauseElement, TextClause
+    from sqlalchemy.sql.elements import ColumnElement
     from sqlalchemy.sql.selectable import Select
 
     from airflow.models.connection import Connection
@@ -85,6 +98,7 @@ T = TypeVar("T")
 log = logging.getLogger(__name__)
 
 _REVISION_HEADS_MAP: dict[str, str] = {
+    "2.6.2": "4bc4d934e2bc",
     "2.7.0": "405de8318b3a",
     "2.8.0": "10b52ebd31f7",
     "2.8.1": "88344c1d9134",
@@ -92,16 +106,71 @@ _REVISION_HEADS_MAP: dict[str, str] = {
     "2.9.2": "686269002441",
     "2.10.0": "22ed7efa9da2",
     "2.10.3": "5f2621c13b39",
-    "3.0.0": "ec62e120484d",
+    "3.0.0": "29ce7909c52b",
+    "3.0.3": "fe199e1abd77",
+    "3.1.0": "cc92b33c6709",
+    "3.1.8": "509b94a1042d",
+    "3.2.0": "1d6611b6ab7c",
+    "3.3.0": "d2f4e1b3c5a7",
+    "3.4.0": "b4f1a7d2c903",
+    "3.5.0": "feb8b1e719ee",
 }
 
+# Prefix used to identify tables holding data moved during migration.
+AIRFLOW_MOVED_TABLE_PREFIX = "_airflow_moved"
+_SKIP_EXTERNAL_DB_MANAGERS_UPGRADE = ContextVar("_SKIP_EXTERNAL_DB_MANAGERS_UPGRADE", default=False)
 
-def _format_airflow_moved_table_name(source_table, version, category):
-    return "__".join([settings.AIRFLOW_MOVED_TABLE_PREFIX, version.replace(".", "_"), category, source_table])
+
+@contextlib.contextmanager
+def timeout_with_traceback(seconds, message="Operation timed out"):
+    """
+    Raise a TimeoutException after specified seconds.
+
+    Logs the full call stack when timeout occurs.
+
+    Note: This uses SIGALRM and only works on Unix systems (not Windows).
+    """
+
+    class TimeoutException(Exception):
+        """Exception raised when a timeout occurs."""
+
+    def timeout_handler(signum, frame):
+        # Capture the full call stack
+        stack_trace = "".join(traceback.format_stack(frame))
+
+        # Log the timeout and stack trace
+        log.error(
+            "\n%s after %s seconds\nFull call stack at timeout:\n%s",
+            message,
+            seconds,
+            stack_trace,
+        )
+
+        raise TimeoutException(message)
+
+    # Set the signal handler
+    timeout_supported = False
+    try:
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(seconds)
+        timeout_supported = True
+    except (AttributeError, ValueError):
+        log.warning(
+            "timeout_with_traceback requires signal.SIGALRM and the main thread. "
+            "Proceeding without a timeout."
+        )
+
+    try:
+        yield
+    finally:
+        if timeout_supported:
+            # Cancel the alarm and restore the old handler
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
 
 
 @provide_session
-def merge_conn(conn: Connection, session: Session = NEW_SESSION):
+def merge_conn(conn: Connection, *, session: Session = NEW_SESSION):
     """Add new Connection."""
     if not session.scalar(select(1).where(conn.__class__.conn_id == conn.conn_id)):
         session.add(conn)
@@ -109,11 +178,11 @@ def merge_conn(conn: Connection, session: Session = NEW_SESSION):
 
 
 @provide_session
-def add_default_pool_if_not_exists(session: Session = NEW_SESSION):
+def add_default_pool_if_not_exists(*, session: Session = NEW_SESSION):
     """Add default pool if it does not exist."""
     from airflow.models.pool import Pool
 
-    if not Pool.get_pool(Pool.DEFAULT_POOL_NAME, session=session):
+    if not session.scalar(select(Pool.id).where(Pool.pool == Pool.DEFAULT_POOL_NAME)):
         default_pool = Pool(
             pool=Pool.DEFAULT_POOL_NAME,
             slots=conf.getint(section="core", key="default_pool_task_slot_count"),
@@ -125,11 +194,18 @@ def add_default_pool_if_not_exists(session: Session = NEW_SESSION):
 
 
 @provide_session
-def create_default_connections(session: Session = NEW_SESSION):
+def create_default_connections(*, session: Session = NEW_SESSION):
     """Create default Airflow connections."""
+    conns = get_default_connections()
+
+    for c in conns:
+        merge_conn(c, session=session)
+
+
+def get_default_connections():
     from airflow.models.connection import Connection
 
-    merge_conn(
+    conns = [
         Connection(
             conn_id="airflow_db",
             conn_type="mysql",
@@ -138,40 +214,26 @@ def create_default_connections(session: Session = NEW_SESSION):
             password="",
             schema="airflow",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="athena_default",
             conn_type="athena",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="aws_default",
             conn_type="aws",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="azure_batch_default",
             conn_type="azure_batch",
             login="<ACCOUNT_NAME>",
             password="",
             extra="""{"account_url": "<ACCOUNT_URL>"}""",
-        )
-    )
-    merge_conn(
+        ),
         Connection(
             conn_id="azure_cosmos_default",
             conn_type="azure_cosmos",
             extra='{"database_name": "<DATABASE_NAME>", "collection_name": "<COLLECTION_NAME>" }',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="azure_data_explorer_default",
             conn_type="azure_data_explorer",
@@ -180,50 +242,32 @@ def create_default_connections(session: Session = NEW_SESSION):
                     "tenant": "<TENANT ID>", "certificate": "<APPLICATION PEM CERTIFICATE>",
                     "thumbprint": "<APPLICATION CERTIFICATE THUMBPRINT>"}""",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="azure_data_lake_default",
             conn_type="azure_data_lake",
             extra='{"tenant": "<TENANT>", "account_name": "<ACCOUNTNAME>" }',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="azure_default",
             conn_type="azure",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="cassandra_default",
             conn_type="cassandra",
             host="cassandra",
             port=9042,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="databricks_default",
             conn_type="databricks",
             host="localhost",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="dingding_default",
             conn_type="http",
             host="",
             password="",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="drill_default",
             conn_type="drill",
@@ -231,9 +275,6 @@ def create_default_connections(session: Session = NEW_SESSION):
             port=8047,
             extra='{"dialect_driver": "drill+sadrill", "storage_plugin": "dfs"}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="druid_broker_default",
             conn_type="druid",
@@ -241,9 +282,6 @@ def create_default_connections(session: Session = NEW_SESSION):
             port=8082,
             extra='{"endpoint": "druid/v2/sql"}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="druid_ingest_default",
             conn_type="druid",
@@ -251,9 +289,6 @@ def create_default_connections(session: Session = NEW_SESSION):
             port=8081,
             extra='{"endpoint": "druid/indexer/v1/task"}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="elasticsearch_default",
             conn_type="elasticsearch",
@@ -261,9 +296,6 @@ def create_default_connections(session: Session = NEW_SESSION):
             schema="http",
             port=9200,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="emr_default",
             conn_type="emr",
@@ -312,9 +344,6 @@ def create_default_connections(session: Session = NEW_SESSION):
                 }
             """,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="facebook_default",
             conn_type="facebook_social",
@@ -326,17 +355,11 @@ def create_default_connections(session: Session = NEW_SESSION):
                 }
             """,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="fs_default",
             conn_type="fs",
             extra='{"path": "/"}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="ftp_default",
             conn_type="ftp",
@@ -346,17 +369,17 @@ def create_default_connections(session: Session = NEW_SESSION):
             password="airflow",
             extra='{"key_file": "~/.ssh/id_rsa", "no_host_key_check": true}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="google_cloud_default",
             conn_type="google_cloud_platform",
             schema="default",
         ),
-        session,
-    )
-    merge_conn(
+        Connection(
+            conn_id="gremlin_default",
+            conn_type="gremlin",
+            host="gremlin",
+            port=8182,
+        ),
         Connection(
             conn_id="hive_cli_default",
             conn_type="hive_cli",
@@ -365,9 +388,6 @@ def create_default_connections(session: Session = NEW_SESSION):
             extra='{"use_beeline": true, "auth": ""}',
             schema="default",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="hiveserver2_default",
             conn_type="hiveserver2",
@@ -375,41 +395,26 @@ def create_default_connections(session: Session = NEW_SESSION):
             schema="default",
             port=10000,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="http_default",
             conn_type="http",
             host="https://www.httpbin.org/",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="iceberg_default",
             conn_type="iceberg",
             host="https://api.iceberg.io/ws/v1",
         ),
-        session,
-    )
-    merge_conn(Connection(conn_id="impala_default", conn_type="impala", host="localhost", port=21050))
-    merge_conn(
+        Connection(conn_id="impala_default", conn_type="impala", host="localhost", port=21050),
         Connection(
             conn_id="kafka_default",
             conn_type="kafka",
             extra=json.dumps({"bootstrap.servers": "broker:29092", "group.id": "my-group"}),
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="kubernetes_default",
             conn_type="kubernetes",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="kylin_default",
             conn_type="kylin",
@@ -418,18 +423,12 @@ def create_default_connections(session: Session = NEW_SESSION):
             login="ADMIN",
             password="KYLIN",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="leveldb_default",
             conn_type="leveldb",
             host="localhost",
         ),
-        session,
-    )
-    merge_conn(Connection(conn_id="livy_default", conn_type="livy", host="livy", port=8998), session)
-    merge_conn(
+        Connection(conn_id="livy_default", conn_type="livy", host="livy", port=8998),
         Connection(
             conn_id="local_mysql",
             conn_type="mysql",
@@ -438,9 +437,6 @@ def create_default_connections(session: Session = NEW_SESSION):
             password="airflow",
             schema="airflow",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="metastore_default",
             conn_type="hive_metastore",
@@ -448,19 +444,13 @@ def create_default_connections(session: Session = NEW_SESSION):
             extra='{"authMechanism": "PLAIN"}',
             port=9083,
         ),
-        session,
-    )
-    merge_conn(Connection(conn_id="mongo_default", conn_type="mongo", host="mongo", port=27017), session)
-    merge_conn(
+        Connection(conn_id="mongo_default", conn_type="mongo", host="mongo", port=27017),
         Connection(
             conn_id="mssql_default",
             conn_type="mssql",
             host="localhost",
             port=1433,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="mysql_default",
             conn_type="mysql",
@@ -468,9 +458,6 @@ def create_default_connections(session: Session = NEW_SESSION):
             schema="airflow",
             host="mysql",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="opensearch_default",
             conn_type="opensearch",
@@ -478,18 +465,12 @@ def create_default_connections(session: Session = NEW_SESSION):
             schema="http",
             port=9200,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="opsgenie_default",
             conn_type="http",
             host="",
             password="",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="oracle_default",
             conn_type="oracle",
@@ -499,39 +480,28 @@ def create_default_connections(session: Session = NEW_SESSION):
             schema="schema",
             port=1521,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="oss_default",
             conn_type="oss",
-            extra="""{
+            extra="""
+                {
                 "auth_type": "AK",
                 "access_key_id": "<ACCESS_KEY_ID>",
                 "access_key_secret": "<ACCESS_KEY_SECRET>",
                 "region": "<YOUR_OSS_REGION>"}
                 """,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="pig_cli_default",
             conn_type="pig_cli",
             schema="default",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="pinot_admin_default",
             conn_type="pinot",
             host="localhost",
             port=9000,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="pinot_broker_default",
             conn_type="pinot",
@@ -539,9 +509,6 @@ def create_default_connections(session: Session = NEW_SESSION):
             port=9000,
             extra='{"endpoint": "/query", "schema": "http"}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="postgres_default",
             conn_type="postgres",
@@ -550,9 +517,6 @@ def create_default_connections(session: Session = NEW_SESSION):
             schema="airflow",
             host="postgres",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="presto_default",
             conn_type="presto",
@@ -560,18 +524,12 @@ def create_default_connections(session: Session = NEW_SESSION):
             schema="hive",
             port=3400,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="qdrant_default",
             conn_type="qdrant",
             host="qdrant",
             port=6333,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="redis_default",
             conn_type="redis",
@@ -579,13 +537,11 @@ def create_default_connections(session: Session = NEW_SESSION):
             port=6379,
             extra='{"db": 0}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="redshift_default",
             conn_type="redshift",
-            extra="""{
+            extra="""
+{
     "iam": true,
     "cluster_identifier": "<REDSHIFT_CLUSTER_IDENTIFIER>",
     "port": 5439,
@@ -595,9 +551,6 @@ def create_default_connections(session: Session = NEW_SESSION):
     "region": ""
 }""",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="salesforce_default",
             conn_type="salesforce",
@@ -605,17 +558,11 @@ def create_default_connections(session: Session = NEW_SESSION):
             password="password",
             extra='{"security_token": "security_token"}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="segment_default",
             conn_type="segment",
             extra='{"write_key": "my-segment-write-key"}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="sftp_default",
             conn_type="sftp",
@@ -624,34 +571,22 @@ def create_default_connections(session: Session = NEW_SESSION):
             login="airflow",
             extra='{"key_file": "~/.ssh/id_rsa", "no_host_key_check": true}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="spark_default",
             conn_type="spark",
             host="yarn",
             extra='{"queue": "root.default"}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="sqlite_default",
             conn_type="sqlite",
             host=os.path.join(gettempdir(), "sqlite_default.db"),
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="ssh_default",
             conn_type="ssh",
             host="localhost",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="tableau_default",
             conn_type="tableau",
@@ -660,9 +595,6 @@ def create_default_connections(session: Session = NEW_SESSION):
             password="password",
             extra='{"site_id": "my_site"}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="teradata_default",
             conn_type="teradata",
@@ -671,9 +603,6 @@ def create_default_connections(session: Session = NEW_SESSION):
             password="password",
             schema="schema",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="trino_default",
             conn_type="trino",
@@ -681,43 +610,28 @@ def create_default_connections(session: Session = NEW_SESSION):
             schema="hive",
             port=3400,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="vertica_default",
             conn_type="vertica",
             host="localhost",
             port=5433,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="wasb_default",
             conn_type="wasb",
             extra='{"sas_token": null}',
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="webhdfs_default",
             conn_type="hdfs",
             host="localhost",
             port=50070,
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="yandexcloud_default",
             conn_type="yandexcloud",
             schema="default",
         ),
-        session,
-    )
-    merge_conn(
         Connection(
             conn_id="ydb_default",
             conn_type="ydb",
@@ -725,28 +639,209 @@ def create_default_connections(session: Session = NEW_SESSION):
             port=2135,
             extra={"database": "/local"},
         ),
-        session,
-    )
+    ]
+    return conns
 
 
-def _create_db_from_orm(session):
-    log.info("Creating Airflow database tables from the ORM")
+class AutocommitEngineForMySQL:
+    """
+    Context manager to temporarily use AUTOCOMMIT isolation level for MySQL.
+
+    This is needed to work around MySQL 8.4 metadata lock issues with SQLAlchemy 2.0.
+    """
+
+    def __init__(self):
+        self.is_mysql = settings.SQL_ALCHEMY_CONN and settings.SQL_ALCHEMY_CONN.lower().startswith("mysql")
+        self.original_prepare_engine_args = None
+
+    def __enter__(self):
+        if not self.is_mysql:
+            return self
+
+        log.info("Entering AUTOCOMMIT mode for MySQL DDL operations")
+
+        # Save and replace prepare_engine_args
+        self.original_prepare_engine_args = settings.prepare_engine_args
+
+        def autocommit_prepare_engine_args(disable_connection_pool=False, pool_class=None):
+            # Call with keyword arguments to preserve the calling convention
+            args = self.original_prepare_engine_args(
+                disable_connection_pool=disable_connection_pool, pool_class=pool_class
+            )
+            args["isolation_level"] = "AUTOCOMMIT"
+            return args
+
+        settings.prepare_engine_args = autocommit_prepare_engine_args
+
+        # Recreate engine with AUTOCOMMIT
+        settings.dispose_orm(do_log=False)
+        settings.configure_orm()
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if not self.is_mysql:
+            return
+
+        log.info("Exiting AUTOCOMMIT mode, restoring normal transaction engine")
+
+        # Restore original function
+        settings.prepare_engine_args = self.original_prepare_engine_args
+
+        # Recreate engine with normal settings
+        settings.dispose_orm(do_log=False)
+        settings.configure_orm()
+
+
+def _create_db_from_orm_mysql(session) -> None:
+    """Create database tables from ORM models for MySQL."""
     from alembic import command
 
     from airflow.models.base import Base
 
+    # MySQL: Commit session to release metadata locks before DDL
+    log.info("MySQL: Committing session to release metadata locks")
+    session.commit()
+
+    engine = session.get_bind().engine
+    log.info("Creating tables (MySQL)")
+    Base.metadata.create_all(engine)
+
+    log.info("Getting alembic config")
+    config = _get_alembic_config()
+
+    with AutocommitEngineForMySQL():
+        log.info("Stamping migration head")
+        command.stamp(config, "head")
+
+    log.info("Airflow database tables created")
+
+
+def _create_db_from_orm_default(session) -> None:
+    """Create database tables from ORM models for PostgreSQL/SQLite."""
+    from alembic import command
+
+    from airflow.models.base import Base
+
+    # PostgreSQL / SQLite: Use transactional global lock
+    log.info("Creating global lock context")
     with create_global_lock(session=session, lock=DBLocks.MIGRATIONS):
         engine = session.get_bind().engine
+        log.info("Pool status: %s", engine.pool.status())
+
+        log.info("Creating metadata")
         Base.metadata.create_all(engine)
-        # stamp the migration head
+
+        log.info("Getting alembic config")
         config = _get_alembic_config()
+
+        log.info("Stamping migration head")
         command.stamp(config, "head")
-        log.info("Airflow database tables created")
+
+    log.info("Airflow database tables created")
+
+
+def _create_db_from_orm(session):
+    """Create database tables from ORM models and stamp alembic version."""
+    log.info("Creating Airflow database tables from the ORM")
+    _setup_debug_logging_if_needed()
+
+    if get_dialect_name(session) == "mysql":
+        _create_db_from_orm_mysql(session)
+    else:
+        _create_db_from_orm_default(session)
+
+
+def _setup_debug_logging_if_needed():
+    """Set up debug logging and stack trace dumping if SQLALCHEMY_ENGINE_DEBUG is set."""
+    if not os.environ.get("SQLALCHEMY_ENGINE_DEBUG"):
+        return
+
+    import atexit
+    import faulthandler
+    from contextlib import suppress
+
+    # Enable SQLA debug logging
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.DEBUG)
+
+    # Enable faulthandler for debugging long-running threads and deadlocks,
+    # but disable it before interpreter shutdown to avoid segfaults during
+    # cleanup (especially with SQLAlchemy 2.0 + pytest teardown)
+    faulthandler.enable(file=sys.stderr, all_threads=True)
+
+    # Cancel any pending traceback dumps and disable faulthandler before exit
+    # to prevent it from interfering with C extension cleanup
+    def cleanup_faulthandler():
+        with suppress(Exception):
+            faulthandler.cancel_dump_traceback_later()
+        with suppress(Exception):
+            faulthandler.disable()
+
+    atexit.register(cleanup_faulthandler)
+
+    # Set up periodic traceback dumps for debugging hanging tests/threads
+    faulthandler.dump_traceback_later(timeout=300, repeat=True, file=sys.stderr)
+
+
+@contextlib.contextmanager
+def _mysql_lock_session_for_migration(original_session: Session) -> Generator[Session, None, None]:
+    """
+    Create a MySQL-specific lock session for migration operations.
+
+    This context manager:
+    1. Commits the original session to release metadata locks
+    2. Creates a new session bound to the engine
+    3. Ensures the session is properly closed on exit
+
+    :param original_session: The original session to commit
+    :return: A new session suitable for use with create_global_lock
+    """
+    from sqlalchemy.orm import Session as SASession
+
+    log.info("MySQL: Committing session to release metadata locks")
+    original_session.commit()
+
+    lock_session = SASession(bind=settings.engine)
+    try:
+        yield lock_session
+    finally:
+        lock_session.close()
+
+
+@contextlib.contextmanager
+def _single_connection_pool() -> Generator[None, None, None]:
+    """
+    Temporarily reconfigure ORM to use exactly one connection.
+
+    This is needed for migrations because some database engines hang forever
+    trying to ALTER TABLEs when multiple connections exist in the pool.
+
+    Saves and restores the AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_SIZE environment variable.
+    """
+    import sqlalchemy.pool
+
+    previous_pool_size = os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_SIZE")
+    try:
+        os.environ["AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_SIZE"] = "1"
+        settings.reconfigure_orm(pool_class=sqlalchemy.pool.SingletonThreadPool)
+        yield
+    finally:
+        os.environ.pop("AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_SIZE", None)
+        if previous_pool_size is not None:
+            os.environ["AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_SIZE"] = previous_pool_size
+        settings.reconfigure_orm()
 
 
 @provide_session
-def initdb(session: Session = NEW_SESSION):
-    """Initialize Airflow database."""
+def initdb(*, session: Session = NEW_SESSION, use_migration_files: bool = False):
+    """
+    Initialize Airflow database.
+
+    :param session: SQLAlchemy session
+    :param use_migration_files: If True, always use migration files (alembic upgrade)
+        to create the database instead of the ORM (create_all). Useful for verifying
+        that migration files produce the same schema as ORM models.
+    """
     # First validate external DB managers before running migration
     external_db_manager = RunDBManager()
     external_db_manager.validate()
@@ -754,12 +849,17 @@ def initdb(session: Session = NEW_SESSION):
     import_all_models()
 
     db_exists = _get_current_revision(session)
-    if db_exists:
-        upgradedb(session=session)
-    else:
-        _create_db_from_orm(session=session)
+    with timeout_with_traceback(60 * 20, "DB upgrade/creation timed out."):
+        if db_exists or use_migration_files:
+            token = _SKIP_EXTERNAL_DB_MANAGERS_UPGRADE.set(True)
+            try:
+                upgradedb(session=session, use_migration_files=use_migration_files)
+            finally:
+                _SKIP_EXTERNAL_DB_MANAGERS_UPGRADE.reset(token)
+        else:
+            _create_db_from_orm(session=session)
 
-    external_db_manager.initdb(session)
+    external_db_manager.initdb(session, use_migration_files=use_migration_files)
     # Add default pool & sync log_template
     add_default_pool_if_not_exists(session=session)
     synchronize_log_template(session=session)
@@ -836,7 +936,7 @@ def _configured_alembic_environment() -> Generator[EnvironmentContext, None, Non
             config,
             script,
         ) as env,
-        settings.engine.connect() as connection,
+        settings.get_engine().connect() as connection,
     ):
         alembic_logger = logging.getLogger("alembic")
         level = alembic_logger.level
@@ -868,8 +968,9 @@ def check_and_run_migrations():
     if sys.stdout.isatty() and verb:
         print()
         question = f"Please confirm database {verb} (or wait 4 seconds to skip it). Are you sure? [y/N]"
+        print_fn = log.info if conf.getboolean("logging", "json_logs", fallback=False) else print
         try:
-            answer = helpers.prompt_with_timeout(question, timeout=4, default=False)
+            answer = helpers.prompt_with_timeout(question, timeout=4, default=False, output_fn=print_fn)
             if answer:
                 try:
                     db_command()
@@ -890,10 +991,11 @@ def check_and_run_migrations():
     elif source_heads != db_heads:
         from airflow.version import version
 
-        print(
-            f"ERROR: You need to {verb} the database. Please run `airflow db {command_name}`. "
-            f"Make sure the command is run using Airflow version {version}.",
-            file=sys.stderr,
+        log.error(
+            "Database migration required. Please run `airflow db %s`. "
+            "Make sure the command is run using Airflow version %s.",
+            command_name,
+            version,
         )
         sys.exit(1)
 
@@ -913,7 +1015,7 @@ def synchronize_log_template(*, session: Session = NEW_SESSION) -> None:
     from airflow.models.tasklog import LogTemplate
 
     metadata = reflect_tables([LogTemplate], session)
-    log_template_table: Table | None = metadata.tables.get(LogTemplate.__tablename__)
+    log_template_table: Table | None = metadata.tables.get(LogTemplate.__table__.key)
 
     if log_template_table is None:
         log.info("Log template table does not exist (added in 2.3.0); skipping log template sync.")
@@ -974,12 +1076,19 @@ def synchronize_log_template(*, session: Session = NEW_SESSION) -> None:
         session.add(LogTemplate(filename=filename, elasticsearch_id=elasticsearch_id))
 
 
-def reflect_tables(tables: list[MappedClassProtocol | str] | None, session):
+def reflect_tables(tables: Sequence[MappedClassProtocol | str] | None, session, schema: str | None = None):
     """
     When running checks prior to upgrades, we use reflection to determine current state of the database.
 
     This function gets the current state of each table in the set of models
     provided and returns a SqlAlchemy metadata object containing them.
+
+    A string entry in ``tables`` may be schema-qualified using dot notation (e.g.
+    ``"celery.celery_taskmeta"``) to reflect a table from a non-default schema; the returned
+    metadata's ``tables`` mapping is then keyed by that same ``schema.table`` string. When
+    ``tables`` is ``None``, ``schema`` selects which schema to reflect in full (default: the
+    connection's default schema); SQLAlchemy keys every reflected table by ``schema.table`` in
+    that case too, whenever a non-``None`` schema was given.
     """
     import sqlalchemy.schema
 
@@ -987,21 +1096,61 @@ def reflect_tables(tables: list[MappedClassProtocol | str] | None, session):
     metadata = sqlalchemy.schema.MetaData()
 
     if tables is None:
-        metadata.reflect(bind=bind, resolve_fks=False)
+        metadata.reflect(bind=bind, schema=schema, resolve_fks=False)
     else:
         for tbl in tables:
             try:
-                table_name = tbl if isinstance(tbl, str) else tbl.__tablename__
-                metadata.reflect(bind=bind, only=[table_name], extend_existing=True, resolve_fks=False)
+                tbl_schema: str | None
+                if isinstance(tbl, str):
+                    tbl_schema, sep, name = tbl.partition(".")
+                    if not sep:
+                        tbl_schema, name = None, tbl
+                else:
+                    # Preserve the mapped class's own configured schema; see PR #70793.
+                    name = tbl.__tablename__
+                    tbl_schema = inspect(tbl, raiseerr=True).local_table.schema
+                metadata.reflect(
+                    bind=bind, schema=tbl_schema, only=[name], extend_existing=True, resolve_fks=False
+                )
             except exc.InvalidRequestError:
                 continue
     return metadata
 
 
+def check_team_names_can_be_lower_cased(*, session: Session) -> Iterable[str]:
+    """
+    Yield an error for each group of stored team names that cannot be folded to lower case.
+
+    Team names became lower case only, and a migration rewrites the stored ones. Names that
+    differ only in case collapse onto a single row, which would silently merge two teams -- one
+    would inherit the other's Dag bundles, Connections, Variables, Pools and Triggers. Nothing
+    here can choose which name survives, so migration stops and the operator renames one first.
+    """
+    from collections import defaultdict
+
+    from airflow.models.team import Team
+
+    if not inspect(session.get_bind()).has_table(Team.__tablename__):
+        return
+
+    by_lower: dict[str, list[str]] = defaultdict(list)
+    for name in Team.get_all_team_names(session=session):
+        by_lower[name.lower()].append(name)
+
+    for lowered, names in sorted(by_lower.items()):
+        if len(names) > 1:
+            yield (
+                f"Teams {', '.join(repr(name) for name in sorted(names))} differ only in case and "
+                f"would both become '{lowered}'. Rename all but one with `airflow teams create` / "
+                "`airflow teams delete`, moving its Dag bundles, Connections, Variables and Pools "
+                "across, before migrating."
+            )
+
+
 @provide_session
-def _check_migration_errors(session: Session = NEW_SESSION) -> Iterable[str]:
+def _check_migration_errors(*, session: Session = NEW_SESSION) -> Iterable[str]:
     """:session: session of the sqlalchemy."""
-    check_functions: Iterable[Callable[..., Iterable[str]]] = ()
+    check_functions: Iterable[Callable[..., Iterable[str]]] = (check_team_names_can_be_lower_cased,)
     for check_fn in check_functions:
         log.debug("running check function %s", check_fn.__name__)
         yield from check_fn(session=session)
@@ -1052,7 +1201,7 @@ def _revisions_above_min_for_offline(config, revisions) -> None:
     :param revisions: list of Alembic revision ids
     :return: None
     """
-    dbname = settings.engine.dialect.name
+    dbname = settings.get_engine().dialect.name
     if dbname == "sqlite":
         raise SystemExit("Offline migration not supported for SQLite.")
     min_version, min_revision = ("2.7.0", "937cbd173ca1")
@@ -1069,32 +1218,79 @@ def _revisions_above_min_for_offline(config, revisions) -> None:
             )
 
 
+def _run_upgradedb(
+    config,
+    to_revision: str | None,
+    session: Session,
+    *,
+    use_migration_files: bool = False,
+) -> None:
+    """Run database upgrade with appropriate locking for the dialect."""
+    from alembic import command
+
+    is_mysql = settings.get_engine().dialect.name == "mysql"
+    dialect_label = " (MySQL)" if is_mysql else ""
+    log.info("Migrating the Airflow database%s", dialect_label)
+
+    # MySQL needs a separate lock session; others use the original session
+    session_cm: contextlib.AbstractContextManager[Session] = (
+        _mysql_lock_session_for_migration(session) if is_mysql else contextlib.nullcontext(session)
+    )
+
+    with (
+        session_cm as work_session,
+        create_global_lock(session=work_session, lock=DBLocks.MIGRATIONS),
+        _single_connection_pool(),
+    ):
+        command.upgrade(config, revision=to_revision or "heads")
+
+        current_revision = _get_current_revision(session=work_session)
+        with _configured_alembic_environment() as env:
+            source_heads = env.script.get_heads()
+
+        # End the read-only transaction from _get_current_revision before
+        # external DB manager migrations, which may run DDL that is blocked by
+        # open transactions (e.g. CREATE INDEX CONCURRENTLY). The advisory lock
+        # from create_global_lock() is unaffected: it is session-level and held
+        # on a separate connection.
+        work_session.rollback()
+
+        if current_revision == source_heads[0] and not _SKIP_EXTERNAL_DB_MANAGERS_UPGRADE.get():
+            external_db_manager = RunDBManager()
+            external_db_manager.upgradedb(work_session, use_migration_files=use_migration_files)
+
+        add_default_pool_if_not_exists(session=work_session)
+        synchronize_log_template(session=work_session)
+
+
 @provide_session
 def upgradedb(
     *,
     to_revision: str | None = None,
     from_revision: str | None = None,
     show_sql_only: bool = False,
-    reserialize_dags: bool = True,
+    use_migration_files: bool = False,
     session: Session = NEW_SESSION,
 ):
     """
-    Upgrades the DB.
+    Upgrade the DB.
 
     :param to_revision: Optional Alembic revision ID to upgrade *to*.
         If omitted, upgrades to latest revision.
     :param from_revision: Optional Alembic revision ID to upgrade *from*.
         Not compatible with ``sql_only=False``.
     :param show_sql_only: if True, migration statements will be printed but not executed.
+    :param use_migration_files: If True, initialize it via Alembic migrations
+        instead of the ORM create-all path.
     :param session: sqlalchemy session with connection to Airflow metadata database
     :return: None
     """
     if from_revision and not show_sql_only:
         raise AirflowException("`from_revision` only supported with `sql_only=True`.")
 
-    # alembic adds significant import time, so we import it lazily
     if not settings.SQL_ALCHEMY_CONN:
         raise RuntimeError("The settings.SQL_ALCHEMY_CONN not set. This is a critical assertion.")
+
     from alembic import command
 
     import_all_models()
@@ -1116,7 +1312,7 @@ def upgradedb(
         _revisions_above_min_for_offline(config=config, revisions=[from_revision, to_revision])
 
         _offline_migration(command.upgrade, config, f"{from_revision}:{to_revision}")
-        return  # only running sql; our job is done
+        return
 
     errors_seen = False
     for err in _check_migration_errors(session=session):
@@ -1128,52 +1324,51 @@ def upgradedb(
     if errors_seen:
         exit(1)
 
-    if not _get_current_revision(session=session):
-        # Don't load default connections
-        # New DB; initialize and exit
+    if not _get_current_revision(session=session) and not to_revision and not use_migration_files:
+        # New DB; initialize and exit.
         initdb(session=session)
         return
-    with create_global_lock(session=session, lock=DBLocks.MIGRATIONS):
-        import sqlalchemy.pool
 
-        log.info("Migrating the Airflow database")
-        val = os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_SIZE")
-        try:
-            # Reconfigure the ORM to use _EXACTLY_ one connection, otherwise some db engines hang forever
-            # trying to ALTER TABLEs
-            os.environ["AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_SIZE"] = "1"
-            settings.reconfigure_orm(pool_class=sqlalchemy.pool.SingletonThreadPool)
-            command.upgrade(config, revision=to_revision or "heads")
-            current_revision = _get_current_revision(session=session)
-            with _configured_alembic_environment() as env:
-                source_heads = env.script.get_heads()
-            if current_revision == source_heads[0]:
-                # Only run external DB upgrade migration if user upgraded to heads
+    _run_upgradedb(config, to_revision, session, use_migration_files=use_migration_files)
+
+
+def _resetdb_mysql(session: Session) -> None:
+    """Drop all Airflow tables for MySQL."""
+    from sqlalchemy.orm import Session as SASession
+
+    # MySQL: Release metadata locks and use AUTOCOMMIT for DDL
+    log.info("MySQL: Releasing metadata locks before DDL operations")
+    session.commit()
+    session.close()
+
+    # Use create_global_lock for migration safety (now handles MySQL with AUTOCOMMIT)
+    engine = settings.get_engine()
+    lock_session = SASession(bind=engine)
+    try:
+        with (
+            create_global_lock(session=lock_session, lock=DBLocks.MIGRATIONS),
+            engine.connect() as connection,
+        ):
+            ddl_conn = connection.execution_options(isolation_level="AUTOCOMMIT")
+
+            drop_airflow_models(ddl_conn)
+            drop_airflow_moved_tables(ddl_conn)
+            log.info("Dropped all Airflow tables")
+
+            # Use raw Session to avoid scoped session issues
+            work_session = SASession(bind=ddl_conn)
+            try:
                 external_db_manager = RunDBManager()
-                external_db_manager.upgradedb(session)
-
-        finally:
-            if val is None:
-                os.environ.pop("AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_SIZE")
-            else:
-                os.environ["AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_SIZE"] = val
-            settings.reconfigure_orm()
-
-        add_default_pool_if_not_exists(session=session)
-        synchronize_log_template(session=session)
+                external_db_manager.drop_tables(work_session, ddl_conn)
+            finally:
+                work_session.close()
+    finally:
+        lock_session.close()
 
 
-@provide_session
-def resetdb(session: Session = NEW_SESSION, skip_init: bool = False):
-    """Clear out the database."""
-    if not settings.engine:
-        raise RuntimeError("The settings.engine must be set. This is a critical assertion")
-    log.info("Dropping Airflow tables that exist")
-
-    import_all_models()
-
-    connection = settings.engine.connect()
-
+def _resetdb_default(session: Session) -> None:
+    """Drop all Airflow tables for PostgreSQL/SQLite."""
+    connection = settings.get_engine().connect()
     with create_global_lock(session=session, lock=DBLocks.MIGRATIONS), connection.begin():
         drop_airflow_models(connection)
         drop_airflow_moved_tables(connection)
@@ -1181,8 +1376,36 @@ def resetdb(session: Session = NEW_SESSION, skip_init: bool = False):
         external_db_manager = RunDBManager()
         external_db_manager.drop_tables(session, connection)
 
+
+@provide_session
+def resetdb(*, session: Session = NEW_SESSION, skip_init: bool = False, use_migration_files: bool = False):
+    """
+    Clear out the database.
+
+    :param session: SQLAlchemy session
+    :param skip_init: If True, only drop tables without re-initializing.
+    :param use_migration_files: If True, use migration files (alembic upgrade)
+        instead of the ORM (create_all) when re-initializing the database.
+    """
+    if not settings.engine:
+        raise RuntimeError("The settings.engine must be set. This is a critical assertion")
+    log.info("Dropping Airflow tables that exist")
+
+    import_all_models()
+
+    if get_dialect_name(session) == "mysql":
+        _resetdb_mysql(session)
+    else:
+        _resetdb_default(session)
+
     if not skip_init:
-        initdb(session=session)
+        # Create a fresh non-scoped session for initdb since the original was closed (MySQL)
+        # or used (Postgres). Using scoped=False ensures we get a new session even if the
+        # scoped session registry has the old closed session.
+        from airflow.utils.session import create_session
+
+        with create_session(scoped=False) as new_session:
+            initdb(session=new_session, use_migration_files=use_migration_files)
 
 
 @provide_session
@@ -1212,33 +1435,104 @@ def downgrade(*, to_revision, from_revision=None, show_sql_only=False, session: 
 
     log.info("Attempting downgrade to revision %s", to_revision)
     config = _get_alembic_config()
-    # Check if downgrade is less than 3.0.0 and requires that `ab_user` fab table is present
-    if _revision_greater(config, _REVISION_HEADS_MAP["3.0.0"], to_revision):
-        if conf.getboolean("core", "unit_test_mode"):
-            try:
-                from airflow.providers.fab.auth_manager.models.db import FABDBManager
 
-                dbm = FABDBManager(session)
-                dbm.initdb()
-            except ImportError:
-                log.warning("Import error occurred while importing FABDBManager. Skipping the check.")
-                pass
-        if not inspect(settings.engine).has_table("ab_user"):
-            log.error(
-                "Downgrade to revision less than 3.0.0 requires that `ab_user` table is present. "
-                "Please add FabDBManager to [core] external_db_managers and run fab migrations before proceeding"
-            )
-            return
-    with create_global_lock(session=session, lock=DBLocks.MIGRATIONS):
+    # If downgrading to less than 3.0.0, we need to handle the FAB provider
+    if _revision_greater(config, _REVISION_HEADS_MAP["2.10.3"], to_revision):
+        _handle_fab_downgrade(session=session)
+
+    # Determine which session to use for the migration operations
+    if get_dialect_name(session) == "mysql":
+        # MySQL: Commit session to release metadata locks before Alembic DDL
+        session_cm: contextlib.AbstractContextManager[Session] = _mysql_lock_session_for_migration(session)
+    else:
+        # PostgreSQL / SQLite: Use original session
+        session_cm = contextlib.nullcontext(session)
+
+    with (
+        session_cm as work_session,
+        create_global_lock(session=work_session, lock=DBLocks.MIGRATIONS),
+    ):
         if show_sql_only:
             log.warning("Generating sql scripts for manual migration.")
             if not from_revision:
-                from_revision = _get_current_revision(session)
+                from_revision = _get_current_revision(work_session)
             revision_range = f"{from_revision}:{to_revision}"
             _offline_migration(command.downgrade, config=config, revision=revision_range)
         else:
-            log.info("Applying downgrade migrations to Airflow database.")
+            dialect_label = " (MySQL)" if get_dialect_name(work_session) == "mysql" else ""
+            log.info("Applying downgrade migrations to Airflow database%s.", dialect_label)
             command.downgrade(config, revision=to_revision, sql=show_sql_only)
+
+
+def _get_fab_migration_version(*, session: Session) -> str | None:
+    """
+    Get the current FAB migration version from the database.
+
+    This intentionally queries the db directly, as the FAB provider and FABDBManager may not even be installed.
+
+    :param session: sqlalchemy session for connection to airflow metadata database
+    :return: The current FAB migration revision, or None if not found
+    """
+    try:
+        result = session.execute(text("SELECT version_num FROM alembic_version_fab LIMIT 1"))
+        row = result.fetchone()
+        return row[0] if row else None
+    except Exception:
+        # Table might not exist or other database error
+        return None
+
+
+def _handle_fab_downgrade(*, session: Session) -> None:
+    """
+    Handle FAB downgrade requirements for downgrades to Airflow versions < 3.0.0.
+
+    First, checks if the FAB db version matches the known version from 1.4.0.
+    If it matches, no FAB db tables need to be touched.
+    Otherwise, imports the FABDBManager and calls its downgrade method.
+
+    :param session: sqlalchemy session for connection to airflow metadata database
+    :raises RuntimeError: If FAB provider is required but cannot be imported
+    """
+    fab_version = _get_fab_migration_version(session=session)
+    if fab_version == "6709f7a774b9":  # 1.4.0
+        # FAB version matches - we can proceed without touching the FAB db tables
+        log.info(
+            "FAB migration version %s matches known version from 1.4.0. "
+            "FAB provider is not required for downgrade.",
+            fab_version,
+        )
+        return
+
+    with settings.get_engine().connect() as connection:
+        insp = inspect(connection)
+        if not fab_version and insp.has_table("ab_user"):
+            log.info(
+                "FAB migration version not found, but FAB tables exist. "
+                "FAB provider is not required for downgrade.",
+            )
+            return
+
+    # FAB db version is different or not found - require the FAB provider
+    try:
+        from airflow.providers.fab.auth_manager.models.db import FABDBManager
+    except ImportError:
+        raise RuntimeError(
+            "Import error occurred while importing FABDBManager. The apache-airflow-providers-fab package must be installed before we can "
+            "downgrade to <3.0.0."
+        )
+
+    # For MySQL: commit session to release metadata locks before FABDBManager operations
+    if get_dialect_name(session) == "mysql":
+        log.info("MySQL: Committing session to release metadata locks before FAB operations")
+        session.commit()
+
+    dbm = FABDBManager(session)
+    if hasattr(dbm, "reset_to_2_x"):
+        dbm.reset_to_2_x()
+    else:
+        # Older version before we added that function, it only has a single migration so we can just create the tables
+        # to ensure they are there
+        dbm.create_db_from_orm()
 
 
 def drop_airflow_models(connection):
@@ -1262,7 +1556,6 @@ def drop_airflow_models(connection):
 
 def drop_airflow_moved_tables(connection):
     from airflow.models.base import Base
-    from airflow.settings import AIRFLOW_MOVED_TABLE_PREFIX
 
     tables = set(inspect(connection).get_table_names())
     to_delete = [Table(x, Base.metadata) for x in tables if x.startswith(AIRFLOW_MOVED_TABLE_PREFIX)]
@@ -1272,7 +1565,7 @@ def drop_airflow_moved_tables(connection):
 
 
 @provide_session
-def check(session: Session = NEW_SESSION):
+def check(*, session: Session = NEW_SESSION):
     """
     Check if the database works.
 
@@ -1299,30 +1592,115 @@ class DBLocks(enum.IntEnum):
 
 
 @contextlib.contextmanager
+def _create_global_lock_mysql(lock: DBLocks, lock_timeout: int) -> Generator[None, None, None]:
+    """
+    Create a global advisory lock for MySQL.
+
+    Uses a dedicated AUTOCOMMIT connection because:
+    - GET_LOCK is session-level, not transaction-level
+    - DDL operations cause implicit commits that would break transaction wrappers
+    """
+    lock_conn = settings.get_engine().connect()
+    try:
+        lock_conn = lock_conn.execution_options(isolation_level="AUTOCOMMIT")
+
+        # GET_LOCK returns: 1 = acquired, 0 = timeout, NULL = error
+        lock_result = lock_conn.execute(
+            text("SELECT GET_LOCK(:lock_name, :timeout)"),
+            {"lock_name": str(lock), "timeout": lock_timeout},
+        ).scalar()
+
+        if lock_result != 1:
+            raise RuntimeError(
+                f"Could not acquire MySQL advisory lock '{lock}'. "
+                f"Result: {lock_result}. Another process may be holding the lock."
+            )
+
+        try:
+            yield
+        finally:
+            lock_conn.execute(text("SELECT RELEASE_LOCK(:lock_name)"), {"lock_name": str(lock)})
+    finally:
+        lock_conn.close()
+
+
+@contextlib.contextmanager
+def _create_global_lock_postgresql(
+    session: Session, lock: DBLocks, lock_timeout: int
+) -> Generator[None, None, None]:
+    """
+    Create a global advisory lock for PostgreSQL using session-level advisory locks.
+
+    The lock connection stays in an open transaction while the lock is held, which keeps it
+    on one server connection behind a transaction-pooling PgBouncer.
+    """
+    bind = session.get_bind()
+    if hasattr(bind, "connect"):
+        conn = bind.connect()
+        owns_connection = True
+    else:
+        conn = bind
+        owns_connection = False
+
+    try:
+        if _USE_PSYCOPG3:
+            conn.execute(
+                text("SELECT set_config('lock_timeout', :timeout, false)"),
+                {"timeout": str(lock_timeout)},
+            )
+        else:
+            conn.execute(text("SET LOCK_TIMEOUT to :timeout"), {"timeout": lock_timeout})
+        # The last statement run on this connection before the yield must have no bound parameter:
+        # under psycopg3 a parameterized statement keeps its snapshot while the connection sits idle
+        # in transaction, and CREATE INDEX CONCURRENTLY run by a migration in this process would
+        # wait on it forever.
+        conn.execute(text(f"SELECT pg_advisory_lock({int(lock.value)})"))
+
+        yield
+    finally:
+        if _USE_PSYCOPG3:
+            conn.execute(text("SELECT set_config('lock_timeout', '0', false)"))
+        else:
+            conn.execute(text("SET LOCK_TIMEOUT TO DEFAULT"))
+
+        result = conn.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": lock.value}).fetchone()
+
+        if result is None:
+            raise RuntimeError("Error releasing DB lock!")
+        (unlocked,) = result
+        if not unlocked:
+            raise RuntimeError("Error releasing DB lock!")
+
+        if owns_connection:
+            conn.close()
+
+
+@contextlib.contextmanager
 def create_global_lock(
     session: Session,
     lock: DBLocks,
     lock_timeout: int = 1800,
 ) -> Generator[None, None, None]:
-    """Contextmanager that will create and teardown a global db lock."""
-    conn = session.get_bind().connect()
-    dialect = conn.dialect
-    try:
-        if dialect.name == "postgresql":
-            conn.execute(text("SET LOCK_TIMEOUT to :timeout"), {"timeout": lock_timeout})
-            conn.execute(text("SELECT pg_advisory_lock(:id)"), {"id": lock.value})
-        elif dialect.name == "mysql" and dialect.server_version_info >= (5, 6):
-            conn.execute(text("SELECT GET_LOCK(:id, :timeout)"), {"id": str(lock), "timeout": lock_timeout})
+    """
+    Contextmanager that will create and teardown a global db lock.
 
+    For MySQL, uses a dedicated AUTOCOMMIT connection because:
+    - GET_LOCK is session-level, not transaction-level
+    - DDL operations cause implicit commits that would break transaction wrappers
+
+    For PostgreSQL, uses a session-level advisory lock, held while the connection stays in a transaction.
+    """
+    dialect_name = get_dialect_name(session)
+
+    if dialect_name == "mysql":
+        with _create_global_lock_mysql(lock, lock_timeout):
+            yield
+    elif dialect_name == "postgresql":
+        with _create_global_lock_postgresql(session, lock, lock_timeout):
+            yield
+    else:
+        # SQLite and others: no advisory lock support
         yield
-    finally:
-        if dialect.name == "postgresql":
-            conn.execute(text("SET LOCK_TIMEOUT TO DEFAULT"))
-            (unlocked,) = conn.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": lock.value}).fetchone()
-            if not unlocked:
-                raise RuntimeError("Error releasing DB lock!")
-        elif dialect.name == "mysql" and dialect.server_version_info >= (5, 6):
-            conn.execute(text("select RELEASE_LOCK(:id)"), {"id": str(lock)})
 
 
 def compare_type(context, inspected_column, metadata_column, inspected_type, metadata_type):
@@ -1376,7 +1754,37 @@ def compare_server_default(
         # where we added the column in the first place -- now that it exists and all
         # existing rows are populated with a value this server default is never used.
         return False
+    if dialect_name == "mysql":
+        normalized_inspected = _normalize_mysql_server_default(inspected_default)
+        normalized_metadata = _normalize_mysql_server_default(rendered_metadata_default)
+        if normalized_inspected is not None and normalized_inspected == normalized_metadata:
+            return False
     return None
+
+
+def _normalize_mysql_server_default(default: Any) -> str | None:
+    """Normalize equivalent MySQL-reflected server defaults for comparison."""
+    if default is None:
+        return None
+
+    normalized = str(default).strip().strip("'\"").lower()
+    # MySQL reflects expression defaults with escaped quotes and a charset introducer,
+    # e.g. unhex(_utf8mb4\'00ff\') for a model default of UNHEX('00ff').
+    normalized = re.sub(r"\b_[a-z0-9]+(?=')", "", normalized.replace("\\'", "'"))
+    while normalized.startswith("(") and normalized.endswith(")"):
+        normalized = normalized[1:-1].strip()
+    normalized = normalized.replace(" ", "")
+
+    if normalized in {"false", "0"}:
+        return "0"
+    if normalized in {"true", "1"}:
+        return "1"
+
+    numeric_expression = normalized.replace("(", "").replace(")", "")
+    if re.fullmatch(r"-?\d+", numeric_expression):
+        return numeric_expression
+
+    return normalized
 
 
 def get_sqla_model_classes():
@@ -1406,7 +1814,8 @@ def get_query_count(query_stmt: Select, *, session: Session) -> int:
     :meta private:
     """
     count_stmt = select(func.count()).select_from(query_stmt.order_by(None).subquery())
-    return session.scalar(count_stmt)
+    result = session.scalar(count_stmt)
+    return result or 0
 
 
 async def get_query_count_async(statement: Select, *, session: AsyncSession) -> int:
@@ -1421,7 +1830,8 @@ async def get_query_count_async(statement: Select, *, session: AsyncSession) -> 
     :meta private:
     """
     count_stmt = select(func.count()).select_from(statement.order_by(None).subquery())
-    return await session.scalar(count_stmt)
+    result = await session.scalar(count_stmt)
+    return result or 0
 
 
 def check_query_exists(query_stmt: Select, *, session: Session) -> bool:
@@ -1439,7 +1849,7 @@ def check_query_exists(query_stmt: Select, *, session: Session) -> bool:
     return bool(session.scalar(count_stmt))
 
 
-def exists_query(*where: ClauseElement, session: Session) -> bool:
+def exists_query(*where: ColumnElement[bool], session: Session) -> bool:
     """
     Check whether there is at least one row matching given clauses.
 
@@ -1456,26 +1866,23 @@ class LazySelectSequence(Sequence[T]):
     """
     List-like interface to lazily access a database model query.
 
-    The intended use case is inside a task execution context, where we manage an
-    active SQLAlchemy session in the background.
+    Rows are fetched through the session passed to :meth:`from_select` each time
+    the sequence is accessed, so the sequence is only usable while that session is.
 
     This is an abstract base class. Each use case should subclass, and implement
-    the following static methods:
+    the ``_process_row`` static method. It is called when an item is accessed.
+    The lazy sequence uses ``session.execute()`` to fetch rows from the database,
+    and this method should know how to process each row into a value.
 
-    * ``_rebuild_select`` is called when a lazy sequence is unpickled. Since it
-      is not easy to pickle SQLAlchemy constructs, this class serializes the
-      SELECT statements into plain text to storage. This method is called on
-      deserialization to convert the textual clause back into an ORM SELECT.
-    * ``_process_row`` is called when an item is accessed. The lazy sequence
-      uses ``session.execute()`` to fetch rows from the database, and this
-      method should know how to process each row into a value.
+    A lazy sequence holds a live session, so it cannot be pickled. Convert it to
+    a list first if the values need to cross a process boundary.
 
     :meta private:
     """
 
-    _select_asc: ClauseElement
-    _select_desc: ClauseElement
-    _session: Session = attrs.field(kw_only=True, factory=get_current_task_instance_session)
+    _select_asc: Select
+    _select_desc: Select
+    _session: Session
     _len: int | None = attrs.field(init=False, default=None)
 
     @classmethod
@@ -1483,8 +1890,8 @@ class LazySelectSequence(Sequence[T]):
         cls,
         select: Select,
         *,
-        order_by: Sequence[ClauseElement],
-        session: Session | None = None,
+        order_by: Sequence[ColumnElement],
+        session: Session,
     ) -> Self:
         s1 = select
         for col in order_by:
@@ -1492,17 +1899,7 @@ class LazySelectSequence(Sequence[T]):
         s2 = select
         for col in order_by:
             s2 = s2.order_by(col.desc())
-        return cls(s1, s2, session=session or get_current_task_instance_session())
-
-    @staticmethod
-    def _rebuild_select(stmt: TextClause) -> Select:
-        """
-        Rebuild a textual statement into an ORM-configured SELECT statement.
-
-        This should do something like ``select(field).from_statement(stmt)`` to
-        reconfigure ORM information to the textual SQL statement.
-        """
-        raise NotImplementedError
+        return cls(s1, s2, session=session)
 
     @staticmethod
     def _process_row(row: Row) -> T:
@@ -1517,27 +1914,15 @@ class LazySelectSequence(Sequence[T]):
         counter = "item" if (length := len(self)) == 1 else "items"
         return f"LazySelectSequence([{length} {counter}])"
 
-    def __getstate__(self) -> Any:
-        # We don't want to go to the trouble of serializing SQLAlchemy objects.
-        # Converting the statement into a SQL string is the best we can get.
-        # The literal_binds compile argument inlines all the values into the SQL
-        # string to simplify cross-process commuinication as much as possible.
-        # Theoratically we can do the same for count(), but I think it should be
-        # performant enough to calculate only that eagerly.
-        s1 = str(self._select_asc.compile(self._session.get_bind(), compile_kwargs={"literal_binds": True}))
-        s2 = str(self._select_desc.compile(self._session.get_bind(), compile_kwargs={"literal_binds": True}))
-        return (s1, s2, len(self))
+    __hash__ = None  # type: ignore[assignment]  # Disable hashing.
 
-    def __setstate__(self, state: Any) -> None:
-        s1, s2, self._len = state
-        self._select_asc = self._rebuild_select(text(s1))
-        self._select_desc = self._rebuild_select(text(s2))
-        self._session = get_current_task_instance_session()
+    def __reduce__(self) -> NoReturn:  # Disable pickling.
+        raise TypeError(f"{type(self).__name__} cannot be pickled; convert it to a list first")
 
     def __bool__(self) -> bool:
         return check_query_exists(self._select_asc, session=self._session)
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         if not isinstance(other, collections.abc.Sequence):
             return NotImplemented
         z = itertools.zip_longest(iter(self), iter(other), fillvalue=object())
@@ -1569,7 +1954,7 @@ class LazySelectSequence(Sequence[T]):
             if (row := self._session.execute(stmt.limit(1)).one_or_none()) is None:
                 raise IndexError(key)
             return self._process_row(row)
-        elif isinstance(key, slice):
+        if isinstance(key, slice):
             # This implements the slicing syntax. We want to optimize negative
             # slicing (e.g. seq[-10:]) by not doing an additional COUNT query
             # if possible. We can do this unless the start and stop have

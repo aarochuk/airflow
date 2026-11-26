@@ -37,7 +37,8 @@ CI_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--upgrade-to-newer-dependencies",
                 "--upgrade-on-failure",
                 "--docker-cache",
-                "--version-suffix-for-pypi",
+                "--use-pinned-os-deps-images",
+                "--version-suffix",
                 "--build-progress",
                 "--docker-host",
             ],
@@ -57,14 +58,12 @@ CI_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
             "name": "Advanced build options (for power users)",
             "options": [
                 "--additional-pip-install-flags",
+                "--cache-from-image",
                 "--commit-sha",
-                "--debian-version",
                 "--disable-airflow-repo-cache",
                 "--install-mysql-client-type",
                 "--python-image",
                 "--use-uv",
-                "--uv-http-timeout",
-                "--build-timeout-minutes",
             ],
         },
         {
@@ -97,7 +96,7 @@ CI_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
             ],
         },
         {
-            "name": "Github authentication",
+            "name": "GitHub authentication",
             "options": [
                 "--github-repository",
                 "--github-token",
@@ -125,7 +124,7 @@ CI_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
             ],
         },
         {
-            "name": "Github authentication",
+            "name": "GitHub authentication",
             "options": [
                 "--github-repository",
                 "--github-token",
@@ -153,7 +152,7 @@ CI_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
             ],
         },
         {
-            "name": "Github authentication",
+            "name": "GitHub authentication",
             "options": [
                 "--github-repository",
                 "--github-token",
@@ -169,6 +168,7 @@ CI_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--github-repository",
                 "--image-file",
                 "--image-file-dir",
+                "--snapshot-file",
             ],
         },
     ],
@@ -185,6 +185,8 @@ CI_IMAGE_TOOLS_PARAMETERS: dict[str, list[dict[str, str | list[str]]]] = {
                 "--from-pr",
                 "--from-run",
                 "--skip-image-file-deletion",
+                "--snapshot-file",
+                "--tag-as",
             ],
         },
     ],

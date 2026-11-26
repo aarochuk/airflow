@@ -20,18 +20,21 @@ Prerequisites
 
 Airflow® is tested with:
 
-* Python: 3.9, 3.10, 3.11, 3.12
+ .. Beginning of the auto-generated tested versions
+
+* Python: 3.11, 3.12, 3.13, 3.14
 
 * Databases:
 
-  * PostgreSQL: 12, 13, 14, 15, 16
-  * MySQL: 8.0, `Innovation <https://dev.mysql.com/blog-archive/introducing-mysql-innovation-and-long-term-support-lts-versions>`_
+  * PostgreSQL: 15, 16, 17, 18, 19
+  * MySQL: 8.0, 8.4, `Innovation <https://dev.mysql.com/blog-archive/introducing-mysql-innovation-and-long-term-support-lts-versions>`_
   * SQLite: 3.15.0+
 
-* Kubernetes: 1.26, 1.27, 1.28, 1.29, 1.30
+* Kubernetes: 1.31, 1.32, 1.33, 1.34, 1.35, 1.36, 1.37
 
-The minimum memory required we recommend Airflow to run with is 4GB, but the actual requirements depend
-wildly on the deployment options you have
+ .. End of the auto-generated tested versions
+
+While we recommend a minimum of 4GB of memory for Airflow, the actual requirements heavily depend on your chosen deployment.
 
 .. warning::
 
@@ -43,17 +46,17 @@ wildly on the deployment options you have
   because the number of users who tried to use MariaDB for Airflow is very small.
 
 .. warning::
-  SQLite is used in Airflow tests. Do not use it in production. We recommend
+  SQLite is used in Airflow tests. DO NOT use it in production. We recommend
   using the latest stable version of SQLite for local development.
 
 
 .. warning::
 
   Airflow® currently can be run on POSIX-compliant Operating Systems. For development it is regularly
-  tested on fairly modern Linux Distros that our contributors use and recent versions of MacOS.
+  tested on fairly modern Linux distributions that our contributors use and recent versions of MacOS.
   On Windows you can run it via WSL2 (Windows Subsystem for Linux 2) or via Linux Containers.
   The work to add Windows support is tracked via `#10388 <https://github.com/apache/airflow/issues/10388>`__
-  but it is not a high priority. You should only use Linux-based distros as "Production" execution environment
-  as this is the only environment that is supported. The only distro that is used in our CI tests and that
+  but it is not a high priority. You should only use Linux-based distributions as "Production environment"
+  as this is the only environment that is supported. The only distribution that is used in our CI tests and that
   is used in the `Community managed DockerHub image <https://hub.docker.com/p/apache/airflow>`__ is
   ``Debian Bookworm``.

@@ -23,25 +23,24 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from airflow.exceptions import AirflowException
 from airflow.jobs.base_job_runner import BaseJobRunner
-from airflow.utils import helpers, timezone
+from airflow.serialization.definitions.notset import NOTSET
+from airflow.utils import helpers
 from airflow.utils.helpers import (
     at_most_one,
     build_airflow_dagrun_url,
     exactly_one,
     merge_dicts,
     prune_dict,
-    validate_group_key,
-    validate_instance_args,
     validate_key,
 )
-from airflow.utils.types import NOTSET
 
 from tests_common.test_utils.db import clear_db_dags, clear_db_runs
 
 if TYPE_CHECKING:
     from airflow.jobs.job import Job
+
+CHUNK_SIZE_POSITIVE_INT = "Chunk size must be a positive integer"
 
 
 @pytest.fixture
@@ -54,41 +53,16 @@ def clear_db():
 
 
 class TestHelpers:
-    @pytest.mark.db_test
-    @pytest.mark.usefixtures("clear_db")
-    def test_render_log_filename(self, create_task_instance):
-        try_number = 1
-        dag_id = "test_render_log_filename_dag"
-        task_id = "test_render_log_filename_task"
-        logical_date = timezone.datetime(2016, 1, 1)
-
-        ti = create_task_instance(dag_id=dag_id, task_id=task_id, logical_date=logical_date)
-        filename_template = "{{ ti.dag_id }}/{{ ti.task_id }}/{{ ts }}/{{ try_number }}.log"
-
-        ts = ti.get_template_context()["ts"]
-        expected_filename = f"{dag_id}/{task_id}/{ts}/{try_number}.log"
-
-        rendered_filename = helpers.render_log_filename(ti, try_number, filename_template)
-
-        assert rendered_filename == expected_filename
-
     def test_chunks(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=CHUNK_SIZE_POSITIVE_INT):
             list(helpers.chunks([1, 2, 3], 0))
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=CHUNK_SIZE_POSITIVE_INT):
             list(helpers.chunks([1, 2, 3], -3))
 
         assert list(helpers.chunks([], 5)) == []
         assert list(helpers.chunks([1], 1)) == [[1]]
         assert list(helpers.chunks([1, 2, 3], 2)) == [[1, 2], [3]]
-
-    def test_reduce_in_chunks(self):
-        assert helpers.reduce_in_chunks(lambda x, y: [*x, y], [1, 2, 3, 4, 5], []) == [[1, 2, 3, 4, 5]]
-
-        assert helpers.reduce_in_chunks(lambda x, y: [*x, y], [1, 2, 3, 4, 5], [], 2) == [[1, 2], [3, 4], [5]]
-
-        assert helpers.reduce_in_chunks(lambda x, y: x + y[0] * y[1], [1, 2, 3, 4], 0, 2) == 14
 
     def test_is_container(self):
         assert not helpers.is_container("a string is not a container")
@@ -98,27 +72,6 @@ class TestHelpers:
         assert not helpers.is_container("test_str_not_iterable")
         # Pass an object that is not iter nor a string.
         assert not helpers.is_container(10)
-
-    def test_as_tuple(self):
-        assert helpers.as_tuple("a string is not a container") == ("a string is not a container",)
-
-        assert helpers.as_tuple(["a", "list", "is", "a", "container"]) == (
-            "a",
-            "list",
-            "is",
-            "a",
-            "container",
-        )
-
-    def test_as_tuple_iter(self):
-        test_list = ["test_str"]
-        as_tup = helpers.as_tuple(test_list)
-        assert tuple(test_list) == as_tup
-
-    def test_as_tuple_no_iter(self):
-        test_str = "test_str"
-        as_tup = helpers.as_tuple(test_str)
-        assert (test_str,) == as_tup
 
     def test_convert_camel_to_snake(self):
         assert helpers.convert_camel_to_snake("LocalTaskJob") == "local_task_job"
@@ -161,11 +114,11 @@ class TestHelpers:
         assert merged == {"a": 1, "r": {"b": 0, "c": 3}}
 
     def test_build_airflow_dagrun_url(self):
-        expected_url = "http://localhost:8080/dags/somedag/runs/abc123"
+        expected_url = "/dags/somedag/runs/abc123"
         assert build_airflow_dagrun_url(dag_id="somedag", run_id="abc123") == expected_url
 
     @pytest.mark.parametrize(
-        "key_id, message, exception",
+        ("key_id", "message", "exception"),
         [
             (3, "The key has to be a string and is <class 'int'>:3", TypeError),
             (None, "The key has to be a string and is <class 'NoneType'>:None", TypeError),
@@ -177,15 +130,25 @@ class TestHelpers:
                 "key with space",
                 "The key 'key with space' has to be made of alphanumeric "
                 "characters, dashes, dots and underscores exclusively",
-                AirflowException,
+                ValueError,
             ),
             (
                 "key_with_!",
                 "The key 'key_with_!' has to be made of alphanumeric "
                 "characters, dashes, dots and underscores exclusively",
-                AirflowException,
+                ValueError,
             ),
-            (" " * 251, f"The key: {' ' * 251} has to be less than 250 characters", AirflowException),
+            (" " * 251, "The key has to be less than 250 characters, not 251", ValueError),
+            (
+                "my..key",
+                "The key 'my..key' must not contain consecutive dots ('..') to prevent path traversal",
+                ValueError,
+            ),
+            (
+                "..",
+                "The key '..' must not contain consecutive dots ('..') to prevent path traversal",
+                ValueError,
+            ),
         ],
     )
     def test_validate_key(self, key_id, message, exception):
@@ -194,47 +157,6 @@ class TestHelpers:
                 validate_key(key_id)
         else:
             validate_key(key_id)
-
-    @pytest.mark.parametrize(
-        "key_id, message, exception",
-        [
-            (3, "The key has to be a string and is <class 'int'>:3", TypeError),
-            (None, "The key has to be a string and is <class 'NoneType'>:None", TypeError),
-            ("simple_key", None, None),
-            ("simple-key", None, None),
-            (
-                "group.simple_key",
-                "The key 'group.simple_key' has to be made of alphanumeric "
-                "characters, dashes and underscores exclusively",
-                AirflowException,
-            ),
-            (
-                "root.group-name.simple_key",
-                "The key 'root.group-name.simple_key' has to be made of alphanumeric "
-                "characters, dashes and underscores exclusively",
-                AirflowException,
-            ),
-            (
-                "key with space",
-                "The key 'key with space' has to be made of alphanumeric "
-                "characters, dashes and underscores exclusively",
-                AirflowException,
-            ),
-            (
-                "key_with_!",
-                "The key 'key_with_!' has to be made of alphanumeric "
-                "characters, dashes and underscores exclusively",
-                AirflowException,
-            ),
-            (" " * 201, "The key has to be less than 200 characters", AirflowException),
-        ],
-    )
-    def test_validate_group_key(self, key_id, message, exception):
-        if message:
-            with pytest.raises(exception, match=re.escape(message)):
-                validate_group_key(key_id)
-        else:
-            validate_group_key(key_id)
 
     def test_exactly_one(self):
         """
@@ -251,14 +173,14 @@ class TestHelpers:
                 if num:
                     sample.extend([truth_value] * num)
             if sample:
-                expected = True if true + truthy == 1 else False
+                expected = true + truthy == 1
                 assert exactly_one(*sample) is expected
 
         for row in itertools.product(range(4), repeat=4):
             assert_exactly_one(*row)
 
     def test_exactly_one_should_fail(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Not supported for iterable args"):
             exactly_one([True, False])
 
     def test_at_most_one(self):
@@ -282,7 +204,7 @@ class TestHelpers:
                 if num:
                     sample.extend([truth_value] * num)
             if sample:
-                expected = True if true + truthy in (0, 1) else False
+                expected = true + truthy in (0, 1)
                 assert at_most_one(*sample) is expected
 
         for row in itertools.product(range(4), repeat=4):
@@ -290,7 +212,7 @@ class TestHelpers:
             assert_at_most_one(*row)
 
     @pytest.mark.parametrize(
-        "mode, expected",
+        ("mode", "expected"),
         [
             (
                 "strict",
@@ -319,6 +241,29 @@ class TestHelpers:
         d2 = {"a": None, "b": "", "c": d1, "d": l1, "e": [None, "", 0, d1, l1, [""]], "f": {}, "g": [""]}
         assert prune_dict(d2, mode=mode) == expected
 
+    @pytest.mark.parametrize(
+        ("func_name", "target_module"),
+        [
+            ("render_template_as_native", "airflow.sdk.definitions.context"),
+            ("render_template_to_string", "airflow.sdk.definitions.context"),
+            ("prevent_duplicates", "airflow.sdk.definitions.mappedoperator"),
+        ],
+    )
+    def test_deprecated_imports(self, func_name, target_module):
+        import importlib
+
+        with pytest.deprecated_call():
+            imported_func = getattr(helpers, func_name)
+        target_mod = importlib.import_module(target_module)
+        expected_func = getattr(target_mod, func_name)
+        assert imported_func is expected_func
+
+    def test_deprecated_imports_unknown_attribute(self):
+        with pytest.raises(
+            AttributeError, match="module 'airflow.utils.helpers' has no attribute 'non_existent_func'"
+        ):
+            _ = helpers.non_existent_func
+
 
 class MockJobRunner(BaseJobRunner):
     job_type = "MockJob"
@@ -341,36 +286,3 @@ class SchedulerJobRunner(MockJobRunner):
 
 class TriggererJobRunner(MockJobRunner):
     job_type = "TriggererJob"
-
-
-class ClassToValidateArgs:
-    def __init__(self, name, age, active):
-        self.name = name
-        self.age = age
-        self.active = active
-
-
-# Edge cases
-@pytest.mark.parametrize(
-    "instance, expected_arg_types",
-    [
-        (ClassToValidateArgs("Alice", 30, None), {"name": str, "age": int, "active": bool}),
-        (ClassToValidateArgs(None, 25, True), {"name": str, "age": int, "active": bool}),
-    ],
-)
-def test_validate_instance_args_raises_no_error(instance, expected_arg_types):
-    validate_instance_args(instance, expected_arg_types)
-
-
-# Error cases
-@pytest.mark.parametrize(
-    "instance, expected_arg_types",
-    [
-        (ClassToValidateArgs("Alice", "thirty", True), {"name": str, "age": int, "active": bool}),
-        (ClassToValidateArgs("Bob", 25, "yes"), {"name": str, "age": int, "active": bool}),
-        (ClassToValidateArgs(123, 25, True), {"name": str, "age": int, "active": bool}),
-    ],
-)
-def test_validate_instance_args_raises_error(instance, expected_arg_types):
-    with pytest.raises(TypeError):
-        validate_instance_args(instance, expected_arg_types)

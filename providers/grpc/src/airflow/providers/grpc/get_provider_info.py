@@ -26,48 +26,36 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-grpc",
         "name": "gRPC",
         "description": "`gRPC <https://grpc.io/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477829,
-        "versions": [
-            "3.7.3",
-            "3.7.2",
-            "3.7.0",
-            "3.6.0",
-            "3.5.2",
-            "3.5.1",
-            "3.5.0",
-            "3.4.1",
-            "3.4.0",
-            "3.3.0",
-            "3.2.2",
-            "3.2.1",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.0.4",
-            "2.0.3",
-            "2.0.2",
-            "2.0.1",
-            "2.0.0",
-            "1.1.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
-            {"integration-name": "gRPC", "external-doc-url": "https://grpc.io/", "tags": ["protocol"]}
+            {
+                "integration-name": "gRPC",
+                "external-doc-url": "https://grpc.io/",
+                "logo": "/docs/integration-logos/gRPC.png",
+                "tags": ["protocol"],
+            }
         ],
         "operators": [
             {"integration-name": "gRPC", "python-modules": ["airflow.providers.grpc.operators.grpc"]}
         ],
         "hooks": [{"integration-name": "gRPC", "python-modules": ["airflow.providers.grpc.hooks.grpc"]}],
         "connection-types": [
-            {"hook-class-name": "airflow.providers.grpc.hooks.grpc.GrpcHook", "connection-type": "grpc"}
+            {
+                "hook-class-name": "airflow.providers.grpc.hooks.grpc.GrpcHook",
+                "hook-name": "GRPC Connection",
+                "connection-type": "grpc",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["login", "password", "schema", "extra"],
+                    "relabeling": {},
+                    "placeholders": {},
+                },
+                "conn-fields": {
+                    "auth_type": {"label": "Grpc Auth Type", "schema": {"type": ["string", "null"]}},
+                    "credential_pem_file": {
+                        "label": "Credential Keyfile Path",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "scopes": {"label": "Scopes (comma separated)", "schema": {"type": ["string", "null"]}},
+                },
+            }
         ],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "google-auth>=1.0.0, <3.0.0",
-            "google-auth-httplib2>=0.0.1",
-            "grpcio>=1.59.0",
-        ],
-        "devel-dependencies": [],
     }

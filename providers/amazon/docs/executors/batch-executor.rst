@@ -1,4 +1,4 @@
-.. Licensed to the Apache Software Foundation (ASF) under one
+ .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
     regarding copyright ownership.  The ASF licenses this file
@@ -16,8 +16,6 @@
     under the License.
 
 
-.. warning::
-   The Batch Executor is alpha/experimental at the moment and may be subject to change without warning.
 .. |executorName| replace:: Batch
 .. |dockerfileLink| replace:: `here <https://github.com/apache/airflow/blob/main/providers/amazon/src/airflow/providers/amazon/aws/executors/Dockerfile>`__
 .. |configKwargs| replace:: SUBMIT_JOB_KWARGS
@@ -69,7 +67,7 @@ Options <https://airflow.apache.org/docs/apache-airflow/stable/howto/set-config.
    :end-before: .. END CONFIG_OPTIONS_PRECEDENCE
 
 .. note::
-   ``exec_config`` is an optional parameter that can be provided to operators. It is a dictionary type and in the context of the Batch Executor it represents a ``submit_job_kwargs`` configuration which is then updated over-top of the ``submit_job_kwargs`` specified in Airflow config above (if present). It is a recursive update which essentially applies Python update to each nested dictionary in the configuration. Loosely approximated as: ``submit_job_kwargs.update(exec_config)``
+   ``executor_config`` is an optional parameter that can be provided to operators. It is a dictionary type and in the context of the Batch Executor it represents a ``submit_job_kwargs`` configuration which is then updated over-top of the ``submit_job_kwargs`` specified in Airflow config above (if present). It is a recursive update which essentially applies Python update to each nested dictionary in the configuration. Loosely approximated as: ``submit_job_kwargs.update(executor_config)``
 
 Required config options:
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -98,7 +96,7 @@ hints and examples, see the ``config_templates`` folder in the Amazon
 provider package.
 
 .. note::
-   ``exec_config`` is an optional parameter that can be provided to operators. It is a dictionary type and in the context of the Batch Executor it represents a ``submit_job_kwargs`` configuration which is then updated over-top of the ``submit_job_kwargs`` specified in Airflow config above (if present). It is a recursive update which essentially applies Python update to each nested dictionary in the configuration. Loosely approximated as: ``submit_job_kwargs.update(exec_config)``
+   ``executor_config`` is an optional parameter that can be provided to operators. It is a dictionary type and in the context of the Batch Executor it represents a ``submit_job_kwargs`` configuration which is then updated over-top of the ``submit_job_kwargs`` specified in Airflow config above (if present). It is a recursive update which essentially applies Python update to each nested dictionary in the configuration. Loosely approximated as: ``submit_job_kwargs.update(executor_config)``
 
 .. _dockerfile_for_batch_executor:
 
@@ -115,8 +113,8 @@ used by the Batch Executor, the appropriate policy needs to be attached to the E
 Additionally, the role also needs to have at least the ``CloudWatchLogsFullAccess``
 (or ``CloudWatchLogsFullAccessV2``) policies. The Job Role is the role that is
 used by the containers to make AWS API requests. This role needs to have
-permissions based on the tasks that are described in the DAG being run.
-If you are loading DAGs via an S3 bucket, this role needs to have
+permissions based on the tasks that are described in the Dag being run.
+If you are loading Dags via an S3 bucket, this role needs to have
 permission to read the S3 bucket.
 
 To create a new Job Role or Execution Role, follow the steps
@@ -140,6 +138,33 @@ newly created Job Role and  Execution role for the Job Definition.
 .. include:: general.rst
    :start-after: .. BEGIN DOCKERFILE_AUTH_SECOND_METHOD
    :end-before: .. END DOCKERFILE_AUTH_SECOND_METHOD
+
+.. include:: general.rst
+  :start-after: .. BEGIN BASE_IMAGE
+  :end-before: .. END BASE_IMAGE
+
+.. include:: general.rst
+  :start-after: .. BEGIN LOADING_DAGS_OVERVIEW
+  :end-before: .. END LOADING_DAGS_OVERVIEW
+
+.. include:: general.rst
+  :start-after: .. BEGIN LOADING_DAGS_FROM_S3
+  :end-before: .. END LOADING_DAGS_FROM_S3
+
+.. include:: general.rst
+  :start-after: .. BEGIN LOADING_DAGS_FROM_LOCAL
+  :end-before: .. END LOADING_DAGS_FROM_LOCAL
+
+.. include:: general.rst
+  :start-after: .. BEGIN DEPENDENCIES
+  :end-before: .. END DEPENDENCIES
+
+Building Image for AWS Batch Executor
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Detailed instructions on how to use the Docker image, that you have
+created via this readme, with the Batch Executor can be found
+:ref:`here <batch_setup_guide>`.
 
 .. _batch_logging:
 
@@ -271,9 +296,9 @@ Create a Job Definition
 
 - ``AIRFLOW__DATABASE__SQL_ALCHEMY_CONN``, with the value being the PostgreSQL connection string in the following format using the values set during the `Database section <#create-the-rds-db-instance>`_ above:
 
-.. code-block:: bash
-
-   postgresql+psycopg2://<username>:<password>@<endpoint>/<database_name>
+.. include:: general.rst
+  :start-after: .. BEGIN SQL_ALCHEMY_CONN
+  :end-before: .. END SQL_ALCHEMY_CONN
 
 7. Add other configuration as necessary for Airflow generally (see `here <https://airflow.apache.org/docs/apache-airflow/stable/configurations-ref.html>`__), the Batch executor (see :ref:`here <config-options>`) or for remote logging (see :ref:`here <logging>`). Note that any configuration changes should be made across the entire Airflow environment to keep configuration consistent.
 
@@ -316,3 +341,7 @@ To configure Airflow to utilize the Batch Executor and leverage the resources we
 .. include:: general.rst
    :start-after: .. BEGIN INIT_DB
    :end-before: .. END INIT_DB
+
+.. include:: general.rst
+  :start-after: .. BEGIN TASK_INSTANCE_IDENTITY
+  :end-before: .. END TASK_INSTANCE_IDENTITY

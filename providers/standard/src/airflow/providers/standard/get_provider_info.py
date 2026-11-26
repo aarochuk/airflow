@@ -26,9 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-standard",
         "name": "Standard",
         "description": "Airflow Standard Provider\n",
-        "state": "ready",
-        "source-date-epoch": 1743477899,
-        "versions": ["0.2.0", "0.1.1", "0.1.0", "0.0.3", "0.0.2", "0.0.1"],
         "integrations": [
             {
                 "integration-name": "Standard",
@@ -37,7 +34,16 @@ def get_provider_info():
                 "how-to-guide": [
                     "/docs/apache-airflow-providers-standard/operators/bash.rst",
                     "/docs/apache-airflow-providers-standard/operators/python.rst",
+                    "/docs/apache-airflow-providers-standard/operators/hitl.rst",
                     "/docs/apache-airflow-providers-standard/operators/datetime.rst",
+                    "/docs/apache-airflow-providers-standard/operators/trigger_dag_run.rst",
+                    "/docs/apache-airflow-providers-standard/operators/latest_only.rst",
+                    "/docs/apache-airflow-providers-standard/sensors/bash.rst",
+                    "/docs/apache-airflow-providers-standard/sensors/python.rst",
+                    "/docs/apache-airflow-providers-standard/sensors/datetime.rst",
+                    "/docs/apache-airflow-providers-standard/sensors/file.rst",
+                    "/docs/apache-airflow-providers-standard/sensors/external_task_sensor.rst",
+                    "/docs/apache-airflow-providers-standard/sensors/asset.rst",
                 ],
             }
         ],
@@ -54,6 +60,7 @@ def get_provider_info():
                     "airflow.providers.standard.operators.latest_only",
                     "airflow.providers.standard.operators.smooth",
                     "airflow.providers.standard.operators.branch",
+                    "airflow.providers.standard.operators.hitl",
                 ],
             }
         ],
@@ -61,6 +68,7 @@ def get_provider_info():
             {
                 "integration-name": "Standard",
                 "python-modules": [
+                    "airflow.providers.standard.sensors.asset",
                     "airflow.providers.standard.sensors.date_time",
                     "airflow.providers.standard.sensors.time_delta",
                     "airflow.providers.standard.sensors.time",
@@ -89,8 +97,13 @@ def get_provider_info():
                     "airflow.providers.standard.triggers.external_task",
                     "airflow.providers.standard.triggers.file",
                     "airflow.providers.standard.triggers.temporal",
+                    "airflow.providers.standard.triggers.hitl",
                 ],
             }
+        ],
+        "extra-links": [
+            "airflow.providers.standard.operators.trigger_dagrun.TriggerDagRunLink",
+            "airflow.providers.standard.sensors.external_task.ExternalDagLink",
         ],
         "config": {
             "standard": {
@@ -106,6 +119,59 @@ def get_provider_info():
                 },
             }
         },
-        "dependencies": ["apache-airflow>=2.9.0"],
-        "devel-dependencies": [],
+        "connection-types": [
+            {
+                "hook-class-name": "airflow.providers.standard.hooks.filesystem.FSHook",
+                "hook-name": "File (path)",
+                "connection-type": "fs",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["host", "schema", "port", "login", "password", "extra"]
+                },
+                "conn-fields": {"path": {"label": "Path", "schema": {"type": ["string", "null"]}}},
+            },
+            {
+                "hook-class-name": "airflow.providers.standard.hooks.package_index.PackageIndexHook",
+                "hook-name": "Package Index (Python)",
+                "connection-type": "package_index",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema", "port", "extra"],
+                    "relabeling": {"host": "Package Index URL"},
+                    "placeholders": {
+                        "host": "Example: https://my-package-mirror.net/pypi/repo-name/simple",
+                        "login": "Username for package index",
+                        "password": "Password for package index (will be masked)",
+                    },
+                },
+            },
+        ],
+        "task-decorators": [
+            {"class-name": "airflow.providers.standard.decorators.python.python_task", "name": "python"},
+            {"class-name": "airflow.providers.standard.decorators.bash.bash_task", "name": "bash"},
+            {
+                "class-name": "airflow.providers.standard.decorators.branch_external_python.branch_external_python_task",
+                "name": "branch_external_python",
+            },
+            {
+                "class-name": "airflow.providers.standard.decorators.branch_python.branch_task",
+                "name": "branch",
+            },
+            {
+                "class-name": "airflow.providers.standard.decorators.branch_virtualenv.branch_virtualenv_task",
+                "name": "branch_virtualenv",
+            },
+            {
+                "class-name": "airflow.providers.standard.decorators.external_python.external_python_task",
+                "name": "external_python",
+            },
+            {
+                "class-name": "airflow.providers.standard.decorators.python_virtualenv.virtualenv_task",
+                "name": "virtualenv",
+            },
+            {"class-name": "airflow.providers.standard.decorators.sensor.sensor_task", "name": "sensor"},
+            {
+                "class-name": "airflow.providers.standard.decorators.short_circuit.short_circuit_task",
+                "name": "short_circuit",
+            },
+            {"class-name": "airflow.providers.standard.decorators.stub.stub", "name": "stub"},
+        ],
     }

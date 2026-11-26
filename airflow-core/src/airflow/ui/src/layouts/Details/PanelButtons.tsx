@@ -16,195 +16,253 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import {
-  HStack,
-  IconButton,
-  ButtonGroup,
-  type StackProps,
-  Stack,
-  createListCollection,
-  type SelectValueChangeDetails,
-  Accordion,
-  Text,
-} from "@chakra-ui/react";
+import type { Dispatch, RefObject, SetStateAction } from "react";
+
+import { Box, Flex, Popover, Portal, Select, type SelectValueChangeDetails, VStack } from "@chakra-ui/react";
+import { useReactFlow } from "@xyflow/react";
+import { useTranslation } from "react-i18next";
 import { FiGrid } from "react-icons/fi";
-import { MdOutlineAccountTree } from "react-icons/md";
+import { LuChartGantt } from "react-icons/lu";
+import { MdOutlineAccountTree, MdSettings } from "react-icons/md";
+import type { GroupImperativeHandle } from "react-resizable-panels";
 import { useParams } from "react-router-dom";
 import { useLocalStorage } from "usehooks-ts";
 
-import DagVersionSelect from "src/components/DagVersionSelect";
-import { directionOptions, type Direction } from "src/components/Graph/useGraphLayout";
-import { Select } from "src/components/ui";
+import {
+  IconButton,
+  Switch,
+  Tooltip,
+  type ButtonGroupOption,
+  ButtonGroupToggle,
+} from "src/system-components";
+
+import { DagVersionSelect } from "src/components/DagVersionSelect";
+import { DirectionDropdown } from "src/components/Graph/DirectionDropdown";
+import { GraphTaskFilters } from "src/components/GraphTaskFilters";
+
+import type { DagView } from "src/constants/dagView";
+import { SHOW_ALL_DEPENDENCIES_KEY } from "src/constants/localStorage";
+import type { VersionIndicatorOptions } from "src/constants/showVersionIndicatorOptions";
+import { SHORTCUTS } from "src/context/keyboardShortcuts";
+import { useShortcut } from "src/hooks/useShortcut";
 
 import { DagRunSelect } from "./DagRunSelect";
+import { RunTypeLegend } from "./Grid/RunTypeLegend";
+import { GridFilters } from "./GridFilters";
+import { TaskStreamFilter } from "./TaskStreamFilter";
+import { ToggleGroups } from "./ToggleGroups";
+import { VersionIndicatorSelect } from "./VersionIndicatorSelect";
+import { getWidthBasedConfig } from "./runLimitConfig";
 
 type Props = {
-  readonly dagView: string;
+  readonly containerWidth: number;
+  readonly dagView: DagView;
   readonly limit: number;
-  readonly setDagView: (x: "graph" | "grid") => void;
-  readonly setLimit: React.Dispatch<React.SetStateAction<number>>;
-} & StackProps;
+  readonly panelGroupRef: RefObject<GroupImperativeHandle | null>;
+  readonly setDagView: (value: DagView) => void;
+  readonly setLimit: (value: number) => void;
+  readonly setShowVersionIndicatorMode: Dispatch<SetStateAction<VersionIndicatorOptions>>;
+  readonly showVersionIndicatorMode: VersionIndicatorOptions;
+};
 
-const options = createListCollection({
-  items: [
-    { label: "Only tasks", value: "tasks" },
-    { label: "External conditions", value: "immediate" },
-    { label: "All Dag Dependencies", value: "all" },
-  ],
-});
+/**
+ * The options popover's trigger. Tooltip and popover each need their own element: both set an `id` on
+ * whatever they wrap and zag resolves a trigger by id, so sharing one element leaves the loser unable
+ * to find its anchor and positioning at the viewport origin.
+ */
+const OptionsTrigger = ({ label }: { readonly label: string }) => (
+  <Tooltip content={label} portalled>
+    <Box display="flex">
+      <Popover.Trigger asChild>
+        <IconButton aria-label={label} bg="bg" variant="outline">
+          <MdSettings />
+        </IconButton>
+      </Popover.Trigger>
+    </Box>
+  </Tooltip>
+);
 
-const deps = ["all", "immediate", "tasks"];
-
-type Dependency = (typeof deps)[number];
-
-export const PanelButtons = ({ dagView, limit, setDagView, setLimit, ...rest }: Props) => {
-  const { dagId = "" } = useParams();
-  const [dependencies, setDependencies, removeDependencies] = useLocalStorage<Dependency>(
-    `dependencies-${dagId}`,
-    "tasks",
+export const PanelButtons = ({
+  containerWidth,
+  dagView,
+  limit,
+  panelGroupRef,
+  setDagView,
+  setLimit,
+  setShowVersionIndicatorMode,
+  showVersionIndicatorMode,
+}: Props) => {
+  const { t: translate } = useTranslation(["common", "components", "dag"]);
+  const { dagId = "", runId } = useParams();
+  const { fitView } = useReactFlow();
+  const shouldShowToggleButtons = Boolean(runId);
+  const [showAllDependencies, setShowAllDependencies] = useLocalStorage<boolean>(
+    SHOW_ALL_DEPENDENCIES_KEY,
+    false,
   );
-  const [direction, setDirection] = useLocalStorage<Direction>(`direction-${dagId}`, "RIGHT");
-  const displayRunOptions = createListCollection({
-    items: [
-      { label: "5", value: "5" },
-      { label: "10", value: "10" },
-      { label: "25", value: "25" },
-      { label: "50", value: "50" },
-      { label: "100", value: "100" },
-      { label: "365", value: "365" },
-    ],
-  });
   const handleLimitChange = (event: SelectValueChangeDetails<{ label: string; value: Array<string> }>) => {
     const runLimit = Number(event.value[0]);
 
     setLimit(runLimit);
   };
 
-  const handleDepsChange = (event: SelectValueChangeDetails<{ label: string; value: Array<string> }>) => {
-    if (event.value[0] === undefined || event.value[0] === "tasks" || !deps.includes(event.value[0])) {
-      removeDependencies();
-    } else {
-      setDependencies(event.value[0]);
+  const enableResponsiveOptions = dagView === "gantt";
+
+  const { displayRunOptions } = getWidthBasedConfig(containerWidth, enableResponsiveOptions);
+
+  const handleFocus = (view: string) => {
+    if (panelGroupRef.current) {
+      const newLayout =
+        view === "graph"
+          ? { "details-panel": 30, "main-panel": 70 }
+          : { "details-panel": 70, "main-panel": 30 };
+
+      panelGroupRef.current.setLayout(newLayout);
+      // Used setTimeout to ensure DOM has been updated
+      setTimeout(() => {
+        void fitView();
+      }, 1);
     }
   };
 
-  const handleDirectionUpdate = (
-    event: SelectValueChangeDetails<{ label: string; value: Array<string> }>,
-  ) => {
-    if (event.value[0] !== undefined) {
-      setDirection(event.value[0] as Direction);
+  const dagViewOptions: Array<ButtonGroupOption<DagView>> = [
+    {
+      dataTestId: "grid-view-button",
+      label: <FiGrid />,
+      title: translate("dag:panel.buttons.showGridShortcut"),
+      value: "grid",
+    },
+    ...(shouldShowToggleButtons
+      ? [
+          {
+            label: <LuChartGantt />,
+            title: translate("dag:panel.buttons.showGantt"),
+            value: "gantt" as const,
+          },
+        ]
+      : []),
+    {
+      label: <MdOutlineAccountTree />,
+      title: translate("dag:panel.buttons.showGraphShortcut"),
+      value: "graph",
+    },
+  ];
+
+  const handleDagViewChange = (view: DagView) => {
+    if (view === dagView) {
+      handleFocus(view);
+    } else {
+      setDagView(view);
     }
   };
+
+  useShortcut({
+    ...SHORTCUTS.dagView.toggleGraphGrid,
+    callback: () => {
+      const newView = dagView === "graph" ? "grid" : "graph";
+
+      setDagView(newView);
+      handleFocus(newView);
+    },
+    dependencies: [dagView],
+    options: { preventDefault: true },
+  });
 
   return (
-    <HStack
-      alignItems="flex-start"
-      justifyContent="space-between"
-      position="absolute"
-      pr={3}
-      top={0}
-      width="100%"
-      zIndex={1}
-      {...rest}
-    >
-      <ButtonGroup attached size="sm" variant="outline">
-        <IconButton
-          aria-label="Show Grid"
-          colorPalette="blue"
-          onClick={() => setDagView("grid")}
-          title="Show Grid"
-          variant={dagView === "grid" ? "solid" : "outline"}
-        >
-          <FiGrid />
-        </IconButton>
-        <IconButton
-          aria-label="Show Graph"
-          colorPalette="blue"
-          onClick={() => setDagView("graph")}
-          title="Show Graph"
-          variant={dagView === "graph" ? "solid" : "outline"}
-        >
-          <MdOutlineAccountTree />
-        </IconButton>
-      </ButtonGroup>
-      <Accordion.Root collapsible>
-        <Accordion.Item borderBottomWidth={0} value="1">
-          <Accordion.ItemTrigger justifyContent="flex-end">
-            <Text fontSize="sm">Options</Text>
-            <Accordion.ItemIndicator />
-          </Accordion.ItemTrigger>
-          <Accordion.ItemContent display="flex" justifyContent="flex-end">
-            <Accordion.ItemBody bg="bg.muted" p={2} width="fit-content">
-              <Stack gap={1} mr={2}>
-                {dagView === "graph" ? (
-                  <>
-                    <DagVersionSelect />
-                    <DagRunSelect limit={limit} />
-                    <Select.Root
-                      collection={options}
-                      data-testid="filter-duration"
-                      onValueChange={handleDepsChange}
-                      size="sm"
-                      value={[dependencies]}
-                    >
-                      <Select.Label fontSize="xs">Dependencies</Select.Label>
-                      <Select.Trigger>
-                        <Select.ValueText placeholder="Dependencies" />
-                      </Select.Trigger>
-                      <Select.Content>
-                        {options.items.map((option) => (
-                          <Select.Item item={option} key={option.value}>
-                            {option.label}
-                          </Select.Item>
-                        ))}
-                      </Select.Content>
-                    </Select.Root>
-                    <Select.Root
-                      collection={directionOptions}
-                      onValueChange={handleDirectionUpdate}
-                      size="sm"
-                      value={[direction]}
-                    >
-                      <Select.Label fontSize="xs">Graph Direction</Select.Label>
-                      <Select.Trigger>
-                        <Select.ValueText />
-                      </Select.Trigger>
-                      <Select.Content>
-                        {directionOptions.items.map((option) => (
-                          <Select.Item item={option} key={option.value}>
-                            {option.label}
-                          </Select.Item>
-                        ))}
-                      </Select.Content>
-                    </Select.Root>
-                  </>
-                ) : (
-                  <Select.Root
-                    collection={displayRunOptions}
-                    data-testid="display-dag-run-options"
-                    onValueChange={handleLimitChange}
-                    size="sm"
-                    value={[limit.toString()]}
+    <Box position="relative" width="100%" zIndex={1}>
+      <Flex justifyContent="space-between">
+        <ButtonGroupToggle
+          bg="bg"
+          borderRadius="md"
+          isIcon
+          onChange={handleDagViewChange}
+          options={dagViewOptions}
+          value={dagView}
+        />
+        <Flex alignItems="center" gap={1} justifyContent="space-between">
+          {dagView !== "graph" && <RunTypeLegend />}
+          <ToggleGroups bg="bg" borderRadius="md" />
+          {dagView === "graph" && <GraphTaskFilters />}
+          <TaskStreamFilter />
+          {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
+          <Popover.Root autoFocus={false} positioning={{ placement: "bottom-end" }}>
+            <OptionsTrigger label={translate("dag:panel.buttons.options")} />
+            <Portal>
+              <Popover.Positioner>
+                <Popover.Content>
+                  <Popover.Body
+                    display="flex"
+                    flexDirection="column"
+                    gap={4}
+                    maxH="70vh"
+                    overflowY="auto"
+                    p={2}
                   >
-                    <Select.Label>Number of Dag Runs</Select.Label>
-                    <Select.Trigger>
-                      {}
-                      <Select.ValueText />
-                    </Select.Trigger>
-                    <Select.Content>
-                      {displayRunOptions.items.map((option) => (
-                        <Select.Item item={option} key={option.value}>
-                          {option.label}
-                        </Select.Item>
-                      ))}
-                    </Select.Content>
-                  </Select.Root>
-                )}
-              </Stack>
-            </Accordion.ItemBody>
-          </Accordion.ItemContent>
-        </Accordion.Item>
-      </Accordion.Root>
-    </HStack>
+                    {dagView === "graph" ? (
+                      <>
+                        <DagVersionSelect />
+                        <DagRunSelect limit={limit} />
+
+                        <Switch
+                          checked={showAllDependencies}
+                          data-testid="show-all-dependencies"
+                          onCheckedChange={(details) => setShowAllDependencies(details.checked)}
+                        >
+                          {translate("dag:panel.dependencies.allDagDependencies")}
+                        </Switch>
+
+                        <DirectionDropdown graphId={dagId} />
+                      </>
+                    ) : (
+                      <>
+                        <Select.Root
+                          // @ts-expect-error The expected option type is incorrect
+                          collection={displayRunOptions}
+                          data-testid="display-dag-run-options"
+                          onValueChange={handleLimitChange}
+                          size="sm"
+                          value={[limit.toString()]}
+                        >
+                          <Select.Label>{translate("dag:panel.dagRuns.label")}</Select.Label>
+                          <Select.Control>
+                            <Select.Trigger>
+                              <Select.ValueText />
+                            </Select.Trigger>
+                            <Select.IndicatorGroup>
+                              <Select.Indicator />
+                            </Select.IndicatorGroup>
+                          </Select.Control>
+                          <Select.Positioner>
+                            <Select.Content>
+                              {displayRunOptions.items.map((option) => (
+                                <Select.Item item={option} key={option.value}>
+                                  {option.label}
+                                </Select.Item>
+                              ))}
+                            </Select.Content>
+                          </Select.Positioner>
+                        </Select.Root>
+                        <VStack alignItems="flex-start" px={1}>
+                          <VersionIndicatorSelect
+                            onChange={setShowVersionIndicatorMode}
+                            value={showVersionIndicatorMode}
+                          />
+                        </VStack>
+                      </>
+                    )}
+                  </Popover.Body>
+                </Popover.Content>
+              </Popover.Positioner>
+            </Portal>
+          </Popover.Root>
+        </Flex>
+      </Flex>
+
+      {dagView !== "graph" && (
+        <Flex justifyContent="space-between" mt={2}>
+          <GridFilters showGanttDateFilters={dagView === "gantt"} />
+        </Flex>
+      )}
+    </Box>
   );
 };

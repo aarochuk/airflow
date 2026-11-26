@@ -17,7 +17,7 @@
 # under the License.
 
 """
-remove pickled data from dagrun table.
+Remove pickled data from dagrun table.
 
 Revision ID: e39a26ac59f6
 Revises: 38770795785f
@@ -28,7 +28,9 @@ Create Date: 2024-12-01 08:33:15.425141
 from __future__ import annotations
 
 import json
+import math
 import pickle
+from collections.abc import Mapping, Sequence
 from textwrap import dedent
 
 import sqlalchemy as sa
@@ -44,9 +46,52 @@ depends_on = None
 airflow_version = "3.0.0"
 
 
+def _json_safe(obj):
+    """
+    Make a pickled conf value safe for strict JSON/JSONB before json.dumps.
+
+    Pickled ``conf`` can hold values that round-trip through pickle but are illegal in
+    strict JSON/JSONB:
+
+    * non-finite floats (NaN / inf / -inf) -> quoted strings. This runs on the deserialized
+      object, so json.dumps handles the escaping at any depth. Migration 0049 (xcom) rewrites
+      serialized text with a regex and cannot, so it substitutes ``null`` there;
+    * embedded U+0000 (NUL) characters in strings -> stripped, since PostgreSQL
+      JSON/JSONB cannot store them.
+
+    NUL is handled here, on the object before serialization, rather than on the dumped
+    text: a blind string replace on the JSON output would also corrupt a genuinely
+    escaped backslash sequence (an embedded literal backslash followed by ``u0000``).
+    """
+    if isinstance(obj, float):
+        if math.isnan(obj):
+            return "NaN"
+        if math.isinf(obj):
+            return "Infinity" if obj > 0 else "-Infinity"
+        return obj
+    if isinstance(obj, str):
+        return obj.replace(chr(0), "")
+    if isinstance(obj, Mapping):
+        return {_json_safe(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, Sequence) and not isinstance(obj, (bytes, bytearray)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
 def upgrade():
     """Apply remove pickled data from dagrun table."""
     conn = op.get_bind()
+    empty_vals = {
+        "mysql": "X'80057D942E'",
+        "postgresql": r"'\x80057D942E'",
+        "sqlite": "X'80057D942E'",
+    }
+    dialect = conn.dialect.name
+    try:
+        empty_val = empty_vals[dialect]
+    except KeyError:
+        raise RuntimeError(f"Dialect {dialect} not supported.")
+
     conf_type = sa.JSON().with_variant(postgresql.JSONB, "postgresql")
     op.add_column("dag_run", sa.Column("conf_json", conf_type, nullable=True))
 
@@ -61,12 +106,20 @@ def upgrade():
             """)
         )
     else:
-        BATCH_SIZE = 100
+        BATCH_SIZE = 1000
         offset = 0
         while True:
+            err_count = 0
+            batch_num = offset + 1
+            print(f"converting dag run conf. batch={batch_num}")
             rows = conn.execute(
                 text(
-                    f"SELECT id,conf FROM dag_run WHERE conf IS not NULL order by id LIMIT {BATCH_SIZE} OFFSET {offset}"
+                    "SELECT id, conf "
+                    "FROM dag_run "
+                    "WHERE conf IS not NULL "
+                    f"AND conf != {empty_val}"
+                    f"ORDER BY id LIMIT {BATCH_SIZE} "
+                    f"OFFSET {offset}"
                 )
             ).fetchall()
             if not rows:
@@ -76,7 +129,9 @@ def upgrade():
 
                 try:
                     original_data = pickle.loads(pickle_data)
-                    json_data = json.dumps(original_data)
+                    # _json_safe quotes non-finite floats and strips embedded NUL chars so the
+                    # row is preserved instead of dropped by the except below.
+                    json_data = json.dumps(_json_safe(original_data))
                     conn.execute(
                         text("""
                                                 UPDATE dag_run
@@ -85,9 +140,11 @@ def upgrade():
                                             """),
                         {"json_data": json_data, "id": row_id},
                     )
-                except Exception as e:
-                    print(f"Error converting dagrun conf to json for dagrun ID {row_id}: {e}")
+                except Exception:
+                    err_count += 1
                     continue
+            if err_count:
+                print(f"could not convert dag run conf for {err_count} records. batch={batch_num}")
             offset += BATCH_SIZE
 
     op.drop_column("dag_run", "conf")
@@ -112,12 +169,16 @@ def downgrade():
         )
 
     else:
-        BATCH_SIZE = 100
+        BATCH_SIZE = 1000
         offset = 0
         while True:
             rows = conn.execute(
                 text(
-                    f"SELECT id,conf FROM dag_run WHERE conf IS not NULL order by id LIMIT {BATCH_SIZE} OFFSET {offset}"
+                    "SELECT id,conf "
+                    "FROM dag_run "
+                    "WHERE conf IS NOT NULL "
+                    f"ORDER BY id LIMIT {BATCH_SIZE} "
+                    f"OFFSET {offset}"
                 )
             ).fetchall()
             if not rows:

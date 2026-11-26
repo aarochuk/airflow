@@ -16,33 +16,35 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { type MultiValue, Select as ReactSelect } from "chakra-react-select";
 import { useState } from "react";
 
+import { type MultiValue, Select as ReactSelect } from "chakra-react-select";
+import { useTranslation } from "react-i18next";
+
+import type { ParamValue } from "src/queries/useDagParams";
 import { paramPlaceholder, useParamStore } from "src/queries/useParamStore";
 
 import type { FlexibleFormElementProps } from ".";
+import { getEnumValueKey, lookupValuesDisplay } from "./getEnumValueKey";
 
-const labelLookup = (key: string, valuesDisplay: Record<string, string> | undefined): string => {
-  if (valuesDisplay && typeof valuesDisplay === "object") {
-    return valuesDisplay[key] ?? key;
-  }
+const labelLookup = (key: string, valuesDisplay: Record<string, string> | undefined): string =>
+  lookupValuesDisplay(key, valuesDisplay) ?? key;
 
-  return key;
-};
-
-export const FieldMultiSelect = ({ name }: FlexibleFormElementProps) => {
-  const { paramsDict, setParamsDict } = useParamStore();
+export const FieldMultiSelect = ({ name, namespace = "default", onUpdate }: FlexibleFormElementProps) => {
+  const { t: translate } = useTranslation("components");
+  const { disabled, paramsDict, setParamsDict } = useParamStore(namespace);
   const param = paramsDict[name] ?? paramPlaceholder;
+
+  const choices = (param.schema.examples ?? param.schema.enum)?.filter((value) => value !== null) ?? [];
+
+  const toOption = (value: ParamValue) => ({
+    label: labelLookup(getEnumValueKey(value), param.schema.values_display),
+    value: getEnumValueKey(value),
+  });
 
   // Initialize `selectedOptions` directly from `paramsDict`
   const [selectedOptions, setSelectedOptions] = useState(
-    Array.isArray(param.value)
-      ? (param.value as Array<string>).map((value) => ({
-          label: labelLookup(value, param.schema.values_display),
-          value,
-        }))
-      : [],
+    Array.isArray(param.value) ? param.value.map(toOption) : [],
   );
 
   // Handle changes to the select field
@@ -57,29 +59,36 @@ export const FieldMultiSelect = ({ name }: FlexibleFormElementProps) => {
     setSelectedOptions(updatedOptions);
 
     // "undefined" values are removed from params, so we set it to null to avoid falling back to DAG defaults.
-    // eslint-disable-next-line unicorn/no-null
-    const newValueArray = updatedOptions.length ? updatedOptions.map((option) => option.value) : null;
+    // Map option keys back to the original typed choices so backend validation receives the correct types.
+    const newValueArray = updatedOptions.length
+      ? updatedOptions.map(
+          (option) => choices.find((choice) => getEnumValueKey(choice) === option.value) ?? option.value,
+        )
+      : null;
 
     if (paramsDict[name]) {
       paramsDict[name].value = newValueArray;
     }
     setParamsDict(paramsDict);
+    onUpdate(String(updatedOptions.map((option) => option.value)));
   };
 
   return (
     <ReactSelect
-      aria-label="Select one or multiple values"
+      aria-label={translate("flexibleForm.placeholderMulti")}
+      chakraStyles={{
+        // Optical centering: the icon reads as sitting high next to lowercase labels without the nudge.
+        multiValueRemove: (provided) => ({ ...provided, alignSelf: "center", transform: "translateY(1px)" }),
+      }}
       id={`element_${name}`}
       isClearable
+      isDisabled={disabled}
       isMulti
+      menuPosition="fixed"
       name={`element_${name}`}
       onChange={handleChange}
-      options={
-        param.schema.examples?.map((value) => ({
-          label: labelLookup(value, param.schema.values_display),
-          value,
-        })) ?? []
-      }
+      options={choices.map(toOption)}
+      placeholder={translate("flexibleForm.placeholderMulti")}
       size="sm"
       value={selectedOptions}
     />

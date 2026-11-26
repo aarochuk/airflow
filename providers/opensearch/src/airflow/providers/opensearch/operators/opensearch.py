@@ -24,18 +24,13 @@ from typing import TYPE_CHECKING, Any
 from opensearchpy import RequestsHttpConnection
 from opensearchpy.exceptions import OpenSearchException
 
-from airflow.exceptions import AirflowException
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import AirflowException, BaseOperator
 from airflow.providers.opensearch.hooks.opensearch import OpenSearchHook
 
 if TYPE_CHECKING:
     from opensearchpy import Connection as OpenSearchConnectionClass
 
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class OpenSearchQueryOperator(BaseOperator):
@@ -54,7 +49,7 @@ class OpenSearchQueryOperator(BaseOperator):
     :param log_query: Whether to log the query used. Defaults to True and logs query used.
     """
 
-    template_fields: Sequence[str] = ["query"]
+    template_fields: Sequence[str] = ["query", "opensearch_conn_id"]
 
     def __init__(
         self,
@@ -123,6 +118,8 @@ class OpenSearchCreateIndexOperator(BaseOperator):
     :param opensearch_conn_id: opensearch connection to use
     """
 
+    template_fields: Sequence[str] = ("opensearch_conn_id",)
+
     def __init__(
         self,
         *,
@@ -163,6 +160,8 @@ class OpenSearchAddDocumentOperator(BaseOperator):
     :param doc_class: A Document subclassed object using opensearch-dsl
     :param opensearch_conn_id: opensearch connection to use
     """
+
+    template_fields: Sequence[str] = ("opensearch_conn_id",)
 
     def __init__(
         self,

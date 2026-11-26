@@ -20,7 +20,12 @@ import os
 from datetime import datetime
 
 from airflow import DAG
-from airflow.decorators import task, teardown
+
+try:
+    from airflow.sdk import task, teardown
+except ImportError:
+    # Airflow 2 path
+    from airflow.decorators import task, teardown  # type: ignore[attr-defined,no-redef]
 from airflow.providers.pinecone.operators.pinecone import CreateServerlessIndexOperator
 
 index_name = os.getenv("INDEX_NAME", "test")
@@ -57,5 +62,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

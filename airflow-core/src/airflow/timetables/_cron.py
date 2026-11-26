@@ -17,18 +17,39 @@
 from __future__ import annotations
 
 import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from cron_descriptor import CasingTypeEnum, ExpressionDescriptor, FormatException, MissingFieldException
 from croniter import CroniterBadCronError, CroniterBadDateError, croniter
 
+from airflow._shared.timezones.timezone import convert_to_utc, make_aware, make_naive, parse_timezone
 from airflow.exceptions import AirflowTimetableInvalid
 from airflow.utils.dates import cron_presets
-from airflow.utils.timezone import convert_to_utc, make_aware, make_naive, parse_timezone
 
 if TYPE_CHECKING:
     from pendulum import DateTime
     from pendulum.tz.timezone import FixedTimezone, Timezone
+
+
+# How far the fold search looks back for a fold twin: tzdata 2020-2030 has no DST shift above 2 hours
+# (Antarctica/Troll); Casey's 3 hours was a change of standard time, not DST.
+_MAX_DST_SHIFT = datetime.timedelta(hours=2)
+
+
+def _localize_all_folds(naive: datetime.datetime, timezone: Timezone | FixedTimezone) -> list[DateTime]:
+    """
+    Return every UTC instant a naive wall-clock time maps to, earliest first.
+
+    A wall-clock time inside a fall-back fold occurs twice, but ``make_aware`` only returns the later one.
+    A time skipped by a spring-forward gap never occurs, so it maps to nothing.
+    """
+    first = timezone.convert(naive.replace(fold=0))
+    second = timezone.convert(naive.replace(fold=1))
+    if first.replace(tzinfo=None) != naive:
+        return []
+    if first.utcoffset() != second.utcoffset():
+        return [convert_to_utc(first), convert_to_utc(second)]
+    return [convert_to_utc(first)]
 
 
 def _covers_every_hour(cron: croniter) -> bool:
@@ -71,27 +92,67 @@ class CronMixin:
         self._timezone = timezone
 
         try:
-            descriptor = ExpressionDescriptor(
-                expression=self._expression, casing_type=CasingTypeEnum.Sentence, use_24hour_time_format=True
-            )
             # checking for more than 5 parameters in Cron and avoiding evaluation for now,
             # as Croniter has inconsistent evaluation with other libraries
             if len(croniter(self._expression).expanded) > 5:
                 raise FormatException()
-            interval_description: str = descriptor.get_description()
-        except (CroniterBadCronError, FormatException, MissingFieldException):
-            interval_description = ""
-        self.description: str = interval_description
 
-    def __eq__(self, other: Any) -> bool:
+            self.description = self._describe_with_dom_dow_fix(self._expression)
+
+        except (CroniterBadCronError, FormatException, MissingFieldException):
+            self.description = ""
+
+    def _describe_with_dom_dow_fix(self, expression: str) -> str:
+        """
+        Return cron description with fix for DOM+DOW conflicts.
+
+        If both DOM and DOW are restricted, explain them as OR.
+        """
+        cron_fields = expression.split()
+
+        if len(cron_fields) < 5:
+            return ExpressionDescriptor(
+                expression, casing_type=CasingTypeEnum.Sentence, use_24hour_time_format=True
+            ).get_description()
+
+        dom = cron_fields[2]
+        dow = cron_fields[4]
+
+        if dom != "*" and dow != "*":
+            # Case: conflict → DOM OR DOW
+            cron_fields_dom = cron_fields.copy()
+            cron_fields_dom[4] = "*"
+            day_of_month_desc = ExpressionDescriptor(
+                " ".join(cron_fields_dom), casing_type=CasingTypeEnum.Sentence, use_24hour_time_format=True
+            ).get_description()
+
+            cron_fields_dow = cron_fields.copy()
+            cron_fields_dow[2] = "*"
+            day_of_week_desc = ExpressionDescriptor(
+                " ".join(cron_fields_dow), casing_type=CasingTypeEnum.Sentence, use_24hour_time_format=True
+            ).get_description()
+
+            return f"{day_of_month_desc} (or) {day_of_week_desc}"
+
+        # no conflict → return normal description
+        return ExpressionDescriptor(
+            expression, casing_type=CasingTypeEnum.Sentence, use_24hour_time_format=True
+        ).get_description()
+
+    def __eq__(self, other: object) -> bool:
         """
         Both expression and timezone should match.
 
         This is only for testing purposes and should not be relied on otherwise.
         """
-        if not isinstance(other, type(self)):
+        from airflow.serialization.encoders import coerce_to_core_timetable
+
+        if not isinstance(other := coerce_to_core_timetable(other), type(self)):
             return NotImplemented
         return self._expression == other._expression and self._timezone == other._timezone
+
+    def __hash__(self):
+        return hash((self._expression, str(self._timezone)))
 
     @property
     def summary(self) -> str:
@@ -103,25 +164,86 @@ class CronMixin:
         except (CroniterBadCronError, CroniterBadDateError) as e:
             raise AirflowTimetableInvalid(str(e))
 
+    def localize_partition_datetime(self, dt: datetime.datetime) -> DateTime:
+        """
+        Re-interpret *dt*'s wall-clock reading as a moment in this timetable's timezone.
+
+        Overrides the base (UTC pass-through) so partition-date filter bounds are
+        evaluated in the timetable's local timezone rather than at the raw UTC
+        instant, while preserving sub-day precision.
+        """
+        return convert_to_utc(make_aware(dt.replace(tzinfo=None), self._timezone))
+
+    def _localized_ticks_within_limit(self, naive: datetime.datetime, *, before: bool) -> list[DateTime]:
+        """Localize every cron tick within ``_MAX_DST_SHIFT`` on one side of ``naive``, ``naive`` included."""
+        nudge = datetime.timedelta(microseconds=1)
+        cron = croniter(self._expression, start_time=naive + nudge if before else naive - nudge)
+        step = cron.get_prev if before else cron.get_next
+        localized: list[DateTime] = []
+        tick = step(datetime.datetime)
+        while abs(tick - naive) <= _MAX_DST_SHIFT:
+            localized += _localize_all_folds(tick, self._timezone)
+            tick = step(datetime.datetime)
+        return localized
+
+    def _localize_if_unambiguous(
+        self, naive: datetime.datetime, scheduled: datetime.datetime
+    ) -> DateTime | None:
+        """
+        Localize ``scheduled`` when neither it nor ``naive`` is ambiguous, else return ``None``.
+
+        croniter yields ticks in wall-clock order, so none lies between ``naive`` and ``scheduled``;
+        a fold or gap between them holds no tick, and localizing an unambiguous wall-clock time is
+        exact. An earlier tick can only cross ``current`` through a fold at ``naive`` itself, and a
+        fold or gap at ``scheduled`` has two or no instants; those cases are left to the fold search.
+        """
+        if len(_localize_all_folds(naive, self._timezone)) != 1:
+            return None
+        localized = _localize_all_folds(scheduled, self._timezone)
+        return localized[0] if len(localized) == 1 else None
+
     def _get_next(self, current: DateTime) -> DateTime:
         """Get the first schedule after specified time, with DST fixed."""
         naive = make_naive(current, self._timezone)
         cron = croniter(self._expression, start_time=naive)
         scheduled = cron.get_next(datetime.datetime)
+        if TYPE_CHECKING:
+            assert isinstance(scheduled, datetime.datetime)
         if not _covers_every_hour(cron):
             return convert_to_utc(make_aware(scheduled, self._timezone))
-        delta = scheduled - naive
-        return convert_to_utc(current.in_timezone(self._timezone) + delta)
+
+        if (exact := self._localize_if_unambiguous(naive, scheduled)) is not None:
+            return exact
+        # Ticks within ``_MAX_DST_SHIFT`` before ``naive`` may have a later fold occurrence after ``current``.
+        candidates = [c for c in self._localized_ticks_within_limit(naive, before=True) if c > current]
+        # croniter is strictly increasing on naive wall clock and DST gaps are finite, so a
+        # candidate strictly after ``current`` is reached in finitely many steps.
+        while not (forward := [c for c in _localize_all_folds(scheduled, self._timezone) if c > current]):
+            scheduled = cron.get_next(datetime.datetime)
+        return min(candidates + forward)
 
     def _get_prev(self, current: DateTime) -> DateTime:
-        """Get the first schedule before specified time, with DST fixed."""
+        """Get the first schedule strictly before specified time, with DST fixed."""
         naive = make_naive(current, self._timezone)
         cron = croniter(self._expression, start_time=naive)
         scheduled = cron.get_prev(datetime.datetime)
+        if TYPE_CHECKING:
+            assert isinstance(scheduled, datetime.datetime)
         if not _covers_every_hour(cron):
-            return convert_to_utc(make_aware(scheduled, self._timezone))
-        delta = naive - scheduled
-        return convert_to_utc(current.in_timezone(self._timezone) - delta)
+            prev = convert_to_utc(make_aware(scheduled, self._timezone))
+            # croniter steps back on naive wall clock, but make_aware can map a tick inside
+            # a DST transition forward onto current or later. Keep stepping until strictly
+            # earlier; get_prev is strictly decreasing, so this terminates.
+            while prev >= current:
+                scheduled = cron.get_prev(datetime.datetime)
+                prev = convert_to_utc(make_aware(scheduled, self._timezone))
+            return prev
+        if (exact := self._localize_if_unambiguous(naive, scheduled)) is not None:
+            return exact
+        candidates = [c for c in self._localized_ticks_within_limit(naive, before=False) if c < current]
+        while not (backward := [c for c in _localize_all_folds(scheduled, self._timezone) if c < current]):
+            scheduled = cron.get_prev(datetime.datetime)
+        return max(candidates + backward)
 
     def _align_to_next(self, current: DateTime) -> DateTime:
         """

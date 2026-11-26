@@ -24,9 +24,8 @@ from copy import deepcopy
 from datetime import date, time, timedelta
 from typing import TYPE_CHECKING, Any
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.hooks.base_aws import AwsBaseHook
+from airflow.providers.common.compat.sdk import AirflowException, conf
 from airflow.providers.google.cloud.hooks.cloud_storage_transfer_service import (
     ACCESS_KEY_ID,
     AWS_ACCESS_KEY,
@@ -52,6 +51,7 @@ from airflow.providers.google.cloud.hooks.cloud_storage_transfer_service import 
     SECRET_ACCESS_KEY,
     START_TIME_OF_DAY,
     STATUS,
+    TRANSFER_JOB,
     TRANSFER_OPTIONS,
     TRANSFER_SPEC,
     YEAR,
@@ -65,13 +65,15 @@ from airflow.providers.google.cloud.links.cloud_storage_transfer import (
 )
 from airflow.providers.google.cloud.operators.cloud_base import GoogleCloudBaseOperator
 from airflow.providers.google.cloud.triggers.cloud_storage_transfer_service import (
+    CloudDataTransferServiceRunJobTrigger,
     CloudStorageTransferServiceCheckJobStatusTrigger,
 )
 from airflow.providers.google.cloud.utils.helpers import normalize_directory_path
 from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
+    from airflow.providers.openlineage.extractors import OperatorLineage
 
 
 class TransferJobPreprocessor:
@@ -96,8 +98,8 @@ class TransferJobPreprocessor:
 
         aws_hook = AwsBaseHook(self.aws_conn_id, resource_type="s3")
         aws_credentials = aws_hook.get_credentials()
-        aws_access_key_id = aws_credentials.access_key  # type: ignore[attr-defined]
-        aws_secret_access_key = aws_credentials.secret_key  # type: ignore[attr-defined]
+        aws_access_key_id = aws_credentials.access_key
+        aws_secret_access_key = aws_credentials.secret_key
         self.body[TRANSFER_SPEC][AWS_S3_DATA_SOURCE][AWS_ACCESS_KEY] = {
             ACCESS_KEY_ID: aws_access_key_id,
             SECRET_ACCESS_KEY: aws_secret_access_key,
@@ -209,7 +211,7 @@ class CloudDataTransferServiceCreateJobOperator(GoogleCloudBaseOperator):
         For more information on how to use this operator, take a look at the guide:
         :ref:`howto/operator:CloudDataTransferServiceCreateJobOperator`
 
-    :param body: (Required) The request body, as described in
+    :param body: (Required) The request body (templated), as described in
         https://cloud.google.com/storage-transfer/docs/reference/rest/v1/transferJobs#TransferJob
         With three additional improvements:
 
@@ -217,6 +219,9 @@ class CloudDataTransferServiceCreateJobOperator(GoogleCloudBaseOperator):
         * times can be given in the form :class:`datetime.time`
         * credentials to Amazon Web Service should be stored in the connection and indicated by the
           aws_conn_id parameter
+
+        If the whole body is passed as a Jinja expression, set ``render_template_as_native_obj=True``
+        on the Dag; a default Jinja render would produce a string instead of a mapping.
 
     :param aws_conn_id: The connection ID used to retrieve credentials to
         Amazon Web Service.
@@ -255,26 +260,23 @@ class CloudDataTransferServiceCreateJobOperator(GoogleCloudBaseOperator):
     ) -> None:
         super().__init__(**kwargs)
         self.body = body
-        if isinstance(self.body, dict):
-            self.body = deepcopy(body)
         self.aws_conn_id = aws_conn_id
         self.gcp_conn_id = gcp_conn_id
         self.api_version = api_version
         self.project_id = project_id
         self.google_impersonation_chain = google_impersonation_chain
-        self._validate_inputs()
-
-    def _validate_inputs(self) -> None:
-        TransferJobValidator(body=self.body).validate_body()
 
     def execute(self, context: Context) -> dict:
-        TransferJobPreprocessor(body=self.body, aws_conn_id=self.aws_conn_id).process_body()
+        # TransferJobPreprocessor mutates the body in place, so copy it to avoid mutating the caller's dict.
+        body = deepcopy(self.body) if isinstance(self.body, dict) else self.body
+        TransferJobValidator(body=body).validate_body()
+        TransferJobPreprocessor(body=body, aws_conn_id=self.aws_conn_id).process_body()
         hook = CloudDataTransferServiceHook(
             api_version=self.api_version,
             gcp_conn_id=self.gcp_conn_id,
             impersonation_chain=self.google_impersonation_chain,
         )
-        result = hook.create_transfer_job(body=self.body)
+        result = hook.create_transfer_job(body=body)
 
         project_id = self.project_id or hook.project_id
         if project_id:
@@ -352,13 +354,31 @@ class CloudDataTransferServiceUpdateJobOperator(GoogleCloudBaseOperator):
         self.google_impersonation_chain = google_impersonation_chain
         self._validate_inputs()
 
+    def _get_transfer_job_body(self) -> dict:
+        """
+        Extract the transfer job dict from the update request body.
+
+        The update/patch request body wraps the ``TransferJob`` under a
+        ``transfer_job`` (or ``transferJob``) key. Both snake_case and
+        camelCase variants are supported because the google-api-python-client
+        accepts either form.
+        """
+        if TRANSFER_JOB in self.body:
+            return self.body[TRANSFER_JOB]
+        # camelCase variant ("transferJob") used in the REST API
+        if "transferJob" in self.body:
+            return self.body["transferJob"]
+        return self.body
+
     def _validate_inputs(self) -> None:
-        TransferJobValidator(body=self.body).validate_body()
+        TransferJobValidator(body=self._get_transfer_job_body()).validate_body()
         if not self.job_name:
             raise AirflowException("The required parameter 'job_name' is empty or None")
 
     def execute(self, context: Context) -> dict:
-        TransferJobPreprocessor(body=self.body, aws_conn_id=self.aws_conn_id).process_body()
+        TransferJobPreprocessor(
+            body=self._get_transfer_job_body(), aws_conn_id=self.aws_conn_id
+        ).process_body()
         hook = CloudDataTransferServiceHook(
             api_version=self.api_version,
             gcp_conn_id=self.gcp_conn_id,
@@ -468,6 +488,8 @@ class CloudDataTransferServiceRunJobOperator(GoogleCloudBaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
+    :param timeout: Time to wait for the operation to end in seconds. Defaults to 60 seconds if not specified.
+    :param deferrable: Run operator in the deferrable mode.
     """
 
     # [START gcp_transfer_job_run_template_fields]
@@ -489,6 +511,8 @@ class CloudDataTransferServiceRunJobOperator(GoogleCloudBaseOperator):
         api_version: str = "v1",
         project_id: str = PROVIDE_PROJECT_ID,
         google_impersonation_chain: str | Sequence[str] | None = None,
+        timeout: float | None = None,
+        deferrable: bool = conf.getboolean("operators", "default_deferrable", fallback=False),
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -497,6 +521,8 @@ class CloudDataTransferServiceRunJobOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.api_version = api_version
         self.google_impersonation_chain = google_impersonation_chain
+        self.timeout = timeout
+        self.deferrable = deferrable
 
     def _validate_inputs(self) -> None:
         if not self.job_name:
@@ -518,7 +544,31 @@ class CloudDataTransferServiceRunJobOperator(GoogleCloudBaseOperator):
                 job_name=self.job_name,
             )
 
+        if self.deferrable:
+            self.defer(
+                timeout=timedelta(seconds=self.timeout or 60),
+                trigger=CloudDataTransferServiceRunJobTrigger(
+                    job_name=self.job_name,
+                    project_id=project_id,
+                    gcp_conn_id=self.gcp_conn_id,
+                    impersonation_chain=self.google_impersonation_chain,
+                ),
+                method_name="execute_complete",
+            )
+
         return hook.run_transfer_job(job_name=self.job_name, project_id=project_id)
+
+    def execute_complete(self, context: Context, event: dict[str, Any]) -> Any:
+        """
+        Act as a callback for when the trigger fires.
+
+        This returns immediately. It relies on trigger to throw an exception,
+        otherwise it assumes execution was successful.
+        """
+        if event["status"] == "error":
+            raise AirflowException(event["message"])
+
+        return event["job_result"]
 
 
 class CloudDataTransferServiceGetOperationOperator(GoogleCloudBaseOperator):
@@ -586,7 +636,6 @@ class CloudDataTransferServiceGetOperationOperator(GoogleCloudBaseOperator):
         if project_id:
             CloudStorageTransferDetailsLink.persist(
                 context=context,
-                task_instance=self,
                 project_id=project_id,
                 operation_name=self.operation_name,
             )
@@ -663,7 +712,6 @@ class CloudDataTransferServiceListOperationsOperator(GoogleCloudBaseOperator):
         if project_id:
             CloudStorageTransferListLink.persist(
                 context=context,
-                task_instance=self,
                 project_id=project_id,
             )
 
@@ -922,6 +970,7 @@ class CloudDataTransferServiceS3ToGCSOperator(GoogleCloudBaseOperator):
         "object_conditions",
         "google_impersonation_chain",
         "aws_role_arn",
+        "aws_conn_id",
     )
     ui_color = "#e09411"
 
@@ -966,6 +1015,7 @@ class CloudDataTransferServiceS3ToGCSOperator(GoogleCloudBaseOperator):
         self.aws_role_arn = aws_role_arn
         self.deferrable = deferrable
         self._validate_inputs()
+        self._transfer_job: dict[str, Any] | None = None
 
     def _validate_inputs(self) -> None:
         if self.delete_job_after_completion and not self.wait:
@@ -980,19 +1030,18 @@ class CloudDataTransferServiceS3ToGCSOperator(GoogleCloudBaseOperator):
 
         TransferJobPreprocessor(body=body, aws_conn_id=self.aws_conn_id, default_schedule=True).process_body()
 
-        job = hook.create_transfer_job(body=body)
-
+        self._transfer_job = hook.create_transfer_job(body=body)
         if self.wait:
             if not self.deferrable:
-                hook.wait_for_transfer_job(job, timeout=self.timeout)
+                hook.wait_for_transfer_job(self._transfer_job, timeout=self.timeout)
                 if self.delete_job_after_completion:
-                    hook.delete_transfer_job(job_name=job[NAME], project_id=self.project_id)
+                    hook.delete_transfer_job(job_name=self._transfer_job[NAME], project_id=self.project_id)
             else:
                 self.defer(
                     timeout=timedelta(seconds=self.timeout or 60),
                     trigger=CloudStorageTransferServiceCheckJobStatusTrigger(
-                        job_name=job[NAME],
-                        project_id=job[PROJECT_ID],
+                        job_name=self._transfer_job[NAME],
+                        project_id=self._transfer_job[PROJECT_ID],
                         gcp_conn_id=self.gcp_conn_id,
                         impersonation_chain=self.google_impersonation_chain,
                     ),
@@ -1041,6 +1090,57 @@ class CloudDataTransferServiceS3ToGCSOperator(GoogleCloudBaseOperator):
             body[TRANSFER_SPEC][AWS_S3_DATA_SOURCE][AWS_ROLE_ARN] = self.aws_role_arn  # type: ignore[index]
 
         return body
+
+    def get_openlineage_facets_on_complete(self, task_instance) -> OperatorLineage | None:
+        """Provide OpenLineage OperatorLineage for the S3->GCS transfer."""
+        from airflow.providers.common.compat.openlineage.facet import Dataset
+        from airflow.providers.google.cloud.openlineage.facets import (
+            CloudStorageTransferJobFacet,
+            CloudStorageTransferRunFacet,
+        )
+        from airflow.providers.openlineage.extractors import OperatorLineage
+
+        input_ds = Dataset(
+            namespace=f"s3://{self.s3_bucket}",
+            name=normalize_directory_path(self.s3_path) or "",
+        )
+
+        output_ds = Dataset(
+            namespace=f"gs://{self.gcs_bucket}",
+            name=normalize_directory_path(self.gcs_path) or "",
+        )
+
+        job = self._transfer_job or {}
+        job_facet = CloudStorageTransferJobFacet(
+            jobName=job.get(NAME),
+            projectId=job.get(PROJECT_ID, self.project_id),
+            description=job.get(DESCRIPTION, self.description),
+            status=job.get(STATUS),
+            sourceBucket=job.get(TRANSFER_SPEC, {})
+            .get(AWS_S3_DATA_SOURCE, {})
+            .get(BUCKET_NAME, self.s3_bucket),
+            sourcePath=job.get(TRANSFER_SPEC, {}).get(AWS_S3_DATA_SOURCE, {}).get(PATH, self.s3_path),
+            targetBucket=job.get(TRANSFER_SPEC, {}).get(GCS_DATA_SINK, {}).get(BUCKET_NAME, self.gcs_bucket),
+            targetPath=job.get(TRANSFER_SPEC, {}).get(GCS_DATA_SINK, {}).get(PATH, self.gcs_path),
+            objectConditions=job.get(TRANSFER_SPEC, {}).get("objectConditions", self.object_conditions),
+            transferOptions=job.get(TRANSFER_SPEC, {}).get("transferOptions", self.transfer_options),
+            schedule=job.get(SCHEDULE, self.schedule),
+        )
+
+        run_facet = CloudStorageTransferRunFacet(
+            jobName=job.get(NAME),
+            wait=self.wait,
+            timeout=self.timeout,
+            deferrable=self.deferrable,
+            deleteJobAfterCompletion=self.delete_job_after_completion,
+        )
+
+        return OperatorLineage(
+            inputs=[input_ds],
+            outputs=[output_ds],
+            job_facets={"cloudStorageTransferJob": job_facet},
+            run_facets={"cloudStorageTransferRun": run_facet},
+        )
 
 
 class CloudDataTransferServiceGCSToGCSOperator(GoogleCloudBaseOperator):

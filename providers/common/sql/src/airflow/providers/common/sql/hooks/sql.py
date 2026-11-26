@@ -18,54 +18,72 @@ from __future__ import annotations
 
 import contextlib
 import warnings
-from collections.abc import Generator, Iterable, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Mapping, MutableMapping, Sequence
 from contextlib import closing, contextmanager, suppress
 from datetime import datetime
 from functools import cached_property
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Protocol,
-    TypeVar,
-    cast,
-    overload,
-)
+from importlib.util import find_spec
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, cast, overload
 from urllib.parse import urlparse
 
 import sqlparse
 from methodtools import lru_cache
 from more_itertools import chunked
-from sqlalchemy import create_engine
-from sqlalchemy.engine import Inspector, make_url
-from sqlalchemy.exc import ArgumentError, NoSuchModuleError
 
-from airflow.configuration import conf
-from airflow.exceptions import (
+try:
+    from sqlalchemy import create_engine, inspect
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.exc import ArgumentError, NoSuchModuleError
+    from sqlalchemy.pool import NullPool
+except ImportError:
+    create_engine = None  # type: ignore[assignment]
+    inspect = None  # type: ignore[assignment]
+    make_url = None  # type: ignore[assignment]
+    NullPool = None  # type: ignore[assignment,misc]
+    ArgumentError = Exception  # type: ignore[misc,assignment]
+    NoSuchModuleError = Exception  # type: ignore[misc,assignment]
+
+
+from airflow.providers.common.compat.module_loading import import_string
+from airflow.providers.common.compat.sdk import (
     AirflowException,
     AirflowOptionalProviderFeatureException,
+    BaseHook,
+    conf,
 )
-from airflow.hooks.base import BaseHook
 from airflow.providers.common.sql.dialects.dialect import Dialect
 from airflow.providers.common.sql.hooks import handlers
-from airflow.utils.module_loading import import_string
+from airflow.providers.common.sql.hooks.lineage import send_sql_hook_lineage
 
 if TYPE_CHECKING:
-    from pandas import DataFrame
-    from sqlalchemy.engine import URL
+    from pandas import DataFrame as PandasDataFrame
+    from polars import DataFrame as PolarsDataFrame
+    from sqlalchemy.engine import URL, Engine, Inspector
 
-    from airflow.models import Connection
+    from airflow.providers.common.compat.sdk import Connection
     from airflow.providers.openlineage.extractors import OperatorLineage
     from airflow.providers.openlineage.sqlparser import DatabaseInfo
 
 
 T = TypeVar("T")
 SQL_PLACEHOLDERS = frozenset({"%s", "?"})
+
+
+def _is_sqlalchemy_2() -> bool:
+    """Whether the installed SQLAlchemy has the native psycopg (v3) dialect (added in 2.0)."""
+    from packaging.version import Version
+    from sqlalchemy import __version__ as sqlalchemy_version
+
+    return Version(sqlalchemy_version) >= Version("2.0.0")
+
+
 WARNING_MESSAGE = """Import of {} from the 'airflow.providers.common.sql.hooks' module is deprecated and will
 be removed in the future. Please import it from 'airflow.providers.common.sql.hooks.handlers'."""
 
 
-def return_single_query_results(sql: str | Iterable[str], return_last: bool, split_statements: bool | None):
+def return_single_query_results(
+    sql: str | Iterable[str], return_last: bool, split_statements: bool | None
+) -> bool:
     warnings.warn(WARNING_MESSAGE.format("return_single_query_results"), DeprecationWarning, stacklevel=2)
 
     return handlers.return_single_query_results(sql, return_last, split_statements)
@@ -77,7 +95,7 @@ def fetch_all_handler(cursor) -> list[tuple] | None:
     return handlers.fetch_all_handler(cursor)
 
 
-def fetch_one_handler(cursor) -> list[tuple] | None:
+def fetch_one_handler(cursor) -> tuple | None:
     warnings.warn(WARNING_MESSAGE.format("fetch_one_handler"), DeprecationWarning, stacklevel=2)
 
     return handlers.fetch_one_handler(cursor)
@@ -166,7 +184,7 @@ class DbApiHook(BaseHook):
         super().__init__()
         if not self.conn_name_attr:
             raise AirflowException("conn_name_attr is not defined")
-        elif len(args) == 1:
+        if len(args) == 1:
             setattr(self, self.conn_name_attr, args[0])
         elif self.conn_name_attr not in kwargs:
             setattr(self, self.conn_name_attr, self.default_conn_name)
@@ -272,7 +290,10 @@ class DbApiHook(BaseHook):
         db = self.connection
         if self.connector is None:
             raise RuntimeError(f"{type(self).__name__} didn't have `self.connector` set!")
-        return self.connector.connect(host=db.host, port=db.port, username=db.login, schema=db.schema)
+        host = db.host or ""
+        login = db.login or ""
+        schema = db.schema or ""
+        return self.connector.connect(host=host, port=cast("int", db.port), username=login, schema=schema)
 
     def get_uri(self) -> str:
         """
@@ -301,43 +322,130 @@ class DbApiHook(BaseHook):
             msg = "`sqlalchemy_url` property should be implemented in the provider subclass."
         raise NotImplementedError(msg)
 
-    def get_sqlalchemy_engine(self, engine_kwargs=None):
+    def get_sqlalchemy_engine(self, engine_kwargs=None) -> Engine:
         """
         Get an sqlalchemy_engine object.
 
         :param engine_kwargs: Kwargs used in :func:`~sqlalchemy.create_engine`.
         :return: the created engine.
         """
+        if create_engine is None:
+            raise AirflowOptionalProviderFeatureException(
+                "SQLAlchemy is required to generate the connection URI. "
+                "Install it with: pip install 'apache-airflow-providers-common-sql[sqlalchemy]'"
+            )
+
         if engine_kwargs is None:
             engine_kwargs = {}
 
         try:
-            url = self.sqlalchemy_url
+            url: URL | str = self.sqlalchemy_url
         except NotImplementedError:
             url = self.get_uri()
 
         self.log.debug("url: %s", url)
         self.log.debug("engine_kwargs: %s", engine_kwargs)
-        return create_engine(url=url, **engine_kwargs)
+        try:
+            return create_engine(url=url, **engine_kwargs)
+        except (ImportError, ModuleNotFoundError):
+            # SQLAlchemy resolves a bare "postgresql" scheme to the psycopg2 DB-API by default.
+            # Retry with a driver this hook can actually resolve, since psycopg2 may not be
+            # installed now that it's an optional extra of apache-airflow-providers-postgres.
+            parsed_url = make_url(url) if make_url is not None else None
+            if parsed_url is None or parsed_url.drivername != "postgresql":
+                raise
+            # psycopg (v3) may be importable where SQLAlchemy is pinned below 2.0, which has no
+            # native "postgresql+psycopg" dialect and would raise NoSuchModuleError — so only
+            # prefer it on SQLAlchemy 2.0+; otherwise fall back to psycopg2.
+            if find_spec("psycopg") is not None and _is_sqlalchemy_2():
+                self.log.info(
+                    "SQLAlchemy could not load a DB-API driver for the bare 'postgresql://' URL; "
+                    "retrying with psycopg (v3) ('postgresql+psycopg')."
+                )
+                return create_engine(url=parsed_url.set(drivername="postgresql+psycopg"), **engine_kwargs)
+            if find_spec("psycopg2") is not None:
+                self.log.info(
+                    "SQLAlchemy could not load a DB-API driver for the bare 'postgresql://' URL; "
+                    "retrying with 'postgresql+psycopg2'."
+                )
+                return create_engine(url=parsed_url.set(drivername="postgresql+psycopg2"), **engine_kwargs)
+            raise
 
-    @property
+    @cached_property
     def inspector(self) -> Inspector:
-        return Inspector.from_engine(self.get_sqlalchemy_engine())
+        if inspect is None:
+            raise AirflowOptionalProviderFeatureException(
+                "SQLAlchemy is required for database inspection. "
+                "Install it with: pip install 'apache-airflow-providers-common-sql[sqlalchemy]'"
+            )
+        # The inspector is cached for the hook's lifetime, so a pooled engine would keep the
+        # connection it reflected with open until the process exits. With NullPool, no
+        # connection outlives the inspection that opened it.
+        return inspect(self.get_sqlalchemy_engine({"poolclass": NullPool}))
+
+    def get_table_schema(self, table_name: str, schema: str | None = None) -> list[dict[str, str]]:
+        """
+        Return column names and types for a table using SQLAlchemy Inspector.
+
+        :param table_name: Name of the table.
+        :param schema: Optional schema/namespace name.
+        :return: List of dicts with ``name`` and ``type`` keys.
+        """
+        columns = self.inspector.get_columns(table_name, schema=schema)
+        return [{"name": col["name"], "type": str(col["type"])} for col in columns]
+
+    def get_table_comment(self, table_name: str, schema: str | None = None) -> str | None:
+        """
+        Return the table comment using SQLAlchemy Inspector.
+
+        :param table_name: Name of the table.
+        :param schema: Optional schema/namespace name.
+        :return: The comment, or ``None`` when the table has none or the dialect cannot report comments.
+        """
+        try:
+            comment = self.inspector.get_table_comment(table_name, schema=schema)
+        except NotImplementedError:
+            return None
+        return comment.get("text") or None
+
+    def get_table_columns_with_comments(
+        self, table_name: str, schema: str | None = None
+    ) -> list[dict[str, str]]:
+        """
+        Return column names and types for a table, plus each column's comment where one exists.
+
+        Same as :meth:`get_table_schema`, except that a column carries a ``comment`` key
+        only when the dialect reports a non-empty comment for it.
+
+        :param table_name: Name of the table.
+        :param schema: Optional schema/namespace name.
+        :return: List of dicts with ``name`` and ``type`` keys, and ``comment`` when present.
+        """
+        result: list[dict[str, str]] = []
+        for col in self.inspector.get_columns(table_name, schema=schema):
+            column = {"name": col["name"], "type": str(col["type"])}
+            if comment := col.get("comment"):
+                column["comment"] = comment
+            result.append(column)
+        return result
 
     @cached_property
     def dialect_name(self) -> str:
-        try:
-            return make_url(self.get_uri()).get_dialect().name
-        except (ArgumentError, NoSuchModuleError):
-            config = self.connection_extra
-            sqlalchemy_scheme = config.get("sqlalchemy_scheme")
-            if sqlalchemy_scheme:
-                return sqlalchemy_scheme.split("+")[0] if "+" in sqlalchemy_scheme else sqlalchemy_scheme
-            return config.get("dialect", "default")
+        if make_url is not None:
+            try:
+                return make_url(self.get_uri()).get_dialect().name
+            except (ArgumentError, NoSuchModuleError, ValueError):
+                pass
+
+        config = self.connection_extra
+        sqlalchemy_scheme = config.get("sqlalchemy_scheme")
+        if sqlalchemy_scheme:
+            return sqlalchemy_scheme.split("+")[0] if "+" in sqlalchemy_scheme else sqlalchemy_scheme
+        return config.get("dialect", "default")
 
     @cached_property
     def dialect(self) -> Dialect:
-        from airflow.utils.module_loading import import_string
+        from airflow.providers.common.compat.module_loading import import_string
 
         dialect_info = self._dialects.get(self.dialect_name)
 
@@ -375,12 +483,61 @@ class DbApiHook(BaseHook):
         self.log.debug("reserved words for '%s': %s", dialect_name, result)
         return result
 
-    def get_pandas_df(
+    @overload
+    def get_df(
+        self,
+        sql: str | list[str],
+        parameters: list | tuple | Mapping[str, Any] | None = None,
+        *,
+        df_type: Literal["pandas"] = "pandas",
+        **kwargs: Any,
+    ) -> PandasDataFrame: ...
+    @overload
+    def get_df(
+        self,
+        sql: str | list[str],
+        parameters: list | tuple | Mapping[str, Any] | None = None,
+        *,
+        df_type: Literal["polars"],
+        **kwargs: Any,
+    ) -> PolarsDataFrame: ...
+
+    def get_df(
+        self,
+        sql: str | list[str],
+        parameters: list | tuple | Mapping[str, Any] | None = None,
+        *,
+        df_type: Literal["pandas", "polars"] = "pandas",
+        **kwargs,
+    ) -> PandasDataFrame | PolarsDataFrame:
+        """
+        Execute the sql and returns a dataframe.
+
+        :param sql: the sql statement to be executed (str) or a list of sql statements to execute
+        :param parameters: The parameters to render the SQL query with.
+        :param df_type: Type of dataframe to return, either "pandas" or "polars"
+        :param kwargs: (optional) passed into `pandas.io.sql.read_sql` or `polars.read_database` method
+        """
+        if df_type == "pandas":
+            result: PandasDataFrame | PolarsDataFrame = self._get_pandas_df(sql, parameters, **kwargs)
+        elif df_type == "polars":
+            result = self._get_polars_df(sql, parameters, **kwargs)
+        else:
+            raise ValueError(f"Unsupported df_type: {df_type}")
+
+        send_sql_hook_lineage(
+            context=self,
+            sql=sql,
+            sql_parameters=parameters,
+        )
+        return result
+
+    def _get_pandas_df(
         self,
         sql,
         parameters: list | tuple | Mapping[str, Any] | None = None,
         **kwargs,
-    ) -> DataFrame:
+    ) -> PandasDataFrame:
         """
         Execute the sql and returns a pandas dataframe.
 
@@ -399,14 +556,100 @@ class DbApiHook(BaseHook):
         with closing(self.get_conn()) as conn:
             return psql.read_sql(sql, con=conn, params=parameters, **kwargs)
 
-    def get_pandas_df_by_chunks(
+    def _get_polars_df(
+        self,
+        sql,
+        parameters: list | tuple | Mapping[str, Any] | None = None,
+        **kwargs,
+    ) -> PolarsDataFrame:
+        """
+        Execute the sql and returns a polars dataframe.
+
+        :param sql: the sql statement to be executed (str) or a list of sql statements to execute
+        :param parameters: The parameters to render the SQL query with.
+        :param kwargs: (optional) passed into polars.read_database method
+        """
+        try:
+            import polars as pl
+        except ImportError:
+            raise AirflowOptionalProviderFeatureException(
+                "polars library not installed, run: pip install "
+                "'apache-airflow-providers-common-sql[polars]'."
+            )
+
+        with closing(self.get_conn()) as conn:
+            execute_options: dict[str, Any] | None = None
+            if parameters is not None:
+                if isinstance(parameters, Mapping):
+                    execute_options = dict(parameters)
+                else:
+                    execute_options = {}
+
+            return pl.read_database(sql, connection=conn, execute_options=execute_options, **kwargs)
+
+    @overload
+    def get_df_by_chunks(
+        self,
+        sql: str | list[str],
+        parameters: list | tuple | Mapping[str, Any] | None = None,
+        *,
+        chunksize: int,
+        df_type: Literal["pandas"] = "pandas",
+        **kwargs,
+    ) -> Generator[PandasDataFrame, None, None]: ...
+    @overload
+    def get_df_by_chunks(
+        self,
+        sql: str | list[str],
+        parameters: list | tuple | Mapping[str, Any] | None = None,
+        *,
+        chunksize: int,
+        df_type: Literal["polars"],
+        **kwargs,
+    ) -> Generator[PolarsDataFrame, None, None]: ...
+
+    def get_df_by_chunks(
+        self,
+        sql: str | list[str],
+        parameters: list | tuple | Mapping[str, Any] | None = None,
+        *,
+        chunksize: int,
+        df_type: Literal["pandas", "polars"] = "pandas",
+        **kwargs,
+    ) -> Generator[PandasDataFrame | PolarsDataFrame, None, None]:
+        """
+        Execute the sql and return a generator.
+
+        :param sql: the sql statement to be executed (str) or a list of sql statements to execute
+        :param parameters: The parameters to render the SQL query with
+        :param chunksize: number of rows to include in each chunk
+        :param df_type: Type of dataframe to return, either "pandas" or "polars"
+        :param kwargs: (optional) passed into `pandas.io.sql.read_sql` or `polars.read_database` method
+        """
+        if df_type == "pandas":
+            result: Generator[PandasDataFrame | PolarsDataFrame, None, None] = self._get_pandas_df_by_chunks(
+                sql, parameters, chunksize=chunksize, **kwargs
+            )
+        elif df_type == "polars":
+            result = self._get_polars_df_by_chunks(sql, parameters, chunksize=chunksize, **kwargs)
+        else:
+            raise ValueError(f"Unsupported df_type: {df_type}")
+
+        send_sql_hook_lineage(
+            context=self,
+            sql=sql,
+            sql_parameters=parameters,
+        )
+        return result
+
+    def _get_pandas_df_by_chunks(
         self,
         sql,
         parameters: list | tuple | Mapping[str, Any] | None = None,
         *,
         chunksize: int,
         **kwargs,
-    ) -> Generator[DataFrame, None, None]:
+    ) -> Generator[PandasDataFrame, None, None]:
         """
         Execute the sql and return a generator.
 
@@ -422,9 +665,42 @@ class DbApiHook(BaseHook):
                 "pandas library not installed, run: pip install "
                 "'apache-airflow-providers-common-sql[pandas]'."
             )
-
         with closing(self.get_conn()) as conn:
             yield from psql.read_sql(sql, con=conn, params=parameters, chunksize=chunksize, **kwargs)
+
+    def _get_polars_df_by_chunks(
+        self,
+        sql,
+        parameters: list | tuple | Mapping[str, Any] | None = None,
+        *,
+        chunksize: int,
+        **kwargs,
+    ) -> Generator[PolarsDataFrame, None, None]:
+        """
+        Execute the sql and return a generator.
+
+        :param sql: the sql statement to be executed (str) or a list of sql statements to execute
+        :param parameters: The parameters to render the SQL query with.
+        :param chunksize: number of rows to include in each chunk
+        :param kwargs: (optional) passed into pandas.io.sql.read_sql method
+        """
+        try:
+            import polars as pl
+        except ImportError:
+            raise AirflowOptionalProviderFeatureException(
+                "polars library not installed, run: pip install "
+                "'apache-airflow-providers-common-sql[polars]'."
+            )
+
+        with closing(self.get_conn()) as conn:
+            execute_options = None
+            if parameters is not None:
+                if isinstance(parameters, Mapping):
+                    execute_options = dict(parameters)
+
+            yield from pl.read_database(
+                sql, connection=conn, execute_options=execute_options, batch_size=chunksize, **kwargs
+            )
 
     def get_records(
         self,
@@ -493,7 +769,7 @@ class DbApiHook(BaseHook):
         handler: Callable[[Any], T] = ...,
         split_statements: bool = ...,
         return_last: bool = ...,
-    ) -> tuple | list[tuple] | list[list[tuple] | tuple] | None: ...
+    ) -> tuple | list | list[tuple] | list[list[tuple] | tuple] | None: ...
 
     def run(
         self,
@@ -503,7 +779,7 @@ class DbApiHook(BaseHook):
         handler: Callable[[Any], T] | None = None,
         split_statements: bool = False,
         return_last: bool = True,
-    ) -> tuple | list[tuple] | list[list[tuple] | tuple] | None:
+    ) -> tuple | list | list[tuple] | list[list[tuple] | tuple] | None:
         """
         Run a command or a list of commands.
 
@@ -599,10 +875,9 @@ class DbApiHook(BaseHook):
         if handlers.return_single_query_results(sql, return_last, split_statements):
             self.descriptions = [_last_description]
             return _last_result
-        else:
-            return results
+        return results
 
-    def _make_common_data_structure(self, result: T | Sequence[T]) -> tuple | list[tuple]:
+    def _make_common_data_structure(self, result: T | Sequence[T]) -> tuple | list[tuple] | None:
         """
         Ensure the data returned from an SQL command is a standard tuple or list[tuple].
 
@@ -624,13 +899,22 @@ class DbApiHook(BaseHook):
             self.log.info("Running statement: %s, parameters: %s", sql_statement, parameters)
 
         if parameters:
+            # If we're using psycopg3, we might need to handle parameters differently
+            if hasattr(cur, "__module__") and "psycopg" in cur.__module__ and isinstance(parameters, list):
+                parameters = tuple(parameters)
             cur.execute(sql_statement, parameters)
         else:
             cur.execute(sql_statement)
 
-        # According to PEP 249, this is -1 when query result is not applicable.
-        if cur.rowcount >= 0:
-            self.log.info("Rows affected: %s", cur.rowcount)
+        send_sql_hook_lineage(
+            context=self,
+            sql=sql_statement,
+            sql_parameters=parameters,
+            cur=cur,
+        )
+
+        if (row_count := handlers.get_row_count(cur)) is not None:
+            self.log.info("Rows affected: %s", row_count)
 
     def set_autocommit(self, conn, autocommit):
         """Set the autocommit flag on the connection."""
@@ -720,6 +1004,7 @@ class DbApiHook(BaseHook):
             before executing the query.
         """
         nb_rows = 0
+        sql = None  # not generated unless we actually process at least one chunk
         with self._create_autocommit_connection(autocommit) as conn:
             conn.commit()
             with closing(conn.cursor()) as cur:
@@ -742,7 +1027,14 @@ class DbApiHook(BaseHook):
                         )
                         sql = self._generate_insert_sql(table, values[0], target_fields, replace, **kwargs)
                         self.log.debug("Generated sql: %s", sql)
-                        cur.executemany(sql, values)
+
+                        try:
+                            cur.executemany(sql, values)
+                        except Exception as e:
+                            self.log.error("Generated sql: %s", sql)
+                            self.log.error("Parameters: %s", values)
+                            raise e
+
                         conn.commit()
                         nb_rows += len(chunked_rows)
                         self.log.info("Loaded %s rows into %s so far", nb_rows, table)
@@ -751,12 +1043,24 @@ class DbApiHook(BaseHook):
                         values = self._serialize_cells(row, conn)
                         sql = self._generate_insert_sql(table, values, target_fields, replace, **kwargs)
                         self.log.debug("Generated sql: %s", sql)
-                        cur.execute(sql, values)
+
+                        try:
+                            cur.execute(sql, values)
+                        except Exception as e:
+                            self.log.error("Generated sql: %s", sql)
+                            self.log.error("Parameters: %s", values)
+                            raise e
+
                         if commit_every and i % commit_every == 0:
                             conn.commit()
                             self.log.info("Loaded %s rows into %s so far", i, table)
                         nb_rows += 1
                     conn.commit()
+
+        if sql:
+            # We only send lineage once, not for each value collection, to save memory.
+            send_sql_hook_lineage(context=self, sql=sql, row_count=nb_rows)
+
         self.log.info("Done loading. Loaded a total of %s rows into %s", nb_rows, table)
 
     @classmethod
@@ -809,7 +1113,7 @@ class DbApiHook(BaseHook):
 
         return status, message
 
-    def get_openlineage_database_info(self, connection) -> DatabaseInfo | None:
+    def get_openlineage_database_info(self, connection: Connection) -> DatabaseInfo | None:
         """
         Return database specific information needed to generate and parse lineage metadata.
 

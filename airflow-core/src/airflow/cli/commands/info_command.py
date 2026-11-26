@@ -28,18 +28,14 @@ from enum import Enum
 from typing import Protocol
 from urllib.parse import urlsplit, urlunsplit
 
-import httpx
-import tenacity
-
 from airflow import configuration
 from airflow.cli.simple_table import AirflowConsole
+from airflow.dag_processing.bundles.manager import DagBundlesManager
 from airflow.providers_manager import ProvidersManager
 from airflow.utils.cli import suppress_logs_and_warning
 from airflow.utils.platform import getuser
 from airflow.utils.providers_configuration_loader import providers_configuration_loaded
 from airflow.version import version as airflow_version
-
-log = logging.getLogger(__name__)
 
 
 class Anonymizer(Protocol):
@@ -91,7 +87,6 @@ class PiiAnonymizer(Anonymizer):
             return value
 
         url_parts = urlsplit(value)
-        netloc = None
         if url_parts.netloc:
             # unpack
             userinfo = None
@@ -123,6 +118,12 @@ class PiiAnonymizer(Anonymizer):
                 netloc = host
             else:
                 netloc = ""
+        else:
+            # A netloc-less URL is a local-file backend (SQLite is the default), where
+            # the path itself is the identifying information. Split off the scheme so the
+            # unanchored username substitution cannot touch it ("sqlite:" -> "sq${USER}:").
+            scheme, sep, rest = value.partition(":")
+            return f"{scheme}{sep}{self.process_path(rest)}"
 
         return urlunsplit((url_parts.scheme, netloc, url_parts.path, url_parts.query, url_parts.fragment))
 
@@ -141,11 +142,11 @@ class OperatingSystem(Enum):
         """Get current operating system."""
         if os.name == "nt":
             return OperatingSystem.WINDOWS
-        elif "linux" in sys.platform:
+        if "linux" in sys.platform:
             return OperatingSystem.LINUX
-        elif "darwin" in sys.platform:
+        if "darwin" in sys.platform:
             return OperatingSystem.MACOSX
-        elif "cygwin" in sys.platform:
+        if "cygwin" in sys.platform:
             return OperatingSystem.CYGWIN
         return OperatingSystem.UNKNOWN
 
@@ -203,8 +204,7 @@ class AirflowInfo:
                     data = [line for line in data if grep in line]
                 if len(data) != 1:
                     return "NOT AVAILABLE"
-                else:
-                    return data[0].decode()
+                return data[0].decode()
         except OSError:
             return "NOT AVAILABLE"
 
@@ -216,8 +216,7 @@ class AirflowInfo:
             module = o.__class__.__module__
             if module is None or module == str.__class__.__module__:
                 return o.__class__.__name__  # Avoid reporting __builtin__
-            else:
-                return f"{module}.{o.__class__.__name__}"
+            return f"{module}.{o.__class__.__name__}"
 
         try:
             handler_names = [get_fullname(handler) for handler in logging.getLogger("airflow.task").handlers]
@@ -231,9 +230,7 @@ class AirflowInfo:
         sql_alchemy_conn = self.anonymizer.process_url(
             configuration.conf.get("database", "SQL_ALCHEMY_CONN", fallback="NOT AVAILABLE")
         )
-        dags_folder = self.anonymizer.process_path(
-            configuration.conf.get("core", "dags_folder", fallback="NOT AVAILABLE")
-        )
+        bundle_names = DagBundlesManager().get_all_bundle_names()
         plugins_folder = self.anonymizer.process_path(
             configuration.conf.get("core", "plugins_folder", fallback="NOT AVAILABLE")
         )
@@ -249,7 +246,7 @@ class AirflowInfo:
             ("executor", executor),
             ("task_logging_handler", self._task_logging_handler()),
             ("sql_alchemy_conn", sql_alchemy_conn),
-            ("dags_folder", dags_folder),
+            ("dag_bundle_names", bundle_names),
             ("plugins_folder", plugins_folder),
             ("base_log_folder", base_log_folder),
             ("remote_base_log_folder", remote_base_log_folder),
@@ -314,7 +311,7 @@ class AirflowInfo:
     def _providers_info(self):
         return [(p.data["package-name"], p.version) for p in ProvidersManager().providers.values()]
 
-    def show(self, output: str, console: AirflowConsole | None = None) -> None:
+    def show(self, output: str) -> None:
         """Show information about Airflow instance."""
         all_info = {
             "Apache Airflow": self._airflow_info,
@@ -324,7 +321,7 @@ class AirflowInfo:
             "Providers info": self._providers_info,
         }
 
-        console = console or AirflowConsole(show_header=False)
+        console = AirflowConsole(show_header=False)
         if output in ("table", "plain"):
             # Show each info as table with key, value column
             for key, info in all_info.items():
@@ -336,57 +333,10 @@ class AirflowInfo:
                 data=[{k.lower().replace(" ", "_"): dict(v)} for k, v in all_info.items()], output=output
             )
 
-    def render_text(self, output: str) -> str:
-        """Export the info to string."""
-        console = AirflowConsole(record=True)
-        with console.capture():
-            self.show(output=output, console=console)
-        return console.export_text()
-
-
-class FileIoException(Exception):
-    """Raises when error happens in FileIo.io integration."""
-
-
-@tenacity.retry(
-    stop=tenacity.stop_after_attempt(5),
-    wait=tenacity.wait_exponential(multiplier=1, max=10),
-    retry=tenacity.retry_if_exception_type(FileIoException),
-    before=tenacity.before_log(log, logging.DEBUG),
-    after=tenacity.after_log(log, logging.DEBUG),
-)
-def _upload_text_to_fileio(content):
-    """Upload text file to File.io service and return link."""
-    resp = httpx.post("https://file.io", content=content)
-    if resp.status_code not in [200, 201]:
-        print(resp.json())
-        raise FileIoException("Failed to send report to file.io service.")
-    try:
-        return resp.json()["link"]
-    except ValueError as e:
-        log.debug(e)
-        raise FileIoException("Failed to send report to file.io service.")
-
-
-def _send_report_to_fileio(info):
-    print("Uploading report to file.io service.")
-    try:
-        link = _upload_text_to_fileio(str(info))
-        print("Report uploaded.")
-        print(link)
-        print()
-    except FileIoException as ex:
-        print(str(ex))
-
 
 @suppress_logs_and_warning
 @providers_configuration_loaded
 def show_info(args):
     """Show information related to Airflow, system and other."""
-    # Enforce anonymization, when file_io upload is tuned on.
-    anonymizer = PiiAnonymizer() if args.anonymize or args.file_io else NullAnonymizer()
-    info = AirflowInfo(anonymizer)
-    if args.file_io:
-        _send_report_to_fileio(info.render_text(args.output))
-    else:
-        info.show(args.output)
+    anonymizer = PiiAnonymizer() if args.anonymize else NullAnonymizer()
+    AirflowInfo(anonymizer).show(args.output)

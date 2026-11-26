@@ -20,7 +20,11 @@ import pytest
 
 from airflow_breeze.global_constants import GroupOfTests
 from airflow_breeze.utils.path_utils import AIRFLOW_ROOT_PATH
-from airflow_breeze.utils.run_tests import convert_parallel_types_to_folders, convert_test_type_to_pytest_args
+from airflow_breeze.utils.run_tests import (
+    convert_parallel_types_to_folders,
+    convert_test_type_to_pytest_args,
+    file_name_from_test_type,
+)
 
 
 def _all_providers() -> list[str]:
@@ -39,7 +43,7 @@ def _find_all_integration_folders() -> list[str]:
 
 
 @pytest.mark.parametrize(
-    "test_group, test_type, pytest_args",
+    ("test_group", "test_type", "pytest_args"),
     [
         # Those list needs to be updated every time we add a new directory to airflow-core/tests/ folder
         (
@@ -63,10 +67,15 @@ def _find_all_integration_folders() -> list[str]:
                 "providers/apache/hive/tests/integration",
                 "providers/apache/kafka/tests/integration",
                 "providers/apache/pinot/tests/integration",
+                "providers/apache/polaris/tests/integration",
+                "providers/apache/tinkerpop/tests/integration",
+                "providers/celery/tests/integration",
+                "providers/elasticsearch/tests/integration",
                 "providers/google/tests/integration",
                 "providers/microsoft/mssql/tests/integration",
                 "providers/mongo/tests/integration",
                 "providers/openlineage/tests/integration",
+                "providers/opensearch/tests/integration",
                 "providers/qdrant/tests/integration",
                 "providers/redis/tests/integration",
                 "providers/trino/tests/integration",
@@ -153,7 +162,6 @@ def _find_all_integration_folders() -> list[str]:
             [
                 "airflow-core/tests/unit/assets",
                 "airflow-core/tests/unit/callbacks",
-                "airflow-core/tests/unit/charts",
                 "airflow-core/tests/unit/cluster_policies",
                 "airflow-core/tests/unit/config_templates",
                 "airflow-core/tests/unit/dag_processing",
@@ -161,28 +169,31 @@ def _find_all_integration_folders() -> list[str]:
                 "airflow-core/tests/unit/decorators",
                 "airflow-core/tests/unit/hooks",
                 "airflow-core/tests/unit/io",
-                "airflow-core/tests/unit/lineage",
                 "airflow-core/tests/unit/listeners",
                 "airflow-core/tests/unit/logging",
                 "airflow-core/tests/unit/macros",
+                "airflow-core/tests/unit/migrations",
+                "airflow-core/tests/unit/observability",
+                "airflow-core/tests/unit/partition_mappers",
                 "airflow-core/tests/unit/plugins",
-                "airflow-core/tests/unit/secrets",
                 "airflow-core/tests/unit/security",
                 "airflow-core/tests/unit/sensors",
+                "airflow-core/tests/unit/state",
                 "airflow-core/tests/unit/task",
                 "airflow-core/tests/unit/testconfig",
                 "airflow-core/tests/unit/timetables",
+                "airflow-core/tests/unit/triggers",
             ],
         ),
         (
             GroupOfTests.HELM,
             "All",
-            ["helm-tests"],
+            ["chart/tests"],
         ),
         (
             GroupOfTests.HELM,
             "airflow_aux",
-            ["helm-tests/tests/helm_tests/airflow_aux"],
+            ["chart/tests/helm_tests/airflow_aux"],
         ),
     ],
 )
@@ -209,7 +220,54 @@ def test_pytest_args_for_missing_provider():
 
 
 @pytest.mark.parametrize(
-    "test_group, parallel_test_types, folders",
+    ("test_type", "pytest_args"),
+    [
+        pytest.param(
+            "Providers[amazon:hooks]",
+            ["providers/amazon/tests/unit/amazon/aws/hooks"],
+            id="named part runs its paths",
+        ),
+        pytest.param(
+            "Providers[standard:python]",
+            ["providers/standard/tests/unit/standard/operators/test_python.py"],
+            id="a part can be a single file",
+        ),
+        pytest.param(
+            "Providers[amazon:other]",
+            [
+                "providers/amazon/tests",
+                "--ignore=providers/amazon/tests/unit/amazon/aws/hooks",
+                "--ignore=providers/amazon/tests/unit/amazon/aws/operators",
+            ],
+            id="other part ignores the named parts",
+        ),
+    ],
+)
+def test_pytest_args_for_split_provider_parts(test_type: str, pytest_args: list[str]):
+    assert (
+        convert_test_type_to_pytest_args(test_group=GroupOfTests.PROVIDERS, test_type=test_type)
+        == pytest_args
+    )
+
+
+@pytest.mark.parametrize(
+    "test_type", ["Providers[amazon:missing]", "Providers[airbyte:other]"], ids=["unknown part", "unsplit"]
+)
+def test_pytest_args_for_unknown_provider_part(test_type: str):
+    with pytest.raises(SystemExit):
+        convert_test_type_to_pytest_args(test_group=GroupOfTests.PROVIDERS, test_type=test_type)
+
+
+def test_folders_for_parallel_test_types_reject_split_provider_parts():
+    with pytest.raises(SystemExit):
+        convert_parallel_types_to_folders(
+            test_group=GroupOfTests.PROVIDERS,
+            parallel_test_types_list=["Providers[amazon:hooks]", "Providers[amazon:other]"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("test_group", "parallel_test_types", "folders"),
     [
         (
             GroupOfTests.CORE,
@@ -298,7 +356,7 @@ def test_pytest_args_for_missing_provider():
             GroupOfTests.HELM,
             "All",
             [
-                "helm-tests",
+                "chart/tests",
             ],
         ),
         (
@@ -342,7 +400,7 @@ def test_folders_for_parallel_test_types(
 
 
 @pytest.mark.parametrize(
-    "test_group, parallel_test_types",
+    ("test_group", "parallel_test_types"),
     [
         (
             GroupOfTests.CORE,
@@ -388,3 +446,15 @@ def xtest_wrong_types_for_parallel_test_types(test_group: GroupOfTests, parallel
             test_group=test_group,
             parallel_test_types_list=parallel_test_types.split(" "),
         )
+
+
+@pytest.mark.parametrize(
+    ("test_type", "file_name"),
+    [
+        pytest.param("Providers[amazon:hooks]", "providers_amazon_hooks", id="split provider part"),
+        pytest.param("Providers[google:cloud-hooks]", "providers_google_cloud-hooks", id="part with a dash"),
+        pytest.param("Providers[apache.hive,http]", "providers_apache_hive_http", id="provider list"),
+    ],
+)
+def test_file_name_from_test_type_is_a_valid_compose_project_name(test_type: str, file_name: str):
+    assert file_name_from_test_type(test_type) == file_name

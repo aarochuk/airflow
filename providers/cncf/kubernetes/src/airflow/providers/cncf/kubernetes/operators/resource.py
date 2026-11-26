@@ -23,16 +23,20 @@ from collections.abc import Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-import tenacity
 import yaml
 from kubernetes.utils import create_from_yaml
 
-from airflow.exceptions import AirflowException
-from airflow.models import BaseOperator
 from airflow.providers.cncf.kubernetes.hooks.kubernetes import KubernetesHook
-from airflow.providers.cncf.kubernetes.kubernetes_helper_functions import should_retry_creation
+from airflow.providers.cncf.kubernetes.kubernetes_helper_functions import generic_api_retry
 from airflow.providers.cncf.kubernetes.utils.delete_from import delete_from_yaml
 from airflow.providers.cncf.kubernetes.utils.k8s_resource_iterator import k8s_resource_iterator
+from airflow.providers.cncf.kubernetes.version_compat import AIRFLOW_V_3_1_PLUS
+from airflow.providers.common.compat.sdk import AirflowException
+
+if AIRFLOW_V_3_1_PLUS:
+    from airflow.sdk import BaseOperator
+else:
+    from airflow.models import BaseOperator
 
 if TYPE_CHECKING:
     from kubernetes.client import ApiClient, CustomObjectsApi
@@ -56,7 +60,7 @@ class KubernetesResourceBaseOperator(BaseOperator):
         This parameter works only when custom_resource_definition parameter is True.
     """
 
-    template_fields: Sequence[str] = ("yaml_conf", "yaml_conf_file")
+    template_fields: Sequence[str] = ("yaml_conf", "yaml_conf_file", "kubernetes_conn_id")
     template_fields_renderers = {"yaml_conf": "yaml"}
 
     def __init__(
@@ -80,6 +84,8 @@ class KubernetesResourceBaseOperator(BaseOperator):
         self.namespaced = namespaced
         self.config_file = config_file
 
+    def _validate_yaml_conf(self) -> None:
+        # yaml_conf/yaml_conf_file are template fields; validate after rendering, called from execute.
         if not any([self.yaml_conf, self.yaml_conf_file]):
             raise AirflowException("One of `yaml_conf` or `yaml_conf_file` arguments must be provided")
 
@@ -99,18 +105,16 @@ class KubernetesResourceBaseOperator(BaseOperator):
     def get_namespace(self) -> str:
         if self._namespace:
             return self._namespace
-        else:
-            return self.hook.get_namespace() or "default"
+        return self.hook.get_namespace() or "default"
 
     def get_crd_fields(self, body: dict) -> tuple[str, str, str, str]:
         api_version = body["apiVersion"]
         group = api_version[0 : api_version.find("/")]
         version = api_version[api_version.find("/") + 1 :]
 
-        namespace = None
-        if body.get("metadata"):
-            metadata: dict = body.get("metadata", None)
-            namespace = metadata.get("namespace", None)
+        metadata = body.get("metadata", {}) if body else None
+        namespace = metadata.get("namespace") if metadata else None
+
         if namespace is None:
             namespace = self.get_namespace()
 
@@ -129,12 +133,7 @@ class KubernetesCreateResourceOperator(KubernetesResourceBaseOperator):
         else:
             self.custom_object_client.create_cluster_custom_object(group, version, plural, body)
 
-    @tenacity.retry(
-        stop=tenacity.stop_after_attempt(3),
-        wait=tenacity.wait_random_exponential(),
-        reraise=True,
-        retry=tenacity.retry_if_exception(should_retry_creation),
-    )
+    @generic_api_retry
     def _create_objects(self, objects):
         self.log.info("Starting resource creation")
         if not self.custom_resource_definition:
@@ -147,6 +146,7 @@ class KubernetesCreateResourceOperator(KubernetesResourceBaseOperator):
             k8s_resource_iterator(self.create_custom_from_yaml_object, objects)
 
     def execute(self, context) -> None:
+        self._validate_yaml_conf()
         if self.yaml_conf:
             self._create_objects(yaml.safe_load_all(self.yaml_conf))
         elif self.yaml_conf_file and os.path.exists(self.yaml_conf_file):
@@ -179,6 +179,7 @@ class KubernetesDeleteResourceOperator(KubernetesResourceBaseOperator):
             k8s_resource_iterator(self.delete_custom_from_yaml_object, objects)
 
     def execute(self, context) -> None:
+        self._validate_yaml_conf()
         if self.yaml_conf:
             self._delete_objects(yaml.safe_load_all(self.yaml_conf))
         elif self.yaml_conf_file and os.path.exists(self.yaml_conf_file):

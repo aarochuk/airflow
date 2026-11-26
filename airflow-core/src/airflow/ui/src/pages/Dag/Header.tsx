@@ -16,75 +16,135 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+import { useTranslation } from "react-i18next";
 import { FiBookOpen } from "react-icons/fi";
 import { useParams } from "react-router-dom";
 
-import type { DAGDetailsResponse, DAGWithLatestDagRunsResponse } from "openapi/requests/types.gen";
-import { DagIcon } from "src/assets/DagIcon";
-import ParseDag from "src/components/DagActions/ParseDag";
-import RunBackfillButton from "src/components/DagActions/RunBackfillButton";
-import DagRunInfo from "src/components/DagRunInfo";
-import DisplayMarkdownButton from "src/components/DisplayMarkdownButton";
-import { HeaderCard } from "src/components/HeaderCard";
-import { TogglePause } from "src/components/TogglePause";
+import type { DAGDetailsResponse, DagRunState } from "openapi/requests/types.gen";
 
+import { RouterLink } from "src/system-components";
+
+import { BackfillInProgressBadge } from "src/components/BackfillInProgressBadge";
+import { DeleteDagButton } from "src/components/DagActions/DeleteDagButton";
+import { FavoriteDagButton } from "src/components/DagActions/FavoriteDagButton";
+import { ParseDagButton } from "src/components/DagActions/ParseDagButton";
+import DagRunInfo from "src/components/DagRunInfo";
+import { DagVersion } from "src/components/DagVersion";
+import DisplayMarkdownButton from "src/components/DisplayMarkdownButton";
+import { DrainingBadge } from "src/components/DrainingBadge";
+import { HeaderCard } from "src/components/HeaderCard";
+import { NeedsReviewButtonWithModal } from "src/components/NeedsReviewButton";
+import { PluginActions } from "src/components/PluginActions";
+import { TeamName } from "src/components/TeamName";
+
+import { DagIcon } from "src/assets/DagIcon";
+import { usePluginActions } from "src/hooks/usePluginActions";
+import { useShowTeam } from "src/hooks/useShowTeam";
+import { formatNumber } from "src/utils";
+
+import { DagOwners } from "../DagsList/DagOwners";
 import { DagTags } from "../DagsList/DagTags";
 import { Schedule } from "../DagsList/Schedule";
+import { DeadlineAlertsBadge } from "./DeadlineAlertsBadge";
+
+type LatestRunInfo = {
+  dag_id: string;
+  end_date: string | null;
+  logical_date: string | null;
+  run_after: string;
+  run_id: string;
+  start_date: string | null;
+  state: DagRunState;
+};
 
 export const Header = ({
   dag,
-  dagWithRuns,
-  isRefreshing,
+  latestRunInfo,
 }: {
   readonly dag?: DAGDetailsResponse;
-  readonly dagWithRuns?: DAGWithLatestDagRunsResponse;
-  readonly isRefreshing?: boolean;
+  readonly latestRunInfo?: LatestRunInfo;
 }) => {
+  const { i18n, t: translate } = useTranslation(["common", "dag"]);
   // We would still like to show the dagId even if the dag object hasn't loaded yet
   const { dagId } = useParams();
-  const latestRun = dagWithRuns?.latest_dag_runs ? dagWithRuns.latest_dag_runs[0] : undefined;
+  const showTeam = useShowTeam(dag?.team_name);
+  const pluginActions = usePluginActions("dag");
+  const isStale = dag?.is_stale;
+
+  const nextRunStat = isStale
+    ? []
+    : [
+        {
+          label: translate("dagDetails.nextRun"),
+          value: dag?.is_paused ? undefined : dag?.scheduling_state === "draining" ? (
+            <DrainingBadge dagId={dag.dag_id} />
+          ) : Boolean(dag?.next_dagrun_run_after) ? (
+            <DagRunInfo
+              logicalDate={dag?.next_dagrun_logical_date}
+              runAfter={dag?.next_dagrun_run_after as string}
+            />
+          ) : undefined,
+        },
+      ];
 
   const stats = [
     {
-      label: "Schedule",
-      value: dagWithRuns === undefined ? undefined : <Schedule dag={dagWithRuns} />,
+      label: translate("dagDetails.schedule"),
+      value:
+        dag === undefined ? undefined : (
+          <Schedule
+            assetExpression={dag.asset_expression}
+            dagId={dag.dag_id}
+            timetableDescription={dag.timetable_description}
+            timetablePartitioned={dag.timetable_partitioned}
+            timetableSummary={dag.timetable_summary}
+          />
+        ),
     },
     {
-      label: "Latest Run",
+      label: translate("dagDetails.latestRun"),
       value:
-        Boolean(latestRun) && latestRun !== undefined ? (
-          <DagRunInfo
-            endDate={latestRun.end_date}
-            logicalDate={latestRun.logical_date}
-            runAfter={latestRun.run_after}
-            startDate={latestRun.start_date}
-            state={latestRun.state}
-          />
+        Boolean(latestRunInfo) && latestRunInfo !== undefined ? (
+          <RouterLink to={`/dags/${latestRunInfo.dag_id}/runs/${latestRunInfo.run_id}`}>
+            <DagRunInfo
+              endDate={latestRunInfo.end_date}
+              logicalDate={latestRunInfo.logical_date}
+              runAfter={latestRunInfo.run_after}
+              startDate={latestRunInfo.start_date}
+              state={latestRunInfo.state}
+            />
+          </RouterLink>
         ) : undefined,
     },
+    ...nextRunStat,
     {
-      label: "Next Run",
-      value: Boolean(dagWithRuns?.next_dagrun_run_after) ? (
-        <DagRunInfo
-          logicalDate={dagWithRuns?.next_dagrun_logical_date}
-          runAfter={dagWithRuns?.next_dagrun_run_after as string}
-        />
-      ) : undefined,
+      label: translate("dagDetails.activeRuns"),
+      value:
+        dag?.max_active_runs === undefined
+          ? undefined
+          : dag.max_active_runs === null
+            ? formatNumber(dag.active_runs_count ?? 0, i18n.language)
+            : `${formatNumber(dag.active_runs_count ?? 0, i18n.language)} of ${formatNumber(dag.max_active_runs, i18n.language)}`,
     },
     {
-      label: "Owner",
-      value: dag?.owners.join(", "),
+      label: translate("dagDetails.owner"),
+      value: <DagOwners ownerLinks={dag?.owner_links ?? undefined} owners={dag?.owners} />,
     },
+    ...(showTeam
+      ? [
+          {
+            label: translate("dagDetails.team"),
+            value: <TeamName teamName={dag?.team_name} />,
+          },
+        ]
+      : []),
     {
-      label: "Tags",
+      label: translate("dagDetails.tags"),
       value: <DagTags tags={dag?.tags ?? []} />,
     },
     {
-      label: "Latest DAG Version",
-      value:
-        dag?.latest_dag_version?.version_number === undefined
-          ? ""
-          : `v${dag.latest_dag_version.version_number}`,
+      label: translate("dagDetails.latestDagVersion"),
+      value: <DagVersion version={dag?.latest_dag_version} />,
     },
   ];
 
@@ -93,28 +153,41 @@ export const Header = ({
       actions={
         dag === undefined ? undefined : (
           <>
+            <DeadlineAlertsBadge dagId={dag.dag_id} />
+            <NeedsReviewButtonWithModal dagId={dag.dag_id} variant="chip" />
             {dag.doc_md === null ? undefined : (
               <DisplayMarkdownButton
-                header="Dag Documentation"
+                bg="bg"
+                header={translate("dagDetails.documentation")}
                 icon={<FiBookOpen />}
                 mdContent={dag.doc_md}
-                text="Dag Docs"
+                text={translate("dag:header.buttons.dagDocs")}
+                variant="outline"
               />
             )}
-            {dag.timetable_summary === null ? undefined : <RunBackfillButton dag={dag} />}
-            <ParseDag dagId={dag.dag_id} fileToken={dag.file_token} />
+            <FavoriteDagButton bg="bg" dagId={dag.dag_id} isFavorite={dag.is_favorite} variant="outline" />
+            {/* Deliberately shown while stale: a Dag that failed to parse or vanished from
+                its file is exactly when reparsing is worth offering. */}
+            <ParseDagButton bg="bg" dagId={dag.dag_id} fileToken={dag.file_token} variant="outline" />
+            <DeleteDagButton
+              bg="bg"
+              dagDisplayName={dag.dag_display_name}
+              dagId={dag.dag_id}
+              variant="outline"
+            />
+            <PluginActions
+              {...pluginActions}
+              buttonProps={{ bg: "bg", variant: "outline" }}
+              entity={{ dag, dagDetails: dag, destination: "dag" }}
+            />
           </>
         )
       }
       icon={<DagIcon />}
-      isRefreshing={isRefreshing}
       stats={stats}
-      subTitle={
-        dag !== undefined && (
-          <TogglePause dagDisplayName={dag.dag_display_name} dagId={dag.dag_id} isPaused={dag.is_paused} />
-        )
-      }
+      statusBadge={<BackfillInProgressBadge dagId={dagId ?? ""} />}
       title={dag?.dag_display_name ?? dagId}
+      type="dag"
     />
   );
 };

@@ -19,12 +19,21 @@ from __future__ import annotations
 
 import math
 import warnings
+from collections.abc import Iterable, Mapping
 from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
 import oracledb
 
-from airflow.providers.common.sql.hooks.sql import DbApiHook
+if TYPE_CHECKING:
+    from airflow.providers.common.compat.sdk import Connection
+    from airflow.providers.openlineage.sqlparser import DatabaseInfo
 
+from airflow.providers.common.sql.hooks.lineage import send_sql_hook_lineage
+from airflow.providers.common.sql.hooks.sql import DbApiHook
+from airflow.providers.oracle.hooks import handlers
+
+DEFAULT_DB_PORT = 1521
 PARAM_TYPES = {bool, float, int, str}
 
 
@@ -114,6 +123,20 @@ class OracleHook(DbApiHook):
         self.thick_mode_config_dir = thick_mode_config_dir
         self.fetch_decimals = fetch_decimals
         self.fetch_lobs = fetch_lobs
+        self._service_name: str | None = None
+        self._sid: str | None = None
+
+    @property
+    def service_name(self) -> str | None:
+        if self._service_name is None:
+            self._service_name = self.get_connection(self.get_conn_id()).extra_dejson.get("service_name")
+        return self._service_name
+
+    @property
+    def sid(self) -> str | None:
+        if self._sid is None:
+            self._sid = self.get_connection(self.get_conn_id()).extra_dejson.get("sid")
+        return self._sid
 
     def get_conn(self) -> oracledb.Connection:
         """
@@ -129,6 +152,16 @@ class OracleHook(DbApiHook):
               that you are connecting to (CONNECT_DATA part of TNS)
         :param sid: Oracle System ID that identifies a particular
               database on a system
+        :param wallet_location: Specify the directory where the wallet can be found.
+        :param wallet_password: the password to use to decrypt the wallet, if it is encrypted.
+            For Oracle Autonomous Database this is the password created when downloading the wallet.
+        :param ssl_server_cert_dn: Specify the distinguished name (DN) which should be matched
+            with the server. This value is ignored if the ``ssl_server_dn_match`` parameter is not
+            set to the value True.
+        :param ssl_server_dn_match: Specify whether the server certificate distinguished name
+            (DN) should be matched in addition to the regular certificate verification that is performed.
+        :param cclass:  the connection class to use for Database Resident Connection Pooling (DRCP).
+        :param pool_name: the name of the DRCP pool when using multi-pool DRCP with Oracle Database 23.4, or higher.
 
         You can set these parameters in the extra fields of your connection
         as in
@@ -142,8 +175,8 @@ class OracleHook(DbApiHook):
 
 
         """
-        conn = self.get_connection(self.oracle_conn_id)  # type: ignore[attr-defined]
-        conn_config = {"user": conn.login, "password": conn.password}
+        conn = self.get_connection(self.get_conn_id())
+        conn_config: dict[str, Any] = {"user": conn.login, "password": conn.password}
         sid = conn.extra_dejson.get("sid")
         mod = conn.extra_dejson.get("module")
         schema = conn.schema
@@ -183,7 +216,11 @@ class OracleHook(DbApiHook):
 
         # Set up DSN
         service_name = conn.extra_dejson.get("service_name")
-        port = conn.port if conn.port else 1521
+        # Fall back to conn.schema as service_name when not explicitly set in extras.
+        # The UI Schema field maps to conn.schema which is the Oracle service name.
+        if not service_name and not sid and schema:
+            service_name = schema
+        port = conn.port if conn.port else DEFAULT_DB_PORT
         if conn.host and sid and not service_name:
             conn_config["dsn"] = oracledb.makedsn(conn.host, port, sid)
         elif conn.host and service_name and not sid:
@@ -191,7 +228,7 @@ class OracleHook(DbApiHook):
         else:
             dsn = conn.extra_dejson.get("dsn")
             if dsn is None:
-                dsn = conn.host
+                dsn = conn.host or ""
                 if conn.port is not None:
                     dsn += f":{conn.port}"
                 if service_name:
@@ -201,42 +238,70 @@ class OracleHook(DbApiHook):
         if "events" in conn.extra_dejson:
             conn_config["events"] = conn.extra_dejson.get("events")
 
-        mode = conn.extra_dejson.get("mode", "").lower()
-        if mode == "sysdba":
-            conn_config["mode"] = oracledb.AUTH_MODE_SYSDBA
-        elif mode == "sysasm":
-            conn_config["mode"] = oracledb.AUTH_MODE_SYSASM
-        elif mode == "sysoper":
-            conn_config["mode"] = oracledb.AUTH_MODE_SYSOPER
-        elif mode == "sysbkp":
-            conn_config["mode"] = oracledb.AUTH_MODE_SYSBKP
-        elif mode == "sysdgd":
-            conn_config["mode"] = oracledb.AUTH_MODE_SYSDGD
-        elif mode == "syskmt":
-            conn_config["mode"] = oracledb.AUTH_MODE_SYSKMT
-        elif mode == "sysrac":
-            conn_config["mode"] = oracledb.AUTH_MODE_SYSRAC
+        # Map the connection extra "mode"/"purity" string (e.g. "sysdba") to the
+        # matching python-oracledb AuthMode/Purity enum member by name. Compare
+        # against None explicitly: Purity.DEFAULT is 0, so a truthiness check
+        # would silently drop it.
+        if mode_name := conn.extra_dejson.get("mode"):
+            auth_mode = getattr(oracledb.AuthMode, mode_name.upper(), None)
+            if auth_mode is not None:
+                conn_config["mode"] = auth_mode
 
-        purity = conn.extra_dejson.get("purity", "").lower()
-        if purity == "new":
-            conn_config["purity"] = oracledb.PURITY_NEW
-        elif purity == "self":
-            conn_config["purity"] = oracledb.PURITY_SELF
-        elif purity == "default":
-            conn_config["purity"] = oracledb.PURITY_DEFAULT
+        if purity_name := conn.extra_dejson.get("purity"):
+            purity = getattr(oracledb.Purity, purity_name.upper(), None)
+            if purity is not None:
+                conn_config["purity"] = purity
 
-        conn = oracledb.connect(**conn_config)  # type: ignore[assignment]
+        expire_time = conn.extra_dejson.get("expire_time")
+        if expire_time:
+            conn_config["expire_time"] = expire_time
+
+        for name in [
+            "wallet_location",
+            "wallet_password",
+            "ssl_server_cert_dn",
+            "ssl_server_dn_match",
+            "cclass",
+            "pool_name",
+        ]:
+            value = conn.extra_dejson.get(name)
+            if value is not None:
+                conn_config[name] = value
+
+        oracle_conn = oracledb.connect(**conn_config)
         if mod is not None:
-            conn.module = mod
+            oracle_conn.module = mod
 
         # if Connection.schema is defined, set schema after connecting successfully
         # cannot be part of conn_config
         # https://python-oracledb.readthedocs.io/en/latest/api_manual/connection.html?highlight=schema#Connection.current_schema
         # Only set schema when not using conn.schema as Service Name
         if schema and service_name:
-            conn.current_schema = schema
+            oracle_conn.current_schema = schema
 
-        return conn
+        return oracle_conn
+
+    def get_records(
+        self,
+        sql: str | list[str],
+        parameters: Iterable | Mapping[str, Any] | None = None,
+    ) -> Any:
+        """
+        Execute the sql and return a set of records.
+
+        :param sql: the sql statement to be executed (str) or a list of sql statements to execute
+        :param parameters: The parameters to render the SQL query with.
+        """
+        return self.run(sql=sql, parameters=parameters, handler=handlers.fetch_all_handler)
+
+    def get_first(self, sql: str | list[str], parameters: Iterable | Mapping[str, Any] | None = None) -> Any:
+        """
+        Execute the sql and return the first resulting row.
+
+        :param sql: the sql statement to be executed (str) or a list of sql statements to execute
+        :param parameters: The parameters to render the SQL query with.
+        """
+        return self.run(sql=sql, parameters=parameters, handler=handlers.fetch_one_handler)
 
     def insert_rows(
         self,
@@ -286,8 +351,9 @@ class OracleHook(DbApiHook):
         conn = self.get_conn()
         if self.supports_autocommit:
             self.set_autocommit(conn, False)
-        cur = conn.cursor()  # type: ignore[attr-defined]
+        cur = conn.cursor()
         i = 0
+        sql = None  # not generated unless we actually process at least one chunk
         for row in rows:
             i += 1
             lst = []
@@ -306,11 +372,16 @@ class OracleHook(DbApiHook):
             sql = f"INSERT /*+ APPEND */ INTO {table} {target_fields} VALUES ({','.join(values)})"
             cur.execute(sql)
             if i % commit_every == 0:
-                conn.commit()  # type: ignore[attr-defined]
+                conn.commit()
                 self.log.info("Loaded %s into %s rows so far", i, table)
-        conn.commit()  # type: ignore[attr-defined]
+        conn.commit()
+
+        if sql:
+            # We only send lineage once, not for each value collection, to save memory.
+            send_sql_hook_lineage(context=self, sql=sql, row_count=i)
+
         cur.close()
-        conn.close()  # type: ignore[attr-defined]
+        conn.close()
         self.log.info("Done loading. Loaded a total of %s rows", i)
 
     def bulk_insert_rows(
@@ -343,7 +414,7 @@ class OracleHook(DbApiHook):
         conn = self.get_conn()
         if self.supports_autocommit:
             self.set_autocommit(conn, False)
-        cursor = conn.cursor()  # type: ignore[attr-defined]
+        cursor = conn.cursor()
         values_base = target_fields or rows[0]
 
         if bool(sequence_column) ^ bool(sequence_name):
@@ -352,21 +423,19 @@ class OracleHook(DbApiHook):
             )
 
         if sequence_column and sequence_name:
-            prepared_stm = "insert into {tablename} {columns} values ({values})".format(
-                tablename=table,
-                columns="({})".format(", ".join([sequence_column] + target_fields))
+            columns = (
+                f"({', '.join([sequence_column] + target_fields)})"
                 if target_fields
-                else f"({sequence_column})",
-                values=", ".join(
-                    [f"{sequence_name}.NEXTVAL"] + [f":{i}" for i in range(1, len(values_base) + 1)]
-                ),
+                else f"({sequence_column})"
+            )
+            value_placeholders = ", ".join(
+                [f"{sequence_name}.NEXTVAL"] + [f":{i}" for i in range(1, len(values_base) + 1)]
             )
         else:
-            prepared_stm = "insert into {tablename} {columns} values ({values})".format(
-                tablename=table,
-                columns="({})".format(", ".join(target_fields)) if target_fields else "",
-                values=", ".join(f":{i}" for i in range(1, len(values_base) + 1)),
-            )
+            columns = f"({', '.join(target_fields)})" if target_fields else ""
+            value_placeholders = ", ".join(f":{i}" for i in range(1, len(values_base) + 1))
+        prepared_stm = f"insert into {table} {columns} values ({value_placeholders})"
+
         row_count = 0
         # Chunk the rows
         row_chunk = []
@@ -376,7 +445,7 @@ class OracleHook(DbApiHook):
             if row_count % commit_every == 0:
                 cursor.prepare(prepared_stm)
                 cursor.executemany(None, row_chunk)
-                conn.commit()  # type: ignore[attr-defined]
+                conn.commit()
                 self.log.info("[%s] inserted %s rows", table, row_count)
                 # Empty chunk
                 row_chunk = []
@@ -384,10 +453,12 @@ class OracleHook(DbApiHook):
         if row_chunk:
             cursor.prepare(prepared_stm)
             cursor.executemany(None, row_chunk)
-            conn.commit()  # type: ignore[attr-defined]
+            conn.commit()
             self.log.info("[%s] inserted %s rows", table, row_count)
+        # We only send lineage once, not for each value collection, to save memory.
+        send_sql_hook_lineage(context=self, sql=prepared_stm, row_count=row_count)
         cursor.close()
-        conn.close()  # type: ignore[attr-defined]
+        conn.close()
 
     def callproc(
         self,
@@ -443,3 +514,53 @@ class OracleHook(DbApiHook):
         )
 
         return result
+
+    def get_openlineage_database_info(self, connection: Connection) -> DatabaseInfo:
+        """Return Oracle specific information for OpenLineage."""
+        from airflow.providers.openlineage.sqlparser import DatabaseInfo
+
+        return DatabaseInfo(
+            scheme=self.get_openlineage_database_dialect(connection),
+            authority=DbApiHook.get_openlineage_authority_part(connection, default_port=DEFAULT_DB_PORT),
+            information_schema_table_name="ALL_TAB_COLUMNS",
+            information_schema_columns=[
+                "owner",
+                "table_name",
+                "column_name",
+                "column_id",
+                "data_type",
+            ],
+            database=self.service_name or self.sid,
+            normalize_name_method=lambda name: name.upper(),
+        )
+
+    def get_openlineage_database_dialect(self, _) -> str:
+        """Return database dialect."""
+        return "oracle"
+
+    def get_openlineage_default_schema(self) -> str | None:
+        """Return current schema."""
+        return self.get_first("SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM dual")[0]
+
+    def get_uri(self) -> str:
+        """Get the URI for the Oracle connection."""
+        conn = self.get_connection(self.get_conn_id())
+        login = conn.login
+        password = conn.password
+        host = conn.host
+        port = conn.port or DEFAULT_DB_PORT
+        service_name = conn.extra_dejson.get("service_name")
+        sid = conn.extra_dejson.get("sid")
+
+        if sid and service_name:
+            raise ValueError("At most one allowed for 'sid', and 'service name'.")
+
+        uri = f"oracle+oracledb://{login}:{password}@{host}:{port}"
+        if service_name:
+            uri = f"{uri}?service_name={service_name}"
+        elif sid:
+            uri = f"{uri}/{sid}"
+        elif conn.schema:
+            uri = f"{uri}/{conn.schema}"
+
+        return uri

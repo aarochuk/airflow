@@ -17,7 +17,7 @@
 #
 # This is automatically generated stub for the `common.sql` provider
 #
-# This file is generated automatically by the `update-common-sql-api stubs` pre-commit
+# This file is generated automatically by the `update-common-sql-api stubs` prek hook
 # and the .pyi file represents part of the "public" API that the
 # `common.sql` provider exposes to other providers.
 #
@@ -28,17 +28,19 @@
 # You can read more in the README_API.md file
 #
 """
-Definition of the public interface for airflow.providers.common.sql.src.airflow.providers.common.sql.sensors.sql
-isort:skip_file
+Definition of the public interface for
+airflow.providers.common.sql.src.airflow.providers.common.sql.sensors.sql.
 """
 
-from collections.abc import Mapping, Sequence
-from typing import Any, Callable
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from _typeshed import Incomplete as Incomplete
 
-from airflow.sensors.base import BaseSensorOperator as BaseSensorOperator
-from airflow.utils.context import Context as Context
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator
+from airflow.sdk import Context
+
+class SqlSensorTriggerError(AirflowException): ...
 
 class SqlSensor(BaseSensorOperator):
     template_fields: Sequence[str]
@@ -49,8 +51,10 @@ class SqlSensor(BaseSensorOperator):
     parameters: Incomplete
     success: Incomplete
     failure: Incomplete
+    selector: Incomplete
     fail_on_empty: Incomplete
     hook_params: Incomplete
+    deferrable: Incomplete
     def __init__(
         self,
         *,
@@ -59,8 +63,12 @@ class SqlSensor(BaseSensorOperator):
         parameters: Mapping[str, Any] | None = None,
         success: Callable[[Any], bool] | None = None,
         failure: Callable[[Any], bool] | None = None,
+        selector: Callable[[tuple[Any]], Any] = ...,
         fail_on_empty: bool = False,
         hook_params: Mapping[str, Any] | None = None,
+        deferrable: bool = ...,
         **kwargs,
     ) -> None: ...
     def poke(self, context: Context) -> bool: ...
+    def execute(self, context: Context) -> Any: ...
+    def execute_complete(self, context: Context, event: dict[str, Any]) -> None: ...

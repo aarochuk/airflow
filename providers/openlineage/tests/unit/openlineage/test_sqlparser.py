@@ -24,7 +24,13 @@ from openlineage.client.event_v2 import Dataset
 from openlineage.client.facet_v2 import column_lineage_dataset, schema_dataset
 from openlineage.common.sql import DbTableMeta
 
-from airflow.providers.openlineage.sqlparser import DatabaseInfo, GetTableSchemasParams, SQLParser
+from airflow.providers.common.sql.hooks.sql import DbApiHook
+from airflow.providers.openlineage.sqlparser import (
+    DatabaseInfo,
+    GetTableSchemasParams,
+    SQLParser,
+    get_openlineage_facets_with_sql,
+)
 
 DB_NAME = "FOOD_DELIVERY"
 DB_SCHEMA_NAME = "PUBLIC"
@@ -356,3 +362,211 @@ class TestSQLParser:
             }
         )
         assert metadata.job_facets["sql"].query.replace(" ", "") == formatted_sql.replace(" ", "")
+
+    def test_generate_openlineage_metadata_from_sql_with_db_error(self):
+        parser = SQLParser(default_schema="ANOTHER_SCHEMA")
+        db_info = DatabaseInfo(scheme="myscheme", authority="host:port")
+
+        hook = MagicMock()
+
+        sql = """INSERT INTO popular_orders_day_of_week (order_day_of_week)
+        SELECT EXTRACT(ISODOW FROM order_placed_on) AS order_day_of_week
+        FROM top_delivery_times -- irrelevant comment"""
+
+        hook.get_conn.side_effect = RuntimeError("Simulated DB error")
+
+        formatted_sql = """INSERT INTO popular_orders_day_of_week (order_day_of_week)
+        SELECT EXTRACT(ISODOW FROM order_placed_on) AS order_day_of_week
+        FROM top_delivery_times"""
+        expected_schema = "ANOTHER_SCHEMA"
+        metadata = parser.generate_openlineage_metadata_from_sql(
+            sql=sql, hook=hook, database_info=db_info, use_connection=True
+        )
+
+        assert metadata.inputs == [
+            Dataset(
+                namespace="myscheme://host:port",
+                name=f"{expected_schema}.top_delivery_times",
+                facets={},
+            )
+        ]
+        assert len(metadata.outputs) == 1
+        assert metadata.outputs[0].namespace == "myscheme://host:port"
+        assert metadata.outputs[0].name == f"{expected_schema}.popular_orders_day_of_week"
+        assert len(metadata.outputs[0].facets) == 1
+        assert metadata.outputs[0].facets[
+            "columnLineage"
+        ] == column_lineage_dataset.ColumnLineageDatasetFacet(
+            fields={
+                "order_day_of_week": column_lineage_dataset.Fields(
+                    inputFields=[
+                        column_lineage_dataset.InputField(
+                            namespace="myscheme://host:port",
+                            name=f"{expected_schema}.top_delivery_times",
+                            field="order_placed_on",
+                        )
+                    ],
+                    transformationDescription="",
+                    transformationType="",
+                )
+            }
+        )
+        assert metadata.job_facets["sql"].query.replace(" ", "") == formatted_sql.replace(" ", "")
+
+
+class TestGetOpenlineageFacetsWithSql:
+    def test_returns_none_when_hook_has_no_database_info_method(self):
+        hook = MagicMock(spec=["get_connection"])
+
+        result = get_openlineage_facets_with_sql(hook=hook, sql="SELECT 1", conn_id="conn", database=None)
+        assert result is None
+
+    @mock.patch("airflow.providers.openlineage.sqlparser.log", autospec=True)
+    def test_error_from_database_info_is_logged_as_warning(self, mock_log):
+        hook = MagicMock(spec=DbApiHook)
+        hook.get_openlineage_database_info.side_effect = AttributeError("broken import")
+
+        result = get_openlineage_facets_with_sql(hook=hook, sql="SELECT 1", conn_id="conn", database=None)
+
+        assert result is None
+        mock_log.warning.assert_called_once()
+        assert mock_log.warning.call_args.args[1] == "conn"
+        assert str(mock_log.warning.call_args.args[2]) == "broken import"
+
+    @mock.patch("airflow.providers.openlineage.sqlparser.log", autospec=True)
+    def test_error_from_dialect_is_logged_as_warning(self, mock_log):
+        hook = MagicMock(spec=DbApiHook)
+        hook.get_openlineage_database_info.return_value = DatabaseInfo(scheme="myscheme")
+        hook.get_openlineage_database_dialect.side_effect = AttributeError("broken import")
+
+        result = get_openlineage_facets_with_sql(hook=hook, sql="SELECT 1", conn_id="conn", database=None)
+
+        assert result is None
+        mock_log.warning.assert_called_once()
+        assert mock_log.warning.call_args.args[1] == "conn"
+        assert str(mock_log.warning.call_args.args[2]) == "broken import"
+
+    def test_prefetched_sql_parser_skips_dialect_lookup(self):
+        hook = MagicMock(spec=DbApiHook)
+        sql_parser = MagicMock(spec=SQLParser)
+
+        result = get_openlineage_facets_with_sql(
+            hook=hook,
+            sql="SELECT 1",
+            conn_id="conn",
+            database=None,
+            use_connection=False,
+            connection=MagicMock(),
+            database_info=DatabaseInfo(scheme="myscheme"),
+            sql_parser=sql_parser,
+        )
+
+        hook.get_openlineage_database_dialect.assert_not_called()
+        sql_parser.generate_openlineage_metadata_from_sql.assert_called_once()
+        assert result is sql_parser.generate_openlineage_metadata_from_sql.return_value
+
+    def test_returns_none_when_no_dialect(self):
+        hook = MagicMock(spec=["get_connection", "get_openlineage_database_info"])
+        hook.get_openlineage_database_info.return_value = DatabaseInfo(scheme="myscheme")
+
+        result = get_openlineage_facets_with_sql(hook=hook, sql="SELECT 1", conn_id="conn", database=None)
+        assert result is None
+
+    @mock.patch("airflow.providers.openlineage.sqlparser.SQLParser.generate_openlineage_metadata_from_sql")
+    def test_use_connection_false_skips_sqlalchemy_engine(self, mock_generate):
+        hook = MagicMock()
+        db_info = DatabaseInfo(scheme="myscheme", authority="host:port")
+        hook.get_openlineage_database_info.return_value = db_info
+        hook.get_openlineage_database_dialect.return_value = "generic"
+        hook.get_openlineage_default_schema.return_value = "public"
+        mock_generate.return_value = MagicMock()
+
+        get_openlineage_facets_with_sql(
+            hook=hook, sql="SELECT 1", conn_id="conn", database=None, use_connection=False
+        )
+
+        hook.get_sqlalchemy_engine.assert_not_called()
+        mock_generate.assert_called_once()
+        assert mock_generate.call_args.kwargs["sqlalchemy_engine"] is None
+
+    @mock.patch("airflow.providers.openlineage.sqlparser.SQLParser.generate_openlineage_metadata_from_sql")
+    def test_use_connection_true_attempts_sqlalchemy_engine(self, mock_generate):
+        hook = MagicMock()
+        db_info = DatabaseInfo(scheme="myscheme", authority="host:port")
+        hook.get_openlineage_database_info.return_value = db_info
+        hook.get_openlineage_database_dialect.return_value = "generic"
+        hook.get_openlineage_default_schema.return_value = "public"
+        mock_generate.return_value = MagicMock()
+
+        get_openlineage_facets_with_sql(
+            hook=hook, sql="SELECT 1", conn_id="conn", database=None, use_connection=True
+        )
+
+        hook.get_sqlalchemy_engine.assert_called_once()
+
+    @mock.patch("airflow.providers.openlineage.sqlparser.SQLParser.generate_openlineage_metadata_from_sql")
+    def test_connection_provided_skips_get_connection(self, mock_generate):
+        """When a pre-fetched connection is passed, hook.get_connection is not called."""
+        hook = MagicMock()
+        db_info = DatabaseInfo(scheme="myscheme", authority="host:port")
+        hook.get_openlineage_database_info.return_value = db_info
+        hook.get_openlineage_database_dialect.return_value = "generic"
+        hook.get_openlineage_default_schema.return_value = "public"
+        mock_generate.return_value = MagicMock()
+
+        prefetched_connection = MagicMock()
+        get_openlineage_facets_with_sql(
+            hook=hook,
+            sql="SELECT 1",
+            conn_id="conn",
+            database=None,
+            use_connection=False,
+            connection=prefetched_connection,
+        )
+
+        hook.get_connection.assert_not_called()
+        hook.get_openlineage_database_info.assert_called_once_with(prefetched_connection)
+
+    @mock.patch("airflow.providers.openlineage.sqlparser.SQLParser.generate_openlineage_metadata_from_sql")
+    def test_database_info_provided_skips_get_openlineage_database_info(self, mock_generate):
+        """When pre-fetched database_info is passed, hook.get_openlineage_database_info is not called."""
+        hook = MagicMock()
+        prefetched_db_info = DatabaseInfo(scheme="myscheme", authority="host:port")
+        hook.get_openlineage_database_dialect.return_value = "generic"
+        hook.get_openlineage_default_schema.return_value = "public"
+        mock_generate.return_value = MagicMock()
+
+        get_openlineage_facets_with_sql(
+            hook=hook,
+            sql="SELECT 1",
+            conn_id="conn",
+            database=None,
+            use_connection=False,
+            database_info=prefetched_db_info,
+        )
+
+        hook.get_connection.assert_called_once_with("conn")
+        hook.get_openlineage_database_info.assert_not_called()
+
+    @mock.patch("airflow.providers.openlineage.sqlparser.SQLParser.generate_openlineage_metadata_from_sql")
+    def test_both_connection_and_database_info_provided_skips_hook_lookups(self, mock_generate):
+        """When both are passed, neither hook.get_connection nor get_openlineage_database_info is called."""
+        hook = MagicMock()
+        hook.get_openlineage_database_dialect.return_value = "generic"
+        hook.get_openlineage_default_schema.return_value = "public"
+        mock_generate.return_value = MagicMock()
+
+        prefetched_connection = MagicMock()
+        prefetched_db_info = DatabaseInfo(scheme="myscheme", authority="host:port")
+        get_openlineage_facets_with_sql(
+            hook=hook,
+            sql="SELECT 1",
+            conn_id="conn",
+            database=None,
+            use_connection=False,
+            connection=prefetched_connection,
+            database_info=prefetched_db_info,
+        )
+
+        hook.get_connection.assert_not_called()
+        hook.get_openlineage_database_info.assert_not_called()

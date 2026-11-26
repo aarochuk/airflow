@@ -16,10 +16,12 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Heading, useDisclosure } from "@chakra-ui/react";
-import { FiPlusCircle } from "react-icons/fi";
+import { Button, useDisclosure } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
+import { MdAdd } from "react-icons/md";
 
-import { Button, Dialog, Toaster } from "src/components/ui";
+import { Modal, Toaster } from "src/system-components";
+
 import { useAddVariable } from "src/queries/useAddVariable";
 
 import VariableForm, { type VariableBody } from "./VariableForm";
@@ -29,6 +31,7 @@ type Props = {
 };
 
 const AddVariableButton = ({ disabled }: Props) => {
+  const { t: translate } = useTranslation("admin");
   const { onClose, onOpen, open } = useDisclosure();
   const { addVariable, error, isPending, setError } = useAddVariable({
     onSuccessConfirm: onClose,
@@ -37,6 +40,7 @@ const AddVariableButton = ({ disabled }: Props) => {
   const initialVariableValue: VariableBody = {
     description: "",
     key: "",
+    team_name: "",
     value: "",
   };
 
@@ -48,29 +52,19 @@ const AddVariableButton = ({ disabled }: Props) => {
   return (
     <>
       <Toaster />
-      <Button colorPalette="blue" disabled={disabled} onClick={onOpen}>
-        <FiPlusCircle /> Add Variable
+      <Button disabled={disabled} onClick={onOpen}>
+        <MdAdd /> {translate("variables.add")}
       </Button>
 
-      <Dialog.Root onOpenChange={handleClose} open={open} size="xl">
-        <Dialog.Content backdrop>
-          <Dialog.Header>
-            <Heading size="xl">Add Variable</Heading>
-          </Dialog.Header>
-
-          <Dialog.CloseTrigger />
-
-          <Dialog.Body>
-            <VariableForm
-              error={error}
-              initialVariable={initialVariableValue}
-              isPending={isPending}
-              manageMutate={addVariable}
-              setError={setError}
-            />
-          </Dialog.Body>
-        </Dialog.Content>
-      </Dialog.Root>
+      <Modal onOpenChange={handleClose} open={open} title={translate("variables.add")}>
+        <VariableForm
+          error={error}
+          initialVariable={initialVariableValue}
+          isPending={isPending}
+          manageMutate={addVariable}
+          setError={setError}
+        />
+      </Modal>
     </>
   );
 };

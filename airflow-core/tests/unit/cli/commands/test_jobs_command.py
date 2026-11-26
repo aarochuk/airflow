@@ -16,17 +16,15 @@
 # under the License.
 from __future__ import annotations
 
-import contextlib
-from io import StringIO
-
 import pytest
 
+from airflow._shared.timezones import timezone
 from airflow.cli import cli_parser
 from airflow.cli.commands import jobs_command
-from airflow.jobs.job import Job
+from airflow.jobs.job import EXECUTOR_JOB_TYPE, Job, JobState
 from airflow.jobs.scheduler_job_runner import SchedulerJobRunner
 from airflow.utils.session import create_session
-from airflow.utils.state import JobState, State
+from airflow.utils.state import State
 
 from tests_common.test_utils.db import clear_db_jobs
 
@@ -45,7 +43,7 @@ class TestCliConfigList:
     def teardown_method(self) -> None:
         clear_db_jobs()
 
-    def test_should_report_success_for_one_working_scheduler(self):
+    def test_should_report_success_for_one_working_scheduler(self, stdout_capture):
         with create_session() as session:
             self.scheduler_job = Job()
             self.job_runner = SchedulerJobRunner(job=self.scheduler_job)
@@ -54,11 +52,11 @@ class TestCliConfigList:
             session.commit()
             self.scheduler_job.heartbeat(heartbeat_callback=self.job_runner.heartbeat_callback)
 
-        with contextlib.redirect_stdout(StringIO()) as temp_stdout:
+        with stdout_capture as temp_stdout:
             jobs_command.check(self.parser.parse_args(["jobs", "check", "--job-type", "SchedulerJob"]))
         assert "Found one alive job." in temp_stdout.getvalue()
 
-    def test_should_report_success_for_one_working_scheduler_with_hostname(self):
+    def test_should_report_success_for_one_working_scheduler_with_hostname(self, stdout_capture):
         with create_session() as session:
             self.scheduler_job = Job()
             self.job_runner = SchedulerJobRunner(job=self.scheduler_job)
@@ -68,7 +66,7 @@ class TestCliConfigList:
             session.commit()
             self.scheduler_job.heartbeat(heartbeat_callback=self.job_runner.heartbeat_callback)
 
-        with contextlib.redirect_stdout(StringIO()) as temp_stdout:
+        with stdout_capture as temp_stdout:
             jobs_command.check(
                 self.parser.parse_args(
                     ["jobs", "check", "--job-type", "SchedulerJob", "--hostname", "HOSTNAME"]
@@ -76,7 +74,32 @@ class TestCliConfigList:
             )
         assert "Found one alive job." in temp_stdout.getvalue()
 
-    def test_should_report_success_for_ha_schedulers(self):
+    def test_without_job_type_ignores_executor_job_rows_on_the_same_host(self, stdout_capture):
+        with create_session() as session:
+            self.scheduler_job = Job()
+            self.job_runner = SchedulerJobRunner(job=self.scheduler_job)
+            self.scheduler_job.state = State.RUNNING
+            self.scheduler_job.hostname = "HOSTNAME"
+            session.add(self.scheduler_job)
+            session.commit()
+            self.scheduler_job.heartbeat(heartbeat_callback=self.job_runner.heartbeat_callback)
+
+            executor_job = Job(
+                job_type=EXECUTOR_JOB_TYPE,
+                state=State.RUNNING,
+                hostname="HOSTNAME",
+                latest_heartbeat=timezone.utcnow(),
+            )
+            session.add(executor_job)
+            session.commit()
+
+        with stdout_capture as temp_stdout:
+            jobs_command.check(
+                self.parser.parse_args(["jobs", "check", "--hostname", "HOSTNAME", "--limit", "0"])
+            )
+        assert "Found one alive job." in temp_stdout.getvalue()
+
+    def test_should_report_success_for_ha_schedulers(self, stdout_capture):
         scheduler_jobs = []
         job_runners = []
         with create_session() as session:
@@ -89,10 +112,27 @@ class TestCliConfigList:
                 job_runners.append(job_runner)
             session.commit()
             scheduler_job.heartbeat(heartbeat_callback=job_runner.heartbeat_callback)
-        with contextlib.redirect_stdout(StringIO()) as temp_stdout:
+        with stdout_capture as temp_stdout:
             jobs_command.check(
                 self.parser.parse_args(
                     ["jobs", "check", "--job-type", "SchedulerJob", "--limit", "100", "--allow-multiple"]
+                )
+            )
+        assert "Found 3 alive jobs." in temp_stdout.getvalue()
+
+    def test_should_report_success_for_ha_schedulers_with_limit_disabled(self, stdout_capture):
+        with create_session() as session:
+            for _ in range(3):
+                scheduler_job = Job()
+                job_runner = SchedulerJobRunner(job=scheduler_job)
+                scheduler_job.state = State.RUNNING
+                session.add(scheduler_job)
+            session.commit()
+            scheduler_job.heartbeat(heartbeat_callback=job_runner.heartbeat_callback)
+        with stdout_capture as temp_stdout:
+            jobs_command.check(
+                self.parser.parse_args(
+                    ["jobs", "check", "--job-type", "SchedulerJob", "--limit", "0", "--allow-multiple"]
                 )
             )
         assert "Found 3 alive jobs." in temp_stdout.getvalue()

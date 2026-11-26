@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -34,6 +33,18 @@ can check whether your problem is fixed.
    * Clean up temp Python files
    * Execute ``breeze down``
    * Cleanup build cache and execute ``breeze cleanup``. Breeze will ask you to confirm each step.
+
+     Cleanup can remove containers, including running ones, belonging to deleted Git worktrees,
+     then prune unused Breeze volumes across all Compose projects. Breeze's Compose containers,
+     volumes, and networks carry ``org.apache.airflow.breeze=true``. Linked worktrees also record their
+     absolute path in ``org.apache.airflow.breeze.worktree``; the primary checkout uses an empty value.
+     Shared cache volumes and shared networks have no worktree owner. Resources also record an
+     id of the machine that created them in ``org.apache.airflow.breeze.host`` (stored in
+     ``~/.config/breeze/host-id``), and worktrees are only checked for resources created on the machine running Breeze.
+
+     Existing volumes keep their original labels. Cleanup retains support for the old
+     ``com.docker.compose.project=breeze`` label, but older volumes from custom projects without
+     the Breeze label require manual removal.
 
 2. Git fetch the origin and git rebase the current branch with main branch.
 3. Restart your Docker Engine and try again.
@@ -83,7 +94,7 @@ describe your problem.
     stated in `This comment <https://github.com/moby/moby/issues/43361#issuecomment-1227617516>`_ and allows to
     run Breeze with no problems.
 
-Cannot import name 'cache' or Python >=3.9 required
+Cannot import name 'cache' or Python >=3.11 required
 ---------------------------------------------------
 
 When you see this error:
@@ -96,33 +107,31 @@ or
 
 .. code-block::
 
-    ERROR: Package 'blacken-docs' requires a different Python: 3.8.18 not in '>=3.9'
+    ERROR: Package 'blacken-docs' requires a different Python: 3.8.18 not in '>=3.11'
 
 
-It means that your pre-commit hook is installed with (already End-Of-Life) Python 3.8 and you should reinstall
-it and clean pre-commit cache.
+It means that your prek hook is installed with (already End-Of-Life) Python 3.8 and you should reinstall
+it and clean prek cache.
 
-This can be done with ``uv tool`` to install ``pre-commit``)
+This can be done with ``uv tool`` to install ``prek``)
 
 .. code-block:: bash
 
-    uv tool uninstall pre-commit
-    uv tool install pre-commit --python 3.9 --force --with pre-commit-uv
-    pre-commit clean
-    pre-commit install
+    uv tool uninstall prek
+    uv tool install prek --python 3.11 --force
+    prek clean
+    prek install
 
 You can also use ``pipx``
 
 .. code-block:: bash
 
-    pipx uninstall pre-commit
-    pipx install pre-commit --python $(which python3.9) --force
-    # This one allows pre-commit to use uv for venvs installed by pre-commit
-    pipx inject pre-commit pre-commit-uv  # optionally if you want to use uv to install virtualenvs
-    pre-commit clean
-    pre-commit install
+    pipx uninstall prek
+    pipx install prek --python $(which python3.11) --force
+    prek clean
+    prek install
 
-If you installed ``pre-commit`` differently, you should remove and reinstall
+If you installed ``prek`` differently, you should remove and reinstall
 it (and clean cache) following the way you installed it.
 
 
@@ -132,7 +141,7 @@ Bad Interpreter Error with ``pipx``
 If you are experiencing bad interpreter errors
 ``zsh: /Users/eladkal/.local/bin/breeze: bad interpreter: /Users/eladkal/.local/pipx/venvs/apache-airflow-breeze/bin/python: no such file or directory``
 
-try to run ``pipx list`` to view which packages has bad interpreter (it can be more than just breeze, for example  pre-commit)
+try to run ``pipx list`` to view which packages has bad interpreter (it can be more than just breeze, for example  prek)
 you can fix these errors by running ``pipx reinstall-all``
 
 ETIMEDOUT Error
@@ -170,7 +179,7 @@ When running ``breeze start-airflow``, either normally or in ``dev-mode``, the f
 
     The asset compilation failed. Exiting.
 
-    [INFO] Locking pre-commit directory
+    [INFO] Locking prek directory
 
     Error 1 returned
 

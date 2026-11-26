@@ -22,9 +22,26 @@ description: |
     `Apache Pinot <https://pinot.apache.org/>`__
 
 state: ready
-source-date-epoch: 1743477784
-# note that those versions are maintained by release manager - do not update them manually
+lifecycle: production
+source-date-epoch: 1791328844
+# Note that those versions are maintained by release manager - do not update them manually
+# with the exception of case where other provider in sources has >= new provider version.
+# In such case adding >= NEW_VERSION and bumping to NEW_VERSION in a provider have
+# to be done in the same PR
 versions:
+  - 4.10.4
+  - 4.10.3
+  - 4.10.2
+  - 4.10.1
+  - 4.10.0
+  - 4.9.2
+  - 4.9.1
+  - 4.9.0
+  - 4.8.4
+  - 4.8.3
+  - 4.8.2
+  - 4.8.1
+  - 4.8.0
   - 4.7.0
   - 4.6.0
   - 4.5.1
@@ -69,6 +86,8 @@ hooks:
 
 connection-types:
   - hook-class-name: airflow.providers.apache.pinot.hooks.pinot.PinotDbApiHook
+    hook-name: "Pinot Broker"
     connection-type: pinot
   - hook-class-name: airflow.providers.apache.pinot.hooks.pinot.PinotAdminHook
+    hook-name: "Pinot Admin"
     connection-type: pinot_admin

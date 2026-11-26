@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Heading } from "@chakra-ui/react";
+import { Box, Heading, useToken } from "@chakra-ui/react";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -25,17 +25,23 @@ import {
   LineElement,
   BarElement,
   Filler,
+  Legend,
   Tooltip,
 } from "chart.js";
-import type { PartialEventContext } from "chartjs-plugin-annotation";
 import annotationPlugin from "chartjs-plugin-annotation";
 import dayjs from "dayjs";
 import { Bar } from "react-chartjs-2";
+import { useTranslation } from "react-i18next";
+import { useNavigate } from "react-router-dom";
 
-import type { TaskInstanceResponse, DAGRunResponse } from "openapi/requests/types.gen";
-import { system } from "src/theme";
-import { pluralize } from "src/utils";
-import { getDuration } from "src/utils/datetime_utils";
+import type { TaskInstanceResponse, GridRunsResponse } from "openapi/requests/types.gen";
+
+import { useTimezone } from "src/context/timezone";
+import { getComputedCSSVariableValue } from "src/theme";
+import { useDurationFormat } from "src/utils";
+import { formatDate, getDurationTickStep, getElapsedSeconds } from "src/utils/datetimeUtils";
+import { buildTaskInstanceUrl } from "src/utils/links";
+import { median } from "src/utils/median";
 
 ChartJS.register(
   CategoryScale,
@@ -44,126 +50,238 @@ ChartJS.register(
   BarElement,
   LineElement,
   Filler,
+  Legend,
   Tooltip,
   annotationPlugin,
 );
 
-const average = (ctx: PartialEventContext, index: number) => {
-  const values: Array<number> | undefined = ctx.chart.data.datasets[index]?.data as Array<number> | undefined;
+const CHART_HEIGHT = "280px";
 
-  return values === undefined ? 0 : values.reduce((initial, next) => initial + next, 0) / values.length;
+type RunResponse = GridRunsResponse | TaskInstanceResponse;
+
+const getQueuedDuration = (entry: RunResponse, kind: "Dag Run" | "Task Instance") => {
+  if (kind === "Dag Run") {
+    const run = entry as GridRunsResponse;
+
+    return run.queued_at !== null && run.start_date !== null && run.queued_at < run.start_date
+      ? (getElapsedSeconds(run.queued_at, run.start_date) ?? 0)
+      : 0;
+  }
+
+  const taskInstance = entry as TaskInstanceResponse;
+
+  return taskInstance.queued_when !== null &&
+    taskInstance.start_date !== null &&
+    taskInstance.queued_when < taskInstance.start_date
+    ? (getElapsedSeconds(taskInstance.queued_when, taskInstance.start_date) ?? 0)
+    : 0;
 };
 
-type RunResponse = DAGRunResponse | TaskInstanceResponse;
+const getTickLabelFormat = (entries: Array<RunResponse>): string => {
+  if (entries.length < 2) {
+    return "HH:mm:ss";
+  }
+
+  const first = dayjs(entries[0]?.run_after);
+  const last = dayjs(entries[entries.length - 1]?.run_after);
+
+  if (!first.isValid() || !last.isValid()) {
+    return "MMM DD";
+  }
+
+  const diffInDays = Math.abs(last.diff(first, "day"));
+
+  return diffInDays < 1 ? "HH:mm:ss" : "MMM DD HH:mm";
+};
 
 export const DurationChart = ({
   entries,
+  isAutoRefreshing = false,
   kind,
 }: {
   readonly entries: Array<RunResponse> | undefined;
+  readonly isAutoRefreshing?: boolean;
   readonly kind: "Dag Run" | "Task Instance";
 }) => {
+  const { t: translate } = useTranslation(["components", "common"]);
+  const { renderDuration } = useDurationFormat();
+  const navigate = useNavigate();
+  const { selectedTimezone } = useTimezone();
+  const [queuedColorToken] = useToken("colors", ["queued.solid"]);
+
+  // Get states and create color tokens for them
+  const states = entries?.map((entry) => entry.state).filter(Boolean) ?? [];
+  const stateColorTokens = useToken(
+    "colors",
+    states.map((state) => `${state}.solid`),
+  );
+
   if (!entries) {
     return undefined;
   }
 
-  const runAnnotation = {
-    borderColor: "green",
-    borderWidth: 1,
-    label: {
-      content: (ctx: PartialEventContext) => average(ctx, 1).toFixed(2),
-      display: true,
-      position: "end",
-    },
-    scaleID: "y",
-    value: (ctx: PartialEventContext) => average(ctx, 1),
-  };
+  // Create a mapping of state to color for easy lookup
+  const stateColorMap: Record<string, string> = {};
 
-  const queuedAnnotation = {
+  states.forEach((state, index) => {
+    if (state) {
+      stateColorMap[state] = getComputedCSSVariableValue(stateColorTokens[index] ?? "oklch(0.5 0 0)");
+    }
+  });
+
+  const queuedDurations = entries.map((entry) => getQueuedDuration(entry, kind));
+  const runDurations = entries.map((entry) =>
+    entry.start_date === null ? 0 : (getElapsedSeconds(entry.start_date, entry.end_date) ?? 0),
+  );
+  // Bars stack queued under run, so the reference line tracks the same total the
+  // reader sees at the top of each bar.
+  const totalDurations = runDurations.map((duration, index) => duration + (queuedDurations[index] ?? 0));
+  const medianTotal = median(totalDurations);
+
+  const medianAnnotation = {
     borderColor: "grey",
+    borderDash: [6, 4],
     borderWidth: 1,
     label: {
-      content: (ctx: PartialEventContext) => average(ctx, 0).toFixed(2),
+      content: translate("durationChart.medianTotalDuration", {
+        duration: renderDuration(medianTotal) ?? "0s",
+      }),
       display: true,
-      position: "end",
+      position: "start",
     },
     scaleID: "y",
-    value: (ctx: PartialEventContext) => average(ctx, 0),
+    value: medianTotal,
   };
 
   return (
     <Box>
       <Heading pb={2} size="sm" textAlign="center">
-        Last {pluralize(kind, entries.length)}
+        {kind === "Dag Run"
+          ? translate("durationChart.lastDagRun", { count: entries.length })
+          : translate("durationChart.lastTaskInstance", { count: entries.length })}
       </Heading>
-      <Bar
-        data={{
-          datasets: [
-            {
-              backgroundColor: system.tokens.categoryMap.get("colors")?.get("queued.600")?.value as string,
-              data: entries.map((entry: RunResponse) => {
-                switch (kind) {
-                  case "Dag Run": {
-                    const run = entry as DAGRunResponse;
+      {/* Height is fixed because the chart now flexes horizontally: with Chart.js'
+          default 2:1 aspect ratio a wide monitor would otherwise scale it past
+          1000px tall. */}
+      <Box height={CHART_HEIGHT}>
+        <Bar
+          data={{
+            datasets: [
+              {
+                backgroundColor: getComputedCSSVariableValue(queuedColorToken ?? "oklch(0.5 0 0)"),
+                data: queuedDurations,
+                label: translate("durationChart.queuedDuration"),
+              },
+              {
+                backgroundColor: entries.map(
+                  (entry: RunResponse) =>
+                    (entry.state ? stateColorMap[entry.state] : undefined) ?? "oklch(0.5 0 0)",
+                ),
+                data: runDurations,
+                label: translate("durationChart.runDuration"),
+              },
+            ],
+            labels: entries.map((entry: RunResponse) => formatDate(entry.run_after, selectedTimezone)),
+          }}
+          datasetIdKey="id"
+          options={{
+            animation: !isAutoRefreshing && undefined,
+            maintainAspectRatio: false,
+            onClick: (_event, elements) => {
+              const [element] = elements;
 
-                    return run.queued_at !== null && run.start_date !== null && run.queued_at < run.start_date
-                      ? Number(getDuration(run.queued_at, run.start_date))
-                      : 0;
-                  }
-                  case "Task Instance": {
-                    const taskInstance = entry as TaskInstanceResponse;
+              if (!element) {
+                return;
+              }
 
-                    return taskInstance.queued_when !== null &&
-                      taskInstance.start_date !== null &&
-                      taskInstance.queued_when < taskInstance.start_date
-                      ? Number(getDuration(taskInstance.queued_when, taskInstance.start_date))
-                      : 0;
-                  }
-                  default:
-                    return 0;
+              switch (kind) {
+                case "Dag Run": {
+                  const entry = entries[element.index] as GridRunsResponse | undefined;
+                  const baseUrl = `/dags/${entry?.dag_id}/runs/${entry?.run_id}`;
+
+                  void Promise.resolve(navigate(baseUrl));
+                  break;
                 }
-              }),
-              label: "Queued duration",
-            },
-            {
-              backgroundColor: entries.map(
-                (entry: RunResponse) =>
-                  system.tokens.categoryMap.get("colors")?.get(`${entry.state}.600`)?.value as string,
-              ),
-              data: entries.map((entry: RunResponse) =>
-                entry.start_date === null ? 0 : Number(getDuration(entry.start_date, entry.end_date)),
-              ),
-              label: "Run duration",
-            },
-          ],
-          labels: entries.map((entry: RunResponse) => dayjs(entry.run_after).format("YYYY-MM-DD, hh:mm:ss")),
-        }}
-        datasetIdKey="id"
-        options={{
-          plugins: {
-            annotation: {
-              annotations: {
-                queuedAnnotation,
-                runAnnotation,
-              },
-            },
-          },
-          responsive: true,
-          scales: {
-            x: {
-              stacked: true,
-              ticks: {
-                maxTicksLimit: 3,
-              },
-              title: { align: "end", display: true, text: "Run After" },
-            },
+                case "Task Instance": {
+                  const entry = entries[element.index] as TaskInstanceResponse | undefined;
 
-            y: {
-              title: { align: "end", display: true, text: "Duration (seconds)" },
+                  if (entry === undefined) {
+                    break;
+                  }
+
+                  const baseUrl = buildTaskInstanceUrl({
+                    currentPathname: location.pathname,
+                    dagId: entry.dag_id,
+                    isMapped: entry.map_index >= 0,
+                    mapIndex: entry.map_index.toString(),
+                    runId: entry.dag_run_id,
+                    taskId: entry.task_id,
+                  });
+                  const query =
+                    entry.region_id === undefined
+                      ? undefined
+                      : new URLSearchParams({
+                          region_id: entry.region_id,
+                          region_index: String(entry.region_index),
+                          try_number: String(entry.try_number),
+                        });
+
+                  void Promise.resolve(navigate(query === undefined ? baseUrl : `${baseUrl}?${query}`));
+                  break;
+                }
+                default:
+              }
             },
-          },
-        }}
-      />
+            onHover: (_event, elements, chart) => {
+              chart.canvas.style.cursor = elements.length > 0 ? "pointer" : "default";
+            },
+            plugins: {
+              annotation: {
+                annotations: {
+                  medianAnnotation,
+                },
+              },
+              legend: {
+                display: true,
+                position: "bottom",
+              },
+              tooltip: {
+                callbacks: {
+                  label: (context) => {
+                    const datasetLabel = context.dataset.label ?? "";
+
+                    const formatted = renderDuration(context.parsed.y) ?? "0s";
+
+                    return datasetLabel ? `${datasetLabel}: ${formatted}` : formatted;
+                  },
+                },
+              },
+            },
+            responsive: true,
+            scales: {
+              x: {
+                stacked: true,
+                ticks: {
+                  callback: (_value, index) =>
+                    formatDate(entries[index]?.run_after, selectedTimezone, getTickLabelFormat(entries)),
+                  maxTicksLimit: 3,
+                },
+                title: { align: "end", display: true, text: translate("common:dagRun.runAfter") },
+              },
+              y: {
+                beginAtZero: true,
+                stacked: true,
+                ticks: {
+                  callback: (value) =>
+                    renderDuration(typeof value === "number" ? value : Number(value)) ?? "0s",
+                  stepSize: getDurationTickStep(Math.max(...totalDurations, 0)),
+                },
+                title: { align: "end", display: true, text: translate("common:duration") },
+              },
+            },
+          }}
+        />
+      </Box>
     </Box>
   );
 };

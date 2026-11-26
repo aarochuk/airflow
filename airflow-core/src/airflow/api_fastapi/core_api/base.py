@@ -17,9 +17,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar, Union, get_args, get_origin
 
-from pydantic import BaseModel as PydanticBaseModel, ConfigDict
+from pydantic import BaseModel as PydanticBaseModel, ConfigDict, create_model
 
 if TYPE_CHECKING:
     from sqlalchemy.sql import Select
@@ -41,12 +41,35 @@ class StrictBaseModel(BaseModel):
     """
     StrictBaseModel is a base Pydantic model for REST API that does not allow any extra fields.
 
-    Use this class for models that should not have any extra fields in the payload.
+    Use this class for request bodies only. A response model is instantiated from a
+    source object that holds more than the model returns, which ``extra="forbid"``
+    rejects; it also sets ``additionalProperties: false`` in the spec, which makes
+    generated clients such as airflowctl reject fields that a newer server adds.
 
     :meta private:
     """
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True, extra="forbid")
+
+
+def make_partial_model(model: type[PydanticBaseModel]) -> type[PydanticBaseModel]:
+    """Create a version of a Pydantic model where all fields are Optional with default=None."""
+    field_overrides: dict = {}
+    for field_name, field_info in model.model_fields.items():
+        ann = field_info.annotation
+        origin = get_origin(ann)
+        if not (origin is Union and type(None) in get_args(ann)):
+            ann = ann | None  # type: ignore[operator, assignment]
+        new_info = field_info._copy()
+        new_info.default = None
+        new_info._attributes_set["default"] = None
+        field_overrides[field_name] = (ann, new_info)
+
+    return create_model(
+        f"{model.__name__}Partial",
+        __base__=model,
+        **field_overrides,
+    )
 
 
 class OrmClause(Generic[T], ABC):

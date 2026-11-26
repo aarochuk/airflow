@@ -29,6 +29,10 @@ Prerequisite
   and :doc:`JDBC connection <apache-airflow-providers-jdbc:connections/jdbc>`.
 * :class:`~airflow.providers.apache.spark.operators.spark_sql.SparkSqlOperator`
   gets all the configurations from operator parameters.
+* To use :class:`~airflow.providers.apache.spark.operators.spark_pyspark.PySparkOperator`
+  you can configure :doc:`SparkConnect Connection <connections/spark-connect>`.
+* To use :class:`~airflow.providers.apache.spark.operators.spark_pipelines.SparkPipelinesOperator`
+  you must configure :doc:`Spark Connection <connections/spark-submit>` and have the ``spark-pipelines`` CLI available.
 
 .. _howto/operator:SparkJDBCOperator:
 
@@ -55,6 +59,81 @@ Reference
 """""""""
 
 For further information, look at `Apache Spark DataFrameWriter documentation <https://spark.apache.org/docs/2.4.5/api/scala/index.html#org.apache.spark.sql.DataFrameWriter>`_.
+
+.. _howto/operator:PySparkOperator:
+
+PySparkOperator
+----------------
+
+Launches applications on a Apache Spark Connect server or directly in a standalone mode
+
+For parameter definition take a look at :class:`~airflow.providers.apache.spark.operators.spark_pyspark.PySparkOperator`.
+
+Using the operator
+""""""""""""""""""
+
+.. exampleinclude:: /../tests/system/apache/spark/example_spark_dag.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_spark_pyspark]
+    :end-before: [END howto_operator_spark_pyspark]
+
+Reference
+"""""""""
+
+For further information, look at `Running the Spark Connect Python <https://spark.apache.org/docs/latest/api/python/getting_started/quickstart_connect.html>`_.
+
+.. _howto/operator:SparkPipelinesOperator:
+
+SparkPipelinesOperator
+----------------------
+
+Execute Spark Declarative Pipelines using the ``spark-pipelines`` CLI. This operator wraps the spark-pipelines binary to execute declarative data pipelines, supporting both pipeline execution and validation through dry-runs.
+
+For parameter definition take a look at :class:`~airflow.providers.apache.spark.operators.spark_pipelines.SparkPipelinesOperator`.
+
+Using the operator
+""""""""""""""""""
+
+The operator can be used to run declarative pipelines:
+
+.. code-block:: python
+
+   from airflow.providers.apache.spark.operators.spark_pipelines import SparkPipelinesOperator
+
+   # Execute the pipeline
+   run_pipeline = SparkPipelinesOperator(
+       task_id="run_pipeline",
+       pipeline_spec="/path/to/pipeline.yml",
+       pipeline_command="run",
+       conn_id="spark_default",
+       num_executors=2,
+       executor_cores=4,
+       executor_memory="2G",
+       driver_memory="1G",
+   )
+
+**Pipeline Specification**
+
+The ``pipeline_spec`` parameter should point to a YAML file defining your declarative pipeline:
+
+.. code-block:: yaml
+
+   name: my_pipeline
+   storage: file:///path/to/pipeline-storage
+   libraries:
+     - glob:
+         include: transformations/**
+
+**Pipeline Commands**
+
+* ``run`` - Execute the pipeline (default)
+* ``dry-run`` - Validate the pipeline without execution
+
+Reference
+"""""""""
+
+For further information, look at `Spark Declarative Pipelines Programming Guide <https://spark.apache.org/docs/latest/declarative-pipelines-programming-guide.html>`_.
 
 .. _howto/operator:SparkSqlOperator:
 
@@ -102,3 +181,200 @@ Reference
 """""""""
 
 For further information, look at `Apache Spark submitting applications <https://spark.apache.org/docs/latest/submitting-applications.html>`_.
+
+Durable execution (crash recovery)
+""""""""""""""""""""""""""""""""""
+
+In cluster deploy mode (``--deploy-mode cluster``) the Spark driver runs independently of the
+Airflow worker. If the worker dies while the Spark job is running, the driver keeps running but
+Airflow loses track of it, and submitting a brand new job on retry wastes the compute already done,
+or even causes conflicts if the Spark job itself is not designed to be idempotent.
+
+The ``SparkSubmitOperator`` solves this by persisting the driver identifier to :doc:`task state store
+<apache-airflow:core-concepts/task-state-store>` immediately after submission. On retry, it reads
+the identifier back and reconnects to the already-running driver instead of resubmitting.
+
+This is the **synchronous path** — the worker holds a slot for the duration of polling. This is
+a crash-safety net for teams running sync operators for log observability, org constraints, or
+because a Triggerer is not available. Teams with a Triggerer available may also consider
+deferrable operators, which free the worker slot but may come with added complexity.
+
+``durable`` defaults to ``True`` and every cluster manager supports it. What differs is the
+prerequisite each one needs before the operator can check driver status on retry:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Cluster manager
+     - Prerequisite for ``durable=True``
+   * - `Spark standalone`_
+     - ``REST scheme`` and ``REST port`` connection extras
+   * - `Kubernetes cluster mode`_
+     - ``track_driver_via_k8s_api=True``
+   * - `YARN cluster mode`_
+     - ``yarn_track_via_rm_api=True`` and ``yarn_resourcemanager_webapp_address``
+
+.. note::
+    Durable execution requires Airflow 3.3+ (``task_state_store`` support). Below
+    3.3, ``durable`` has no effect: setting it explicitly only emits a warning, and the operator
+    always submits fresh, exactly as before this feature existed. The deprecated
+    ``reconnect_on_retry`` parameter (the original name for this same feature, superseded almost
+    immediately) still emits a deprecation warning on every Airflow version and maps onto
+    ``durable``.
+
+Clearing a task instance from the UI or the REST API (so ``airflowctl`` too) deletes the stored
+driver ID by default from Airflow 3.4. Every other clear, such as ``airflow tasks clear`` or
+clearing a whole Dag run, does so from Airflow 3.5. To keep it, tick **Keep task state and resume**
+in the Clear dialog, or send ``"keep_task_state": true`` in the request. The
+**Keep task state on clear** UI setting ticks that box by default. From Airflow 3.5,
+``airflow tasks clear --keep-task-state`` keeps it too. The next attempt then reads the stored
+driver ID back. What the next attempt does depends on the state of the driver at that point:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 40 40
+
+   * - Driver state
+     - Default clear
+     - Clear that keeps task state
+   * - Still running (the task had already failed, or its worker died)
+     - Submits a new driver. The first one keeps running.
+     - Reconnects to the running driver.
+   * - Succeeded
+     - Submits a new driver.
+     - Returns right away without submitting another one.
+   * - Failed or killed
+     - Submits a new driver.
+     - Submits a new driver.
+
+With ``[state_store] clear_on_success`` on, the stored driver ID is deleted when the task succeeds,
+so clearing a succeeded task submits again even when task state is kept.
+
+Keep task state when a driver is still running and nothing about the code or inputs changed, so
+you don't pay for two. This assumes the driver survives the clear; keeping task state does not
+prevent cancellation via ``on_kill``. See :doc:`apache-airflow:core-concepts/resumable-tasks`
+for the ways of clearing.
+
+.. _cluster-mode-crash-recovery-spark-standalone:
+
+Spark standalone
+""""""""""""""""
+
+Reconnecting to a running driver calls the Spark standalone REST API
+(``GET /v1/submissions/status/{driverId}``). Make sure the Spark connection's
+``REST scheme`` and ``REST port`` extras match your cluster's configuration:
+
+* ``REST scheme`` — set to ``https`` if your cluster has TLS enabled on the REST port
+  (``spark.ssl.standalone.enabled=true``). Defaults to ``http``.
+* ``REST port`` — set to the value of ``spark.master.rest.port`` on your cluster. Defaults to ``6066``.
+
+See :doc:`connections/spark-submit` for how to configure these fields.
+
+.. _tracking-driver-status-via-kubernetes-api:
+
+Kubernetes cluster mode
+"""""""""""""""""""""""
+
+When running in Kubernetes cluster mode, ``spark-submit`` blocks for the duration of the job.
+The JVM runs processes which does nothing but polling of the pod phase and holds heap space for
+the entire duration. This is not ideal for long-running jobs, especially when the driver is idle
+for long periods (e.g. waiting for data or user input).
+
+Set ``track_driver_via_k8s_api=True`` to have the operator track the driver pod status via the
+Python Kubernetes client rather than holding ``spark-submit`` open for the full job duration. The
+same flag is what lets the operator find the driver again after a crash, so it is also the
+prerequisite for durable execution on Kubernetes: the driver pod name is persisted to task state
+before polling begins, and a retry reconnects to that pod instead of submitting a fresh one.
+
+.. code-block:: python
+
+   from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
+
+   run_spark = SparkSubmitOperator(
+       task_id="run_spark",
+       application="local:///opt/spark/examples/jars/spark-examples.jar",
+       conn_id="spark_k8s",
+       deploy_mode="cluster",
+       track_driver_via_k8s_api=True,
+       durable=True,
+   )
+
+**Requirements**
+
+* The Spark connection ``master`` must be ``k8s://...`` and ``deploy_mode`` must be ``cluster``.
+* Do not set ``spark.kubernetes.submission.waitAppCompletion=true`` in your ``conf`` — this
+  conflicts with the flag and a ``ValueError`` will be raised at task start.
+* The Airflow worker must be able to reach the Kubernetes API server and have permission to
+  read and delete pods in the driver's namespace; otherwise pod tracking and cleanup will fail.
+* Pod completion is detected from ``pod.status.phase``. If your driver pods have sidecar
+  containers (e.g. Istio injection enabled for the driver namespace), the pod phase may not
+  advance to ``Succeeded`` until all sidecars exit. In that case the poll loop will wait
+  indefinitely — set ``execution_timeout`` as a hard bound.
+
+Set ``durable=False`` to always submit a fresh driver on retry.
+
+.. _yarn-resourcemanager-api-tracking:
+
+YARN cluster mode
+"""""""""""""""""
+
+When running Spark applications on YARN in cluster deploy mode, the default Spark submit path keeps
+the local ``spark-submit`` JVM alive on the Airflow worker while the YARN
+application runs. For long-running Spark applications this can keep worker memory tied up for the
+whole application lifetime.
+
+Set ``yarn_track_via_rm_api=True`` to release the local ``spark-submit`` JVM after YARN accepts the
+application, then poll the YARN ResourceManager REST API until the application reaches a terminal
+state. The ResourceManager API polling interval is controlled by ``status_poll_interval`` with a
+minimum of 10 seconds.
+
+The ResourceManager REST API is also what makes checking application status on retry possible, so
+this flag is the prerequisite for durable execution on YARN. Because ``durable`` defaults to
+``True``, leaving the flag unset raises a ``ValueError`` at task start rather than silently falling
+back to a fire-and-forget submission.
+
+This mode requires the Spark connection extra to set ``yarn_resourcemanager_webapp_address`` before
+the application is submitted:
+
+.. code-block:: bash
+
+    airflow connections add spark_yarn_rm \
+        --conn-type spark \
+        --conn-host yarn \
+        --conn-extra '{
+            "deploy-mode": "cluster",
+            "yarn_resourcemanager_webapp_address": "http://rm.example.com:8088"
+        }'
+
+.. code-block:: python
+
+    SparkSubmitOperator(
+        task_id="spark_pi",
+        conn_id="spark_yarn_rm",
+        application="/path/to/spark-examples.jar",
+        java_class="org.apache.spark.examples.SparkPi",
+        deploy_mode="cluster",
+        yarn_track_via_rm_api=True,
+    )
+
+For Kerberized clusters, install ``requests-kerberos`` in the Airflow environment. When the
+Spark connection has both ``keytab`` and ``principal`` configured, Airflow automatically uses
+``HTTPKerberosAuth()`` for the ResourceManager REST requests.
+
+Use ``yarn_rm_auth`` only when the ResourceManager needs a custom ``requests`` authentication
+object:
+
+.. code-block:: python
+
+    import requests
+
+    SparkSubmitOperator(
+        task_id="spark_pi",
+        conn_id="spark_yarn_rm",
+        application="/path/to/spark-examples.jar",
+        java_class="org.apache.spark.examples.SparkPi",
+        deploy_mode="cluster",
+        yarn_track_via_rm_api=True,
+        yarn_rm_auth=requests.auth.HTTPBasicAuth("user", "password"),
+    )

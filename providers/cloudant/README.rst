@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-cloudant``
 
-Release: ``4.1.1``
+Release: ``4.3.7``
 
 
 `IBM Cloudant <https://www.ibm.com/cloud/cloudant>`__
@@ -36,26 +36,27 @@ This is a provider package for ``cloudant`` provider. All classes for this provi
 are in ``airflow.providers.cloudant`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-cloudant/4.1.1/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-cloudant/4.3.7/>`_.
 
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation (see ``Requirements`` below
+You can install this package on top of an existing Airflow installation (see ``Requirements`` below
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-cloudant``
 
-The package supports the following python versions: 3.10,3.11,3.12
+The package supports the following python versions: 3.11,3.12,3.13,3.14
 
 Requirements
 ------------
 
-==================  =====================================
-PIP package         Version required
-==================  =====================================
-``apache-airflow``  ``>=2.9.0``
-``ibmcloudant``     ``==0.9.1; python_version >= "3.10"``
-==================  =====================================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.10.1``
+``ibmcloudant``                             ``>=0.10.0``
+==========================================  ==================
 
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-cloudant/4.1.1/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-cloudant/4.3.7/changelog.html>`_.

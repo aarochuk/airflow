@@ -16,12 +16,19 @@
 # under the License.
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from airflow.models.pool import Pool
-from airflow.utils.session import provide_session
+from airflow.models.team import Team
+from airflow.utils.session import NEW_SESSION, provide_session
 
-from tests_common.test_utils.db import clear_db_pools
+from tests_common.test_utils.asserts import count_queries
+from tests_common.test_utils.config import conf_vars
+from tests_common.test_utils.db import clear_db_pools, clear_db_teams
 from tests_common.test_utils.logs import check_last_log
 
 pytestmark = pytest.mark.db_test
@@ -37,11 +44,29 @@ POOL2_INCLUDE_DEFERRED = False
 POOL2_DESCRIPTION = "Some Description"
 
 
+POOL3_NAME = "pool3/with_slashes"
+POOL3_SLOT = 5
+POOL3_INCLUDE_DEFERRED = False
+POOL3_DESCRIPTION = "Some Description"
+
+
 @provide_session
-def _create_pools(session) -> None:
-    pool1 = Pool(pool=POOL1_NAME, slots=POOL1_SLOT, include_deferred=POOL1_INCLUDE_DEFERRED)
+def _create_pools(*, session: Session = NEW_SESSION) -> None:
+    pool1 = Pool(pool=POOL1_NAME, slots=POOL1_SLOT, include_deferred=POOL1_INCLUDE_DEFERRED, team_name="test")
     pool2 = Pool(pool=POOL2_NAME, slots=POOL2_SLOT, include_deferred=POOL2_INCLUDE_DEFERRED)
-    session.add_all([pool1, pool2])
+    pool3 = Pool(
+        pool=POOL3_NAME,
+        slots=POOL3_SLOT,
+        include_deferred=POOL3_INCLUDE_DEFERRED,
+        description=POOL3_DESCRIPTION,
+    )
+    session.add_all([pool1, pool2, pool3])
+
+
+@provide_session
+def _create_team(*, session: Session = NEW_SESSION) -> None:
+    session.add(Team(name="test"))
+    session.commit()
 
 
 class TestPoolsEndpoint:
@@ -51,20 +76,22 @@ class TestPoolsEndpoint:
 
     def teardown_method(self) -> None:
         clear_db_pools()
+        clear_db_teams()
 
     def create_pools(self):
+        _create_team()
         _create_pools()
 
 
 class TestDeletePool(TestPoolsEndpoint):
     def test_delete_should_respond_204(self, test_client, session):
         self.create_pools()
-        pools = session.query(Pool).all()
-        assert len(pools) == 3
+        pools = session.scalars(select(Pool)).all()
+        assert len(pools) == 4
         response = test_client.delete(f"/pools/{POOL1_NAME}")
         assert response.status_code == 204
-        pools = session.query(Pool).all()
-        assert len(pools) == 2
+        pools = session.scalars(select(Pool)).all()
+        assert len(pools) == 3
         check_last_log(session, dag_id=None, event="delete_pool", logical_date=None)
 
     def test_delete_should_respond_401(self, unauthenticated_test_client):
@@ -87,6 +114,17 @@ class TestDeletePool(TestPoolsEndpoint):
         body = response.json()
         assert f"The Pool with name: `{POOL1_NAME}` was not found" == body["detail"]
 
+    def test_delete_pool3_should_respond_204(self, test_client, session):
+        """Test deleting POOL3 with forward slash in name"""
+        self.create_pools()
+        pools = session.scalars(select(Pool)).all()
+        assert len(pools) == 4
+        response = test_client.delete(f"/pools/{POOL3_NAME}")
+        assert response.status_code == 204
+        pools = session.scalars(select(Pool)).all()
+        assert len(pools) == 3
+        check_last_log(session, dag_id=None, event="delete_pool", logical_date=None)
+
 
 class TestGetPool(TestPoolsEndpoint):
     def test_get_should_respond_200(self, test_client, session):
@@ -104,6 +142,7 @@ class TestGetPool(TestPoolsEndpoint):
             "running_slots": 0,
             "scheduled_slots": 0,
             "slots": 3,
+            "team_name": "test",
         }
 
     def test_get_should_respond_401(self, unauthenticated_test_client):
@@ -120,25 +159,74 @@ class TestGetPool(TestPoolsEndpoint):
         body = response.json()
         assert f"The Pool with name: `{POOL1_NAME}` was not found" == body["detail"]
 
+    def test_get_pool3_should_respond_200(self, test_client, session):
+        """Test getting POOL3 with forward slash in name"""
+        self.create_pools()
+        response = test_client.get(f"/pools/{POOL3_NAME}")
+        assert response.status_code == 200
+        assert response.json() == {
+            "deferred_slots": 0,
+            "description": "Some Description",
+            "include_deferred": False,
+            "name": "pool3/with_slashes",
+            "occupied_slots": 0,
+            "open_slots": 5,
+            "queued_slots": 0,
+            "running_slots": 0,
+            "scheduled_slots": 0,
+            "slots": 5,
+            "team_name": None,
+        }
+
+    def test_get_unlimited_pool_should_respond_200(self, test_client, session):
+        """Regression for #65377: an unlimited (-1 slots) pool has open_slots == inf internally; the
+        response must serialize open_slots as -1 and return 200, not 500."""
+        # Seed the DB row directly to exercise the GET/read path that #65377 reported.
+        session.add(Pool(pool="unlimited_pool", slots=-1, include_deferred=False))
+        session.commit()
+        response = test_client.get("/pools/unlimited_pool")
+        assert response.status_code == 200
+        assert response.json() == {
+            "deferred_slots": 0,
+            "description": None,
+            "include_deferred": False,
+            "name": "unlimited_pool",
+            "occupied_slots": 0,
+            "open_slots": -1,
+            "queued_slots": 0,
+            "running_slots": 0,
+            "scheduled_slots": 0,
+            "slots": -1,
+            "team_name": None,
+        }
+
 
 class TestGetPools(TestPoolsEndpoint):
     @pytest.mark.parametrize(
-        "query_params, expected_total_entries, expected_ids",
+        ("query_params", "expected_total_entries", "expected_ids"),
         [
             # Filters
-            ({}, 3, [Pool.DEFAULT_POOL_NAME, POOL1_NAME, POOL2_NAME]),
-            ({"limit": 1}, 3, [Pool.DEFAULT_POOL_NAME]),
-            ({"limit": 1, "offset": 1}, 3, [POOL1_NAME]),
+            ({}, 4, [Pool.DEFAULT_POOL_NAME, POOL1_NAME, POOL2_NAME, POOL3_NAME]),
+            ({"limit": 1}, 4, [Pool.DEFAULT_POOL_NAME]),
+            ({"limit": 1, "offset": 1}, 4, [POOL1_NAME]),
             # Sort
-            ({"order_by": "-id"}, 3, [POOL2_NAME, POOL1_NAME, Pool.DEFAULT_POOL_NAME]),
-            ({"order_by": "id"}, 3, [Pool.DEFAULT_POOL_NAME, POOL1_NAME, POOL2_NAME]),
+            ({"order_by": "-id"}, 4, [POOL3_NAME, POOL2_NAME, POOL1_NAME, Pool.DEFAULT_POOL_NAME]),
+            ({"order_by": "id"}, 4, [Pool.DEFAULT_POOL_NAME, POOL1_NAME, POOL2_NAME, POOL3_NAME]),
+            ({"order_by": "name"}, 4, [Pool.DEFAULT_POOL_NAME, POOL1_NAME, POOL2_NAME, POOL3_NAME]),
             # Search
             (
                 {"pool_name_pattern": "~"},
-                3,
-                [Pool.DEFAULT_POOL_NAME, POOL1_NAME, POOL2_NAME],
+                4,
+                [Pool.DEFAULT_POOL_NAME, POOL1_NAME, POOL2_NAME, POOL3_NAME],
             ),
             ({"pool_name_pattern": "default"}, 1, [Pool.DEFAULT_POOL_NAME]),
+            (
+                {"pool_name_prefix_pattern": "~"},
+                4,
+                [Pool.DEFAULT_POOL_NAME, POOL1_NAME, POOL2_NAME, POOL3_NAME],
+            ),
+            ({"pool_name_prefix_pattern": "default"}, 1, [Pool.DEFAULT_POOL_NAME]),
+            ({"pool_name_prefix_pattern": "pool"}, 3, [POOL1_NAME, POOL2_NAME, POOL3_NAME]),
         ],
     )
     def test_should_respond_200(
@@ -160,10 +248,42 @@ class TestGetPools(TestPoolsEndpoint):
         response = unauthorized_test_client.get("/pools", params={"pool_name_pattern": "~"})
         assert response.status_code == 403
 
+    @mock.patch("airflow.api_fastapi.auth.managers.base_auth_manager.BaseAuthManager.get_authorized_pools")
+    def test_should_call_get_authorized_pools(self, mock_get_authorized_pools, test_client):
+        self.create_pools()
+        mock_get_authorized_pools.return_value = {Pool.DEFAULT_POOL_NAME, POOL1_NAME}
+        response = test_client.get("/pools")
+        mock_get_authorized_pools.assert_called_once_with(user=mock.ANY, method="GET")
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["total_entries"] == 2
+        assert [pool["name"] for pool in body["pools"]] == [Pool.DEFAULT_POOL_NAME, POOL1_NAME]
+
+    def test_get_pools_with_unlimited_pool_should_respond_200(self, test_client, session):
+        """Regression for #65377: listing pools that include an unlimited (-1 slots) pool must serialize
+        open_slots as -1 through the collection serializer and return 200, not 500."""
+        # Seed the DB row directly to exercise the GET/read path that #65377 reported.
+        session.add(Pool(pool="unlimited_pool", slots=-1, include_deferred=False))
+        session.commit()
+        response = test_client.get("/pools")
+        assert response.status_code == 200
+        pools = {pool["name"]: pool for pool in response.json()["pools"]}
+        assert pools["unlimited_pool"]["slots"] == -1
+        assert pools["unlimited_pool"]["open_slots"] == -1
+
+    def test_should_not_query_on_event_loop(self, test_client, event_loop_queries):
+        """Regression for #74239: the slot counts of each pool must not be queried during serialization."""
+        self.create_pools()
+        response = test_client.get("/pools")
+        assert response.status_code == 200
+        assert response.json()["pools"][1]["open_slots"] == POOL1_SLOT
+        assert event_loop_queries == []
+
 
 class TestPatchPool(TestPoolsEndpoint):
     @pytest.mark.parametrize(
-        "pool_name, query_params, body, expected_status_code, expected_response",
+        ("pool_name", "query_params", "body", "expected_status_code", "expected_response"),
         [
             # Error
             (
@@ -210,12 +330,6 @@ class TestPatchPool(TestPoolsEndpoint):
                         },
                         {
                             "input": {"pool": POOL1_NAME},
-                            "loc": ["description"],
-                            "msg": "Field required",
-                            "type": "missing",
-                        },
-                        {
-                            "input": {"pool": POOL1_NAME},
                             "loc": ["include_deferred"],
                             "msg": "Field required",
                             "type": "missing",
@@ -223,11 +337,21 @@ class TestPatchPool(TestPoolsEndpoint):
                     ],
                 },
             ),
+            # Negative slot number
+            (
+                POOL1_NAME,
+                {},
+                {"slots": -10},
+                422,
+                {
+                    "detail": "Slots must be greater than or equal to -1. Use -1 for unlimited.",
+                },
+            ),
             # Partial body on default_pool
             (
                 Pool.DEFAULT_POOL_NAME,
                 {"update_mask": ["slots"]},
-                {"slots": 150},
+                {"slots": 150, "name": Pool.DEFAULT_POOL_NAME, "include_deferred": True},
                 200,
                 {
                     "deferred_slots": 0,
@@ -240,6 +364,7 @@ class TestPatchPool(TestPoolsEndpoint):
                     "running_slots": 0,
                     "scheduled_slots": 0,
                     "slots": 150,
+                    "team_name": None,
                 },
             ),
             # Partial body on default_pool alternate
@@ -259,6 +384,7 @@ class TestPatchPool(TestPoolsEndpoint):
                     "running_slots": 0,
                     "scheduled_slots": 0,
                     "slots": 150,
+                    "team_name": None,
                 },
             ),
             # Full body
@@ -283,6 +409,7 @@ class TestPatchPool(TestPoolsEndpoint):
                     "running_slots": 0,
                     "scheduled_slots": 0,
                     "slots": 8,
+                    "team_name": "test",
                 },
             ),
         ],
@@ -297,9 +424,10 @@ class TestPatchPool(TestPoolsEndpoint):
         body = response.json()
 
         if response.status_code == 422:
-            for error in body["detail"]:
-                # pydantic version can vary in tests (lower constraints), we do not assert the url.
-                del error["url"]
+            detail = response.json().get("detail")
+            assert detail is not None
+            assert "slots" in str(detail)
+            return
 
         assert body == expected_response
         if response.status_code == 200:
@@ -313,10 +441,70 @@ class TestPatchPool(TestPoolsEndpoint):
         response = unauthorized_test_client.patch(f"/pools/{POOL1_NAME}", params={}, json={})
         assert response.status_code == 403
 
+    def test_patch_pool3_should_respond_200(self, test_client, session):
+        """Test patching POOL3 with forward slash in name"""
+        self.create_pools()
+        body = {
+            "slots": 10,
+            "description": "Updated Description",
+            "name": POOL3_NAME,
+            "include_deferred": True,
+        }
+        response = test_client.patch(f"/pools/{POOL3_NAME}", json=body)
+        assert response.status_code == 200
+        expected_response = {
+            "deferred_slots": 0,
+            "description": "Updated Description",
+            "include_deferred": True,
+            "name": "pool3/with_slashes",
+            "occupied_slots": 0,
+            "open_slots": 10,
+            "queued_slots": 0,
+            "running_slots": 0,
+            "scheduled_slots": 0,
+            "slots": 10,
+            "team_name": None,
+        }
+        assert response.json() == expected_response
+        check_last_log(session, dag_id=None, event="patch_pool", logical_date=None)
+
+    @conf_vars({("core", "multi_team"): "False"})
+    def test_patch_pool_rejects_team_name_when_multi_team_disabled(self, test_client):
+        self.create_pools()
+        response = test_client.patch(
+            f"/pools/{POOL2_NAME}",
+            json={
+                "name": POOL2_NAME,
+                "slots": POOL2_SLOT,
+                "include_deferred": POOL2_INCLUDE_DEFERRED,
+                "team_name": "test_team",
+            },
+        )
+        assert response.status_code == 422
+        assert (
+            "team_name cannot be set when multi_team mode is disabled. Please contact your administrator."
+            in response.json()["detail"][0]["msg"]
+        )
+
+    def test_patch_pool_rejects_blank_name_instead_of_renaming(self, test_client, session):
+        # The guard tested the body name for truthiness, so a blank one was read as "no name
+        # supplied", skipped the mismatch check and renamed the pool to "" instead.
+        self.create_pools()
+        response = test_client.patch(
+            f"/pools/{POOL1_NAME}",
+            json={"name": "", "slots": POOL1_SLOT, "include_deferred": POOL1_INCLUDE_DEFERRED},
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "Invalid body, pool name from request body doesn't match uri parameter"
+        )
+        assert session.scalar(select(Pool.pool).where(Pool.pool == POOL1_NAME)) == POOL1_NAME
+
 
 class TestPostPool(TestPoolsEndpoint):
+    @conf_vars({("core", "multi_team"): "True"})
     @pytest.mark.parametrize(
-        "body, expected_status_code, expected_response",
+        ("body", "expected_status_code", "expected_response"),
         [
             (
                 {"name": "my_pool", "slots": 11},
@@ -332,6 +520,7 @@ class TestPostPool(TestPoolsEndpoint):
                     "scheduled_slots": 0,
                     "open_slots": 11,
                     "deferred_slots": 0,
+                    "team_name": None,
                 },
             ),
             (
@@ -348,19 +537,103 @@ class TestPostPool(TestPoolsEndpoint):
                     "scheduled_slots": 0,
                     "open_slots": 11,
                     "deferred_slots": 0,
+                    "team_name": None,
+                },
+            ),
+            (
+                {
+                    "name": "my_pool",
+                    "slots": 11,
+                    "include_deferred": True,
+                    "description": "Some description",
+                    "team_name": "test",
+                },
+                201,
+                {
+                    "name": "my_pool",
+                    "slots": 11,
+                    "description": "Some description",
+                    "include_deferred": True,
+                    "occupied_slots": 0,
+                    "running_slots": 0,
+                    "queued_slots": 0,
+                    "scheduled_slots": 0,
+                    "open_slots": 11,
+                    "deferred_slots": 0,
+                    "team_name": "test",
                 },
             ),
         ],
     )
     def test_should_respond_200(self, test_client, session, body, expected_status_code, expected_response):
         self.create_pools()
-        n_pools = session.query(Pool).count()
-        response = test_client.post("/pools", json=body)
-        assert response.status_code == expected_status_code
+        n_pools = session.scalar(select(func.count()).select_from(Pool))
 
+        response = test_client.post("/pools", json=body)
+
+        assert response.status_code == expected_status_code
         assert response.json() == expected_response
-        assert session.query(Pool).count() == n_pools + 1
+        assert session.scalar(select(func.count()).select_from(Pool)) == n_pools + 1
         check_last_log(session, dag_id=None, event="post_pool", logical_date=None)
+
+    def test_post_pool_allows_unlimited_slots(self, test_client, session):
+        self.create_pools()
+        n_pools = session.scalar(select(func.count()).select_from(Pool))
+
+        response = test_client.post(
+            "/pools",
+            json={
+                "name": "unlimited_pool",
+                "slots": -1,
+                "description": "Unlimited pool",
+                "include_deferred": False,
+            },
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["name"] == "unlimited_pool"
+        assert body["slots"] == -1
+        assert body["open_slots"] == -1
+        assert session.scalar(select(func.count()).select_from(Pool)) == n_pools + 1
+        check_last_log(session, dag_id=None, event="post_pool", logical_date=None)
+
+    def test_post_pool_rejects_infinity_string(self, test_client, session):
+        response = test_client.post(
+            "/pools",
+            json={
+                "name": "bad_pool",
+                "slots": "infinity",
+                "include_deferred": False,
+            },
+        )
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize("name", ["", " ", "   ", "\t", "\n"])
+    def test_post_pool_rejects_blank_name(self, test_client, session, name):
+        n_pools = session.scalar(select(func.count()).select_from(Pool))
+        response = test_client.post(
+            "/pools",
+            json={"name": name, "slots": 1, "include_deferred": False},
+        )
+        assert response.status_code == 422
+        assert session.scalar(select(func.count()).select_from(Pool)) == n_pools
+
+    @conf_vars({("core", "multi_team"): "False"})
+    def test_post_pool_rejects_team_name_when_multi_team_disabled(self, test_client):
+        response = test_client.post(
+            "/pools",
+            json={
+                "name": "bad_team_pool",
+                "slots": 1,
+                "team_name": "test_team",
+            },
+        )
+        assert response.status_code == 422
+        assert (
+            "team_name cannot be set when multi_team mode is disabled. Please contact your administrator."
+            in response.json()["detail"][0]["msg"]
+        )
 
     def test_should_respond_401(self, unauthenticated_test_client):
         response = unauthenticated_test_client.post("/pools", json={})
@@ -371,7 +644,13 @@ class TestPostPool(TestPoolsEndpoint):
         assert response.status_code == 403
 
     @pytest.mark.parametrize(
-        "body,first_expected_status_code, first_expected_response, second_expected_status_code, second_expected_response",
+        (
+            "body",
+            "first_expected_status_code",
+            "first_expected_response",
+            "second_expected_status_code",
+            "second_expected_response",
+        ),
         [
             (
                 {"name": "my_pool", "slots": 11},
@@ -387,6 +666,7 @@ class TestPostPool(TestPoolsEndpoint):
                     "scheduled_slots": 0,
                     "open_slots": 11,
                     "deferred_slots": 0,
+                    "team_name": None,
                 },
                 409,
                 None,
@@ -404,11 +684,11 @@ class TestPostPool(TestPoolsEndpoint):
         second_expected_response,
     ):
         self.create_pools()
-        n_pools = session.query(Pool).count()
+        n_pools = session.scalar(select(func.count()).select_from(Pool))
         response = test_client.post("/pools", json=body)
         assert response.status_code == first_expected_status_code
         assert response.json() == first_expected_response
-        assert session.query(Pool).count() == n_pools + 1
+        assert session.scalar(select(func.count()).select_from(Pool)) == n_pools + 1
         response = test_client.post("/pools", json=body)
         assert response.status_code == second_expected_status_code
         if second_expected_status_code == 201:
@@ -416,18 +696,18 @@ class TestPostPool(TestPoolsEndpoint):
         else:
             response_json = response.json()
             assert "detail" in response_json
-            assert list(response_json["detail"].keys()) == ["reason", "statement", "orig_error"]
+            assert list(response_json["detail"].keys()) == ["reason", "statement", "orig_error", "message"]
 
-        assert session.query(Pool).count() == n_pools + 1
+        assert session.scalar(select(func.count()).select_from(Pool)) == n_pools + 1
 
 
 class TestBulkPools(TestPoolsEndpoint):
+    @conf_vars({("core", "multi_team"): "True"})
     @pytest.mark.enable_redact
     @pytest.mark.parametrize(
-        "actions, expected_results",
+        ("actions", "expected_results"),
         [
-            # Test successful create
-            (
+            pytest.param(
                 {
                     "actions": [
                         {
@@ -441,9 +721,9 @@ class TestBulkPools(TestPoolsEndpoint):
                     ]
                 },
                 {"create": {"success": ["pool3", "pool4"], "errors": []}},
+                id="test_successful_create",
             ),
-            # Test successful create with skip
-            (
+            pytest.param(
                 {
                     "actions": [
                         {
@@ -457,15 +737,20 @@ class TestBulkPools(TestPoolsEndpoint):
                     ]
                 },
                 {"create": {"success": ["pool3"], "errors": []}},
+                id="test_successful_create_with_skip",
             ),
-            # Test successful create with overwrite
-            (
+            pytest.param(
                 {
                     "actions": [
                         {
                             "action": "create",
                             "entities": [
-                                {"name": "pool3", "slots": 10, "description": "New Description"},
+                                {
+                                    "name": "pool3",
+                                    "slots": 10,
+                                    "description": "New Description",
+                                    "team_name": "test",
+                                },
                                 {"name": "pool2", "slots": 20, "description": "New Description"},
                             ],
                             "action_on_existence": "overwrite",
@@ -473,9 +758,9 @@ class TestBulkPools(TestPoolsEndpoint):
                     ]
                 },
                 {"create": {"success": ["pool3", "pool2"], "errors": []}},
+                id="test_successful_create_with_overwrite",
             ),
-            # Test create conflict
-            (
+            pytest.param(
                 {
                     "actions": [
                         {
@@ -496,40 +781,61 @@ class TestBulkPools(TestPoolsEndpoint):
                         ],
                     }
                 },
+                id="test_create_conflict",
             ),
-            # Test successful update
-            (
+            pytest.param(
                 {
                     "actions": [
                         {
                             "action": "update",
-                            "entities": [{"name": "pool2", "slots": 10, "description": "New Description"}],
+                            "entities": [
+                                {
+                                    "name": "pool2",
+                                    "slots": 10,
+                                    "description": "New Description",
+                                    "include_deferred": False,
+                                }
+                            ],
                             "action_on_non_existence": "fail",
                         }
                     ]
                 },
                 {"update": {"success": ["pool2"], "errors": []}},
+                id="test_successful_update",
             ),
-            # Test update with skip
-            (
+            pytest.param(
                 {
                     "actions": [
                         {
                             "action": "update",
-                            "entities": [{"name": "pool4", "slots": 20, "description": "New Description"}],
+                            "entities": [
+                                {
+                                    "name": "pool4",
+                                    "slots": 20,
+                                    "description": "New Description",
+                                    "include_deferred": False,
+                                }
+                            ],
                             "action_on_non_existence": "skip",
                         }
                     ]
                 },
                 {"update": {"success": [], "errors": []}},
+                id="test_update_with_skip",
             ),
-            # Test update not found
-            (
+            pytest.param(
                 {
                     "actions": [
                         {
                             "action": "update",
-                            "entities": [{"name": "pool4", "slots": 10, "description": "New Description"}],
+                            "entities": [
+                                {
+                                    "name": "pool4",
+                                    "slots": 10,
+                                    "description": "New Description",
+                                    "include_deferred": False,
+                                }
+                            ],
                             "action_on_non_existence": "fail",
                         }
                     ]
@@ -545,19 +851,42 @@ class TestBulkPools(TestPoolsEndpoint):
                         ],
                     }
                 },
+                id="test_update_not_found",
             ),
-            # Test successful delete
-            (
+            pytest.param(
+                {
+                    "actions": [
+                        {
+                            "action": "update",
+                            "entities": [
+                                {
+                                    "name": "pool1",
+                                    "slots": 50,
+                                    "description": "Updated description",
+                                    "include_deferred": False,
+                                }
+                            ],
+                            "update_mask": ["slots", "description"],
+                            "action_on_non_existence": "fail",
+                        }
+                    ]
+                },
+                {
+                    "update": {"success": ["pool1"], "errors": []},
+                },
+                id="test_update_with_valid_update_mask",
+            ),
+            pytest.param(
                 {"actions": [{"action": "delete", "entities": ["pool1"], "action_on_non_existence": "skip"}]},
                 {"delete": {"success": ["pool1"], "errors": []}},
+                id="test_successful_delete",
             ),
-            # Test delete with skip
-            (
+            pytest.param(
                 {"actions": [{"action": "delete", "entities": ["pool3"], "action_on_non_existence": "skip"}]},
                 {"delete": {"success": [], "errors": []}},
+                id="test_delete_with_skip",
             ),
-            # Test delete not found
-            (
+            pytest.param(
                 {"actions": [{"action": "delete", "entities": ["pool4"], "action_on_non_existence": "fail"}]},
                 {
                     "delete": {
@@ -570,9 +899,9 @@ class TestBulkPools(TestPoolsEndpoint):
                         ],
                     }
                 },
+                id="test_delete_not_found",
             ),
-            # Test Create, Update, and Delete combined
-            (
+            pytest.param(
                 {
                     "actions": [
                         {
@@ -582,7 +911,14 @@ class TestBulkPools(TestPoolsEndpoint):
                         },
                         {
                             "action": "update",
-                            "entities": [{"name": "pool1", "slots": 10, "description": "New Description"}],
+                            "entities": [
+                                {
+                                    "name": "pool1",
+                                    "slots": 10,
+                                    "description": "New Description",
+                                    "include_deferred": False,
+                                }
+                            ],
                             "action_on_non_existence": "fail",
                         },
                         {"action": "delete", "entities": ["pool2"], "action_on_non_existence": "skip"},
@@ -593,9 +929,9 @@ class TestBulkPools(TestPoolsEndpoint):
                     "update": {"success": ["pool1"], "errors": []},
                     "delete": {"success": ["pool2"], "errors": []},
                 },
+                id="test_create_update_delete",
             ),
-            # Test Fail on conflicting create and handle others
-            (
+            pytest.param(
                 {
                     "actions": [
                         {
@@ -605,7 +941,14 @@ class TestBulkPools(TestPoolsEndpoint):
                         },
                         {
                             "action": "update",
-                            "entities": [{"name": "pool1", "slots": 100, "description": "New Description"}],
+                            "entities": [
+                                {
+                                    "name": "pool1",
+                                    "slots": 100,
+                                    "description": "New Description",
+                                    "include_deferred": False,
+                                }
+                            ],
                             "action_on_non_existence": "fail",
                         },
                         {"action": "delete", "entities": ["pool4"], "action_on_non_existence": "skip"},
@@ -624,9 +967,9 @@ class TestBulkPools(TestPoolsEndpoint):
                     "update": {"success": ["pool1"], "errors": []},
                     "delete": {"success": [], "errors": []},
                 },
+                id="test_create_update_delete_with_fail",
             ),
-            # Test all skipping actions
-            (
+            pytest.param(
                 {
                     "actions": [
                         {
@@ -636,7 +979,14 @@ class TestBulkPools(TestPoolsEndpoint):
                         },
                         {
                             "action": "update",
-                            "entities": [{"name": "pool5", "slots": 10, "description": "New Description"}],
+                            "entities": [
+                                {
+                                    "name": "pool5",
+                                    "slots": 10,
+                                    "description": "New Description",
+                                    "include_deferred": False,
+                                }
+                            ],
                             "action_on_non_existence": "skip",
                         },
                         {"action": "delete", "entities": ["pool5"], "action_on_non_existence": "skip"},
@@ -647,9 +997,9 @@ class TestBulkPools(TestPoolsEndpoint):
                     "update": {"success": [], "errors": []},
                     "delete": {"success": [], "errors": []},
                 },
+                id="test_create_update_delete_with_skip",
             ),
-            # Test Dependent actions
-            (
+            pytest.param(
                 {
                     "actions": [
                         {
@@ -660,7 +1010,12 @@ class TestBulkPools(TestPoolsEndpoint):
                         {
                             "action": "update",
                             "entities": [
-                                {"name": "pool5", "slots": 100, "description": "New test Description"}
+                                {
+                                    "name": "pool5",
+                                    "slots": 100,
+                                    "description": "New test Description",
+                                    "include_deferred": False,
+                                }
                             ],
                             "action_on_non_existence": "fail",
                         },
@@ -672,9 +1027,9 @@ class TestBulkPools(TestPoolsEndpoint):
                     "update": {"success": ["pool5"], "errors": []},
                     "delete": {"success": ["pool5"], "errors": []},
                 },
+                id="test_dependent_actions",
             ),
-            # Test Repeated actions
-            (
+            pytest.param(
                 {
                     "actions": [
                         {
@@ -687,7 +1042,12 @@ class TestBulkPools(TestPoolsEndpoint):
                         {
                             "action": "update",
                             "entities": [
-                                {"name": "pool1", "slots": 100, "description": "New test Description"}
+                                {
+                                    "name": "pool1",
+                                    "slots": 100,
+                                    "description": "New test Description",
+                                    "include_deferred": False,
+                                }
                             ],
                             "action_on_non_existence": "fail",
                         },
@@ -701,7 +1061,12 @@ class TestBulkPools(TestPoolsEndpoint):
                         {
                             "action": "update",
                             "entities": [
-                                {"name": "pool8", "slots": 100, "description": "New test Description"}
+                                {
+                                    "name": "pool8",
+                                    "slots": 100,
+                                    "description": "New test Description",
+                                    "include_deferred": False,
+                                }
                             ],
                             "action_on_non_existence": "fail",
                         },
@@ -716,7 +1081,12 @@ class TestBulkPools(TestPoolsEndpoint):
                         {
                             "action": "update",
                             "entities": [
-                                {"name": "pool9", "slots": 100, "description": "New test Description"}
+                                {
+                                    "name": "pool9",
+                                    "slots": 100,
+                                    "description": "New test Description",
+                                    "include_deferred": False,
+                                }
                             ],
                             "action_on_non_existence": "fail",
                         },
@@ -747,21 +1117,323 @@ class TestBulkPools(TestPoolsEndpoint):
                     },
                     "delete": {"success": ["pool2"], "errors": []},
                 },
+                id="test_repeated_actions",
+            ),
+            pytest.param(
+                {
+                    "actions": [
+                        {
+                            "action": "create",
+                            "entities": [{"name": "pool6", "slots": 5, "description": "Initial Description"}],
+                            "action_on_existence": "fail",
+                        },
+                        {
+                            "action": "update",
+                            "entities": [
+                                {
+                                    "name": "pool6",
+                                    "slots": 50,
+                                    "description": "Masked Update Description",
+                                    "include_deferred": False,
+                                }
+                            ],
+                            "update_mask": ["slots"],
+                            "action_on_non_existence": "fail",
+                        },
+                        {
+                            "action": "delete",
+                            "entities": ["pool6"],
+                            "action_on_non_existence": "fail",
+                        },
+                    ]
+                },
+                {
+                    "create": {"success": ["pool6"], "errors": []},
+                    "update": {"success": ["pool6"], "errors": []},
+                    "delete": {"success": ["pool6"], "errors": []},
+                },
+                id="test_dependent_actions_with_update_mask",
             ),
         ],
     )
     def test_bulk_pools(self, test_client, actions, expected_results, session):
         self.create_pools()
+
         response = test_client.patch("/pools", json=actions)
+
         response_data = response.json()
         for key, value in expected_results.items():
             assert response_data[key] == value
         check_last_log(session, dag_id=None, event="bulk_pools", logical_date=None)
+
+    def test_update_mask_preserves_other_fields(self, test_client, session):
+        # Arrange: create a pool with initial values
+        self.create_pools()
+
+        # Act: update only the "slots" field via update_mask
+        response = test_client.patch(
+            "/pools",
+            json={
+                "actions": [
+                    {
+                        "action": "update",
+                        "entities": [
+                            {
+                                "name": "pool1",
+                                "slots": 50,
+                                "description": "Should not be updated",
+                                "include_deferred": False,
+                            }
+                        ],
+                        "update_mask": ["slots"],  # only slots should update
+                        "action_on_non_existence": "fail",
+                    }
+                ]
+            },
+        )
+        assert response.status_code == 200
+        response_data = response.json()
+        assert response_data["update"]["success"] == ["pool1"]
+
+        # Assert: fetch from DB and check only masked field changed
+        updated_pool = session.execute(select(Pool).where(Pool.pool == "pool1")).scalar_one()
+        assert updated_pool.slots == 50  # updated
+        assert updated_pool.description is None  # unchanged
+        assert updated_pool.include_deferred is True  # unchanged
+
+    @pytest.mark.parametrize(
+        ("pool_count"),
+        [5, 10, 20],
+    )
+    def test_bulk_delete_query_count_is_independent_of_pool_count(self, test_client, session, pool_count):
+        # Regression guard for the N+1 fix in BulkPoolService.handle_bulk_delete:
+        # the query count for a bulk delete must be the same regardless of how
+        # many pools are deleted. A regression that re-queries each pool inside
+        # the loop would add one SELECT per pool, so the larger run would issue
+        # strictly more queries than the smaller one.
+
+        EXPECTED_QUERY_COUNT = 4
+
+        pool_names = [f"perf_pool_{pool_count}_{i}" for i in range(pool_count)]
+        session.add_all(Pool(pool=name, slots=1, include_deferred=False) for name in pool_names)
+        session.commit()
+
+        request_body = {
+            "actions": [{"action": "delete", "entities": pool_names, "action_on_non_existence": "fail"}]
+        }
+
+        with count_queries() as result:
+            response = test_client.patch("/pools", json=request_body)
+
+        assert response.status_code == 200
+        assert sorted(response.json()["delete"]["success"]) == sorted(pool_names)
+        assert session.scalars(select(Pool).where(Pool.pool.in_(pool_names))).all() == []
+
+        query_count = sum(result.values())
+
+        assert query_count == EXPECTED_QUERY_COUNT, (
+            f"Bulk-delete query count {query_count} does not match expected {EXPECTED_QUERY_COUNT}. "
+            f"A regression that re-queries pools inside the loop would add one SELECT per pool."
+        )
+
+    @pytest.mark.parametrize(
+        ("pool_count"),
+        [5, 10, 20],
+    )
+    def test_bulk_update_query_count_is_independent_of_pool_count(self, test_client, session, pool_count):
+        # Regression guard for the N+1 fix in BulkPoolService.handle_bulk_update:
+        # the query count for a bulk update must be the same regardless of how
+        # many pools are updated. A regression that re-queries each pool inside
+        # the loop would add one SELECT per pool, so the larger run would issue
+        # strictly more queries than the smaller one.
+
+        EXPECTED_QUERY_COUNT = 4
+
+        pool_names = [f"perf_update_pool_{pool_count}_{i}" for i in range(pool_count)]
+        session.add_all(Pool(pool=name, slots=1, include_deferred=False) for name in pool_names)
+        session.commit()
+
+        request_body = {
+            "actions": [
+                {
+                    "action": "update",
+                    "entities": [
+                        {"name": name, "slots": 99, "include_deferred": False} for name in pool_names
+                    ],
+                    "action_on_non_existence": "fail",
+                }
+            ]
+        }
+
+        with count_queries() as result:
+            response = test_client.patch("/pools", json=request_body)
+
+        assert response.status_code == 200
+        assert sorted(response.json()["update"]["success"]) == sorted(pool_names)
+
+        query_count = sum(result.values())
+
+        assert query_count == EXPECTED_QUERY_COUNT, (
+            f"Bulk-update query count {query_count} does not match expected {EXPECTED_QUERY_COUNT}. "
+            f"A regression that re-queries pools inside the loop would add one SELECT per pool."
+        )
 
     def test_should_respond_401(self, unauthenticated_test_client):
         response = unauthenticated_test_client.patch("/pools", json={})
         assert response.status_code == 401
 
     def test_should_respond_403(self, unauthorized_test_client):
-        response = unauthorized_test_client.patch("/pools", json={})
+        response = unauthorized_test_client.patch(
+            "/pools",
+            json={
+                "actions": [
+                    {
+                        "action": "create",
+                        "entities": [
+                            {"pool": "pool1", "slots": 1},
+                        ],
+                    },
+                ]
+            },
+        )
         assert response.status_code == 403
+
+    @conf_vars({("core", "multi_team"): "False"})
+    def test_bulk_rejects_team_name_when_multi_team_is_disabled(self, test_client):
+        actions = {
+            "actions": [
+                {
+                    "action": "create",
+                    "entities": [
+                        {
+                            "name": "pool_1",
+                            "slots": 1,
+                            "description": "description",
+                        },
+                        {
+                            "name": "pool_2",
+                            "slots": 2,
+                            "description": "description_2",
+                            "team_name": "test_team",
+                        },
+                    ],
+                },
+                {
+                    "action": "update",
+                    "entities": [
+                        {
+                            "name": "pool_3",
+                            "slots": 3,
+                            "description": "updated_description",
+                            "team_name": "test_team",
+                        },
+                        {
+                            "name": "pool_4",
+                            "slots": 4,
+                            "description": "updated_description_2",
+                        },
+                    ],
+                },
+            ]
+        }
+        response = test_client.patch("/pools", json=actions)
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+
+        assert all(
+            "team_name cannot be set when multi_team mode is disabled. Please contact your administrator."
+            in err["msg"]
+            for err in detail
+        ), f"Unexpected errors in detail: {detail}"
+
+        expected_error_names = {err["input"]["name"] for err in detail}
+        assert sorted(expected_error_names) == ["pool_2", "pool_3"]
+
+    @pytest.mark.parametrize("action", ["create", "update"])
+    @pytest.mark.parametrize("name", ["", " ", "\t"])
+    def test_bulk_rejects_blank_name(self, test_client, session, action, name):
+        # The bulk endpoint validates its entities as PoolBody, so it picks up the same
+        # constraint as POST. One bad entity rejects the whole request before any action runs.
+        self.create_pools()
+        n_pools = session.scalar(select(func.count()).select_from(Pool))
+        response = test_client.patch(
+            "/pools",
+            json={
+                "actions": [
+                    {
+                        "action": action,
+                        "entities": [
+                            {"name": POOL1_NAME, "slots": 1, "include_deferred": False},
+                            {"name": name, "slots": 1, "include_deferred": False},
+                        ],
+                    }
+                ]
+            },
+        )
+        assert response.status_code == 422
+        assert session.scalar(select(func.count()).select_from(Pool)) == n_pools
+
+    @conf_vars({("core", "multi_team"): "True"})
+    def test_bulk_create_overwrite_preserves_unset_team_name(self, test_client, session):
+        """A bulk create+overwrite that omits ``team_name`` must NOT reset an existing pool's
+        ``team_name`` to ``None``.
+
+        ``POOL1_NAME`` is owned by team ``test``. Overwriting it with a body that changes only
+        ``slots`` (no ``team_name``) previously clobbered every unset field back to its default via
+        ``model_dump()`` — silently nulling the pool's multi-team ownership. With
+        ``model_dump(exclude_unset=True)`` the omitted ``team_name`` keeps its current value.
+        """
+        self.create_pools()
+        before = session.scalar(select(Pool).where(Pool.pool == POOL1_NAME))
+        assert before.team_name == "test"
+
+        response = test_client.patch(
+            "/pools",
+            json={
+                "actions": [
+                    {
+                        "action": "create",
+                        "action_on_existence": "overwrite",
+                        "entities": [{"name": POOL1_NAME, "slots": 99}],
+                    }
+                ]
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["create"]["success"] == [POOL1_NAME]
+
+        session.expire_all()
+        after = session.scalar(select(Pool).where(Pool.pool == POOL1_NAME))
+        assert after.slots == 99  # the field that WAS provided is applied
+        assert after.team_name == "test", (
+            "bulk overwrite that omitted team_name must preserve existing ownership, "
+            f"got team_name={after.team_name!r}"
+        )
+
+    @conf_vars({("core", "multi_team"): "True"})
+    def test_bulk_create_overwrite_applies_explicit_team_name(self, test_client, session):
+        """An explicitly-provided ``team_name`` on a bulk overwrite is still applied (the fix only
+        skips *omitted* fields, it must not skip fields the request actually set)."""
+        _create_team()
+        session.add(Team(name="other"))
+        session.commit()
+        _create_pools()  # POOL1 owned by team "test"
+
+        response = test_client.patch(
+            "/pools",
+            json={
+                "actions": [
+                    {
+                        "action": "create",
+                        "action_on_existence": "overwrite",
+                        "entities": [{"name": POOL1_NAME, "slots": 7, "team_name": "other"}],
+                    }
+                ]
+            },
+        )
+        assert response.status_code == 200
+
+        session.expire_all()
+        after = session.scalar(select(Pool).where(Pool.pool == POOL1_NAME))
+        assert after.team_name == "other"
+        assert after.slots == 7

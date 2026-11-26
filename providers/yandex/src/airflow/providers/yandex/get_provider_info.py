@@ -26,38 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-yandex",
         "name": "Yandex",
         "description": "This package is for Yandex, including:\n\n    - `Yandex.Cloud <https://cloud.yandex.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477911,
-        "versions": [
-            "4.0.3",
-            "4.0.2",
-            "4.0.1",
-            "4.0.0",
-            "3.12.0",
-            "3.11.2",
-            "3.11.1",
-            "3.11.0",
-            "3.10.0",
-            "3.9.0",
-            "3.8.0",
-            "3.7.1",
-            "3.7.0",
-            "3.6.0",
-            "3.5.0",
-            "3.4.0",
-            "3.3.0",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.2.3",
-            "2.2.2",
-            "2.2.1",
-            "2.2.0",
-            "2.1.0",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Yandex.Cloud",
@@ -101,7 +69,43 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.yandex.hooks.yandex.YandexCloudBaseHook",
+                "hook-name": "Yandex Cloud",
                 "connection-type": "yandexcloud",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["host", "schema", "login", "password", "port", "extra"]
+                },
+                "conn-fields": {
+                    "service_account_json": {
+                        "label": "Service account auth JSON",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                        "description": 'Service account auth JSON. Looks like {"id": "...", "service_account_id": "...", "private_key": "..."}. Will be used instead of OAuth token and SA JSON file path field if specified.',
+                    },
+                    "service_account_json_path": {
+                        "label": "Service account auth JSON file path",
+                        "schema": {"type": ["string", "null"]},
+                        "description": 'Service account auth JSON file path. File content looks like {"id": "...", "service_account_id": "...", "private_key": "..."}. Will be used instead of OAuth token if specified.',
+                    },
+                    "oauth": {
+                        "label": "OAuth Token",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                        "description": "User account OAuth token. Either this or service account JSON must be specified.",
+                    },
+                    "folder_id": {
+                        "label": "Default folder ID",
+                        "schema": {"type": ["string", "null"]},
+                        "description": "Optional. If specified, this ID will be used by default when creating nodes and clusters.",
+                    },
+                    "public_ssh_key": {
+                        "label": "Public SSH key",
+                        "schema": {"type": ["string", "null"]},
+                        "description": "Optional. The key will be placed to all created Compute nodes,\n allowing you to have a root shell there.",
+                    },
+                    "endpoint": {
+                        "label": "API endpoint",
+                        "schema": {"type": ["string", "null"]},
+                        "description": "Optional. Specify an API endpoint. Leave blank to use default.",
+                    },
+                },
             }
         ],
         "secrets-backends": ["airflow.providers.yandex.secrets.lockbox.LockboxSecretBackend"],
@@ -120,7 +124,4 @@ def get_provider_info():
                 },
             }
         },
-        "dependencies": ["apache-airflow>=2.9.0", "yandexcloud>=0.308.0", "yandex-query-client>=0.1.4"],
-        "optional-dependencies": {"common.compat": ["apache-airflow-providers-common-compat"]},
-        "devel-dependencies": ["responses>=0.25.0"],
     }

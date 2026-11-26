@@ -17,11 +17,20 @@
 from __future__ import annotations
 
 from ipaddress import IPv4Network
+from operator import itemgetter
 
 import boto3
 
-from airflow.decorators import task
-from airflow.utils.trigger_rule import TriggerRule
+try:
+    from airflow.sdk import task
+except ImportError:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 
 def _get_next_available_cidr(vpc_id: str) -> str:
@@ -43,6 +52,57 @@ def _get_next_available_cidr(vpc_id: str) -> str:
     last_used_block = max(existing_cidr_blocks)
     *_, last_reserved_ip = last_used_block
     return f"{last_reserved_ip + 1}/{last_used_block.prefixlen}"
+
+
+@task
+def get_latest_ami_id():
+    """Returns the AMI ID of the most recently-created released Amazon Linux image"""
+
+    # Amazon Linux images are published with a description such as
+    # "Amazon Linux 2023 AMI 2023.9.20260819.0 arm64 HVM kernel-6.1", so this prefix matches every
+    # generation without needing an update when a new one is released. Unsuitable variants are
+    # filtered out below.
+    image_prefix = "Amazon Linux*"
+    root_device_name = "/dev/xvda"
+
+    # Variants which must not be selected, matched against the image name and description.
+    #   preview: images of an unreleased Amazon Linux generation are always newer than the latest
+    #            released one, and are not supported by every AWS service.
+    #   minimal: these carry a 2 GiB root volume and do not preinstall amazon-ssm-agent, leaving
+    #            no headroom for tests that install packages (see example_ssm.py).
+    #   ecs:     the ECS-optimized variants carry a 30 GiB root volume and extra preinstalled
+    #            software that these tests do not need.
+    excluded_variants = ("preview", "minimal", "ecs")
+
+    images = boto3.client("ec2").describe_images(
+        Filters=[
+            {"Name": "description", "Values": [image_prefix]},
+            {
+                "Name": "architecture",
+                "Values": ["arm64"],
+            },  # t3 instances are only compatible with x86 architecture
+            {
+                "Name": "root-device-type",
+                "Values": ["ebs"],
+            },  # instances which are capable of hibernation need to use an EBS-backed AMI
+            {"Name": "root-device-name", "Values": [root_device_name]},
+        ],
+        Owners=["amazon"],
+    )
+
+    suitable_images = [
+        image
+        for image in images["Images"]
+        if not any(
+            variant in f"{image.get('Name', '')} {image.get('Description', '')}".lower()
+            for variant in excluded_variants
+        )
+    ]
+    if not suitable_images:
+        raise ValueError("No suitable Amazon Linux AMI matching the requested criteria was found.")
+
+    # Sort on CreationDate
+    return max(suitable_images, key=itemgetter("CreationDate"))["ImageId"]
 
 
 @task

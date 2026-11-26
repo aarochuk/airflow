@@ -16,8 +16,6 @@
 # under the License.
 from __future__ import annotations
 
-import ast
-import json
 from collections.abc import Generator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -25,9 +23,6 @@ from unittest import mock
 
 import flask
 import pytest
-
-from airflow.models import Log
-from airflow.sdk.execution_time.secrets_masker import DEFAULT_SENSITIVE_FIELDS as sensitive_fields
 
 if TYPE_CHECKING:
     import jinja2
@@ -77,116 +72,6 @@ def check_content_not_in_response(text, resp, resp_code=200):
         assert text not in resp_html
 
 
-def _masked_value_check(data, sensitive_fields):
-    """
-    Recursively check if sensitive fields are properly masked.
-
-    :param data: JSON object (dict, list, or value)
-    :param sensitive_fields: Set of sensitive field names
-    """
-    if isinstance(data, dict):
-        for key, value in data.items():
-            if key in sensitive_fields:
-                assert value == "***", f"Expected masked value for {key}, but got {value}"
-            else:
-                _masked_value_check(value, sensitive_fields)
-    elif isinstance(data, list):
-        for item in data:
-            _masked_value_check(item, sensitive_fields)
-
-
-def _check_last_log(session, dag_id, event, logical_date, expected_extra=None, check_masked=False):
-    logs = (
-        session.query(
-            Log.dag_id,
-            Log.task_id,
-            Log.event,
-            Log.logical_date,
-            Log.owner,
-            Log.extra,
-        )
-        .filter(
-            Log.dag_id == dag_id,
-            Log.event == event,
-            Log.logical_date == logical_date,
-        )
-        .order_by(Log.dttm.desc())
-        .limit(5)
-        .all()
-    )
-    assert len(logs) >= 1
-    assert logs[0].extra
-    if expected_extra:
-        assert json.loads(logs[0].extra) == expected_extra
-    if check_masked:
-        extra_json = json.loads(logs[0].extra)
-        _masked_value_check(extra_json, sensitive_fields)
-
-    session.query(Log).delete()
-
-
-def _check_last_log_masked_connection(session, dag_id, event, logical_date):
-    logs = (
-        session.query(
-            Log.dag_id,
-            Log.task_id,
-            Log.event,
-            Log.logical_date,
-            Log.owner,
-            Log.extra,
-        )
-        .filter(
-            Log.dag_id == dag_id,
-            Log.event == event,
-            Log.logical_date == logical_date,
-        )
-        .order_by(Log.dttm.desc())
-        .limit(5)
-        .all()
-    )
-    assert len(logs) >= 1
-    extra = ast.literal_eval(logs[0].extra)
-    assert extra == {
-        "conn_id": "test_conn",
-        "conn_type": "http",
-        "description": "description",
-        "host": "localhost",
-        "port": "8080",
-        "username": "root",
-        "password": "***",
-        "extra": {"x_secret": "***", "y_secret": "***"},
-    }
-
-
-def _check_last_log_masked_variable(
-    session,
-    dag_id,
-    event,
-    logical_date,
-):
-    logs = (
-        session.query(
-            Log.dag_id,
-            Log.task_id,
-            Log.event,
-            Log.logical_date,
-            Log.owner,
-            Log.extra,
-        )
-        .filter(
-            Log.dag_id == dag_id,
-            Log.event == event,
-            Log.logical_date == logical_date,
-        )
-        .order_by(Log.dttm.desc())
-        .limit(5)
-        .all()
-    )
-    assert len(logs) >= 1
-    extra_dict = ast.literal_eval(logs[0].extra)
-    assert extra_dict == {"key": "x_secret", "val": "***"}
-
-
 class _TemplateWithContext(NamedTuple):
     template: jinja2.environment.Template
     context: dict[str, Any]
@@ -212,14 +97,11 @@ class _TemplateWithContext(NamedTuple):
             "appbuilder",
             "base_template",
             "server_timezone",
-            "default_ui_timezone",
             "hostname",
             "navbar_color",
             "navbar_text_color",
             "navbar_hover_color",
             "navbar_text_hover_color",
-            "navbar_logo_text_color",
-            "state_color_mapping",
             "airflow_version",
             "git_version",
             "k8s_or_k8scelery_executor",
@@ -245,11 +127,11 @@ def capture_templates(app):
         def record(sender, template, context, **extra):
             recorded.append(_TemplateWithContext(template, context))
 
-        flask.template_rendered.connect(record, app)  # type: ignore
+        flask.template_rendered.connect(record, app)
         try:
             yield recorded
         finally:
-            flask.template_rendered.disconnect(record, app)  # type: ignore
+            flask.template_rendered.disconnect(record, app)
 
         assert recorded, "Failed to catch the templates"
 

@@ -24,17 +24,21 @@ and credit will always be given.
 This page aims to explain the basic concept of contributions. It contains links
 to detailed documents for the different aspects of contribution. We encourage both
 Open Source first timers as well as more experienced contributors to read and
-learn about this community's contribution guidelines as it support easy and efficient collaboration.
+learn about this community's contribution guidelines as it supports easy and efficient collaboration.
 
 Getting Started
 ----------------
 New Contributor
 ...............
 
-If you are a new contributor, please follow the `Contributors Quick Start <03_contributors_quick_start.rst>`__
-guide for a step-by-step introduction to setting up the development environment and making your
-first contribution.
-We also suggest you to check out `Contribution Workflow <16_contribution_workflow.rst>`__ in order to get an overview of how to
+If you are a new contributor, please follow the `Contributors Quick Start <03a_contributors_quick_start_beginners.rst>`__
+guide for a step-by-step introduction to setting up the development environment and making your first
+contribution (15-minute path).
+
+If you need a full development environment, test suite, and advanced tooling, please see the
+`Seasoned Developers Guide <03_contributors_quick_start.rst>`__.
+
+We also suggest you to check out `Contribution Workflow <18_contribution_workflow.rst>`__ in order to get an overview of how to
 contribute to Airflow.
 
 If you are new to the project, you might need some help in understanding how the dynamics
@@ -43,7 +47,7 @@ community - mostly Airflow committers (maintainers). Mentoring new members of th
 maintainers job so do not be afraid to ask them to help you. You can do it
 via comments in your PR, asking on a devlist or via Slack. We also have a dedicated ``#new-contributors`` Slack channel where you can ask any questions
 about making your first Pull Request (PR) contribution to the Airflow codebase - it's a safe space
-where it is expected that people asking questions do not know a lot Airflow (yet!).
+where it is expected that people asking questions do not know a lot about Airflow (yet!).
 If you need help with Airflow see the Slack channel ``#user-troubleshooting``.
 
 To check on how mentoring works for the projects under Apache Software Foundation's
@@ -60,14 +64,25 @@ To learn about various roles and communication channels in the Airflow project:
 * `How to communicate <02_how_to_communicate.rst>`__
   describes how to communicate with the community and how to get help.
 
+* `Code of Conduct <../CODE_OF_CONDUCT.md>`__ states the behaviour
+  the project expects from everyone, and the
+  `Community escalation process <../COMMUNITY_ESCALATION.md>`__
+  describes what happens when Code of Conduct breaches, spamming, or
+  other sustained disruptive behaviour cannot be resolved through
+  normal review and mentoring — and how to appeal a decision via
+  ``private@airflow.apache.org``.
+
 * `How to contribute <04_how_to_contribute.rst>`__ describes the various ways of how you can contribute to Airflow.
 
 To learn how to setup your environment for development and how to develop and test code:
 
-* `Contributors quick start <03_contributors_quick_start.rst>`__ describes
+* `Contributors quick start <03a_contributors_quick_start_beginners.rst>`__ describes
   how to set up your development environment and make your first contribution.
 
 * `Pull requests <05_pull_requests.rst>`__ describes how you can create pull requests. It also includes the pull request guidelines and the coding standards.
+
+* `Limit on open Pull Requests <32_open_pull_request_limit.rst>`__ explains the limit of open pull requests
+  for contributors without write access, and what to do when you reach it.
 
 * `Development environment <06_development_environments.rst>`__ describes the development environment
   used in Airflow.
@@ -81,21 +96,34 @@ To learn how to setup your environment for development and how to develop and te
 
 * `Testing <09_testing.rst>`__ describes what kind of tests we have and how to run them.
 
-* `Building documentation <../docs/README.rst>`__ describes how to build the documentation locally.
-
 * `Working with Git <10_working_with_git.rst>`__ describes the Git branches used in Airflow,
   how to sync your fork and how to rebase your PR.
+
+* `Building documentation <11_documentation_building.rst>`__ describes how to build the documentation.
+
 
 Advanced Topics
 ----------------
 Developing Providers
 .....................
 
-You can learn how Airflow repository is a monorepo split into airflow and providers,
+You can learn how Airflow repository is a monorepo split into Airflow and providers,
 and how to contribute to the providers:
 
-* `Provider distributions <11_provider_distributions.rst>`__ describes the providers and how they
+* `Provider distributions <12_provider_distributions.rst>`__ describes the providers and how they
   are used in Airflow.
+
+
+Developing Charts
+..................
+
+If you are working on the Airflow Helm chart, this guide explains where a
+change belongs (chart, Kustomize overlay, or out entirely) and the conventions
+that govern the chart's parameter surface:
+
+* `Developing the Helm Chart <29_helm_chart_development.rst>`__ — decision tree
+  for chart vs Kustomize routing, component reference, authoring conventions,
+  and the quality bar for overlays.
 
 
 Airflow Deep Dive
@@ -103,14 +131,46 @@ Airflow Deep Dive
 
 You can also dive deeper into more specific areas that are important for contributing to Airflow:
 
-* `Airflow dependencies and extras <12_airflow_dependencies_and_extras.rst>`__ describes
+* `Airflow dependencies and extras <13_airflow_dependencies_and_extras.rst>`__ describes
   the dependencies - both required and optional (extras) used in Airflow.
 
-* `Metadata database updates <13_metadata_database_updates.rst>`__ describes
+* `Metadata database updates <14_metadata_database_updates.rst>`__ describes
   how to make changes in the metadata database.
 
-* `Node environment setup <14_node_environment_setup.rst>`__ describes how to set up
+* `Node environment setup <15_node_environment_setup.rst>`__ describes how to set up
   the node environment for Airflow UI.
 
-* `Architecture diagram <15_architecture_diagrams.rst>`__ describes how to create and
+* `Adding API endpoints <16_adding_api_endpoints.rst>`__ describes how to add API endpoints
+  to the Airflow REST API.
+
+* `Architecture diagram <17_architecture_diagrams.rst>`__ describes how to create and
   update the architecture diagrams embedded in Airflow documentation.
+
+* `Execution API versioning <19_execution_api_versioning.rst>`__ describes how to
+  version the Task Execution API and how to add new versions of the API.
+
+* `Debugging Airflow Components <20_debugging_airflow_components.rst>`__ describes how to debug
+  Airflow components using Breeze with debugpy and VSCode integration.
+
+Maintainer Tools
+.................
+
+* `Maintainer PR Triage and Review <25_maintainer_pr_triage.md>`__ describes the agentic
+  ``pr-triage`` and ``pr-stats`` skills that maintainers invoke from Claude Code to sweep the
+  open Pull Request queue (run deterministic quality checks, propose actions under explicit
+  per-batch confirmation) and to surface backlog statistics by ``area:*`` label.
+
+* `Agent-assisted contribution <33_agent_assisted_contribution.md>`__ describes how to install the
+  ``apache/magpie`` agent skills used in this repository and where Airflow's overrides live.
+
+* `CLI Implementation Guide <27_cli_implementation_guide.rst>`__ describes where to implement new
+  CLI features following AIP-94: remote commands go to ``airflowctl``, admin/deployment commands
+  stay in the ``airflow`` CLI.
+
+
+Task Execution Lifecycle
+........................
+
+* `Task execution architecture <31_task_execution_architecture.rst>`__ explains what happens inside a
+  worker when a task runs: the Python Supervisor and task runner, the Coordinator layer shared by the Java
+  and Go SDKs.

@@ -24,12 +24,12 @@ from collections.abc import Sequence
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
 from airflow.providers.google.ads.hooks.ads import GoogleAdsHook
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
+from airflow.providers.google.version_compat import BaseOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class GoogleAdsListAccountsOperator(BaseOperator):
@@ -62,13 +62,16 @@ class GoogleAdsListAccountsOperator(BaseOperator):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
-    :param api_version: Optional Google Ads API version to use.
+    :param api_version: Optional Google Ads API version to use. If not set, the operator uses the
+        default version of the installed ``google-ads`` library.
     """
 
     template_fields: Sequence[str] = (
         "bucket",
         "object_name",
         "impersonation_chain",
+        "gcp_conn_id",
+        "google_ads_conn_id",
     )
 
     def __init__(

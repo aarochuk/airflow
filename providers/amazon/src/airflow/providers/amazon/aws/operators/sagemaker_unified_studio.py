@@ -22,9 +22,6 @@ from __future__ import annotations
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
-from airflow.models import BaseOperator
 from airflow.providers.amazon.aws.hooks.sagemaker_unified_studio import (
     SageMakerNotebookHook,
 )
@@ -34,14 +31,16 @@ from airflow.providers.amazon.aws.links.sagemaker_unified_studio import (
 from airflow.providers.amazon.aws.triggers.sagemaker_unified_studio import (
     SageMakerNotebookJobTrigger,
 )
+from airflow.providers.amazon.aws.utils.deferral import should_defer
+from airflow.providers.common.compat.sdk import AirflowException, BaseOperator, conf
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class SageMakerNotebookOperator(BaseOperator):
     """
-    Provides Artifact execution functionality for Sagemaker Unified Studio Workflows.
+    Provides Jupyter notebook artifact execution functionality for Sagemaker Unified Studio Workflows.
 
     Examples:
      .. code-block:: python
@@ -50,8 +49,11 @@ class SageMakerNotebookOperator(BaseOperator):
 
         notebook_operator = SageMakerNotebookOperator(
             task_id="notebook_task",
+            domain_id="dzd-example123456",
+            project_id="example123456",
             input_config={"input_path": "path/to/notebook.ipynb", "input_params": ""},
             output_config={"output_format": "ipynb"},
+            domain_region="us-east-1",
             wait_for_completion=True,
             waiter_delay=10,
             waiter_max_attempts=1440,
@@ -65,18 +67,35 @@ class SageMakerNotebookOperator(BaseOperator):
     :param output_config:  Configuration for the output format. It should include an output_format parameter to control
         the format of the notebook execution output.
         Example: {"output_formats": ["NOTEBOOK"]}
+    :param domain_id: The domain ID for Amazon SageMaker Unified Studio. Optional - if not provided,
+        the SDK will attempt to resolve it from the environment.
+    :param project_id: The project ID for Amazon SageMaker Unified Studio. Optional - if not provided,
+        the SDK will attempt to resolve it from the environment.
+    :param domain_region: The AWS region for the domain. If not provided, the default AWS region will be used.
     :param compute: compute configuration to use for the artifact execution. This is a required attribute
         if the execution is on a remote compute.
-        Example: { "InstanceType": "ml.m5.large", "VolumeSizeInGB": 30, "VolumeKmsKeyId": "", "ImageUri": "string", "ContainerEntrypoint": [ "string" ]}
+        Example::
+
+            {
+                "instance_type": "ml.c5.xlarge",
+                "image_details": {
+                    "image_name": "sagemaker-distribution-prod",
+                    "image_version": "3",
+                    "ecr_uri": "123456123456.dkr.ecr.us-west-2.amazonaws.com/ImageName:latest",
+                },
+            }
+
     :param termination_condition: conditions to match to terminate the remote execution.
-        Example: { "MaxRuntimeInSeconds": 3600 }
+        Example: ``{"MaxRuntimeInSeconds": 3600}``
     :param tags: tags to be associated with the remote execution runs.
-        Example: { "md_analytics": "logs" }
+        Example: ``{"md_analytics": "logs"}``
     :param wait_for_completion: Indicates whether to wait for the notebook execution to complete. If True, wait for completion; if False, don't wait.
     :param waiter_delay: Interval in seconds to check the notebook execution status.
     :param waiter_max_attempts: Number of attempts to wait before returning FAILED.
     :param deferrable: If True, the operator will wait asynchronously for the job to complete.
-        This implies waiting for completion. This mode requires aiobotocore module to be installed.
+        Deferring when ``wait_for_completion`` is False is deprecated; from the next major release
+        this has no effect when ``wait_for_completion`` is False.
+        This mode requires aiobotocore module to be installed.
         (default: False)
 
     .. seealso::
@@ -85,12 +104,25 @@ class SageMakerNotebookOperator(BaseOperator):
     """
 
     operator_extra_links = (SageMakerUnifiedStudioLink(),)
+    template_fields = (
+        "domain_id",
+        "project_id",
+        "domain_region",
+        "input_config",
+        "output_config",
+        "compute",
+        "termination_condition",
+        "tags",
+    )
 
     def __init__(
         self,
         task_id: str,
         input_config: dict,
+        domain_id: str | None = None,
+        project_id: str | None = None,
         output_config: dict | None = None,
+        domain_region: str | None = None,
         compute: dict | None = None,
         termination_condition: dict | None = None,
         tags: dict | None = None,
@@ -102,8 +134,11 @@ class SageMakerNotebookOperator(BaseOperator):
     ):
         super().__init__(task_id=task_id, **kwargs)
         self.execution_name = task_id
+        self.domain_id = domain_id
+        self.project_id = project_id
         self.input_config = input_config
         self.output_config = output_config or {"output_formats": ["NOTEBOOK"]}
+        self.domain_region = domain_region
         self.compute = compute or {}
         self.termination_condition = termination_condition or {}
         self.tags = tags or {}
@@ -122,9 +157,12 @@ class SageMakerNotebookOperator(BaseOperator):
             raise AirflowException("input_path is a required field in the input_config")
 
         return SageMakerNotebookHook(
+            domain_id=self.domain_id,
+            project_id=self.project_id,
             input_config=self.input_config,
             output_config=self.output_config,
             execution_name=self.execution_name,
+            domain_region=self.domain_region,
             compute=self.compute,
             termination_condition=self.termination_condition,
             tags=self.tags,
@@ -136,7 +174,7 @@ class SageMakerNotebookOperator(BaseOperator):
         notebook_execution = self.notebook_execution_hook.start_notebook_execution()
         execution_id = notebook_execution["execution_id"]
 
-        if self.deferrable:
+        if should_defer(deferrable=self.deferrable, wait_for_completion=self.wait_for_completion):
             self.defer(
                 trigger=SageMakerNotebookJobTrigger(
                     execution_id=execution_id,

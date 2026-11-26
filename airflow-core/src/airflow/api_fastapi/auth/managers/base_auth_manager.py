@@ -17,26 +17,43 @@
 # under the License.
 from __future__ import annotations
 
+import inspect
 import logging
+import warnings
 from abc import ABCMeta, abstractmethod
-from functools import cache
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from enum import StrEnum
+from functools import cache, cached_property
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from jwt import InvalidTokenError
 from sqlalchemy import select
+from starlette.concurrency import run_in_threadpool
 
 from airflow.api_fastapi.auth.managers.models.base_user import BaseUser
-from airflow.api_fastapi.auth.managers.models.resource_details import BackfillDetails, DagDetails
+from airflow.api_fastapi.auth.managers.models.resource_details import (
+    AssetDetails,
+    ConnectionDetails,
+    DagDetails,
+    PoolDetails,
+    TeamDetails,
+    VariableDetails,
+)
 from airflow.api_fastapi.auth.tokens import (
     JWTGenerator,
     JWTValidator,
     get_sig_validation_args,
     get_signing_args,
 )
-from airflow.api_fastapi.common.types import ExtraMenuItem, MenuItem
+from airflow.api_fastapi.common.types import CliLoginMethods, ExtraMenuItem, MenuItem
 from airflow.configuration import conf
-from airflow.models import DagModel
-from airflow.typing_compat import Literal
+from airflow.exceptions import RemovedInAirflow4Warning
+from airflow.models import Connection, DagModel, Pool, Variable
+from airflow.models.asset import AssetModel
+from airflow.models.dagbundle import DagBundleModel
+from airflow.models.revoked_token import RevokedToken
+from airflow.models.team import Team, dag_bundle_team_association_table
 from airflow.utils.log.logging_mixin import LoggingMixin
 from airflow.utils.session import NEW_SESSION, provide_session
 
@@ -44,7 +61,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from fastapi import FastAPI
+    from sqlalchemy import Row
     from sqlalchemy.orm import Session
+    from starlette.middleware import _MiddlewareFactory
 
     from airflow.api_fastapi.auth.managers.models.batch_apis import (
         IsAuthorizedConnectionRequest,
@@ -55,18 +74,35 @@ if TYPE_CHECKING:
     from airflow.api_fastapi.auth.managers.models.resource_details import (
         AccessView,
         AssetAliasDetails,
-        AssetDetails,
         ConfigurationDetails,
-        ConnectionDetails,
         DagAccessEntity,
-        PoolDetails,
-        VariableDetails,
     )
     from airflow.cli.cli_config import CLICommand
 
-# This cannot be in the TYPE_CHECKING block since some providers import it globally.
-# TODO: Move this inside once all providers drop Airflow 2.x support.
-ResourceMethod = Literal["GET", "POST", "PUT", "DELETE", "MENU"]
+if TYPE_CHECKING:
+    # For static type checking - accepts string literals
+    ResourceMethod = Literal["GET", "POST", "PUT", "DELETE"]
+    ExtendedResourceMethod = Literal["GET", "POST", "PUT", "DELETE", "MENU"]
+else:
+    # For runtime - provides iteration and validation
+
+    class ResourceMethod(StrEnum):
+        """HTTP methods (actions) a user can perform against a resource."""
+
+        GET = "GET"
+        POST = "POST"
+        PUT = "PUT"
+        DELETE = "DELETE"
+
+    class ExtendedResourceMethod(StrEnum):
+        """Extended HTTP methods including MENU for UI resource authorization."""
+
+        GET = "GET"
+        POST = "POST"
+        PUT = "PUT"
+        DELETE = "DELETE"
+        MENU = "MENU"
+
 
 log = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseUser)
@@ -83,19 +119,39 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
     """
 
     def init(self) -> None:
-        """
-        Run operations when Airflow is initializing.
+        """Run operations when Airflow is initializing."""
+        if conf.getboolean("core", "multi_team"):
+            am_teams = self._get_teams()
+            db_teams = Team.get_all_team_names()
 
-        By default, do nothing.
-        """
+            if not db_teams.issuperset(am_teams):
+                warnings.warn(
+                    f"Teams defined in the auth manager are not present in the database ({am_teams.difference(db_teams)}).",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            if not am_teams.issuperset(db_teams):
+                warnings.warn(
+                    f"Teams defined in the database are not present in the auth manager ({db_teams.difference(am_teams)}).",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
     @abstractmethod
     def deserialize_user(self, token: dict[str, Any]) -> T:
         """Create a user object from dict."""
 
+    async def deserialize_user_async(self, token: dict[str, Any]) -> T:
+        """Extension point for asynchronously creating a user object from token claims."""
+        return self.deserialize_user(token)
+
     @abstractmethod
     def serialize_user(self, user: T) -> dict[str, Any]:
         """Create a subject and extra claims dict from a user object."""
+
+    def revoke_token(self, token: str) -> None:
+        """Revoke a JWT token by persisting its JTI in the database."""
+        self._get_token_validator().revoke_token(token)
 
     async def get_user_from_token(self, token: str) -> BaseUser:
         """Verify the JWT token is valid and create a user object from it if valid."""
@@ -105,11 +161,41 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
             log.error("JWT token is not valid: %s", e)
             raise e
 
+        # A synchronous DB lookup, kept off the event loop
+        if (jti := payload.get("jti")) and await run_in_threadpool(RevokedToken.is_revoked, jti):
+            raise InvalidTokenError("Token has been revoked")
+
         try:
-            return self.deserialize_user(payload)
+            return await self.deserialize_user_async(payload)
         except (ValueError, KeyError) as e:
             log.error("Couldn't deserialize user from token, JWT token is not valid: %s", e)
             raise InvalidTokenError(str(e))
+
+    def get_fastapi_middlewares(self) -> list[tuple[_MiddlewareFactory[Any], dict[str, Any]]]:
+        """
+        Return middlewares the auth manager wants registered on the main FastAPI app.
+
+        Each entry is a ``(middleware_class, kwargs)`` tuple and is registered via
+        ``app.add_middleware`` by the API server. Auth managers that need to intercept or
+        augment incoming requests (for example, attaching an anonymous user to
+        unauthenticated requests when public access is configured) should override this
+        method.
+        """
+        return []
+
+    def get_jwt_refresh_middleware(self) -> list[tuple[_MiddlewareFactory[Any], dict[str, Any]]]:
+        """
+        Return the JWTRefreshMiddleware to refresh the Airflow JWT token.
+
+        Middlewares added by this method will be initialised before middleware from
+        ``get_fastapi_middlewares()``. To disable JWT refresh return an empty list.
+        To add more middleware, simply add more tuples here in the same format as
+        ``get_fastapi_middlewares()``.
+        """
+        from airflow.api_fastapi.auth.middlewares.refresh_token import JWTRefreshMiddleware
+        from airflow.api_fastapi.core_api.app import _STATIC_URL_PATH
+
+        return [(JWTRefreshMiddleware, {"skip_path_prefixes": (f"{_STATIC_URL_PATH}/",)})]
 
     def generate_jwt(
         self, user: T, *, expiration_time_in_seconds: int = conf.getint("api_auth", "jwt_expiration_time")
@@ -118,6 +204,22 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         return self._get_token_signer(expiration_time_in_seconds=expiration_time_in_seconds).generate(
             self.serialize_user(user)
         )
+
+    def generate_api_jwt(
+        self, user: T, *, expiration_time_in_seconds: int = conf.getint("api_auth", "jwt_expiration_time")
+    ) -> str:
+        """
+        Return the JWT token for a client that authenticates with the ``Authorization`` header.
+
+        Such a client sends no cookies, so an auth manager that keeps part of its state in
+        cookies has to put that state in the token's claims instead for the request to be
+        authorized. Auth managers whose tokens are already self-contained need not override
+        this.
+
+        :param user: the user to generate the token for
+        :param expiration_time_in_seconds: expiration time in seconds of the token
+        """
+        return self.generate_jwt(user, expiration_time_in_seconds=expiration_time_in_seconds)
 
     @abstractmethod
     def get_url_login(self, **kwargs) -> str:
@@ -130,6 +232,27 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         The user is redirected to this URL when logging out. If None is returned (by default), no redirection
         is performed. This redirection is usually needed to invalidate resources when logging out, such as a
         session.
+        """
+        return None
+
+    def get_cli_login_methods(self) -> CliLoginMethods:
+        """
+        Return the login methods offered to command-line clients such as airflowctl.
+
+        Clients read them before logging in, so they can tell which flows the server supports.
+        By default, no method is advertised.
+        """
+        return CliLoginMethods()
+
+    def refresh_user(self, *, user: T) -> T | None:
+        """
+        Refresh the user if needed.
+
+        By default, does nothing. Some auth managers might need to refresh the user to, for instance,
+        refresh some tokens that are needed to communicate with a service/tool.
+
+        This method is called by every single request, it must be lightweight otherwise the overall API
+        server latency will increase.
         """
         return None
 
@@ -175,29 +298,13 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         details: DagDetails | None = None,
     ) -> bool:
         """
-        Return whether the user is authorized to perform a given action on a DAG.
+        Return whether the user is authorized to perform a given action on a Dag.
 
         :param method: the method to perform
         :param user: the user to performing the action
-        :param access_entity: the kind of DAG information the authorization request is about.
-            If not provided, the authorization request is about the DAG itself
-        :param details: optional details about the DAG
-        """
-
-    @abstractmethod
-    def is_authorized_backfill(
-        self,
-        *,
-        method: ResourceMethod,
-        user: T,
-        details: BackfillDetails | None = None,
-    ) -> bool:
-        """
-        Return whether the user is authorized to perform a given action on a backfill.
-
-        :param method: the method to perform
-        :param user: the user to performing the action
-        :param details: optional details about the backfill
+        :param access_entity: the kind of Dag information the authorization request is about.
+            If not provided, the authorization request is about the Dag itself
+        :param details: optional details about the Dag
         """
 
     @abstractmethod
@@ -248,6 +355,28 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         :param details: optional details about the pool
         """
 
+    def is_authorized_team(
+        self,
+        *,
+        method: ResourceMethod,
+        user: T,
+        details: TeamDetails | None = None,
+    ) -> bool:
+        """
+        Return whether the user is authorized to perform a given action on a team.
+
+        It is used primarily to check whether a user belongs to a team.
+        This function needs to be overridden by an auth manager compatible with multi-team.
+
+        :param method: the method to perform
+        :param user: the user performing the action
+        :param details: optional details about the team
+        """
+        raise NotImplementedError(
+            "The auth manager you are using is not compatible with multi-team. "
+            "In order to run Airflow in multi-team mode you need to use an auth manager compatible with it."
+        )
+
     @abstractmethod
     def is_authorized_variable(
         self,
@@ -270,16 +399,75 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         *,
         access_view: AccessView,
         user: T,
+        team_name: str | None = None,
     ) -> bool:
         """
         Return whether the user is authorized to access a read-only state of the installation.
 
         :param access_view: the specific read-only view/state the authorization request is about.
         :param user: the user to performing the action
+        :param team_name: team the view is scoped to, if any. Managers without multi-team
+            support may accept and ignore it, which authorizes the view globally.
         """
 
+    @cached_property
+    def _is_authorized_view_team_aware(self) -> bool:
+        """Whether this manager's ``is_authorized_view`` override accepts ``team_name``."""
+        params = inspect.signature(self.is_authorized_view).parameters
+        return "team_name" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+    def authorize_view(self, *, access_view: AccessView, user: T, team_name: str | None = None) -> bool:
+        """
+        Authorize a read-only view, tolerating auth managers that predate ``team_name``.
+
+        Core calls this instead of :meth:`is_authorized_view` on team-scoped paths: an
+        override still on the old ``(access_view, user)`` signature would otherwise raise
+        ``TypeError``. Removed in Airflow 4.
+
+        A manager that does not recognise ``access_view`` at all is also tolerated, and
+        denied -- see :meth:`_authorize_view_unmapped_denied`.
+        """
+        try:
+            if self._is_authorized_view_team_aware:
+                return self.is_authorized_view(access_view=access_view, user=user, team_name=team_name)
+            warnings.warn(
+                f"The '{type(self).__name__}' auth manager is not team-aware, so team-scoped views are "
+                "authorized across all teams and may be visible to users of other teams. Add the "
+                "'team_name' argument to its is_authorized_view (or upgrade the provider). Airflow 4 "
+                "will require team-aware auth managers.",
+                RemovedInAirflow4Warning,
+                stacklevel=2,
+            )
+            return self.is_authorized_view(access_view=access_view, user=user)
+        except KeyError:
+            return self._authorize_view_unmapped_denied(access_view)
+
+    def _authorize_view_unmapped_denied(self, access_view: AccessView) -> bool:
+        """
+        Deny an ``AccessView`` the auth manager cannot map, instead of raising.
+
+        ``AccessView`` members are added by core, but auth managers ship as separately
+        released providers, so a core newer than the installed auth manager can name a
+        view the manager has never heard of. Managers that translate the enum through a
+        lookup table (the FAB auth manager, for one) raise ``KeyError`` on such a member,
+        which would surface as a 500 on the endpoint that consults it.
+
+        Denying keeps the endpoint working and fails closed: an unmappable view means the
+        manager cannot express who may see the records, and these views gate records with
+        no other authorization key. Upgrading the auth manager provider to a version that
+        maps the view restores access.
+        """
+        warnings.warn(
+            f"The '{type(self).__name__}' auth manager cannot map the '{access_view.name}' view, so "
+            "access to it is denied. This usually means the auth manager provider is older than "
+            "Airflow core; upgrade it to a version that supports this view.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return False
+
     @abstractmethod
-    def is_authorized_custom_view(self, *, method: ResourceMethod | str, resource_name: str, user: T) -> bool:
+    def is_authorized_custom_view(self, *, method: ResourceMethod, resource_name: str, user: T) -> bool:
         """
         Return whether the user is authorized to perform a given action on a custom view.
 
@@ -304,6 +492,22 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         :param user: the user
         """
 
+    def is_authorized_hitl_task(self, *, assigned_users: set[str], user: T) -> bool:
+        """
+        Check if a user is allowed to approve/reject a HITL task.
+
+        Airflow only calls this method for tasks that have assigned users. When a task has none, Airflow
+        skips this method and any user allowed to update the task's HITL detail (``is_authorized_dag``
+        with ``DagAccessEntity.HITL_DETAIL``) can respond.
+
+        By default, checks if the user's ID is in the assigned_users set.
+        Auth managers can override this method to implement custom logic.
+
+        :param assigned_users: set of user IDs assigned to the task, never empty
+        :param user: the user to check authorization for
+        """
+        return user.get_id() in assigned_users
+
     def batch_is_authorized_connection(
         self,
         requests: Sequence[IsAuthorizedConnectionRequest],
@@ -313,15 +517,19 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         """
         Batch version of ``is_authorized_connection``.
 
-        By default, calls individually the ``is_authorized_connection`` API on each item in the list of
-        requests, which can lead to some poor performance. It is recommended to override this method in the auth
-        manager implementation to provide a more efficient implementation.
+        By default, calls individually the ``is_authorized_connection`` API on each item in the list of requests.
+        Can lead to some poor performance. It is recommended to override this method in the auth manager
+        implementation to provide a more efficient implementation.
 
         :param requests: a list of requests containing the parameters for ``is_authorized_connection``
         :param user: the user to performing the action
         """
         return all(
-            self.is_authorized_connection(method=request["method"], details=request.get("details"), user=user)
+            self.is_authorized_connection(
+                method=request["method"],
+                details=request.get("details"),
+                user=user,
+            )
             for request in requests
         )
 
@@ -360,15 +568,19 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         """
         Batch version of ``is_authorized_pool``.
 
-        By default, calls individually the ``is_authorized_pool`` API on each item in the list of
-        requests. Can lead to some poor performance. It is recommended to override this method in the auth
-        manager implementation to provide a more efficient implementation.
+        By default, calls individually the ``is_authorized_pool`` API on each item in the list of requests.
+        Can lead to some poor performance. It is recommended to override this method in the auth manager
+        implementation to provide a more efficient implementation.
 
         :param requests: a list of requests containing the parameters for ``is_authorized_pool``
         :param user: the user to performing the action
         """
         return all(
-            self.is_authorized_pool(method=request["method"], details=request.get("details"), user=user)
+            self.is_authorized_pool(
+                method=request["method"],
+                details=request.get("details"),
+                user=user,
+            )
             for request in requests
         )
 
@@ -381,17 +593,127 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         """
         Batch version of ``is_authorized_variable``.
 
-        By default, calls individually the ``is_authorized_variable`` API on each item in the list of
-        requests. Can lead to some poor performance. It is recommended to override this method in the auth
-        manager implementation to provide a more efficient implementation.
+        By default, calls individually the ``is_authorized_variable`` API on each item in the list of requests.
+        Can lead to some poor performance. It is recommended to override this method in the auth manager
+        implementation to provide a more efficient implementation.
 
         :param requests: a list of requests containing the parameters for ``is_authorized_variable``
         :param user: the user to performing the action
         """
         return all(
-            self.is_authorized_variable(method=request["method"], details=request.get("details"), user=user)
+            self.is_authorized_variable(
+                method=request["method"],
+                details=request.get("details"),
+                user=user,
+            )
             for request in requests
         )
+
+    @provide_session
+    def get_authorized_assets(
+        self,
+        *,
+        user: T,
+        method: ResourceMethod = "GET",
+        session: Session = NEW_SESSION,
+    ) -> set[int]:
+        """
+        Get the ids of the assets the user has access to.
+
+        :param user: the user
+        :param method: the method to filter on
+        :param session: the session
+        """
+        rows = session.execute(select(AssetModel.id, AssetModel.name, AssetModel.uri)).all()
+        assets = [AssetDetails(id=str(asset_id), name=name, uri=uri) for asset_id, name, uri in rows]
+        authorized_ids = self.filter_authorized_assets(assets=assets, user=user, method=method)
+        return {asset_id for asset_id, _, _ in rows if str(asset_id) in authorized_ids}
+
+    def filter_authorized_assets(
+        self,
+        *,
+        assets: Sequence[AssetDetails],
+        user: T,
+        method: ResourceMethod = "GET",
+    ) -> set[str]:
+        """
+        Filter assets the user has access to, returning the ids of the authorized ones.
+
+        By default, check individually if the user has permissions to access the asset. An auth manager
+        whose ``is_authorized_asset`` performs a remote call must override this method: a deployment can
+        hold far more assets than connections or pools, and the default costs one round trip per asset on
+        every asset listing.
+
+        :param assets: the assets to filter. Each item carries the asset id, name and uri, so an auth
+            manager can authorize on any of them (e.g. restrict by uri prefix).
+        :param user: the user
+        :param method: the method to filter on
+        """
+        return {
+            details.id
+            for details in assets
+            if details.id is not None and self.is_authorized_asset(method=method, details=details, user=user)
+        }
+
+    @provide_session
+    def get_authorized_connections(
+        self,
+        *,
+        user: T,
+        method: ResourceMethod = "GET",
+        session: Session = NEW_SESSION,
+    ) -> set[str]:
+        """
+        Get connection ids (``conn_id``) the user has access to.
+
+        :param user: the user
+        :param method: the method to filter on
+        :param session: the session
+        """
+        stmt = select(Connection.conn_id, Connection.team_name)
+        rows = session.execute(stmt).all()
+        connections_by_team: dict[str | None, set[str]] = defaultdict(set)
+        for conn_id, team_name in rows:
+            connections_by_team[team_name].add(conn_id)
+
+        conn_ids: set[str] = set()
+        for team_name, team_conn_ids in connections_by_team.items():
+            conn_ids.update(
+                self.filter_authorized_connections(
+                    conn_ids=team_conn_ids, user=user, method=method, team_name=team_name
+                )
+            )
+
+        return conn_ids
+
+    def filter_authorized_connections(
+        self,
+        *,
+        conn_ids: set[str],
+        user: T,
+        method: ResourceMethod = "GET",
+        team_name: str | None = None,
+    ) -> set[str]:
+        """
+        Filter connections the user has access to.
+
+        By default, check individually if the user has permissions to access the connection.
+        Can lead to some poor performance. It is recommended to override this method in the auth manager
+        implementation to provide a more efficient implementation.
+
+        :param conn_ids: the set of connection ids (``conn_id``)
+        :param user: the user
+        :param method: the method to filter on
+        :param team_name: the name of the team associated to the connections if Airflow environment runs in
+            multi-team mode
+        """
+
+        def _is_authorized_connection(conn_id: str):
+            return self.is_authorized_connection(
+                method=method, details=ConnectionDetails(conn_id=conn_id, team_name=team_name), user=user
+            )
+
+        return {conn_id for conn_id in conn_ids if _is_authorized_connection(conn_id)}
 
     @provide_session
     def get_authorized_dag_ids(
@@ -402,18 +724,36 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         session: Session = NEW_SESSION,
     ) -> set[str]:
         """
-        Get DAGs the user has access to.
-
-        By default, reads all the DAGs and check individually if the user has permissions to access the DAG.
-        Can lead to some poor performance. It is recommended to override this method in the auth manager
-        implementation to provide a more efficient implementation.
+        Get Dags the user has access to.
 
         :param user: the user
         :param method: the method to filter on
         :param session: the session
         """
-        dag_ids = {dag.dag_id for dag in session.execute(select(DagModel.dag_id))}
-        return self.filter_authorized_dag_ids(dag_ids=dag_ids, method=method, user=user)
+        stmt = (
+            select(DagModel.dag_id, dag_bundle_team_association_table.c.team_name)
+            .join(DagBundleModel, DagModel.bundle_name == DagBundleModel.name)
+            .join(
+                dag_bundle_team_association_table,
+                DagBundleModel.name == dag_bundle_team_association_table.c.dag_bundle_name,
+                isouter=True,
+            )
+        )
+        # The below type annotation is acceptable on SQLA2.1, but not on 2.0
+        rows: Sequence[Row[*tuple[str, str]]] = session.execute(stmt).all()  # type: ignore[type-arg]
+        dags_by_team: dict[str, set[str]] = defaultdict(set)
+        for dag_id, team_name in rows:
+            dags_by_team[team_name].add(dag_id)
+
+        dag_ids: set[str] = set()
+        for team_name, team_dag_ids in dags_by_team.items():
+            dag_ids.update(
+                self.filter_authorized_dag_ids(
+                    dag_ids=team_dag_ids, user=user, method=method, team_name=team_name
+                )
+            )
+
+        return dag_ids
 
     def filter_authorized_dag_ids(
         self,
@@ -421,19 +761,197 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         dag_ids: set[str],
         user: T,
         method: ResourceMethod = "GET",
+        team_name: str | None = None,
     ) -> set[str]:
         """
-        Filter DAGs the user has access to.
+        Filter Dags the user has access to.
 
-        :param dag_ids: the list of DAG ids
+        By default, check individually if the user has permissions to access the Dag.
+        Can lead to some poor performance. It is recommended to override this method in the auth manager
+        implementation to provide a more efficient implementation.
+
+        :param dag_ids: the set of Dag ids
+        :param user: the user
+        :param method: the method to filter on
+        :param team_name: the name of the team associated to the Dags if Airflow environment runs in
+            multi-team mode
+        """
+
+        def _is_authorized_dag_id(dag_id: str):
+            return self.is_authorized_dag(
+                method=method, details=DagDetails(id=dag_id, team_name=team_name), user=user
+            )
+
+        if not dag_ids:
+            return set()
+
+        with ThreadPoolExecutor() as executor:
+            results = executor.map(_is_authorized_dag_id, dag_ids)
+
+        return {dag_id for dag_id, authorized in zip(dag_ids, results) if authorized}
+
+    @provide_session
+    def get_authorized_pools(
+        self,
+        *,
+        user: T,
+        method: ResourceMethod = "GET",
+        session: Session = NEW_SESSION,
+    ) -> set[str]:
+        """
+        Get pools the user has access to.
+
+        :param user: the user
+        :param method: the method to filter on
+        :param session: the session
+        """
+        stmt = select(Pool.pool, Pool.team_name)
+        rows = session.execute(stmt).all()
+        pools_by_team: dict[str | None, set[str]] = defaultdict(set)
+        for pool_name, team_name in rows:
+            if pool_name is not None:
+                pools_by_team[team_name].add(pool_name)
+
+        pool_names: set[str] = set()
+        for team_name, team_pool_names in pools_by_team.items():
+            pool_names.update(
+                self.filter_authorized_pools(
+                    pool_names=team_pool_names, user=user, method=method, team_name=team_name
+                )
+            )
+
+        return pool_names
+
+    def filter_authorized_pools(
+        self,
+        *,
+        pool_names: set[str],
+        user: T,
+        method: ResourceMethod = "GET",
+        team_name: str | None = None,
+    ) -> set[str]:
+        """
+        Filter pools the user has access to.
+
+        By default, check individually if the user has permissions to access the pool.
+        Can lead to some poor performance. It is recommended to override this method in the auth manager
+        implementation to provide a more efficient implementation.
+
+        :param pool_names: the set of pool names
+        :param user: the user
+        :param method: the method to filter on
+        :param team_name: the name of the team associated to the connections if Airflow environment runs in
+            multi-team mode
+        """
+
+        def _is_authorized_pool(name: str):
+            return self.is_authorized_pool(
+                method=method, details=PoolDetails(name=name, team_name=team_name), user=user
+            )
+
+        return {pool_name for pool_name in pool_names if _is_authorized_pool(pool_name)}
+
+    @provide_session
+    def get_authorized_teams(
+        self,
+        *,
+        user: T,
+        method: ResourceMethod = "GET",
+        session: Session = NEW_SESSION,
+    ) -> set[str]:
+        """
+        Get teams the user belongs to.
+
+        :param user: the user
+        :param method: the method to filter on
+        :param session: the session
+        """
+        team_names = Team.get_all_team_names(session=session)
+        return self.filter_authorized_teams(teams_names=team_names, user=user, method=method)
+
+    def filter_authorized_teams(
+        self,
+        *,
+        teams_names: set[str],
+        user: T,
+        method: ResourceMethod = "GET",
+    ) -> set[str]:
+        """
+        Filter teams the user belongs to.
+
+        By default, check individually if the user has permissions to access the team.
+        Can lead to some poor performance. It is recommended to override this method in the auth manager
+        implementation to provide a more efficient implementation.
+
+        :param teams_names: the set of team names
         :param user: the user
         :param method: the method to filter on
         """
 
-        def _is_authorized_dag_id(method: ResourceMethod, dag_id: str):
-            return self.is_authorized_dag(method=method, details=DagDetails(id=dag_id), user=user)
+        def _is_authorized_team(name: str):
+            return self.is_authorized_team(method=method, details=TeamDetails(name=name), user=user)
 
-        return {dag_id for dag_id in dag_ids if _is_authorized_dag_id(method, dag_id)}
+        return {team_name for team_name in teams_names if _is_authorized_team(team_name)}
+
+    @provide_session
+    def get_authorized_variables(
+        self,
+        *,
+        user: T,
+        method: ResourceMethod = "GET",
+        session: Session = NEW_SESSION,
+    ) -> set[str]:
+        """
+        Get variable keys the user has access to.
+
+        :param user: the user
+        :param method: the method to filter on
+        :param session: the session
+        """
+        stmt = select(Variable.key, Variable.team_name)
+        rows = session.execute(stmt).all()
+        variables_by_team: dict[str | None, set[str]] = defaultdict(set)
+        for var_key, team_name in rows:
+            variables_by_team[team_name].add(var_key)
+
+        var_keys: set[str] = set()
+        for team_name, team_var_keys in variables_by_team.items():
+            var_keys.update(
+                self.filter_authorized_variables(
+                    variable_keys=team_var_keys, user=user, method=method, team_name=team_name
+                )
+            )
+
+        return var_keys
+
+    def filter_authorized_variables(
+        self,
+        *,
+        variable_keys: set[str],
+        user: T,
+        method: ResourceMethod = "GET",
+        team_name: str | None = None,
+    ) -> set[str]:
+        """
+        Filter variables the user has access to.
+
+        By default, check individually if the user has permissions to access the variable.
+        Can lead to some poor performance. It is recommended to override this method in the auth manager
+        implementation to provide a more efficient implementation.
+
+        :param variable_keys: the set of variable keys
+        :param user: the user
+        :param method: the method to filter on
+        :param team_name: the name of the team associated to the connections if Airflow environment runs in
+            multi-team mode
+        """
+
+        def _is_authorized_variable(var_key: str):
+            return self.is_authorized_variable(
+                method=method, details=VariableDetails(key=var_key, team_name=team_name), user=user
+            )
+
+        return {var_key for var_key in variable_keys if _is_authorized_variable(var_key)}
 
     @staticmethod
     def get_cli_commands() -> list[CLICommand]:
@@ -464,6 +982,14 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         """
         return []
 
+    def _get_teams(self) -> set[str]:
+        """
+        Return the set of teams defined in the auth manager.
+
+        This method is used only when the Airflow environment is configured in multi-team mode.
+        """
+        raise NotImplementedError()
+
     @staticmethod
     def get_db_manager() -> str | None:
         """
@@ -472,6 +998,37 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         This is optional and not all auth managers require a DB manager.
         """
         return None
+
+    @staticmethod
+    def _get_jwt_audience() -> str:
+        """
+        Resolve the JWT audience from the documented ``[api_auth] jwt_audience`` option.
+
+        Falls back to the undocumented ``[api] jwt_audience`` location used by the signer in
+        earlier 3.x releases (with a deprecation warning) so deployments that set the wrong
+        section continue to work until they migrate. Returns the default ``apache-airflow``
+        when neither is configured.
+
+        :meta private:
+        """
+        if conf.has_option("api_auth", "jwt_audience"):
+            return conf.get("api_auth", "jwt_audience")
+        if conf.has_option("api", "jwt_audience"):
+            # Bug context in PR https://github.com/apache/airflow/pull/67494: the signer used to
+            # read `[api] jwt_audience` while the validator read `[api_auth] jwt_audience`, so
+            # any deployment that hit the bug set the value under `[api]`. Honour it with a
+            # deprecation warning until the fallback can be removed in a future major release.
+            warnings.warn(
+                "The `[api] jwt_audience` configuration option is deprecated and was never "
+                "documented. It was read only by the JWT signer due to a bug; the validator "
+                "always read `[api_auth] jwt_audience`. Move the value to `[api_auth] "
+                "jwt_audience` (env var `AIRFLOW__API_AUTH__JWT_AUDIENCE`). Support for the "
+                "`[api]` location will be removed in a future release.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return conf.get("api", "jwt_audience")
+        return "apache-airflow"
 
     @classmethod
     @cache
@@ -489,7 +1046,7 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         return JWTGenerator(
             **get_signing_args(),
             valid_for=expiration_time_in_seconds,
-            audience=conf.get("api", "jwt_audience", fallback="apache-airflow"),
+            audience=cls._get_jwt_audience(),
         )
 
     @classmethod
@@ -503,5 +1060,5 @@ class BaseAuthManager(Generic[T], LoggingMixin, metaclass=ABCMeta):
         return JWTValidator(
             **get_sig_validation_args(),
             leeway=conf.getint("api_auth", "jwt_leeway"),
-            audience=conf.get("api_auth", "jwt_audience", fallback="apache-airflow"),
+            audience=cls._get_jwt_audience(),
         )

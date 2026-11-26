@@ -16,9 +16,10 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { useCallback, useMemo } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, useLocation } from "react-router-dom";
+import { useLocalStorage } from "usehooks-ts";
 
+import { tableSortKey } from "src/constants/localStorage";
 import { useConfig } from "src/queries/useConfig";
 
 import { searchParamsToState, stateToSearchParams } from "./searchParams";
@@ -26,34 +27,32 @@ import type { TableState } from "./types";
 
 export const useTableURLState = (defaultState?: Partial<TableState>) => {
   const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
+  const pageName = location.pathname;
 
-  const pageSize = useConfig("page_size") as number;
+  const [sorting, setSorting] = useLocalStorage<TableState["sorting"]>(tableSortKey(pageName), []);
+
+  const pageSize = useConfig("fallback_page_limit") as number;
 
   const defaultTableState = {
     pagination: {
       pageIndex: 0,
       pageSize,
     },
-    sorting: [],
+    sorting,
   } as const satisfies TableState;
 
-  const handleStateChange = useCallback(
-    (state: TableState) => {
-      setSearchParams(stateToSearchParams(state, defaultTableState), {
-        replace: true,
-      });
-    },
-    [setSearchParams, defaultTableState],
-  );
+  const handleStateChange = (state: TableState) => {
+    setSearchParams(stateToSearchParams(state, defaultTableState), {
+      replace: true,
+    });
+    setSorting(state.sorting);
+  };
 
-  const tableURLState = useMemo(
-    () =>
-      searchParamsToState(searchParams, {
-        ...defaultTableState,
-        ...defaultState,
-      }),
-    [searchParams, defaultState, defaultTableState],
-  );
+  const tableURLState = searchParamsToState(searchParams, {
+    ...defaultTableState,
+    ...defaultState,
+  });
 
   return {
     setTableURLState: handleStateChange,

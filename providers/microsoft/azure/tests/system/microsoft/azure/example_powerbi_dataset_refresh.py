@@ -20,7 +20,12 @@ import os
 from datetime import datetime
 
 from airflow import DAG, settings
-from airflow.decorators import task
+
+try:
+    from airflow.sdk import task
+except ImportError:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
 from airflow.models import Connection
 from airflow.models.baseoperator import chain
 from airflow.providers.microsoft.azure.operators.powerbi import PowerBIDatasetRefreshOperator
@@ -28,7 +33,7 @@ from airflow.providers.microsoft.azure.operators.powerbi import PowerBIDatasetRe
 DAG_ID = "example_refresh_powerbi_dataset"
 CONN_ID = "powerbi_default"
 
-# Before running this system test, you should set following environment variables:
+# Before running this system test, you should set the following environment variables:
 DATASET_ID = os.environ.get("DATASET_ID", "None")
 GROUP_ID = os.environ.get("GROUP_ID", "None")
 CLIENT_ID = os.environ.get("CLIENT_ID", None)
@@ -45,6 +50,8 @@ def create_connection(conn_id_name: str):
         password=CLIENT_SECRET,
         extra={"tenant_id": TENANT_ID},
     )
+    if settings.Session is None:
+        raise RuntimeError("Session not configured. Call configure_orm() first.")
     session = settings.Session()
     session.add(conn)
     session.commit()
@@ -66,6 +73,12 @@ with DAG(
         group_id=GROUP_ID,
         check_interval=30,
         timeout=120,
+        request_body={
+            "type": "full",
+            "retryCount": 3,
+            "commitMode": "transactional",
+            "notifyOption": "MailOnFailure",
+        },
     )
     # [END howto_operator_powerbi_refresh_async]
 
@@ -84,5 +97,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

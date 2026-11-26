@@ -17,20 +17,16 @@
 # under the License.
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any
 
 from github import GithubException
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator
 from airflow.providers.github.hooks.github import GithubHook
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class GithubSensor(BaseSensorOperator):
@@ -42,6 +38,8 @@ class GithubSensor(BaseSensorOperator):
     :param method_params: parameters for the method method_name
     :param result_processor: function that return boolean and act as a sensor response
     """
+
+    template_fields: Sequence[str] = ("github_conn_id",)
 
     def __init__(
         self,
@@ -58,7 +56,7 @@ class GithubSensor(BaseSensorOperator):
         if result_processor is not None:
             self.result_processor = result_processor
         self.method_name = method_name
-        self.method_params = method_params
+        self.method_params = method_params or {}
 
     def poke(self, context: Context) -> bool:
         hook = GithubHook(github_conn_id=self.github_conn_id)
@@ -108,7 +106,10 @@ class GithubTagSensor(BaseGithubRepositorySensor):
     :param repository_name: fully qualified name of the repository to be monitored, ex. "apache/airflow"
     """
 
-    template_fields = ("tag_name",)
+    template_fields: Sequence[str] = (
+        "tag_name",
+        "github_conn_id",
+    )
 
     def __init__(
         self,
@@ -139,7 +140,7 @@ class GithubTagSensor(BaseGithubRepositorySensor):
                 all_tags = [x.name for x in repo.get_tags()]
                 result = self.tag_name in all_tags
 
-        except GithubException as github_error:  # type: ignore[misc]
+        except GithubException as github_error:
             raise AirflowException(f"Failed to execute GithubSensor, error: {github_error}")
         except Exception as e:
             raise AirflowException(f"GitHub operator error: {e}")

@@ -40,13 +40,19 @@ with DAG(
         task_id="task1",
         file="local:///tmp/spark-examples.jar",
         class_name="org.apache.spark.examples.SparkPi",
+        cluster_id="<your cluster id>",
+        rg_name="<your resource group name>",
     )
 
     spark_lr = AnalyticDBSparkBatchOperator(
         task_id="task2",
         file="local:///tmp/spark-examples.jar",
         class_name="org.apache.spark.examples.SparkLR",
+        cluster_id="<your cluster id>",
+        rg_name="<your resource group name>",
     )
+
+    #  Replace the above cluster_id and rg_name with your own values.
 
     spark_pi >> spark_lr
 
@@ -59,5 +65,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

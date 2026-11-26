@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-teradata``
 
-Release: ``3.0.2``
+Release: ``3.7.2``
 
 
 `Teradata <https://www.teradata.com/>`__
@@ -36,31 +36,32 @@ This is a provider package for ``teradata`` provider. All classes for this provi
 are in ``airflow.providers.teradata`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-teradata/3.0.2/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-teradata/3.7.2/>`_.
 
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation (see ``Requirements`` below
+You can install this package on top of an existing Airflow installation (see ``Requirements`` below
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-teradata``
 
-The package supports the following python versions: 3.9,3.10,3.11,3.12
+The package supports the following python versions: 3.11,3.12,3.13,3.14
 
 Requirements
 ------------
 
-=======================================  ==================
-PIP package                              Version required
-=======================================  ==================
-``apache-airflow``                       ``>=2.9.0``
-``apache-airflow-providers-common-sql``  ``>=1.20.0``
-``teradatasqlalchemy``                   ``>=17.20.0.0``
-``teradatasql``                          ``>=17.20.0.28``
-=======================================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.12.0``
+``apache-airflow-providers-common-sql``     ``>=1.32.0``
+``teradatasqlalchemy``                      ``>=17.20.0.0``
+``teradatasql``                             ``>=17.20.0.28``
+==========================================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified providers in order to use them.
@@ -76,9 +77,21 @@ You can install such cross-provider dependencies when installing from PyPI. For 
 Dependent package                                                                                                       Extra
 ======================================================================================================================  ===================
 `apache-airflow-providers-amazon <https://airflow.apache.org/docs/apache-airflow-providers-amazon>`_                    ``amazon``
-`apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_            ``common.sql``
 `apache-airflow-providers-microsoft-azure <https://airflow.apache.org/docs/apache-airflow-providers-microsoft-azure>`_  ``microsoft.azure``
+`apache-airflow-providers-ssh <https://airflow.apache.org/docs/apache-airflow-providers-ssh>`_                          ``ssh``
 ======================================================================================================================  ===================
 
+Optional dependencies
+----------------------
+
+===================  ============================================
+Extra                Dependencies
+===================  ============================================
+``microsoft.azure``  ``apache-airflow-providers-microsoft-azure``
+``amazon``           ``apache-airflow-providers-amazon``
+``sqlalchemy``       ``sqlalchemy>=1.4.54,!=2.1.0``
+``ssh``              ``apache-airflow-providers-ssh``
+===================  ============================================
+
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-teradata/3.0.2/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-teradata/3.7.2/changelog.html>`_.

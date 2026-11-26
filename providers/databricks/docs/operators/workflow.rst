@@ -22,13 +22,12 @@ DatabricksWorkflowTaskGroup
 ===========================
 
 Use the :class:`~airflow.providers.databricks.operators.databricks_workflow.DatabricksWorkflowTaskGroup` to launch and monitor
-Databricks notebook job runs as Airflow tasks. The task group launches a `Databricks Workflow <https://docs.databricks.com/en/workflows/index.html/>`_ and runs the notebook jobs from within it, resulting in a `75% cost reduction <https://www.databricks.com/product/pricing>`_ ($0.40/DBU for all-purpose compute, $0.07/DBU for Jobs compute) when compared to executing ``DatabricksNotebookOperator`` outside of ``DatabricksWorkflowTaskGroup``.
-
+Databricks notebook job runs as Airflow tasks. The task group launches a `Databricks Workflow <https://docs.databricks.com/en/workflows/index.html/>`_ and runs the notebook jobs from within it.
 
 There are a few advantages to defining your Databricks Workflows in Airflow:
 
 =======================================  =============================================  =================================
-Authoring interface                      via Databricks (Web-based with Databricks UI)  via Airflow(Code with Airflow DAG)
+Authoring interface                      via Databricks (Web-based with Databricks UI)  via Airflow(Code with Airflow Dag)
 =======================================  =============================================  =================================
 Workflow compute pricing                 ✅                                             ✅
 Notebook code in source control          ✅                                             ✅
@@ -36,14 +35,14 @@ Workflow structure in source control     ✅                                    
 Retry from beginning                     ✅                                             ✅
 Retry single task                        ✅                                             ✅
 Task groups within Workflows                                                            ✅
-Trigger workflows from other DAGs                                                       ✅
+Trigger workflows from other Dags                                                       ✅
 Workflow-level parameters                                                               ✅
 =======================================  =============================================  =================================
 
 Examples
 --------
 
-Example of what a DAG looks like with a DatabricksWorkflowTaskGroup
+Example of what a Dag looks like with a DatabricksWorkflowTaskGroup
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. exampleinclude:: /../../databricks/tests/system/databricks/example_databricks_workflow.py
     :language: python
@@ -53,13 +52,13 @@ Example of what a DAG looks like with a DatabricksWorkflowTaskGroup
 With this example, Airflow will produce a job named ``<dag_name>.test_workflow_<USER>_<GROUP_ID>`` that will
 run task ``notebook_1`` and then ``notebook_2``. The job will be created in the databricks workspace
 if it does not already exist. If the job already exists, it will be updated to match
-the workflow defined in the DAG.
+the workflow defined in the Dag.
 
 The following image displays the resulting Databricks Workflow in the Airflow UI (based on the above example provided)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. image:: ../img/databricks_workflow_task_group_airflow_graph_view.png
 
-The corresponding Databricks Workflow  in the Databricks UI for the run triggered from the Airflow DAG is depicted below
+The corresponding Databricks Workflow  in the Databricks UI for the run triggered from the Airflow Dag is depicted below
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. image:: ../img/workflow_run_databricks_graph_view.png

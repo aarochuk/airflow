@@ -20,8 +20,19 @@ name: Integration and system tests
 on:  # yamllint disable-line rule:truthy
   workflow_call:
     inputs:
-      runs-on-as-json-public:
+      merge-with:
+        description: >-
+          The base branch commit and merge base to merge the pushed commit with, space-separated;
+          empty outside fork CI runs.
+        required: false
+        default: ""
+        type: string
+      runners:
         description: "The array of labels (in json form) determining public runners."
+        required: true
+        type: string
+      platform:
+        description: "Platform for the build - 'linux/amd64' or 'linux/arm64'"
         required: true
         type: string
       testable-core-integrations:
@@ -30,6 +41,10 @@ on:  # yamllint disable-line rule:truthy
         type: string
       testable-providers-integrations:
         description: "The list of testable providers integrations as JSON array."
+        required: true
+        type: string
+      testable-providers-integrations-matrix:
+        description: "Matrix include entries for the providers integration jobs as JSON array."
         required: true
         type: string
       run-system-tests:
@@ -71,14 +86,17 @@ jobs:
     timeout-minutes: 30
     if: inputs.testable-core-integrations != '[]'
     name: "Integration core ${{ matrix.integration }}"
-    runs-on: ${{ fromJSON(inputs.runs-on-as-json-public) }}
+    runs-on: ${{ format(fromJSON(inputs.runners)[0], '8+16', '32+64') }}
     strategy:
       fail-fast: false
+      # 20 keeps runs on GitHub-hosted runners within the ASF limit of 20 concurrent jobs. The RunsOn
+      # runners are the project's own capacity, so a run there starts the whole matrix at once.
+      max-parallel: ${{ contains(inputs.runners, 'runs-on=') && 256 || 20 }}
       matrix:
         integration: ${{ fromJSON(inputs.testable-core-integrations) }}
     env:
       BACKEND: "postgres"
-      BACKEND_VERSION: ${{ inputs.default-postgres-version }}"
+      BACKEND_VERSION: ${{ inputs.default-postgres-version }}
       PYTHON_MAJOR_MINOR_VERSION: "${{ inputs.default-python-version }}"
       JOB_ID: "integration-core-${{ matrix.integration }}"
       SKIP_PROVIDERS_TESTS: "${{ inputs.skip-providers-tests }}"
@@ -91,17 +109,23 @@ jobs:
     steps:
       - name: "Cleanup repo"
         shell: bash
-        run: docker run -v "${GITHUB_WORKSPACE}:/workspace" -u 0:0 bash -c "rm -rf /workspace/*"
+        run: sudo rm -rf ${GITHUB_WORKSPACE}/*
       - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: "Merge with the base branch"
+        if: inputs.merge-with != ''
+        uses: ./.github/actions/merge-with-base
+        with:
+          merge-with: ${{ inputs.merge-with }}
       - name: "Prepare breeze & CI image: ${{ inputs.default-python-version }}"
         uses: ./.github/actions/prepare_breeze_and_image
         with:
-          platform: "linux/amd64"
-          python: ${{ inputs.default-python-version }}
+          platform: ${{ inputs.platform }}
+          python: "${{ inputs.default-python-version }}"
           use-uv: ${{ inputs.use-uv }}
+          make-mnt-writeable-and-cleanup: true
       - name: "Integration: core ${{ matrix.integration }}"
         env:
           INTEGRATION: "${{ matrix.integration }}"
@@ -111,7 +135,7 @@ jobs:
         uses: ./.github/actions/post_tests_success
         with:
           codecov-token: ${{ secrets.CODECOV_TOKEN }}
-          python-version: ${{ inputs.default-python-version }}
+          python-version: "${{ inputs.default-python-version }}"
       - name: "Post Tests failure"
         uses: ./.github/actions/post_tests_failure
         if: failure()
@@ -119,17 +143,20 @@ jobs:
   tests-providers-integration:
     timeout-minutes: 30
     if: inputs.testable-providers-integrations != '[]' && inputs.skip-providers-tests != 'true'
-    name: "Integration: providers ${{ matrix.integration }}"
-    runs-on: ${{ fromJSON(inputs.runs-on-as-json-public) }}
+    name: "Integration: providers ${{ matrix.id }}"
+    runs-on: ${{ format(fromJSON(inputs.runners)[0], '8+16', '32+64') }}
     strategy:
       fail-fast: false
+      # 20 keeps runs on GitHub-hosted runners within the ASF limit of 20 concurrent jobs. The RunsOn
+      # runners are the project's own capacity, so a run there starts the whole matrix at once.
+      max-parallel: ${{ contains(inputs.runners, 'runs-on=') && 256 || 20 }}
       matrix:
-        integration: ${{ fromJSON(inputs.testable-providers-integrations) }}
+        include: ${{ fromJSON(inputs.testable-providers-integrations-matrix) }}
     env:
       BACKEND: "postgres"
-      BACKEND_VERSION: ${{ inputs.default-postgres-version }}"
+      BACKEND_VERSION: ${{ inputs.default-postgres-version }}
       PYTHON_MAJOR_MINOR_VERSION: "${{ inputs.default-python-version }}"
-      JOB_ID: "integration-providers-${{ matrix.integration }}"
+      JOB_ID: "integration-providers-${{ matrix.id }}"
       SKIP_PROVIDERS_TESTS: "${{ inputs.skip-providers-tests }}"
       ENABLE_COVERAGE: "${{ inputs.run-coverage}}"
       DEBUG_RESOURCES: "${{ inputs.debug-resources }}"
@@ -140,26 +167,34 @@ jobs:
     steps:
       - name: "Cleanup repo"
         shell: bash
-        run: docker run -v "${GITHUB_WORKSPACE}:/workspace" -u 0:0 bash -c "rm -rf /workspace/*"
+        run: sudo rm -rf ${GITHUB_WORKSPACE}/*
       - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: "Merge with the base branch"
+        if: inputs.merge-with != ''
+        uses: ./.github/actions/merge-with-base
+        with:
+          merge-with: ${{ inputs.merge-with }}
       - name: "Prepare breeze & CI image: ${{ inputs.default-python-version }}"
         uses: ./.github/actions/prepare_breeze_and_image
         with:
-          platform: "linux/amd64"
-          python: ${{ inputs.default-python-version }}
+          platform: ${{ inputs.platform }}
+          python: "${{ inputs.default-python-version }}"
           use-uv: ${{ inputs.use-uv }}
-      - name: "Integration: providers ${{ matrix.integration }}"
+          make-mnt-writeable-and-cleanup: true
+      - name: "Integration: providers ${{ matrix.id }}"
         env:
           INTEGRATION: "${{ matrix.integration }}"
+          ELASTICSEARCH_VERSION: "${{ matrix.elasticsearch-version }}"
+          OPENSEARCH_VERSION: "${{ matrix.opensearch-version }}"
         run: ./scripts/ci/testing/run_integration_tests_with_retry.sh providers "${INTEGRATION}"
       - name: "Post Tests success"
         uses: ./.github/actions/post_tests_success
         with:
           codecov-token: ${{ secrets.CODECOV_TOKEN }}
-          python-version: ${{ inputs.default-python-version }}
+          python-version: "${{ inputs.default-python-version }}"
       - name: "Post Tests failure"
         uses: ./.github/actions/post_tests_failure
         if: failure()
@@ -168,10 +203,10 @@ jobs:
     timeout-minutes: 30
     if: inputs.run-system-tests == 'true'
     name: "System Tests"
-    runs-on: ${{ fromJSON(inputs.runs-on-as-json-public) }}
+    runs-on: ${{ format(fromJSON(inputs.runners)[0], '4+8', '16+32') }}
     env:
       BACKEND: "postgres"
-      BACKEND_VERSION: ${{ inputs.default-postgres-version }}"
+      BACKEND_VERSION: ${{ inputs.default-postgres-version }}
       PYTHON_MAJOR_MINOR_VERSION: "${{ inputs.default-python-version }}"
       JOB_ID: "system"
       SKIP_PROVIDERS_TESTS: "${{ inputs.skip-providers-tests }}"
@@ -184,17 +219,23 @@ jobs:
     steps:
       - name: "Cleanup repo"
         shell: bash
-        run: docker run -v "${GITHUB_WORKSPACE}:/workspace" -u 0:0 bash -c "rm -rf /workspace/*"
+        run: sudo rm -rf ${GITHUB_WORKSPACE}/*
       - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: "Merge with the base branch"
+        if: inputs.merge-with != ''
+        uses: ./.github/actions/merge-with-base
+        with:
+          merge-with: ${{ inputs.merge-with }}
       - name: "Prepare breeze & CI image: ${{ inputs.default-python-version }}"
         uses: ./.github/actions/prepare_breeze_and_image
         with:
-          platform: "linux/amd64"
-          python: ${{ inputs.default-python-version }}
+          platform: ${{ inputs.platform }}
+          python: "${{ inputs.default-python-version }}"
           use-uv: ${{ inputs.use-uv }}
+          make-mnt-writeable-and-cleanup: true
       - name: "System Tests"
         run: >
           ./scripts/ci/testing/run_system_tests.sh airflow-core/tests/system/example_empty.py
@@ -202,7 +243,7 @@ jobs:
         uses: ./.github/actions/post_tests_success
         with:
           codecov-token: ${{ secrets.CODECOV_TOKEN }}
-          python-version: ${{ inputs.default-python-version }}
+          python-version: "${{ inputs.default-python-version }}"
       - name: "Post Tests failure"
         uses: ./.github/actions/post_tests_failure
         if: failure()

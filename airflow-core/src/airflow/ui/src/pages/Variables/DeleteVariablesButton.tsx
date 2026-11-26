@@ -16,11 +16,14 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Flex, useDisclosure, Text, VStack, Heading, Code } from "@chakra-ui/react";
-import { FiTrash, FiTrash2 } from "react-icons/fi";
+import { Button, Code, Text, useDisclosure } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
+import { FiTrash2 } from "react-icons/fi";
+
+import { Modal } from "src/system-components";
 
 import { ErrorAlert } from "src/components/ErrorAlert";
-import { Button, Dialog } from "src/components/ui";
+
 import { useBulkDeleteVariables } from "src/queries/useBulkDeleteVariables";
 
 type Props = {
@@ -29,71 +32,63 @@ type Props = {
 };
 
 const DeleteVariablesButton = ({ clearSelections, deleteKeys: variableKeys }: Props) => {
+  const { t: translate } = useTranslation("admin");
   const { onClose, onOpen, open } = useDisclosure();
   const { error, isPending, mutate } = useBulkDeleteVariables({ clearSelections, onSuccessConfirm: onClose });
 
   return (
     <>
       <Button
+        colorPalette="danger"
         onClick={() => {
           onOpen();
         }}
-        size="sm"
         variant="outline"
       >
         <FiTrash2 />
-        Delete
+        {translate("deleteActions.button")}
       </Button>
 
-      <Dialog.Root onOpenChange={onClose} open={open} size="xl">
-        <Dialog.Content backdrop>
-          <Dialog.Header>
-            <VStack align="start" gap={4}>
-              <Heading size="xl">Delete Variable{variableKeys.length > 1 ? "s" : ""}</Heading>
-            </VStack>
-          </Dialog.Header>
-
-          <Dialog.CloseTrigger />
-
-          <Dialog.Body width="full">
-            <Text color="gray.solid" fontSize="md" fontWeight="semibold" mb={4}>
-              You are about to delete{" "}
-              <strong>
-                {variableKeys.length} variable{variableKeys.length > 1 ? "s" : ""}.
-              </strong>
-              <br />
-              <Code mb={2} mt={2} p={4}>
-                {variableKeys.join(", ")}
-              </Code>
-              <br />
-              This action is permanent and cannot be undone.{" "}
-              <strong>Are you sure you want to proceed?</strong>
-            </Text>
-            <ErrorAlert error={error} />
-            <Flex justifyContent="end" mt={3}>
-              <Button
-                colorPalette="red"
-                loading={isPending}
-                onClick={() => {
-                  mutate({
-                    requestBody: {
-                      actions: [
-                        {
-                          action: "delete" as const,
-                          action_on_non_existence: "fail",
-                          entities: variableKeys,
-                        },
-                      ],
+      <Modal
+        footerActions={
+          <Button
+            colorPalette="danger"
+            loading={isPending}
+            onClick={() => {
+              mutate({
+                requestBody: {
+                  actions: [
+                    {
+                      action: "delete" as const,
+                      action_on_non_existence: "fail",
+                      entities: variableKeys,
                     },
-                  });
-                }}
-              >
-                <FiTrash /> <Text fontWeight="bold">Yes, Delete</Text>
-              </Button>
-            </Flex>
-          </Dialog.Body>
-        </Dialog.Content>
-      </Dialog.Root>
+                  ],
+                },
+              });
+            }}
+          >
+            <FiTrash2 /> <Text fontWeight="bold">{translate("deleteActions.modal.confirmButton")}</Text>
+          </Button>
+        }
+        onOpenChange={onClose}
+        open={open}
+        title={translate("variables.delete.deleteVariable", {
+          count: variableKeys.length,
+        })}
+      >
+        <Text color="fg" fontSize="md" fontWeight="semibold" mb={4}>
+          {translate("variables.delete.firstConfirmMessage", { count: variableKeys.length })}
+          <br />
+          <Code mb={2} mt={2} p={4}>
+            {variableKeys.join(", ")}
+          </Code>
+          <br />
+          {translate("deleteActions.modal.secondConfirmMessage")}
+          <strong>{translate("deleteActions.modal.thirdConfirmMessage")}</strong>
+        </Text>
+        <ErrorAlert error={error} />
+      </Modal>
     </>
   );
 };

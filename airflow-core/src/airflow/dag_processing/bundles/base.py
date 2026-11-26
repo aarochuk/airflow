@@ -22,6 +22,7 @@ import logging
 import os
 import shutil
 import tempfile
+import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -29,16 +30,17 @@ from datetime import timedelta
 from fcntl import LOCK_SH, LOCK_UN, flock
 from operator import attrgetter
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import pendulum
 from pendulum.parsing import ParserError
-from sqlalchemy_utils.types.enriched_datetime.pendulum_datetime import pendulum
 
 from airflow.configuration import conf
-from airflow.dag_processing.bundles.manager import DagBundlesManager
 
 if TYPE_CHECKING:
     from pendulum import DateTime
+
+    from airflow.typing_compat import Self
 
 log = logging.getLogger(__name__)
 
@@ -46,8 +48,7 @@ log = logging.getLogger(__name__)
 def get_bundle_storage_root_path():
     if configured_location := conf.get("dag_processor", "dag_bundle_storage_path", fallback=None):
         return Path(configured_location)
-    else:
-        return Path(tempfile.gettempdir(), "airflow", "dag_bundles")
+    return Path(tempfile.gettempdir(), "airflow", "dag_bundles")
 
 
 STALE_BUNDLE_TRACKING_FOLDER = get_bundle_storage_root_path() / "_tracking"
@@ -97,7 +98,8 @@ class BundleUsageTrackingManager:
 
     def _parse_dt(self, val) -> DateTime | None:
         try:
-            return pendulum.parse(val)
+            dt = pendulum.parse(val)
+            return dt if isinstance(dt, pendulum.DateTime) else None
         except ParserError:
             return None
 
@@ -198,7 +200,8 @@ class BundleUsageTrackingManager:
                 recently_used,
             )
 
-    def _remove_stale_bundle_versions_for_bundle(self, bundle_name: str):
+    def remove_stale_bundle_versions_for_bundle(self, bundle_name: str):
+        """Remove one bundle's stale versions without constructing the bundle."""
         log.info("checking bundle for stale versions. bundle_name=%s", bundle_name)
         found = self._find_all_tracking_files(bundle_name=bundle_name)
         if not found:
@@ -216,12 +219,67 @@ class BundleUsageTrackingManager:
         This isn't really necessary on worker types that don't share storage
         with other processes.
         """
+        from airflow.dag_processing.bundles.manager import DagBundlesManager
+
         log.info("checking for stale bundle versions locally")
+
         bundles = list(DagBundlesManager().get_all_dag_bundles())
         for bundle in bundles:
             if not bundle.supports_versioning:
                 continue
-            self._remove_stale_bundle_versions_for_bundle(bundle_name=bundle.name)
+            self.remove_stale_bundle_versions_for_bundle(bundle_name=bundle.name)
+
+
+@dataclass(frozen=True)
+class BundleVersion:
+    """
+    Version information returned by a DAG bundle.
+
+    Bundles return this from ``get_current_version()`` to provide both a version
+    identifier and optional structured data (e.g., a manifest) atomically.
+
+    :param version: A string identifier for this bundle version (e.g., git SHA, content hash).
+    :param data: Optional structured data associated with this version (e.g., S3 manifest).
+        Mutating ``data`` after construction is undefined behavior.
+    """
+
+    version: str
+    data: dict[str, Any] | None = None
+
+
+def unpack_bundle_version(
+    result: str | BundleVersion | None, bundle: BaseDagBundle
+) -> tuple[str | None, dict[str, Any] | None]:
+    """
+    Unpack the return value of get_current_version().
+
+    Handles both the new BundleVersion dataclass and legacy str | None returns.
+    Emits a deprecation warning for bare string returns from versioned bundles.
+
+    :return: Tuple of (version_string, version_data)
+    """
+    if result is None:
+        return None, None
+    if isinstance(result, BundleVersion):
+        return result.version, result.data
+    # Legacy path: bare string return
+    if bundle.supports_versioning:
+        warnings.warn(
+            f"Bundle '{bundle.name}' returned a plain string from get_current_version(). "
+            f"Return a BundleVersion instance instead. "
+            f"Plain string returns are deprecated and will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    return result, None
+
+
+class DagBundleRefreshError(RuntimeError):
+    """A refresh failure with an explicit guarantee about the previous source files."""
+
+    def __init__(self, message: str, *, source_unchanged: bool = False) -> None:
+        super().__init__(message)
+        self.source_unchanged = source_unchanged
 
 
 class BaseDagBundle(ABC):
@@ -243,9 +301,17 @@ class BaseDagBundle(ABC):
     :param refresh_interval: How often the bundle should be refreshed from the source in seconds
         (Optional - defaults to [dag_processor] refresh_interval)
     :param version: Version of the DAG bundle (Optional)
+    :param version_data: Structured metadata for this bundle version, e.g. an S3 manifest.
+        Only populated for pinned runs (where dag_run.bundle_version is not None). (Optional)
     """
 
     supports_versioning: bool = False
+
+    refresh_changes_source: bool = True
+    """Whether ``refresh()`` may change files being imported by a Dag processor."""
+
+    is_initialized: bool = False
+    """Set by ``super().initialize()``; overrides must call it last."""
 
     _locked: bool = False
 
@@ -255,17 +321,21 @@ class BaseDagBundle(ABC):
         name: str,
         refresh_interval: int = conf.getint("dag_processor", "refresh_interval"),
         version: str | None = None,
+        version_data: dict[str, Any] | None = None,
+        view_url_template: str | None = None,
     ) -> None:
         self.name = name
         self.version = version
+        self.version_data = version_data
         self.refresh_interval = refresh_interval
-        self.is_initialized: bool = False
 
         self.base_dir = get_bundle_base_folder(bundle_name=self.name)
         """Base directory for all bundle files for this bundle."""
 
         self.versions_dir = get_bundle_versions_base_folder(bundle_name=self.name)
         """Where bundle versions are stored locally for this bundle."""
+
+        self._view_url_template = view_url_template
 
     def initialize(self) -> None:
         """
@@ -279,8 +349,20 @@ class BaseDagBundle(ABC):
         This method must ultimately be safe to call concurrently from different threads or processes.
         If it isn't naturally safe, you'll need to make it so with some form of locking.
         There is a `lock` context manager on this class available for this purpose.
+
+        If you override this method, ensure you call `super().initialize()`
+        at the end of your method, after the bundle is initialized, not the beginning.
         """
         self.is_initialized = True
+
+        # Check if the bundle path exists after initialization
+        bundle_path = self.path
+        if not bundle_path.exists():
+            log.warning(
+                "Bundle '%s' path does not exist: %s. This may cause DAG loading issues.",
+                self.name,
+                bundle_path,
+            )
 
     @property
     @abstractmethod
@@ -293,11 +375,18 @@ class BaseDagBundle(ABC):
         """
 
     @abstractmethod
-    def get_current_version(self) -> str | None:
+    def get_current_version(self) -> str | BundleVersion | None:
         """
-        Retrieve a string that represents the version of the DAG bundle.
+        Retrieve the version of the DAG bundle.
 
         Airflow can use this value to retrieve this same bundle version later.
+
+        May return:
+
+        - A ``BundleVersion`` instance (preferred) containing both a version string and
+          optional structured data (e.g., a manifest).
+        - A plain string (deprecated; will emit a warning in a future release).
+        - None if the bundle does not support versioning.
         """
 
     @abstractmethod
@@ -308,6 +397,11 @@ class BaseDagBundle(ABC):
         This method must ultimately be safe to call concurrently from different threads or processes.
         If it isn't naturally safe, you'll need to make it so with some form of locking.
         There is a `lock` context manager on this class available for this purpose.
+
+        Set ``refresh_changes_source`` to False only if this method never changes the source files.
+        A failed refresh may raise ``DagBundleRefreshError`` with ``source_unchanged=True`` only
+        when the previous source files are guaranteed to be intact; an unchanged version is
+        insufficient if an operation may have partially modified the working tree.
         """
 
     def view_url(self, version: str | None = None) -> str | None:
@@ -315,10 +409,34 @@ class BaseDagBundle(ABC):
         URL to view the bundle on an external website. This is shown to users in the Airflow UI, allowing them to navigate to this url for more details about that version of the bundle.
 
         This needs to function without `initialize` being called.
-
         :param version: Version to view
         :return: URL to view the bundle
         """
+        warnings.warn(
+            "The 'view_url' method is deprecated and will be removed in a future version. "
+            "Use 'view_url_template' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return None
+
+    def view_url_template(self) -> str | None:
+        """
+        URL template to view the bundle on an external website.
+
+        This is shown to users in the Airflow UI, allowing them to navigate to
+        this url for more details about that version of the bundle.
+
+        The template should use format string placeholders like {version}, {subdir}, etc.
+        Common placeholders:
+        - {version}: The version identifier
+        - {subdir}: The subdirectory within the bundle (if applicable)
+
+        This needs to function without `initialize` being called.
+
+        :return: URL template string or None if not applicable
+        """
+        return self._view_url_template
 
     @contextmanager
     def lock(self):
@@ -370,7 +488,7 @@ class BundleVersionLock:
 
     def _log_exc(self, msg):
         log.exception(
-            "% name=%s version=%s lock_file=%s",
+            "%s name=%s version=%s lock_file=%s",
             msg,
             self.bundle_name,
             self.version,
@@ -406,7 +524,7 @@ class BundleVersionLock:
             self.lock_file.close()
             self.lock_file = None
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         # wrapping in try except here is just extra cautious since this is in task execution path
         try:
             self.acquire()

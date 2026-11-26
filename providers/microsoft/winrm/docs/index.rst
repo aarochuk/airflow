@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -55,7 +54,7 @@
     :maxdepth: 1
     :caption: Resources
 
-    Example DAGs <https://github.com/apache/airflow/tree/providers-microsoft-winrm/|version|/providers/microsoft/winrm/tests/system/microsoft/winrm>
+    Example Dags <https://github.com/apache/airflow/tree/providers-microsoft-winrm/|version|/providers/microsoft/winrm/tests/system/microsoft/winrm>
     PyPI Repository <https://pypi.org/project/apache-airflow-providers-microsoft-winrm/>
     Installing from sources <installing-providers-from-sources>
 
@@ -76,7 +75,7 @@ apache-airflow-providers-microsoft-winrm package
 `Windows Remote Management (WinRM) <https://docs.microsoft.com/windows/win32/winrm/portal>`__
 
 
-Release: 3.9.2
+Release: 3.15.1
 
 Provider package
 ----------------
@@ -87,18 +86,29 @@ All classes for this package are included in the ``airflow.providers.microsoft.w
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-microsoft-winrm``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-==================  ==================
-PIP package         Version required
-==================  ==================
-``apache-airflow``  ``>=2.9.0``
-``pywinrm``         ``>=0.5.0``
-==================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.12.0``
+``pywinrm``                                 ``>=0.5.0``
+``pyspnego``                                ``>=0.4.0``
+==========================================  ==================
+
+Downloading official packages
+-----------------------------
+
+You can download officially released packages and verify their checksums and signatures from the
+`Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
+
+* `The apache-airflow-providers-microsoft-winrm 3.15.1 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_microsoft_winrm-3.15.1.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_microsoft_winrm-3.15.1.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_microsoft_winrm-3.15.1.tar.gz.sha512>`__)
+* `The apache-airflow-providers-microsoft-winrm 3.15.1 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_microsoft_winrm-3.15.1-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_microsoft_winrm-3.15.1-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_microsoft_winrm-3.15.1-py3-none-any.whl.sha512>`__)

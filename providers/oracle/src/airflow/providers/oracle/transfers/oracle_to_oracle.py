@@ -20,15 +20,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.oracle.hooks.oracle import OracleHook
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class OracleToOracleOperator(BaseOperator):
@@ -44,7 +40,12 @@ class OracleToOracleOperator(BaseOperator):
     :param rows_chunk: number of rows per chunk to commit.
     """
 
-    template_fields: Sequence[str] = ("source_sql", "source_sql_params")
+    template_fields: Sequence[str] = (
+        "source_sql",
+        "source_sql_params",
+        "oracle_destination_conn_id",
+        "oracle_source_conn_id",
+    )
     template_fields_renderers = {"source_sql": "sql", "source_sql_params": "py"}
     ui_color = "#e08c8c"
 

@@ -21,7 +21,7 @@ from unittest import mock
 
 import pytest
 
-from airflow.exceptions import AirflowConfigException
+from airflow.providers.common.compat.sdk import AirflowConfigException
 from airflow.providers.openlineage.conf import (
     _is_true,
     config_path,
@@ -30,6 +30,7 @@ from airflow.providers.openlineage.conf import (
     dag_state_change_process_pool_size,
     debug_mode,
     disabled_operators,
+    execute_in_thread,
     execution_timeout,
     include_full_task_info,
     is_disabled,
@@ -63,6 +64,7 @@ _CONFIG_OPTION_SELECTIVE_ENABLE = "selective_enable"
 _CONFIG_OPTION_DAG_STATE_CHANGE_PROCESS_POOL_SIZE = "dag_state_change_process_pool_size"
 _CONFIG_OPTION_INCLUDE_FULL_TASK_INFO = "include_full_task_info"
 _CONFIG_OPTION_DEBUG_MODE = "debug_mode"
+_CONFIG_OPTION_EXECUTE_IN_THREAD = "execute_in_thread"
 _CONFIG_OPTION_SPARK_INJECT_PARENT_JOB_INFO = "spark_inject_parent_job_info"
 _CONFIG_OPTION_SPARK_INJECT_TRANSPORT_INFO = "spark_inject_transport_info"
 
@@ -320,7 +322,7 @@ def test_transport_valid():
 @pytest.mark.parametrize("transport_value", ('["a", "b"]', "[]", '[{"a": "b"}]'))
 def test_transport_not_valid(transport_value):
     with conf_vars({(_CONFIG_SECTION, _CONFIG_OPTION_TRANSPORT): transport_value}):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="OpenLineage transport"):
             transport()
 
 
@@ -476,6 +478,39 @@ def test_is_disabled_empty_conf_option():
     assert is_disabled() is True
 
 
+@mock.patch.dict(os.environ, {_VAR_URL: "", "OPENLINEAGE__TRANSPORT": '{"type": "console"}'}, clear=True)
+@conf_vars(
+    {
+        (_CONFIG_SECTION, _CONFIG_OPTION_CONFIG_PATH): "",
+        (_CONFIG_SECTION, _CONFIG_OPTION_TRANSPORT): "",
+    }
+)
+def test_is_disabled_env_variables_present():
+    assert is_disabled() is False
+
+
+@mock.patch.dict(os.environ, {_VAR_URL: "", "OPENLINEAGE__TRANSPORT": ""}, clear=True)
+@conf_vars(
+    {
+        (_CONFIG_SECTION, _CONFIG_OPTION_CONFIG_PATH): "",
+        (_CONFIG_SECTION, _CONFIG_OPTION_TRANSPORT): "",
+    }
+)
+def test_is_disabled_env_variables_not_present():
+    assert is_disabled() is True
+
+
+@mock.patch.dict(os.environ, {_VAR_URL: "", "OPENLINEAGE__TRANSPOR": '{"type": "console"}'}, clear=True)
+@conf_vars(
+    {
+        (_CONFIG_SECTION, _CONFIG_OPTION_CONFIG_PATH): "",
+        (_CONFIG_SECTION, _CONFIG_OPTION_TRANSPORT): "",
+    }
+)
+def test_is_disabled_env_variables_not_present_typo():
+    assert is_disabled() is True
+
+
 @mock.patch.dict(os.environ, {_VAR_URL: ""}, clear=True)
 @conf_vars(
     {
@@ -594,6 +629,21 @@ def test_debug_mode(var_string, expected):
     with conf_vars({(_CONFIG_SECTION, _CONFIG_OPTION_DEBUG_MODE): var_string}):
         result = debug_mode()
         assert result is expected
+
+
+@pytest.mark.parametrize(
+    ("var_string", "expected"),
+    _BOOL_PARAMS,
+)
+def test_execute_in_thread(var_string, expected):
+    with conf_vars({(_CONFIG_SECTION, _CONFIG_OPTION_EXECUTE_IN_THREAD): var_string}):
+        result = execute_in_thread()
+        assert result is expected
+
+
+@conf_vars({(_CONFIG_SECTION, _CONFIG_OPTION_EXECUTE_IN_THREAD): None})
+def test_execute_in_thread_do_not_fail_if_conf_option_missing():
+    assert execute_in_thread() is False
 
 
 @pytest.mark.parametrize(

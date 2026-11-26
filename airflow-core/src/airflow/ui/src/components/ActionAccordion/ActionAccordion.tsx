@@ -16,87 +16,143 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Editable, Text, VStack } from "@chakra-ui/react";
-import type { ChangeEvent } from "react";
+import { Box, Field, Heading, Stack, Text, VStack } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 
-import type { DAGRunResponse, TaskInstanceCollectionResponse } from "openapi/requests/types.gen";
-import ReactMarkdown from "src/components/ReactMarkdown";
-import { Accordion } from "src/components/ui";
+import type {
+  DAGRunResponse,
+  TaskInstanceCollectionResponse,
+  TaskInstanceResponse,
+} from "openapi/requests/types.gen";
+
+import { Accordion } from "src/system-components";
+
+import EditableMarkdown from "src/components/TriggerDag/EditableMarkdown";
+
+import { formatNumber } from "src/utils";
 
 import { DataTable } from "../DataTable";
-import { columns } from "./columns";
+import { getColumns, type RowSelection } from "./columns";
 
 type Props = {
   readonly affectedTasks?: TaskInstanceCollectionResponse;
+  readonly groupByRunId?: boolean;
   readonly note: DAGRunResponse["note"];
+  readonly selection?: RowSelection;
   readonly setNote: (value: string) => void;
+};
+
+const TasksTable = ({
+  noRowsMessage,
+  selection,
+  tasks,
+}: {
+  readonly noRowsMessage: string;
+  readonly selection?: RowSelection;
+  readonly tasks: Array<TaskInstanceResponse>;
+}) => {
+  const { t: translate } = useTranslation();
+  const columns = getColumns(translate, selection, {
+    hasLoopIteration: tasks.some((task) => task.loop_iteration !== null && task.loop_iteration !== undefined),
+    hasMultipleDags: new Set(tasks.map((task) => task.dag_id)).size > 1,
+  });
+
+  return (
+    <DataTable
+      columns={columns}
+      data={tasks}
+      displayMode="table"
+      hideRowCountHeading
+      modelName="common:taskInstance"
+      noRowsMessage={noRowsMessage}
+      total={tasks.length}
+    />
+  );
 };
 
 // Table is in memory, pagination and sorting are disabled.
 // TODO: Make a front-end only unconnected table component with client side ordering and pagination
-const ActionAccordion = ({ affectedTasks, note, setNote }: Props) => {
+const ActionAccordion = ({ affectedTasks, groupByRunId = false, note, selection, setNote }: Props) => {
   const showTaskSection = affectedTasks !== undefined;
+  const { i18n, t: translate } = useTranslation();
+
+  // Group task instances by dag_run_id when requested
+  const runGroups = (() => {
+    if (!groupByRunId || !affectedTasks) {
+      return undefined;
+    }
+
+    const map = new Map<string, Array<TaskInstanceResponse>>();
+
+    for (const ti of affectedTasks.task_instances) {
+      const group = map.get(ti.dag_run_id) ?? [];
+
+      group.push(ti);
+      map.set(ti.dag_run_id, group);
+    }
+
+    return map;
+  })();
+
+  // Only group when there are actually multiple run IDs
+  const shouldGroup = groupByRunId && runGroups !== undefined && runGroups.size > 1;
 
   return (
-    <Accordion.Root
-      collapsible
-      defaultValue={showTaskSection ? ["tasks"] : ["note"]}
-      multiple={false}
-      variant="enclosed"
-    >
+    <VStack align="stretch" gap={4}>
       {showTaskSection ? (
-        <Accordion.Item key="tasks" value="tasks">
-          <Accordion.ItemTrigger>
-            <Text fontWeight="bold">Affected Tasks: {affectedTasks.total_entries}</Text>
-          </Accordion.ItemTrigger>
-          <Accordion.ItemContent>
-            <Box maxH="400px" overflowY="scroll">
-              <DataTable
-                columns={columns}
-                data={affectedTasks.task_instances}
-                displayMode="table"
-                modelName="Task Instance"
-                total={affectedTasks.total_entries}
+        <Box>
+          <Heading mb={2} size="lg">
+            {translate("dags:runAndTaskActions.affectedTasks.title", {
+              count: affectedTasks.total_entries ?? 0,
+            })}
+          </Heading>
+          <Box borderRadius="md" borderWidth={1} maxH="400px" overflowY="auto">
+            {shouldGroup ? (
+              <Accordion.Root collapsible defaultValue={[...runGroups.keys()]} multiple variant="plain">
+                {[...runGroups.entries()].map(([runId, tis]) => (
+                  <Accordion.Item key={runId} value={runId}>
+                    <Accordion.ItemTrigger px={2} py={1}>
+                      <Text fontSize="sm" fontWeight="semibold">
+                        {translate("runId")}: {runId}{" "}
+                        <Text as="span" color="fg.subtle" fontWeight="normal">
+                          ({formatNumber(tis.length, i18n.language)})
+                        </Text>
+                      </Text>
+                    </Accordion.ItemTrigger>
+                    <Accordion.ItemContent>
+                      <TasksTable
+                        noRowsMessage={translate("dags:runAndTaskActions.affectedTasks.noItemsFound")}
+                        selection={selection}
+                        tasks={tis}
+                      />
+                    </Accordion.ItemContent>
+                  </Accordion.Item>
+                ))}
+              </Accordion.Root>
+            ) : (
+              <TasksTable
+                noRowsMessage={translate("dags:runAndTaskActions.affectedTasks.noItemsFound")}
+                selection={selection}
+                tasks={affectedTasks.task_instances}
               />
-            </Box>
-          </Accordion.ItemContent>
-        </Accordion.Item>
+            )}
+          </Box>
+        </Box>
       ) : undefined}
-      <Accordion.Item key="note" value="note">
-        <Accordion.ItemTrigger>
-          <Text fontWeight="bold">Note</Text>
-        </Accordion.ItemTrigger>
-        <Accordion.ItemContent>
-          <Editable.Root
-            onChange={(event: ChangeEvent<HTMLInputElement>) => setNote(event.target.value)}
-            value={note ?? ""}
-          >
-            <Editable.Preview
-              _hover={{ backgroundColor: "transparent" }}
-              alignItems="flex-start"
-              as={VStack}
-              gap="0"
-              height="200px"
-              overflowY="auto"
-              width="100%"
-            >
-              {Boolean(note) ? (
-                <ReactMarkdown>{note}</ReactMarkdown>
-              ) : (
-                <Text color="fg.subtle">Add a note...</Text>
-              )}
-            </Editable.Preview>
-            <Editable.Textarea
-              data-testid="notes-input"
-              height="200px"
-              overflowY="auto"
-              placeholder="Add a note..."
-              resize="none"
-            />
-          </Editable.Root>
-        </Accordion.ItemContent>
-      </Accordion.Item>
-    </Accordion.Root>
+      <Field.Root orientation="horizontal">
+        <Stack>
+          <Field.Label fontSize="md" style={{ flexBasis: "30%" }}>
+            {translate("note.label")}
+          </Field.Label>
+        </Stack>
+        <Stack css={{ flexBasis: "70%" }}>
+          <EditableMarkdown
+            field={{ onChange: setNote, value: note ?? "" }}
+            placeholder={translate("note.placeholder")}
+          />
+        </Stack>
+      </Field.Root>
+    </VStack>
   );
 };
 

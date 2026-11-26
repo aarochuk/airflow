@@ -45,6 +45,14 @@ AIRFLOW_CORE_DOCKER_COMPOSE_PATH = AIRFLOW_CORE_DOCS_PATH / "howto" / "docker-co
 AIRFLOW_CORE_SRC_PATH = AIRFLOW_CORE_ROOT_PATH / "src"
 AIRFLOW_FAVICON_PATH = AIRFLOW_CORE_SRC_PATH / "airflow" / "ui" / "public" / "pin_32.png"
 
+AIRFLOW_CTL_ROOT_PATH = AIRFLOW_REPO_ROOT_PATH / "airflow-ctl"
+AIRFLOW_CTL_DOCS_PATH = AIRFLOW_CTL_ROOT_PATH / "docs"
+AIRFLOW_CTL_DOC_STATIC_PATH = AIRFLOW_CTL_DOCS_PATH / "static"
+AIRFLOW_CTL_SRC_PATH = AIRFLOW_CTL_ROOT_PATH / "src"
+
+CHART_PATH = AIRFLOW_CORE_ROOT_PATH / "chart"
+CHART_DOC_PATH = AIRFLOW_CORE_DOCS_PATH / "docs"
+
 # Add sphinx_exts to the path so that sphinx can find them
 sys.path.append((DEVEL_COMMON_PATH / "src" / "sphinx_exts").as_posix())
 
@@ -78,22 +86,27 @@ BASIC_SPHINX_EXTENSIONS = [
     "removemarktransform",
     "sphinx_copybutton",
     "airflow_intersphinx",
-    "sphinxcontrib.spelling",
+    "python_builtin_xrefs",
+    "common_compat_alias",
+    "mermaid_svg",
+    "airflow_spelling",
     "sphinx_airflow_theme",
     "redirects",
     "substitution_extensions",
     "sphinx_design",
+    "pagefind_search",
+    "metrics_tables_from_registry",
+    "suggest_change_button",
 ]
 
-SPHINX_REDOC_EXTENSIONS = [
-    "autoapi.extension",
-    # First, generate redoc
-    "sphinxcontrib.redoc",
-    # Second, update redoc script
-    "sphinx_script_update",
-]
+# Properties for Swagger OpenAPI generation:
+# See https://github.com/SAP/swagger-plugin-for-sphinx
+SPHINX_SWAGGER_EXTENSION = "swagger_plugin_for_sphinx"
 
-REDOC_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/redoc@2.0.0-rc.48/bundles/redoc.standalone.js"
+_SWAGGER_VERSION = "5.32.6"
+SWAGGER_PRESENT_URI = f"https://unpkg.com/swagger-ui-dist@{_SWAGGER_VERSION}/swagger-ui-standalone-preset.js"
+SWAGGER_BUNDLE_URI = f"https://unpkg.com/swagger-ui-dist@{_SWAGGER_VERSION}/swagger-ui-bundle.js"
+SWAGGER_CSS_URI = f"https://unpkg.com/swagger-ui-dist@{_SWAGGER_VERSION}/swagger-ui.css"
 
 
 def get_rst_filepath_from_path(filepath: pathlib.Path, root: pathlib.Path):
@@ -137,6 +150,7 @@ def get_html_theme_options():
             {"href": "/community/", "text": "Community"},
             {"href": "/meetups/", "text": "Meetups"},
             {"href": "/docs/", "text": "Documentation"},
+            {"href": "/registry/", "text": "Registry"},
             {"href": "/use-cases/", "text": "Use Cases"},
             {"href": "/announcements/", "text": "Announcements"},
             {"href": "/blog/", "text": "Blog"},
@@ -147,10 +161,6 @@ def get_html_theme_options():
 
 def get_html_context(conf_py_path: str):
     return {
-        # Google Analytics ID.
-        # For more information look at:
-        # https://github.com/readthedocs/sphinx_rtd_theme/blob/master/sphinx_rtd_theme/layout.html#L222-L232
-        "theme_analytics_id": "UA-140539454-1",
         # Variables used to build a button for editing the source code
         #
         # The path is created according to the following template:
@@ -244,6 +254,7 @@ def get_autodoc_mock_imports() -> list[str]:
         "pandas_gbq",
         "paramiko",
         "pinotdb",
+        "psycopg",
         "psycopg2",
         "pydruid",
         "pyhive",
@@ -258,7 +269,6 @@ def get_autodoc_mock_imports() -> list[str]:
         "smbclient",
         "snowflake",
         "sqlalchemy-drill",
-        "sshtunnel",
         "telegram",
         "tenacity",
         "vertica_python",
@@ -267,12 +277,26 @@ def get_autodoc_mock_imports() -> list[str]:
     ]
 
 
+def _get_third_party_mapping(pkg_names: list[str]) -> dict[str, tuple[str, tuple[str]]]:
+    """Build intersphinx mapping for third-party packages, skipping those without cached inventories."""
+    mapping: dict[str, tuple[str, tuple[str]]] = {}
+    for pkg_name in pkg_names:
+        inv_path = INVENTORY_CACHE_DIR / pkg_name / "objects.inv"
+        if not inv_path.exists():
+            continue
+        mapping[pkg_name] = (
+            f"{THIRD_PARTY_INDEXES[pkg_name]}/",
+            (str(inv_path),),
+        )
+    return mapping
+
+
 def get_intersphinx_mapping() -> dict[str, tuple[str, tuple[str]]]:
-    return {
-        pkg_name: (f"{THIRD_PARTY_INDEXES[pkg_name]}/", (f"{INVENTORY_CACHE_DIR}/{pkg_name}/objects.inv",))
-        for pkg_name in [
+    return _get_third_party_mapping(
+        [
             "boto3",
             "celery",
+            "dateutil",
             "docker",
             "hdfs",
             "jinja2",
@@ -282,16 +306,12 @@ def get_intersphinx_mapping() -> dict[str, tuple[str, tuple[str]]]:
             "requests",
             "sqlalchemy",
         ]
-    }
+    )
 
 
 def get_google_intersphinx_mapping() -> dict[str, tuple[str, tuple[str]]]:
-    return {
-        pkg_name: (
-            f"{THIRD_PARTY_INDEXES[pkg_name]}/",
-            (f"{INVENTORY_CACHE_DIR}/{pkg_name}/objects.inv",),
-        )
-        for pkg_name in [
+    return _get_third_party_mapping(
+        [
             "google-api-core",
             "google-cloud-automl",
             "google-cloud-bigquery",
@@ -317,7 +337,7 @@ def get_google_intersphinx_mapping() -> dict[str, tuple[str, tuple[str]]]:
             "google-cloud-videointelligence",
             "google-cloud-vision",
         ]
-    }
+    )
 
 
 BASIC_AUTOAPI_IGNORE_PATTERNS = [
@@ -325,6 +345,7 @@ BASIC_AUTOAPI_IGNORE_PATTERNS = [
     "*/airflow/executors/*",
     "*/_internal*",
     "*/node_modules/*",
+    "*/.pnpm-store/*",
     "*/migrations/*",
     "*/contrib/*",
     "*/example_taskflow_api_docker_virtualenv.py",
@@ -332,8 +353,8 @@ BASIC_AUTOAPI_IGNORE_PATTERNS = [
     "*/conftest.py",
     "*/tests/__init__.py",
     "*/tests/system/__init__.py",
+    "*/tests/system/*/tests/*",
     "*/tests/system/example_empty.py",
-    "*/test_aws_auth_manager.py",
 ]
 
 IGNORE_PATTERNS_RECOGNITION = re.compile(r"\[AutoAPI\] .* Ignoring \s (?P<path>/[\w/.]*)", re.VERBOSE)
@@ -341,7 +362,7 @@ IGNORE_PATTERNS_RECOGNITION = re.compile(r"\[AutoAPI\] .* Ignoring \s (?P<path>/
 
 # Make the "Ignoring /..." log messages slightly less verbose
 def filter_autoapi_ignore_entries(record: logging.LogRecord) -> bool:
-    matches = IGNORE_PATTERNS_RECOGNITION.search(record.msg)  # type: ignore
+    matches = IGNORE_PATTERNS_RECOGNITION.search(record.msg)
     if not matches:
         return True
     if matches["path"].endswith("__init__.py"):

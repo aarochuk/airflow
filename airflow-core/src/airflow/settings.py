@@ -18,45 +18,78 @@
 from __future__ import annotations
 
 import atexit
-import functools
-import json
+import json as json_lib
 import logging
 import os
 import sys
 import warnings
+from collections.abc import Callable, Mapping
+from functools import cache, partial
 from importlib import metadata
-from typing import TYPE_CHECKING, Any, Callable
+from importlib.util import find_spec
+from typing import TYPE_CHECKING, Any, Literal
 
 import pluggy
 from packaging.version import Version
 from sqlalchemy import create_engine
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession as SAAsyncSession, create_async_engine
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError, NoSuchModuleError
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession as SAAsyncSession,
+    create_async_engine,
+)
 from sqlalchemy.orm import scoped_session, sessionmaker
+
+from airflow._shared.observability.traces import configure_otel
+
+try:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+except ImportError:
+    async_sessionmaker = sessionmaker  # type: ignore[assignment,misc]
+
 from sqlalchemy.pool import NullPool
 
 from airflow import __version__ as airflow_version, policies
-from airflow.configuration import AIRFLOW_HOME, WEBSERVER_CONFIG, conf  # noqa: F401
+from airflow._shared.timezones.timezone import (
+    initialize as initialize_timezone,
+    local_timezone,
+    parse_timezone,
+    utc,
+)
+from airflow.configuration import AIRFLOW_HOME, conf
 from airflow.exceptions import AirflowInternalRuntimeError
 from airflow.logging_config import configure_logging
 from airflow.utils.orm_event_handlers import setup_event_handlers
-from airflow.utils.sqlalchemy import is_sqlalchemy_v1
-from airflow.utils.state import State
-from airflow.utils.timezone import local_timezone, parse_timezone, utc
+
+_USE_PSYCOPG3: bool
+try:
+    _USE_PSYCOPG3 = find_spec("psycopg") is not None
+
+except (ImportError, ModuleNotFoundError):
+    _USE_PSYCOPG3 = False
+
+_USE_ASYNCMY = find_spec("asyncmy") is not None
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
     from airflow.api_fastapi.common.types import UIAlert
+    from airflow.models.dagrun import DagRun
+    from airflow.models.taskinstance import TaskInstance
 
 log = logging.getLogger(__name__)
 
 try:
-    if (tz := conf.get_mandatory_value("core", "default_timezone")) != "system":
-        TIMEZONE = parse_timezone(tz)
+    tz_str = conf.get_mandatory_value("core", "default_timezone")
+    initialize_timezone(tz_str)
+    if tz_str != "system":
+        TIMEZONE = parse_timezone(tz_str)
     else:
         TIMEZONE = local_timezone()
 except Exception:
     TIMEZONE = utc
+    initialize_timezone("UTC")
 
 log.info("Configured default timezone %s", TIMEZONE)
 
@@ -79,56 +112,40 @@ HEADER = "\n".join(
     ]
 )
 
-LOGGING_LEVEL = logging.INFO
-
-# the prefix to append to gunicorn worker processes after init
-GUNICORN_WORKER_READY_PREFIX = "[ready] "
-
-LOG_FORMAT = conf.get("logging", "log_format")
 SIMPLE_LOG_FORMAT = conf.get("logging", "simple_log_format")
 
 SQL_ALCHEMY_CONN: str | None = None
+SQL_ALCHEMY_CONN_ASYNC: str | None = None
 PLUGINS_FOLDER: str | None = None
-LOGGING_CLASS_PATH: str | None = None
-DONOT_MODIFY_HANDLERS: bool | None = None
 DAGS_FOLDER: str = os.path.expanduser(conf.get_mandatory_value("core", "DAGS_FOLDER"))
 
-AIO_LIBS_MAPPING = {"sqlite": "aiosqlite", "postgresql": "asyncpg", "mysql": "aiomysql"}
-"""
-Mapping of sync scheme to async scheme.
-
-:meta private:
-"""
-
-engine: Engine
-Session: scoped_session
+engine: Engine | None = None
+Session: scoped_session | None = None
 # NonScopedSession creates global sessions and is not safe to use in multi-threaded environment without
 # additional precautions. The only use case is when the session lifecycle needs
 # custom handling. Most of the time we only want one unique thread local session object,
 # this is achieved by the Session factory above.
-NonScopedSession: sessionmaker
-async_engine: AsyncEngine
-AsyncSession: Callable[..., SAAsyncSession]
+NonScopedSession: sessionmaker | None = None
+async_engine: AsyncEngine | None = None
+AsyncSession: Callable[..., SAAsyncSession] | None = None
+
+
+def get_engine():
+    """Get the configured engine, raising an error if not configured."""
+    if engine is None:
+        raise RuntimeError("Engine not configured. Call configure_orm() first.")
+    return engine
+
+
+def get_session():
+    """Get the configured Session, raising an error if not configured."""
+    if Session is None:
+        raise RuntimeError("Session not configured. Call configure_orm() first.")
+    return Session
+
 
 # The JSON library to use for DAG Serialization and De-Serialization
-json = json
-
-# Dictionary containing State and colors associated to each state to
-# display on the Webserver
-STATE_COLORS = {
-    "deferred": "mediumpurple",
-    "failed": "red",
-    "queued": "gray",
-    "removed": "lightgrey",
-    "restarting": "violet",
-    "running": "lime",
-    "scheduled": "tan",
-    "skipped": "hotpink",
-    "success": "green",
-    "up_for_reschedule": "turquoise",
-    "up_for_retry": "gold",
-    "upstream_failed": "orange",
-}
+json = json_lib
 
 # Display alerts on the dashboard
 # Useful for warning about setup issues or announcing changes to end users
@@ -144,7 +161,7 @@ STATE_COLORS = {
 DASHBOARD_UIALERTS: list[UIAlert] = []
 
 
-@functools.cache
+@cache
 def _get_rich_console(file):
     # Delay imports until we need it
     import rich.console
@@ -180,44 +197,44 @@ def replace_showwarning(replacement):
 
 
 original_show_warning = replace_showwarning(custom_show_warning)
-atexit.register(functools.partial(replace_showwarning, original_show_warning))
-
-POLICY_PLUGIN_MANAGER: Any = None  # type: ignore
+atexit.register(partial(replace_showwarning, original_show_warning))
 
 
 def task_policy(task):
-    return POLICY_PLUGIN_MANAGER.hook.task_policy(task=task)
+    return get_policy_plugin_manager().hook.task_policy(task=task)
 
 
 def dag_policy(dag):
-    return POLICY_PLUGIN_MANAGER.hook.dag_policy(dag=dag)
+    return get_policy_plugin_manager().hook.dag_policy(dag=dag)
 
 
-def task_instance_mutation_hook(task_instance):
-    return POLICY_PLUGIN_MANAGER.hook.task_instance_mutation_hook(task_instance=task_instance)
+def task_instance_mutation_hook(task_instance: TaskInstance, dag_run: DagRun | None = None):
+    return get_policy_plugin_manager().hook.task_instance_mutation_hook(
+        task_instance=task_instance, dag_run=dag_run
+    )
 
 
 task_instance_mutation_hook.is_noop = True  # type: ignore
 
 
 def pod_mutation_hook(pod):
-    return POLICY_PLUGIN_MANAGER.hook.pod_mutation_hook(pod=pod)
+    return get_policy_plugin_manager().hook.pod_mutation_hook(pod=pod)
 
 
 def get_airflow_context_vars(context):
-    return POLICY_PLUGIN_MANAGER.hook.get_airflow_context_vars(context=context)
+    return get_policy_plugin_manager().hook.get_airflow_context_vars(context=context)
 
 
 def get_dagbag_import_timeout(dag_file_path: str):
-    return POLICY_PLUGIN_MANAGER.hook.get_dagbag_import_timeout(dag_file_path=dag_file_path)
+    return get_policy_plugin_manager().hook.get_dagbag_import_timeout(dag_file_path=dag_file_path)
 
 
-def configure_policy_plugin_manager():
-    global POLICY_PLUGIN_MANAGER
-
-    POLICY_PLUGIN_MANAGER = pluggy.PluginManager(policies.local_settings_hookspec.project_name)
-    POLICY_PLUGIN_MANAGER.add_hookspecs(policies)
-    POLICY_PLUGIN_MANAGER.register(policies.DefaultPolicy)
+@cache
+def get_policy_plugin_manager() -> pluggy.PluginManager:
+    plugin_mgr = pluggy.PluginManager(policies.local_settings_hookspec.project_name)
+    plugin_mgr.add_hookspecs(policies)
+    plugin_mgr.register(policies.DefaultPolicy)
+    return plugin_mgr
 
 
 def load_policy_plugins(pm: pluggy.PluginManager):
@@ -225,14 +242,46 @@ def load_policy_plugins(pm: pluggy.PluginManager):
     pm.load_setuptools_entrypoints("airflow.policy")
 
 
+def _translate_asyncpg_sslmode(async_uri: str) -> str:
+    """
+    Rename the libpq ``sslmode`` query param to asyncpg's ``ssl`` equivalent.
+
+    asyncpg has no ``sslmode`` connect arg -- SQLAlchemy's asyncpg dialect passes URL
+    query params straight to ``asyncpg.connect()``, which spells the option ``ssl`` and
+    accepts the same libpq mode strings (``disable``/``prefer``/``require``/``verify-ca``/
+    ``verify-full``). A sync Postgres URI commonly carries ``sslmode`` (the official Helm
+    chart sets it unconditionally), so the derived async URI must translate it; otherwise
+    every async DB call raises ``TypeError: connect() got an unexpected keyword argument
+    'sslmode'``.
+    """
+    url = make_url(async_uri)
+    if "sslmode" not in url.query:
+        return async_uri
+    query = dict(url.query)
+    query["ssl"] = query.pop("sslmode")
+    return url.set(query=query).render_as_string(hide_password=False)
+
+
 def _get_async_conn_uri_from_sync(sync_uri):
+    # Derive the async URI scheme from the sync one by swapping in the async driver:
+    AIO_LIBS_MAPPING = {
+        "sqlite": "aiosqlite",
+        "postgresql": "psycopg_async" if _USE_PSYCOPG3 else "asyncpg",
+        "mysql": "asyncmy" if _USE_ASYNCMY else "aiomysql",
+    }
+
     scheme, rest = sync_uri.split(":", maxsplit=1)
     scheme = scheme.split("+", maxsplit=1)[0]
     aiolib = AIO_LIBS_MAPPING.get(scheme)
-    if aiolib:
-        return f"{scheme}+{aiolib}:{rest}"
-    else:
+    if not aiolib:
         return sync_uri
+    async_uri = f"{scheme}+{aiolib}:{rest}"
+    if aiolib == "asyncpg":
+        # asyncpg-only: it is not libpq-based and has no ``sslmode`` connect arg. A
+        # libpq-based async driver (e.g. psycopg3) understands ``sslmode`` natively and
+        # would in turn reject ``ssl``, so this translation must stay gated on asyncpg.
+        async_uri = _translate_asyncpg_sslmode(async_uri)
+    return async_uri
 
 
 def configure_vars():
@@ -241,20 +290,16 @@ def configure_vars():
     global SQL_ALCHEMY_CONN_ASYNC
     global DAGS_FOLDER
     global PLUGINS_FOLDER
-    global DONOT_MODIFY_HANDLERS
-    SQL_ALCHEMY_CONN = conf.get("database", "SQL_ALCHEMY_CONN")
-    SQL_ALCHEMY_CONN_ASYNC = _get_async_conn_uri_from_sync(sync_uri=SQL_ALCHEMY_CONN)
+
+    SQL_ALCHEMY_CONN = conf.get("database", "sql_alchemy_conn")
+    if conf.has_option("database", "sql_alchemy_conn_async"):
+        SQL_ALCHEMY_CONN_ASYNC = conf.get("database", "sql_alchemy_conn_async")
+    else:
+        SQL_ALCHEMY_CONN_ASYNC = _get_async_conn_uri_from_sync(sync_uri=SQL_ALCHEMY_CONN)
 
     DAGS_FOLDER = os.path.expanduser(conf.get("core", "DAGS_FOLDER"))
 
     PLUGINS_FOLDER = conf.get("core", "plugins_folder", fallback=os.path.join(AIRFLOW_HOME, "plugins"))
-
-    # If donot_modify_handlers=True, we do not modify logging handlers in task_run command
-    # If the flag is set to False, we remove all handlers from the root logger
-    # and add all handlers from 'airflow.task' logger to the root Logger. This is done
-    # to get all the logs from the print & log statements in the DAG files before a task is run
-    # The handlers are restored after the task completes execution.
-    DONOT_MODIFY_HANDLERS = conf.getboolean("logging", "donot_modify_handlers", fallback=False)
 
 
 def _run_openlineage_runtime_check():
@@ -312,13 +357,6 @@ class SkipDBTestsSession:
         pass
 
 
-AIRFLOW_PATH = os.path.dirname(os.path.dirname(__file__))
-AIRFLOW_TESTS_PATH = os.path.join(AIRFLOW_PATH, "tests")
-AIRFLOW_SETTINGS_PATH = os.path.join(AIRFLOW_PATH, "airflow", "settings.py")
-AIRFLOW_UTILS_SESSION_PATH = os.path.join(AIRFLOW_PATH, "airflow", "utils", "session.py")
-AIRFLOW_MODELS_BASEOPERATOR_PATH = os.path.join(AIRFLOW_PATH, "airflow", "models", "baseoperator.py")
-
-
 def _is_sqlite_db_path_relative(sqla_conn_str: str) -> bool:
     """Determine whether the database connection URI specifies a relative path."""
     # Check for non-empty connection string:
@@ -338,9 +376,148 @@ def _is_sqlite_db_path_relative(sqla_conn_str: str) -> bool:
     return True
 
 
+_PSYCOPG3_DRIVERS = frozenset({"psycopg", "psycopg_async"})
+
+
+def _psycopg3_connect_args(sql_alchemy_conn: str | None) -> dict[str, Any]:
+    """
+    Disable psycopg3's automatic server-side statement preparation.
+
+    psycopg3 prepares a statement server-side after ``prepare_threshold`` executions
+    (5 by default). Transaction pooling can route the next transaction to a different
+    server connection, so a pooler that does not itself track prepared statements fails
+    with ``InvalidSqlStatementName`` once a statement outlives the backend that prepared
+    it, or ``DuplicatePreparedStatement`` when a second client reuses the same generated
+    name. Preparation is only safe behind PgBouncer from 1.22 onwards, with
+    ``max_prepared_statements`` raised above 0 (its default until 1.24) and libpq 17 or
+    newer on the client; Airflow's chart sets ``pool_mode = transaction`` and ships 1.23.1
+    without that setting, so the recommended deployment is an affected one.
+
+    This disables preparation outright, not just the automatic threshold, so bulk
+    ``executemany`` writes re-parse per row rather than reusing one prepared statement.
+    Overridable via ``[database] sql_alchemy_connect_args``.
+
+    The driver is resolved through SQLAlchemy rather than matched against the URL prefix
+    so that it always agrees with the dialect that gets loaded: ``sql_alchemy_conn_async``
+    is taken verbatim from config without scheme normalization, and a bare
+    ``postgresql://`` resolves to psycopg on SQLAlchemy 2.1.
+    """
+    if not sql_alchemy_conn:
+        return {}
+    try:
+        driver = make_url(sql_alchemy_conn).get_driver_name()
+    except (ArgumentError, NoSuchModuleError):
+        # Leave it to create_engine, which reports a bad URL with far more context.
+        return {}
+    if driver not in _PSYCOPG3_DRIVERS:
+        return {}
+    return {"prepare_threshold": None}
+
+
+def _get_connect_args(mode: Literal["sync", "async"]) -> Any:
+    key, sql_alchemy_conn = {
+        "sync": ("sql_alchemy_connect_args", SQL_ALCHEMY_CONN),
+        "async": ("sql_alchemy_connect_args_async", SQL_ALCHEMY_CONN_ASYNC),
+    }[mode]
+    defaults = _psycopg3_connect_args(sql_alchemy_conn)
+    if not conf.has_option("database", key):
+        return defaults
+    configured = conf.getimport("database", key)
+    if not isinstance(configured, Mapping):
+        if defaults:
+            log.warning(
+                "[database] %s is not a mapping, so the psycopg3 default "
+                "prepare_threshold=None was not applied. Engine creation will "
+                "fail unless it resolves to a mapping.",
+                key,
+            )
+        return configured
+    # Anything the operator sets wins, including putting prepare_threshold back.
+    return {**defaults, **configured}
+
+
+def create_metadata_engine(
+    sql_alchemy_conn: str,
+    *,
+    engine_args: dict[str, Any],
+    connect_args: dict[str, Any],
+) -> Engine:
+    """
+    Create the SQLAlchemy Engine for the Airflow metadata database.
+
+    Override in ``airflow_local_settings.py`` to customize engine creation,
+    e.g. to register ``do_connect`` event handlers for token-based authentication.
+    """
+    return create_engine(
+        sql_alchemy_conn,
+        connect_args=connect_args,
+        **engine_args,
+        future=True,
+    )
+
+
+def create_async_metadata_engine(
+    sql_alchemy_conn_async: str,
+    *,
+    connect_args: dict[str, Any],
+    engine_args: dict[str, Any] | None = None,
+) -> AsyncEngine:
+    """
+    Create the async SQLAlchemy Engine for the Airflow metadata database.
+
+    Override in ``airflow_local_settings.py`` to customize async engine creation.
+    For ``do_connect`` handlers, register on ``engine.sync_engine``.
+
+    :param engine_args: Pool and engine configuration (pool_size, pool_recycle, etc.).
+    """
+    return create_async_engine(
+        sql_alchemy_conn_async,
+        connect_args=connect_args,
+        **(engine_args or {}),
+        future=True,
+    )
+
+
+def _configure_async_session() -> None:
+    """Configure the async engine and session factory."""
+    global AsyncSession, async_engine
+
+    if not SQL_ALCHEMY_CONN_ASYNC:
+        async_engine = None
+        AsyncSession = None
+        return
+
+    # Apply the same pool health settings used by the sync engine.
+    # Without these, the async pool uses SQLAlchemy defaults (pool_recycle=-1,
+    # pool_pre_ping=False) which means dead connections from PostgreSQL idle
+    # timeouts or pgbouncer disconnects are never detected.
+    engine_args: dict[str, Any] = {}
+    if not conf.getboolean("database", "SQL_ALCHEMY_POOL_ENABLED"):
+        engine_args["poolclass"] = NullPool
+    elif not SQL_ALCHEMY_CONN_ASYNC.startswith("sqlite"):
+        engine_args["pool_size"] = conf.getint("database", "SQL_ALCHEMY_POOL_SIZE", fallback=5)
+        engine_args["pool_recycle"] = conf.getint("database", "SQL_ALCHEMY_POOL_RECYCLE", fallback=1800)
+        engine_args["pool_pre_ping"] = conf.getboolean("database", "SQL_ALCHEMY_POOL_PRE_PING", fallback=True)
+        engine_args["max_overflow"] = conf.getint("database", "SQL_ALCHEMY_MAX_OVERFLOW", fallback=10)
+    engine_args.update(_get_isolation_level_args(SQL_ALCHEMY_CONN_ASYNC))
+
+    async_engine = create_async_metadata_engine(
+        SQL_ALCHEMY_CONN_ASYNC,
+        connect_args=_get_connect_args("async"),
+        engine_args=engine_args,
+    )
+    setup_event_handlers(async_engine.sync_engine)
+    AsyncSession = async_sessionmaker(
+        bind=async_engine,
+        class_=SAAsyncSession,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+
+
 def configure_orm(disable_connection_pool=False, pool_class=None):
     """Configure ORM using SQLAlchemy."""
-    from airflow.sdk.execution_time.secrets_masker import mask_secret
+    from airflow._shared.secrets_masker import mask_secret
 
     if _is_sqlite_db_path_relative(SQL_ALCHEMY_CONN):
         from airflow.exceptions import AirflowConfigException
@@ -350,11 +527,9 @@ def configure_orm(disable_connection_pool=False, pool_class=None):
             "Please use absolute path such as `sqlite:////tmp/airflow.db`."
         )
 
+    global NonScopedSession
     global Session
     global engine
-    global async_engine
-    global AsyncSession
-    global NonScopedSession
 
     if os.environ.get("_AIRFLOW_SKIP_DB_TESTS") == "true":
         # Skip DB initialization in unit tests, if DB tests are skipped
@@ -364,74 +539,86 @@ def configure_orm(disable_connection_pool=False, pool_class=None):
     log.debug("Setting up DB connection pool (PID %s)", os.getpid())
     engine_args = prepare_engine_args(disable_connection_pool, pool_class)
 
-    if conf.has_option("database", "sql_alchemy_connect_args"):
-        connect_args = conf.getimport("database", "sql_alchemy_connect_args")
-    else:
-        connect_args = {}
-
+    connect_args = _get_connect_args("sync")
     if SQL_ALCHEMY_CONN.startswith("sqlite"):
         # FastAPI runs sync endpoints in a separate thread. SQLite does not allow
         # to use objects created in another threads by default. Allowing that in test
         # to so the `test` thread and the tested endpoints can use common objects.
         connect_args["check_same_thread"] = False
 
-    engine = create_engine(SQL_ALCHEMY_CONN, connect_args=connect_args, **engine_args, future=True)
-    async_engine = create_async_engine(SQL_ALCHEMY_CONN_ASYNC, future=True)
-    AsyncSession = sessionmaker(
-        bind=async_engine,
-        autocommit=False,
-        autoflush=False,
-        class_=SAAsyncSession,
-        expire_on_commit=False,
+    engine = create_metadata_engine(
+        SQL_ALCHEMY_CONN,
+        engine_args=engine_args,
+        connect_args=connect_args,
     )
+    _configure_async_session()
     mask_secret(engine.url.password)
-
     setup_event_handlers(engine)
 
     if conf.has_option("database", "sql_alchemy_session_maker"):
         _session_maker = conf.getimport("database", "sql_alchemy_session_maker")
     else:
-
-        def _session_maker(_engine):
-            return sessionmaker(
-                autocommit=False,
-                autoflush=False,
-                bind=_engine,
-                expire_on_commit=False,
-            )
-
+        _session_maker = partial(
+            sessionmaker,
+            autocommit=False,
+            autoflush=False,
+            expire_on_commit=False,
+        )
+    if engine is None:
+        raise RuntimeError("Engine must be initialized before creating a session")
     NonScopedSession = _session_maker(engine)
     Session = scoped_session(NonScopedSession)
 
-    # https://docs.sqlalchemy.org/en/20/core/pooling.html#using-connection-pools-with-multiprocessing-or-os-fork
-    def clean_in_fork():
-        _globals = globals()
-        if engine := _globals.get("engine"):
-            engine.dispose(close=False)
-        if async_engine := _globals.get("async_engine"):
-            async_engine.sync_engine.dispose(close=False)
+    if register_at_fork := getattr(os, "register_at_fork", None):
+        # https://docs.sqlalchemy.org/en/20/core/pooling.html#using-connection-pools-with-multiprocessing-or-os-fork
+        def clean_in_fork():
+            _globals = globals()
+            if engine := _globals.get("engine"):
+                engine.dispose(close=False)
+            if async_engine := _globals.get("async_engine"):
+                async_engine.sync_engine.dispose(close=False)
 
-    os.register_at_fork(after_in_child=clean_in_fork)
+        # Won't work on Windows
+        register_at_fork(after_in_child=clean_in_fork)
 
 
-DEFAULT_ENGINE_ARGS = {
-    "postgresql": {
-        "executemany_mode": "values_plus_batch",
-        "executemany_values_page_size" if is_sqlalchemy_v1() else "insertmanyvalues_page_size": 10000,
-        "executemany_batch_page_size": 2000,
-    },
-}
+def _is_sqlite_in_memory(url: str) -> bool:
+    """
+    Check if a SQLAlchemy connection URL points to an in-memory SQLite database.
+
+    Handles driver prefixes (e.g. ``sqlite+pysqlite://``), query parameters, and
+    various in-memory forms like ``:memory:`` and ``file::memory:``.
+    """
+    parsed = make_url(url)
+    if parsed.get_backend_name() != "sqlite":
+        return False
+    db = parsed.database
+    return not db or db == ":memory:" or ":memory:" in db
 
 
 def prepare_engine_args(disable_connection_pool=False, pool_class=None):
     """Prepare SQLAlchemy engine args."""
+    use_psycopg2_tuning = SQL_ALCHEMY_CONN.startswith("postgresql+psycopg2")
+    DEFAULT_ENGINE_ARGS: dict[str, dict[str, Any]] = {
+        "postgresql": (
+            {
+                "insertmanyvalues_page_size": 10000,
+            }
+            | (
+                {"executemany_mode": "values_plus_batch", "executemany_batch_page_size": 2000}
+                if use_psycopg2_tuning
+                else {}
+            )
+        )
+    }
+
     default_args = {}
     for dialect, default in DEFAULT_ENGINE_ARGS.items():
         if SQL_ALCHEMY_CONN.startswith(dialect):
             default_args = default.copy()
             break
 
-    engine_args: dict = conf.getjson("database", "sql_alchemy_engine_args", fallback=default_args)  # type: ignore
+    engine_args: dict = conf.getjson("database", "sql_alchemy_engine_args", fallback=default_args)
 
     if pool_class:
         # Don't use separate settings for size etc, only those from sql_alchemy_engine_args
@@ -439,8 +626,12 @@ def prepare_engine_args(disable_connection_pool=False, pool_class=None):
     elif disable_connection_pool or not conf.getboolean("database", "SQL_ALCHEMY_POOL_ENABLED"):
         engine_args["poolclass"] = NullPool
         log.debug("settings.prepare_engine_args(): Using NullPool")
-    elif not SQL_ALCHEMY_CONN.startswith("sqlite"):
-        # Pool size engine args not supported by sqlite.
+    elif _is_sqlite_in_memory(SQL_ALCHEMY_CONN):
+        # In-memory SQLite uses SingletonThreadPool which doesn't support pool_size/max_overflow.
+        log.debug("settings.prepare_engine_args(): Skipping pool settings for in-memory SQLite")
+    else:
+        # Pool settings for all file-based databases including SQLite.
+        # SQLAlchemy 2.0+ uses QueuePool by default for file-based SQLite.
         # If no config value is defined for the pool size, select a reasonable value.
         # 0 means no limit, which could lead to exceeding the Database connection limit.
         pool_size = conf.getint("database", "SQL_ALCHEMY_POOL_SIZE", fallback=5)
@@ -467,7 +658,7 @@ def prepare_engine_args(disable_connection_pool=False, pool_class=None):
         # Typically, this is a simple statement like "SELECT 1", but may also make use
         # of some DBAPI-specific method to test the connection for liveness.
         # More information here:
-        # https://docs.sqlalchemy.org/en/14/core/pooling.html#disconnect-handling-pessimistic
+        # https://docs.sqlalchemy.org/en/20/core/pooling.html#disconnect-handling-pessimistic
         pool_pre_ping = conf.getboolean("database", "SQL_ALCHEMY_POOL_PRE_PING", fallback=True)
 
         log.debug(
@@ -483,30 +674,36 @@ def prepare_engine_args(disable_connection_pool=False, pool_class=None):
         engine_args["pool_pre_ping"] = pool_pre_ping
         engine_args["max_overflow"] = max_overflow
 
-    # The default isolation level for MySQL (REPEATABLE READ) can introduce inconsistencies when
-    # running multiple schedulers, as repeated queries on the same session may read from stale snapshots.
-    # 'READ COMMITTED' is the default value for PostgreSQL.
-    # More information here:
-    # https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html"
-
-    if SQL_ALCHEMY_CONN.startswith("mysql"):
-        engine_args["isolation_level"] = "READ COMMITTED"
-
-    if is_sqlalchemy_v1():
-        # Allow the user to specify an encoding for their DB otherwise default
-        # to utf-8 so jobs & users with non-latin1 characters can still use us.
-        # This parameter was removed in SQLAlchemy 2.x.
-        engine_args["encoding"] = conf.get("database", "SQL_ENGINE_ENCODING", fallback="utf-8")
+    engine_args.update(_get_isolation_level_args(SQL_ALCHEMY_CONN))
 
     return engine_args
 
 
+def _get_isolation_level_args(sql_alchemy_conn: str) -> dict[str, str]:
+    """
+    Return the isolation level engine argument for the metadata database connection.
+
+    The default isolation level for MySQL (REPEATABLE READ) can introduce inconsistencies when
+    running multiple schedulers, as repeated queries on the same session may read from stale snapshots.
+    'READ COMMITTED' is the default value for PostgreSQL.
+    More information here:
+    https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html
+    """
+    if sql_alchemy_conn.startswith("mysql"):
+        return {"isolation_level": "READ COMMITTED"}
+    return {}
+
+
 def dispose_orm(do_log: bool = True):
     """Properly close pooled database connections."""
-    global Session, engine, NonScopedSession
+    global Session, engine, NonScopedSession, async_engine, AsyncSession
 
     _globals = globals()
-    if _globals.get("engine") is None and _globals.get("Session") is None:
+    if (
+        _globals.get("engine") is None
+        and _globals.get("Session") is None
+        and _globals.get("async_engine") is None
+    ):
         return
 
     if do_log:
@@ -523,6 +720,17 @@ def dispose_orm(do_log: bool = True):
     if "engine" in _globals and engine is not None:
         engine.dispose()
         engine = None
+
+    if "async_engine" in _globals and async_engine is not None:
+        async_engine.sync_engine.dispose()
+        async_engine = None
+        AsyncSession = None
+
+
+async def dispose_async_engine() -> None:
+    """Close checked-in connections on their event loop, retaining the engine and session factory."""
+    if async_engine is not None:
+        await async_engine.dispose()
 
 
 def reconfigure_orm(disable_connection_pool=False, pool_class=None):
@@ -542,15 +750,7 @@ def configure_adapters():
 
     if SQL_ALCHEMY_CONN.startswith("mysql"):
         try:
-            try:
-                import MySQLdb.converters
-            except ImportError:
-                raise RuntimeError(
-                    "You do not have `mysqlclient` package installed. "
-                    "Please install it with `pip install mysqlclient` and make sure you have system "
-                    "mysql libraries installed, as well as well as `pkg-config` system package "
-                    "installed in case you see compilation error during installation."
-                )
+            import MySQLdb.converters
 
             MySQLdb.converters.conversions[Pendulum] = MySQLdb.converters.DateTime2literal
         except ImportError:
@@ -561,6 +761,45 @@ def configure_adapters():
             pymysql.converters.conversions[Pendulum] = pymysql.converters.escape_datetime
         except ImportError:
             pass
+        if "MySQLdb.converters" not in sys.modules and "pymysql.converters" not in sys.modules:
+            raise RuntimeError(
+                "You have a MySQL connection string but neither `mysqlclient` nor `PyMySQL` is "
+                "installed. Install one of them, e.g. `pip install mysqlclient` (make sure the "
+                "system mysql libraries and `pkg-config` are present in case you see a compilation "
+                "error during installation) or `pip install PyMySQL`."
+            )
+
+
+def _configure_secrets_masker():
+    """Configure the secrets masker with values from config."""
+    from airflow._shared.secrets_masker import (
+        DEFAULT_SENSITIVE_FIELDS,
+        _secrets_masker as secrets_masker_core,
+    )
+    from airflow.configuration import conf
+
+    min_length_to_mask = conf.getint("logging", "min_length_masked_secret", fallback=5)
+    secret_mask_adapter = conf.getimport("logging", "secret_mask_adapter", fallback=None)
+    sensitive_fields = DEFAULT_SENSITIVE_FIELDS.copy()
+    sensitive_variable_fields = conf.get("core", "sensitive_var_conn_names")
+    if sensitive_variable_fields:
+        sensitive_fields |= frozenset({field.strip() for field in sensitive_variable_fields.split(",")})
+
+    hide_sensitive_var_conn_fields = conf.getboolean("core", "hide_sensitive_var_conn_fields")
+
+    core_masker = secrets_masker_core()
+    core_masker.min_length_to_mask = min_length_to_mask
+    core_masker.sensitive_variables_fields = list(sensitive_fields)
+    core_masker.secret_mask_adapter = secret_mask_adapter
+    core_masker.hide_sensitive_var_conn_fields = hide_sensitive_var_conn_fields
+
+    from airflow.sdk._shared.secrets_masker import _secrets_masker as sdk_secrets_masker
+
+    sdk_masker = sdk_secrets_masker()
+    sdk_masker.min_length_to_mask = min_length_to_mask
+    sdk_masker.sensitive_variables_fields = list(sensitive_fields)
+    sdk_masker.secret_mask_adapter = secret_mask_adapter
+    sdk_masker.hide_sensitive_var_conn_fields = hide_sensitive_var_conn_fields
 
 
 def configure_action_logging() -> None:
@@ -579,23 +818,42 @@ def prepare_syspath_for_config_and_plugins():
         sys.path.append(PLUGINS_FOLDER)
 
 
-def prepare_syspath_for_dags_folder():
-    """Update sys.path to include the DAGs folder."""
-    if DAGS_FOLDER not in sys.path:
-        sys.path.append(DAGS_FOLDER)
+def __getattr__(name: str):
+    """Handle deprecated module attributes."""
+    import warnings
 
+    from airflow.exceptions import RemovedInAirflow4Warning
 
-def get_session_lifetime_config():
-    """Get session timeout configs and handle outdated configs gracefully."""
-    session_lifetime_minutes = conf.get("webserver", "session_lifetime_minutes", fallback=None)
-    minutes_per_day = 24 * 60
-    if not session_lifetime_minutes:
-        session_lifetime_days = 30
-        session_lifetime_minutes = minutes_per_day * session_lifetime_days
+    if name == "MASK_SECRETS_IN_LOGS":
+        warnings.warn(
+            "settings.MASK_SECRETS_IN_LOGS has been removed. This shim returns default value of False. "
+            "Use SecretsMasker.enable_log_masking(), disable_log_masking(), or is_log_masking_enabled() instead.",
+            RemovedInAirflow4Warning,
+            stacklevel=2,
+        )
+        return False
+    if name == "WEB_COLORS":
+        warnings.warn(
+            "settings.WEB_COLORS has been removed. This shim returns default value. "
+            "Please upgrade your provider or integration.",
+            RemovedInAirflow4Warning,
+            stacklevel=2,
+        )
+        return {"LIGHTBLUE": "#4d9de0", "LIGHTORANGE": "#FF9933"}
+    if name == "EXECUTE_TASKS_NEW_PYTHON_INTERPRETER":
+        warnings.warn(
+            "settings.EXECUTE_TASKS_NEW_PYTHON_INTERPRETER has been removed. This shim returns default value. "
+            "Please upgrade your provider or integration.",
+            RemovedInAirflow4Warning,
+            stacklevel=2,
+        )
+        return not hasattr(os, "fork") or conf.getboolean(
+            "core",
+            "execute_tasks_new_python_interpreter",
+            fallback=False,
+        )
 
-    log.debug("User session lifetime is set to %s minutes.", session_lifetime_minutes)
-
-    return int(session_lifetime_minutes)
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 
 def import_local_settings():
@@ -621,7 +879,7 @@ def import_local_settings():
             names = {n for n in airflow_local_settings.__dict__ if not n.startswith("__")}
 
         plugin_functions = policies.make_plugin_from_local_settings(
-            POLICY_PLUGIN_MANAGER, airflow_local_settings, names
+            get_policy_plugin_manager(), airflow_local_settings, names
         )
 
         # If we have already handled a function by adding it to the plugin,
@@ -629,7 +887,7 @@ def import_local_settings():
         for name in names - plugin_functions:
             globals()[name] = getattr(airflow_local_settings, name)
 
-        if POLICY_PLUGIN_MANAGER.hook.task_instance_mutation_hook.get_hookimpls():
+        if get_policy_plugin_manager().hook.task_instance_mutation_hook.get_hookimpls():
             task_instance_mutation_hook.is_noop = False
 
         log.info("Loaded airflow_local_settings from %s .", airflow_local_settings.__file__)
@@ -639,25 +897,26 @@ def initialize():
     """Initialize Airflow with all the settings from this file."""
     configure_vars()
     prepare_syspath_for_config_and_plugins()
-    configure_policy_plugin_manager()
+    policy_mgr = get_policy_plugin_manager()
     # Load policy plugins _before_ importing airflow_local_settings, as Pluggy uses LIFO and we want anything
     # in airflow_local_settings to take precendec
-    load_policy_plugins(POLICY_PLUGIN_MANAGER)
+    load_policy_plugins(policy_mgr)
     import_local_settings()
-    prepare_syspath_for_dags_folder()
-    global LOGGING_CLASS_PATH
-    LOGGING_CLASS_PATH = configure_logging()
-    State.state_color.update(STATE_COLORS)
-
+    configure_logging()
+    configure_otel(conf)
     configure_adapters()
     # The webservers import this file from models.py with the default settings.
 
-    if not os.environ.get("PYTHON_OPERATORS_VIRTUAL_ENV_MODE", None):
-        configure_orm()
-    configure_action_logging()
+    # Configure secrets masker before masking secrets
+    _configure_secrets_masker()
 
-    # mask the sensitive_config_values
-    conf.mask_secrets()
+    is_worker = os.environ.get("_AIRFLOW__REEXECUTED_PROCESS") == "1"
+    if not os.environ.get("PYTHON_OPERATORS_VIRTUAL_ENV_MODE", None) and not is_worker:
+        configure_orm()
+
+        # mask the sensitive_config_values
+        conf.mask_secrets()
+    configure_action_logging()
 
     # Run any custom runtime checks that needs to be executed for providers
     run_providers_custom_runtime_checks()
@@ -665,33 +924,6 @@ def initialize():
     # Ensure we close DB connections at scheduler and gunicorn worker terminations
     atexit.register(dispose_orm)
 
-
-# Const stuff
-
-KILOBYTE = 1024
-MEGABYTE = KILOBYTE * KILOBYTE
-WEB_COLORS = {"LIGHTBLUE": "#4d9de0", "LIGHTORANGE": "#FF9933"}
-
-# Updating serialized DAG can not be faster than a minimum interval to reduce database
-# write rate.
-MIN_SERIALIZED_DAG_UPDATE_INTERVAL = conf.getint("core", "min_serialized_dag_update_interval", fallback=30)
-
-# If set to True, serialized DAGs is compressed before writing to DB,
-COMPRESS_SERIALIZED_DAGS = conf.getboolean("core", "compress_serialized_dags", fallback=False)
-
-# Fetching serialized DAG can not be faster than a minimum interval to reduce database
-# read rate. This config controls when your DAGs are updated in the Webserver
-MIN_SERIALIZED_DAG_FETCH_INTERVAL = conf.getint("core", "min_serialized_dag_fetch_interval", fallback=10)
-
-CAN_FORK = hasattr(os, "fork")
-
-EXECUTE_TASKS_NEW_PYTHON_INTERPRETER = not CAN_FORK or conf.getboolean(
-    "core",
-    "execute_tasks_new_python_interpreter",
-    fallback=False,
-)
-
-USE_JOB_SCHEDULE = conf.getboolean("scheduler", "use_job_schedule", fallback=True)
 
 # By default Airflow plugins are lazily-loaded (only loaded when required). Set it to False,
 # if you want to load plugins whenever 'airflow' is invoked via cli or loaded from module.
@@ -702,19 +934,8 @@ LAZY_LOAD_PLUGINS: bool = conf.getboolean("core", "lazy_load_plugins", fallback=
 # loaded from module.
 LAZY_LOAD_PROVIDERS: bool = conf.getboolean("core", "lazy_discover_providers", fallback=True)
 
-# Executors can set this to true to configure logging correctly for
-# containerized executors.
-IS_EXECUTOR_CONTAINER = bool(os.environ.get("AIRFLOW_IS_EXECUTOR_CONTAINER", ""))
-IS_K8S_EXECUTOR_POD = bool(os.environ.get("AIRFLOW_IS_K8S_EXECUTOR_POD", ""))
-"""Will be True if running in kubernetes executor pod."""
-
-HIDE_SENSITIVE_VAR_CONN_FIELDS = conf.getboolean("core", "hide_sensitive_var_conn_fields")
-
-# By default this is off, but is automatically configured on when running task
-# instances
-MASK_SECRETS_IN_LOGS = False
-
-# Prefix used to identify tables holding data moved during migration.
-AIRFLOW_MOVED_TABLE_PREFIX = "_airflow_moved"
-
 DAEMON_UMASK: str = conf.get("core", "daemon_umask", fallback="0o077")
+
+# Prefix used by gunicorn workers to indicate they are ready to serve requests
+# Used by GunicornMonitor to track worker readiness via process titles
+GUNICORN_WORKER_READY_PREFIX: str = "[ready] "

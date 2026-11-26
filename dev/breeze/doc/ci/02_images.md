@@ -27,6 +27,7 @@
 - [Building docker images from current sources](#building-docker-images-from-current-sources)
 - [Building PROD docker images from released PIP packages](#building-prod-docker-images-from-released-pip-packages)
 - [Using docker cache during builds](#using-docker-cache-during-builds)
+- [Pinned OS-dependencies images](#pinned-os-dependencies-images)
 - [Naming conventions](#naming-conventions)
 - [Customizing the CI image](#customizing-the-ci-image)
   - [CI image build arguments](#ci-image-build-arguments)
@@ -108,7 +109,7 @@ it uses the latest installed version of airflow and providers. However,
 you can choose different installation methods as described in [Building
 PROD docker images from released PIP packages](#building-prod-docker-images-from-released-pip-packages). Detailed
 reference for building production image from different sources can be
-found in: [Build Args reference](../../../../docs/docker-stack/build-arg-ref.rst#installing-airflow-using-different-methods)
+found in: [Build Args reference](../../../../docker-stack-docs/build-arg-ref.rst#installing-airflow-using-different-methods)
 
 You can build the CI image using current sources this command:
 
@@ -129,17 +130,17 @@ The images are built with default extras - different extras for CI and
 production image and you can change the extras via the `--airflow-extras`
 parameters and add new ones with `--additional-airflow-extras`.
 
-For example if you want to build Python 3.9 version of production image
+For example if you want to build Python 3.11 version of production image
 with "all" extras installed you should run this command:
 
 ``` bash
-breeze prod-image build --python 3.9 --airflow-extras "all"
+breeze prod-image build --python 3.11 --airflow-extras "all"
 ```
 
 If you just want to add new extras you can add them like that:
 
 ``` bash
-breeze prod-image build --python 3.9 --additional-airflow-extras "all"
+breeze prod-image build --python 3.11 --additional-airflow-extras "all"
 ```
 
 The command that builds the CI image is optimized to minimize the time
@@ -151,6 +152,14 @@ steps are executed to rebuild parts of the image (for example, PIP
 dependencies) and will give you an image consistent with the one used
 during Continuous Integration.
 
+Locally built CI images are labelled with the aggregated hash of the
+files that trigger image rebuild when changed
+(`org.apache.airflow.ci.sources-hash` label). When another checkout of
+the same sources - for example a git worktree - shares the same Docker
+daemon, Breeze recognizes via that label that the image present in the
+daemon was built from identical sources and reuses it instead of
+rebuilding it, even though that checkout never built the image itself.
+
 The command that builds the production image is optimised for size of
 the image.
 
@@ -160,7 +169,7 @@ You can also build production images from PIP packages via providing
 `--install-airflow-version` parameter to Breeze:
 
 ``` bash
-breeze prod-image build --python 3.9 --additional-airflow-extras=trino --install-airflow-version=2.0.0
+breeze prod-image build --python 3.11 --additional-airflow-extras=trino --install-airflow-version=2.0.0
 ```
 
 This will build the image using command similar to:
@@ -168,7 +177,7 @@ This will build the image using command similar to:
 ``` bash
 pip install \
   apache-airflow[async,amazon,celery,cncf.kubernetes,docker,elasticsearch,ftp,grpc,hashicorp,http,ldap,google,microsoft.azure,mysql,postgres,redis,sendgrid,sftp,slack,ssh,statsd,virtualenv]==2.0.0 \
-  --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.0.0/constraints-3.9.txt"
+  --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.0.0/constraints-3.11.txt"
 ```
 
 > [!NOTE]
@@ -199,7 +208,7 @@ HEAD of development for constraints):
 
 ``` bash
 pip install "https://github.com/apache/airflow/archive/<tag>.tar.gz#egg=apache-airflow" \
-  --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-main/constraints-3.9.txt"
+  --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-main/constraints-3.11.txt"
 ```
 
 You can also skip installing airflow and install it from locally
@@ -207,7 +216,7 @@ provided files by using `--install-distributions-from-context` parameter to
 Breeze:
 
 ``` bash
-breeze prod-image build --python 3.9 --additional-airflow-extras=trino --install-distributions-from-context
+breeze prod-image build --python 3.11 --additional-airflow-extras=trino --install-distributions-from-context
 ```
 
 In this case you airflow and all packages (.whl files) should be placed
@@ -243,20 +252,20 @@ flags: `registry` (default), `local`, or `disabled` flags when you run
 Breeze commands. For example:
 
 ``` bash
-breeze ci-image build --python 3.9 --docker-cache local
+breeze ci-image build --python 3.11 --docker-cache local
 ```
 
 Will build the CI image using local build cache (note that it will take
 quite a long time the first time you run it).
 
 ``` bash
-breeze prod-image build --python 3.9 --docker-cache registry
+breeze prod-image build --python 3.11 --docker-cache registry
 ```
 
 Will build the production image with cache used from registry.
 
 ``` bash
-breeze prod-image build --python 3.9 --docker-cache disabled
+breeze prod-image build --python 3.11 --docker-cache disabled
 ```
 
 Will build the production image from the scratch.
@@ -279,6 +288,49 @@ or
 ``` bash
 export DOCKER_CACHE="disabled"
 ```
+
+# Pinned OS-dependencies images
+
+The base image is pinned to a digest, but the OS dependencies - system packages, compilers and the
+MySQL, MSSQL and Postgres clients - are installed with `apt-get` from the live `dhi.io` repository,
+which moves on and drops the package versions it replaced whenever Docker rebuilds its hardened
+images. To keep a commit building the same image every time, the CI image and the PROD images built
+by CI and the release workflows start their OS dependencies from images in which
+`install_os_dependencies.sh` already ran. The reasoning and the alternatives are in
+[ADR 21](../adr/0021-pin-os-dependencies-images.md).
+
+How it fits together:
+
+* **Stages.** `Dockerfile.ci` installs the OS dependencies in its `ci-os-deps` stage, `Dockerfile` in
+  `dev-os-deps` (the build image) and `runtime-os-deps` (the final image). The stages start from
+  `CI_OS_DEPS_IMAGE`, `DEV_OS_DEPS_IMAGE` and `RUNTIME_OS_DEPS_IMAGE`, which default to `BASE_IMAGE`,
+  so a plain `docker build` installs everything as before.
+* **Marker.** The script writes a hash of everything that decides what it installs - the scripts and
+  repository keys, the installation type, the apt dependency and database client build args and
+  `DEPENDENCIES_EPOCH_NUMBER` - to `/usr/share/airflow/os-dependencies.sha256`. On an image whose
+  marker matches it installs nothing; otherwise it installs on top, so a build never runs on OS
+  dependencies that do not match its inputs.
+* **Building and publishing.** The "Mirror hardened base images" workflow runs
+  `breeze release-management build-os-deps-images` and `publish-os-deps-images` daily, building
+  each image only when one of its inputs changed. They are published as
+  `ghcr.io/apache/airflow/base/os-deps:<type>-<X.Y.Z>-debian13-dev` (the latest image of a Python
+  patch release), and every image keeps a tag that encodes all its inputs and never moves.
+* **Pinning.** The upgrade check (`breeze ci upgrade`) pins the latest image of each Python patch
+  release in `dev/breeze/src/airflow_breeze/files/hardened_os_deps_image_digests.json`, together
+  with the base image pins, in the PR that has to pass the full CI. Only `main` carries these pins.
+* **Using the pins.** `breeze ci-image build` and `breeze prod-image build` pass the pinned images
+  unless the build uses another base image, Debian version or flavor, custom apt dependencies or
+  custom database clients. `--no-use-pinned-os-deps-images` (`USE_PINNED_OS_DEPS_IMAGES=false`)
+  turns them off. In CI, the "disable image cache" label turns them off, and so does a PR that
+  changes the OS-dependency scripts or repository keys: installing on top of a pinned image would
+  only test additions, as a package or database client the PR drops would still be there from the
+  pinned layer. The automatic cache-disabled retry of a failed image build keeps them.
+* **Provenance.** An image records the image its OS dependencies came from in
+  `AIRFLOW_OS_DEPS_IMAGE`, and the base image they were installed on in
+  `/usr/share/airflow/os-dependencies.base-image` - which can be an older digest than `BASE_IMAGE`.
+
+To install the OS dependencies from the live repositories locally, for example to check that a
+`dhi.io` change does not break the next pinned image, build with `--no-use-pinned-os-deps-images`.
 
 # Naming conventions
 
@@ -342,7 +394,7 @@ faster. It is enough to download and uncompress the artifact that stores the
 image and run ``breeze ci-image load -i <path-to-image.tar>`` to load the
 image and mark the image as refreshed in the local cache.
 
-You can see more details and examples in[Breeze](../06_managing_docker_images.rst)
+You can see more details and examples in [Breeze](../06_managing_docker_images.rst).
 
 # Customizing the CI image
 
@@ -350,7 +402,7 @@ Customizing the CI image allows to add your own dependencies to the
 image.
 
 The easiest way to build the customized image is to use `breeze` script,
-but you can also build suc customized image by running appropriately
+but you can also build such customized image by running appropriately
 crafted docker build in which you specify all the `build-args` that you
 need to add to customize it. You can read about all the args and ways
 you can build the image in the
@@ -359,7 +411,7 @@ you can build the image in the
 Here just a few examples are presented which should give you general
 understanding of what you can customize.
 
-This builds the production image in version 3.9 with additional airflow
+This builds the production image in version 3.11 with additional airflow
 extras from 2.0.0 PyPI package and additional apt dev and runtime
 dependencies.
 
@@ -371,7 +423,7 @@ plugin installed.
 ``` bash
 DOCKER_BUILDKIT=1 docker build . -f Dockerfile.ci \
   --pull \
-  --build-arg PYTHON_BASE_IMAGE="python:3.9-slim-bookworm" \
+  --build-arg BASE_IMAGE="ghcr.io/apache/airflow/base/python:3.11-debian13-dev" \
   --build-arg ADDITIONAL_AIRFLOW_EXTRAS="jdbc" \
   --build-arg ADDITIONAL_PYTHON_DEPS="pandas" \
   --build-arg ADDITIONAL_DEV_APT_DEPS="gcc g++" \
@@ -382,7 +434,7 @@ the same image can be built using `breeze` (it supports auto-completion
 of the options):
 
 ``` bash
-breeze ci-image build --python 3.9 --additional-airflow-extras=jdbc --additional-python-deps="pandas" \
+breeze ci-image build --python 3.11 --additional-airflow-extras=jdbc --additional-python-deps="pandas" \
     --additional-dev-apt-deps="gcc g++"
 ```
 
@@ -396,7 +448,7 @@ comment](https://github.com/apache/airflow/issues/8605#issuecomment-690065621):
 ``` bash
 DOCKER_BUILDKIT=1 docker build . -f Dockerfile.ci \
   --pull \
-  --build-arg PYTHON_BASE_IMAGE="python:3.9-slim-bookworm" \
+  --build-arg BASE_IMAGE="ghcr.io/apache/airflow/base/python:3.11-debian13-dev" \
   --build-arg AIRFLOW_INSTALLATION_METHOD="apache-airflow" \
   --build-arg ADDITIONAL_AIRFLOW_EXTRAS="slack" \
   --build-arg ADDITIONAL_PYTHON_DEPS="apache-airflow-providers-odbc \
@@ -419,93 +471,93 @@ DOCKER_BUILDKIT=1 docker build . -f Dockerfile.ci \
 The following build arguments (`--build-arg` in docker build command)
 can be used for CI images:
 
-| Build argument                    | Default value              | Description                                                                                                       |
-|-----------------------------------|----------------------------|-------------------------------------------------------------------------------------------------------------------|
-| `PYTHON_BASE_IMAGE`               | `python:3.9-slim-bookworm` | Base Python image                                                                                                 |
-| `PYTHON_MAJOR_MINOR_VERSION`      | `3.9`                      | major/minor version of Python (should match base image)                                                           |
-| `DEPENDENCIES_EPOCH_NUMBER`       | `2`                        | increasing this number will reinstall all apt dependencies                                                        |
-| `ADDITIONAL_PIP_INSTALL_FLAGS`    |                            | additional `pip` flags passed to the installation commands (except when reinstalling `pip` itself)                |
-| `HOME`                            | `/root`                    | Home directory of the root user (CI image has root user as default)                                               |
-| `AIRFLOW_HOME`                    | `/root/airflow`            | Airflow's HOME (that's where logs and sqlite databases are stored)                                                |
-| `AIRFLOW_SOURCES`                 | `/opt/airflow`             | Mounted sources of Airflow                                                                                        |
-| `AIRFLOW_REPO`                    | `apache/airflow`           | the repository from which PIP dependencies are pre-installed                                                      |
-| `AIRFLOW_BRANCH`                  | `main`                     | the branch from which PIP dependencies are pre-installed                                                          |
-| `AIRFLOW_CI_BUILD_EPOCH`          | `1`                        | increasing this value will reinstall PIP dependencies from the repository from scratch                            |
-| `AIRFLOW_CONSTRAINTS_LOCATION`    |                            | If not empty, it will override the source of the constraints with the specified URL or file.                      |
-| `AIRFLOW_CONSTRAINTS_REFERENCE`   | `constraints-main`         | reference (branch or tag) from GitHub repository from which constraints are used.                                 |
-| `AIRFLOW_EXTRAS`                  | `all`                      | extras to install                                                                                                 |
-| `UPGRADE_RANDOM_INDICATOR_STRING` |                            | If set to any random value the dependencies are upgraded to newer versions. In CI it is set to build id.          |
-| `ADDITIONAL_AIRFLOW_EXTRAS`       |                            | additional extras to install                                                                                      |
-| `ADDITIONAL_PYTHON_DEPS`          |                            | additional Python dependencies to install                                                                         |
-| `DEV_APT_COMMAND`                 |                            | Dev apt command executed before dev deps are installed in the first part of image                                 |
-| `ADDITIONAL_DEV_APT_COMMAND`      |                            | Additional Dev apt command executed before dev dep are installed in the first part of the image                   |
-| `DEV_APT_DEPS`                    |                            | Dev APT dependencies installed in the first part of the image (default empty means default dependencies are used) |
-| `ADDITIONAL_DEV_APT_DEPS`         |                            | Additional apt dev dependencies installed in the first part of the image                                          |
-| `ADDITIONAL_DEV_APT_ENV`          |                            | Additional env variables defined when installing dev deps                                                         |
-| `AIRFLOW_PIP_VERSION`             | `25.0.1`                   | `pip` version used.                                                                                               |
-| `AIRFLOW_UV_VERSION`              | `0.6.10`                   | `uv` version used.                                                                                                |
-| `AIRFLOW_PRE_COMMIT_VERSION`      | `4.2.0`                    | `pre-commit` version used.                                                                                        |
-| `AIRFLOW_PRE_COMMIT_UV_VERSION`   | `4.1.4`                    | `pre-commit-uv` version used.                                                                                     |
-| `AIRFLOW_USE_UV`                  | `true`                     | Whether to use UV for installation.                                                                               |
-| `PIP_PROGRESS_BAR`                | `on`                       | Progress bar for PIP installation                                                                                 |
+| Build argument                    | Default value               | Description                                                                                                       |
+|-----------------------------------|-----------------------------|-------------------------------------------------------------------------------------------------------------------|
+| `BASE_IMAGE`                      | `ghcr.io/apache/airflow/base/python:<X.Y.Z>-debian13-dev@<digest>`                  | Mirror of the hardened base image Python comes from, pinned to a digest by `breeze ci upgrade` |
+| `CI_OS_DEPS_IMAGE`                | `BASE_IMAGE`                | Image the OS dependencies are installed on; breeze passes the pinned OS-dependencies image (see [Pinned OS-dependencies images](#pinned-os-dependencies-images)) |
+| `PYTHON_MAJOR_MINOR_VERSION`      | `3.11`                      | major/minor version of Python (should match base image)                                                           |
+| `DEPENDENCIES_EPOCH_NUMBER`       | `2`                         | increasing this number will reinstall all apt dependencies                                                        |
+| `ADDITIONAL_PIP_INSTALL_FLAGS`    |                             | additional `pip` flags passed to the installation commands (except when reinstalling `pip` itself)                |
+| `HOME`                            | `/root`                     | Home directory of the root user (CI image has root user as default)                                               |
+| `AIRFLOW_HOME`                    | `/root/airflow`             | Airflow's HOME (that's where logs and sqlite databases are stored)                                                |
+| `AIRFLOW_SOURCES`                 | `/opt/airflow`              | Mounted sources of Airflow                                                                                        |
+| `AIRFLOW_REPO`                    | `apache/airflow`            | the repository from which PIP dependencies are pre-installed                                                      |
+| `AIRFLOW_BRANCH`                  | `main`                      | the branch from which PIP dependencies are pre-installed                                                          |
+| `AIRFLOW_CI_BUILD_EPOCH`          | `1`                         | increasing this value will reinstall PIP dependencies from the repository from scratch                            |
+| `AIRFLOW_CONSTRAINTS_LOCATION`    |                             | If not empty, it will override the source of the constraints with the specified URL or file.                      |
+| `AIRFLOW_CONSTRAINTS_REFERENCE`   | `constraints-main`          | reference (branch or tag) from GitHub repository from which constraints are used.                                 |
+| `AIRFLOW_EXTRAS`                  | `all`                       | extras to install                                                                                                 |
+| `UPGRADE_RANDOM_INDICATOR_STRING` |                             | If set to any random value the dependencies are upgraded to newer versions. In CI it is set to build id.          |
+| `ADDITIONAL_AIRFLOW_EXTRAS`       |                             | additional extras to install                                                                                      |
+| `ADDITIONAL_PYTHON_DEPS`          |                             | additional Python dependencies to install                                                                         |
+| `DEV_APT_COMMAND`                 |                             | Dev apt command executed before dev deps are installed in the first part of image                                 |
+| `ADDITIONAL_DEV_APT_COMMAND`      |                             | Additional Dev apt command executed before dev dep are installed in the first part of the image                   |
+| `DEV_APT_DEPS`                    |                             | Dev APT dependencies installed in the first part of the image (default empty means default dependencies are used) |
+| `ADDITIONAL_DEV_APT_DEPS`         |                             | Additional apt dev dependencies installed in the first part of the image                                          |
+| `ADDITIONAL_DEV_APT_ENV`          |                             | Additional env variables defined when installing dev deps                                                         |
+| `AIRFLOW_PIP_VERSION`             | `26.3`                      | `pip` version used.                                                                                               |
+| `AIRFLOW_UV_VERSION`              | `0.13.7`                    | `uv` version used.                                                                                                |
+| `AIRFLOW_PREK_VERSION`            | `0.5.10`                    | `prek` version used.                                                                                              |
+| `AIRFLOW_USE_UV`                  | `true`                      | Whether to use UV for installation.                                                                               |
+| `PIP_PROGRESS_BAR`                | `on`                        | Progress bar for PIP installation                                                                                 |
 
 
 Here are some examples of how CI images can built manually. CI is always
 built from local sources.
 
-This builds the CI image in version 3.9 with default extras ("all").
+This builds the CI image in version 3.11 with default extras ("all").
 
 ``` bash
 DOCKER_BUILDKIT=1 docker build . -f Dockerfile.ci \
    --pull \
-   --build-arg PYTHON_BASE_IMAGE="python:3.9-slim-bookworm" --tag my-image:0.0.1
+   --build-arg BASE_IMAGE="ghcr.io/apache/airflow/base/python:3.11-debian13-dev" --tag my-image:0.0.1
 ```
 
-This builds the CI image in version 3.9 with "gcp" extra only.
+This builds the CI image in version 3.11 with "gcp" extra only.
 
 ``` bash
 DOCKER_BUILDKIT=1 docker build . -f Dockerfile.ci \
   --pull \
-  --build-arg PYTHON_BASE_IMAGE="python:3.9-slim-bookworm" \
+  --build-arg BASE_IMAGE="ghcr.io/apache/airflow/base/python:3.11-debian13-dev" \
   --build-arg AIRFLOW_EXTRAS=gcp --tag my-image:0.0.1
 ```
 
-This builds the CI image in version 3.9 with "apache-beam" extra added.
+This builds the CI image in version 3.11 with "apache-beam" extra added.
 
 ``` bash
 DOCKER_BUILDKIT=1 docker build . -f Dockerfile.ci \
   --pull \
-  --build-arg PYTHON_BASE_IMAGE="python:3.9-slim-bookworm" \
+  --build-arg BASE_IMAGE="ghcr.io/apache/airflow/base/python:3.11-debian13-dev" \
   --build-arg ADDITIONAL_AIRFLOW_EXTRAS="apache-beam" --tag my-image:0.0.1
 ```
 
-This builds the CI image in version 3.9 with "mssql" additional package
+This builds the CI image in version 3.11 with "mssql" additional package
 added.
 
 ``` bash
 DOCKER_BUILDKIT=1 docker build . -f Dockerfile.ci \
   --pull \
-  --build-arg PYTHON_BASE_IMAGE="python:3.9-slim-bookworm" \
+  --build-arg BASE_IMAGE="ghcr.io/apache/airflow/base/python:3.11-debian13-dev" \
   --build-arg ADDITIONAL_PYTHON_DEPS="mssql" --tag my-image:0.0.1
 ```
 
-This builds the CI image in version 3.9 with "gcc" and "g++" additional
+This builds the CI image in version 3.11 with "gcc" and "g++" additional
 apt dev dependencies added.
 
 ```
 DOCKER_BUILDKIT=1 docker build . -f Dockerfile.ci \
   --pull
-  --build-arg PYTHON_BASE_IMAGE="python:3.9-slim-bookworm" \
+  --build-arg BASE_IMAGE="ghcr.io/apache/airflow/base/python:3.11-debian13-dev" \
   --build-arg ADDITIONAL_DEV_APT_DEPS="gcc g++" --tag my-image:0.0.1
 ```
 
-This builds the CI image in version 3.9 with "jdbc" extra and
+This builds the CI image in version 3.11 with "jdbc" extra and
 "default-jre-headless" additional apt runtime dependencies added.
 
 ```
 DOCKER_BUILDKIT=1 docker build . -f Dockerfile.ci \
   --pull \
-  --build-arg PYTHON_BASE_IMAGE="python:3.9-slim-bookworm" \
+  --build-arg BASE_IMAGE="ghcr.io/apache/airflow/base/python:3.11-debian13-dev" \
   --build-arg AIRFLOW_EXTRAS=jdbc \
   --tag my-image:0.0.1
 ```
@@ -562,12 +614,13 @@ percent-encoded when you access them via UI (/ = %2F)
 
 | Image                    | Name                                   | Description                                                   |
 |--------------------------|----------------------------------------|---------------------------------------------------------------|
-| Python image (DockerHub) | python:\<X.Y\>-slim-bookworm           | Base Python image used by both production and CI image.       |
+| Hardened Python base     | base/python:\<X.Y.Z\>-debian13-dev     | Mirror of the Docker Hardened Python image that the CI image and the default PROD image are built on. |
+| OS-dependencies images   | base/os-deps:\<TYPE\>-\<X.Y.Z\>-debian13-dev | The hardened base image with the OS dependencies of the `ci`, `dev` or `runtime` installation already installed; CI and release builds start from their pinned digests. |
 | CI image                 | airflow/\<BRANCH\>/ci/python\<X.Y\>    | CI image - this is the image used for most of the tests.      |
 | PROD image               | airflow/\<BRANCH\>/prod/python\<X.Y\>  | faster to build or pull. Production image optimized for size. |
 
 - \<BRANCH\> might be either "main" or "v2-\*-test"
-- \<X.Y\> - Python version (Major + Minor).Should be one of \["3.9", "3.10", "3.11", "3.12" \].
+- \<X.Y\> - Python version (Major + Minor).Should be one of \["3.11", "3.12", "3.13", "3.14" \].
 
 
 ----

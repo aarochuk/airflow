@@ -17,17 +17,21 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta, timezone
+import base64
+import os
+from datetime import UTC, datetime, timedelta
 
-from airflow.providers.amazon.aws.hooks.eks import EksHook
+import boto3
+from botocore.signers import RequestSigner
 
 # Presigned STS urls are valid for 15 minutes, set token expiration to 1 minute before it expires for
 # some cushion
+STS_TOKEN_EXPIRES_IN = 60
 TOKEN_EXPIRATION_MINUTES = 14
 
 
 def get_expiration_time():
-    token_expiration = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_EXPIRATION_MINUTES)
+    token_expiration = datetime.now(UTC) + timedelta(minutes=TOKEN_EXPIRATION_MINUTES)
 
     return token_expiration.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -38,24 +42,69 @@ def get_parser():
         "--cluster-name", help="The name of the cluster to generate kubeconfig file for.", required=True
     )
     parser.add_argument(
-        "--aws-conn-id",
-        help=(
-            "The Airflow connection used for AWS credentials. "
-            "If not specified or empty then the default boto3 behaviour is used."
-        ),
-    )
-    parser.add_argument(
         "--region-name", help="AWS region_name. If not specified then the default boto3 behaviour is used."
     )
+    parser.add_argument("--sts-url", help="Provide the STS url", required=True)
 
     return parser
 
 
+# EKS only accepts the token if sts_url is the regional STS endpoint. The URL is signed as given.
+def fetch_access_token_for_cluster(
+    eks_cluster_name: str, sts_url: str, region_name: str, session: boto3.Session | None = None
+) -> str:
+    if session is None:
+        # This will use the credentials from the caller set as the standard AWS env variables
+        session = boto3.Session(region_name=region_name)
+    eks_client = session.client("eks")
+
+    credentials = session.get_credentials()
+    if credentials is None:
+        raise ValueError(
+            "No AWS credentials found. Credentials may have expired or not been properly configured. "
+            "Please ensure AWS credentials are available through environment variables, "
+            "AWS config files, or IAM roles."
+        )
+
+    signer = RequestSigner(
+        service_id=eks_client.meta.service_model.service_id,
+        region_name=session.region_name,
+        signing_name="sts",
+        signature_version="v4",
+        credentials=credentials,
+        event_emitter=session.events,
+    )
+
+    request_params = {
+        "method": "GET",
+        "url": sts_url,
+        "body": {},
+        "headers": {"x-k8s-aws-id": eks_cluster_name},
+        "context": {},
+    }
+
+    signed_url = signer.generate_presigned_url(
+        request_dict=request_params,
+        region_name=session.region_name,
+        expires_in=STS_TOKEN_EXPIRES_IN,
+        operation_name="",
+    )
+
+    base64_url = base64.urlsafe_b64encode(signed_url.encode("utf-8")).decode("utf-8")
+
+    # remove any base64 encoding padding:
+    return "k8s-aws-v1." + base64_url.rstrip("=")
+
+
 def main():
+    # Keeps any STS call made here for credentials regional too. This is the kubeconfig exec plugin's
+    # own short-lived process, so setting the env var can't affect another thread.
+    os.environ["AWS_STS_REGIONAL_ENDPOINTS"] = "regional"
     parser = get_parser()
     args = parser.parse_args()
-    eks_hook = EksHook(aws_conn_id=args.aws_conn_id, region_name=args.region_name)
-    access_token = eks_hook.fetch_access_token_for_cluster(args.cluster_name)
+    access_token = fetch_access_token_for_cluster(
+        args.cluster_name, args.sts_url, region_name=args.region_name
+    )
     access_token_expiration = get_expiration_time()
     print(f"expirationTimestamp: {access_token_expiration}, token: {access_token}")
 

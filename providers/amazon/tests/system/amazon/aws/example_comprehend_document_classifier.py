@@ -18,9 +18,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from airflow import DAG
-from airflow.decorators import task, task_group
-from airflow.models.baseoperator import chain
 from airflow.providers.amazon.aws.hooks.comprehend import ComprehendHook
 from airflow.providers.amazon.aws.operators.comprehend import (
     ComprehendCreateDocumentClassifierOperator,
@@ -34,7 +31,22 @@ from airflow.providers.amazon.aws.operators.s3 import (
 from airflow.providers.amazon.aws.sensors.comprehend import (
     ComprehendCreateDocumentClassifierCompletedSensor,
 )
-from airflow.utils.trigger_rule import TriggerRule
+
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import DAG, chain, task, task_group
+else:
+    # Airflow 2 path
+    from airflow.decorators import task, task_group  # type: ignore[attr-defined,no-redef]
+    from airflow.models.baseoperator import chain  # type: ignore[attr-defined,no-redef]
+    from airflow.models.dag import DAG  # type: ignore[attr-defined,no-redef,assignment]
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.amazon.aws.utils import SystemTestContextBuilder
 
@@ -94,7 +106,6 @@ def document_classifier_workflow():
         document_classifier_kwargs=document_classifier_kwargs,
     )
     # [END howto_operator_create_document_classifier]
-    create_document_classifier.wait_for_completion = False
 
     # [START howto_sensor_create_document_classifier]
     await_create_document_classifier = ComprehendCreateDocumentClassifierCompletedSensor(
@@ -103,13 +114,28 @@ def document_classifier_workflow():
     # [END howto_sensor_create_document_classifier]
 
     @task(trigger_rule=TriggerRule.ALL_DONE)
-    def delete_classifier(document_classifier_arn: str):
-        ComprehendHook().conn.delete_document_classifier(DocumentClassifierArn=document_classifier_arn)
+    def delete_classifier(classifier_name: str):
+        hook = ComprehendHook()
+        classifiers = hook.conn.list_document_classifiers(
+            Filter={"DocumentClassifierName": classifier_name},
+        )["DocumentClassifierPropertiesList"]
+
+        for classifier in classifiers:
+            classifier_arn = classifier["DocumentClassifierArn"]
+
+            # A classifier can only be deleted from a terminal state.
+            if classifier["Status"] == "DELETING":
+                continue
+            if classifier["Status"] in ("SUBMITTED", "TRAINING"):
+                hook.conn.stop_training_document_classifier(DocumentClassifierArn=classifier_arn)
+
+            hook.get_waiter("document_classifier_deletable").wait(DocumentClassifierArn=classifier_arn)
+            hook.conn.delete_document_classifier(DocumentClassifierArn=classifier_arn)
 
     chain(
         create_document_classifier,
         await_create_document_classifier,
-        delete_classifier(create_document_classifier.output),
+        delete_classifier(classifier_name),
     )
 
 
@@ -139,7 +165,6 @@ with DAG(
     dag_id=DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),
-    tags=["example"],
     catchup=False,
 ) as dag:
     test_context = sys_test_context_task()
@@ -215,5 +240,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

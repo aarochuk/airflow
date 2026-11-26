@@ -17,20 +17,40 @@
 # under the License.
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Callable
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest import mock
 
 import pendulum
 import pytest
 
-from airflow.sdk.api.datamodels._generated import TerminalTIState
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.sdk import ExceptionRetryPolicy, TaskInstanceState, TriggerRule
 from airflow.sdk.bases.operator import BaseOperator
+from airflow.sdk.bases.xcom import BaseXCom
+from airflow.sdk.definitions.asset import Asset, AssetAlias, AssetRef
 from airflow.sdk.definitions.dag import DAG
 from airflow.sdk.definitions.mappedoperator import MappedOperator
 from airflow.sdk.definitions.xcom_arg import XComArg
-from airflow.sdk.execution_time.comms import GetXCom, SetXCom, XComResult
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.sdk.execution_time.comms import (
+    AssetResult,
+    AssetsByAliasResult,
+    ErrorResponse,
+    GetAssetByName,
+    GetAssetsByAlias,
+    GetTICount,
+    GetXCom,
+    GetXComSequenceItem,
+    GetXComSequenceSlice,
+    SetXCom,
+    TICount,
+    XComResult,
+    XComSequenceIndexResult,
+    XComSequenceSliceResult,
+)
+from airflow.sdk.execution_time.context import AssetStateStoreAccessor, InletEventsAccessor
 
 from tests_common.test_utils.mapping import expand_mapped_task  # noqa: F401
 from tests_common.test_utils.mock_operators import (
@@ -106,6 +126,63 @@ def test_task_mapping_override_default_args():
     assert mapped.owner == "airflow"
 
 
+def test_mapped_task_preserves_custom_base_operator_default():
+    retry_policy = ExceptionRetryPolicy(rules=[])
+
+    class CustomRetryOperator(BaseOperator):
+        def __init__(self, *, value: str, retry_policy=retry_policy, **kwargs):
+            super().__init__(retry_policy=retry_policy, **kwargs)
+            self.value = value
+
+        def execute(self, context):
+            pass
+
+    direct = CustomRetryOperator(task_id="direct", value="direct")
+    mapped = CustomRetryOperator.partial(task_id="mapped").expand(value=["mapped"])
+    unmapped = mapped.unmap({"value": "mapped"})
+
+    assert direct.retry_policy is retry_policy
+    assert mapped.partial_kwargs["retry_policy"] is retry_policy
+    assert mapped.partial_kwargs["inlets"] == []
+    assert unmapped.retry_policy is retry_policy
+
+
+class _ItemEmptyOperator(EmptyOperator):
+    def __init__(self, *, item=None, **kwargs):
+        super().__init__(**kwargs)
+        self.item = item
+
+
+class _RunsOnWorkerEmptyOperator(_ItemEmptyOperator):
+    inherits_from_empty_operator = False
+
+
+class _ReportsClearTargetEmptyOperator(_ItemEmptyOperator):
+    def get_external_clear_target(self, context):
+        return None
+
+
+class _ItemMockOperator(MockOperator):
+    def __init__(self, *, item=None, **kwargs):
+        super().__init__(**kwargs)
+        self.item = item
+
+
+@pytest.mark.parametrize(
+    ("operator_class", "expected"),
+    [
+        pytest.param(_ItemEmptyOperator, True, id="empty-subclass"),
+        pytest.param(_RunsOnWorkerEmptyOperator, False, id="empty-subclass-opted-out"),
+        pytest.param(_ReportsClearTargetEmptyOperator, False, id="empty-subclass-reports-clear-target"),
+        pytest.param(_ItemMockOperator, False, id="not-empty"),
+    ],
+)
+def test_mapped_operator_reads_inherits_from_empty_operator(operator_class, expected):
+    mapped = operator_class.partial(task_id="t").expand(item=[1, 2])
+
+    assert mapped.inherits_from_empty_operator is expected
+
+
 def test_map_unknown_arg_raises():
     with pytest.raises(TypeError, match=r"argument 'file'"):
         BaseOperator.partial(task_id="a").expand(file=[1, 2, {"a": "b"}])
@@ -158,6 +235,33 @@ def test_partial_on_invalid_pool_slots_raises() -> None:
 
     with pytest.raises(TypeError, match="'<' not supported between instances of 'str' and 'int'"):
         MockOperator.partial(task_id="pool_slots_test", pool="test", pool_slots="a").expand(arg1=[1, 2, 3])
+
+
+def test_expand_rejects_pool() -> None:
+    with pytest.raises(TypeError, match="unmappable or already specified argument: pool"):
+        MockOperator.partial(task_id="a").expand(pool=["p1", "p2"])
+
+
+def test_expand_kwargs_rejects_pool_on_unmap() -> None:
+    mapped = MockOperator.partial(task_id="a").expand_kwargs([{"pool": "p1"}])
+    with pytest.raises(TypeError, match="unmappable or already specified argument: pool"):
+        mapped.unmap({"pool": "p1"})
+
+
+def test_partial_pool_none_uses_default_pool() -> None:
+    mapped = MockOperator.partial(task_id="a", pool=None).expand(arg1=[1])
+    assert mapped.pool == "default_pool"
+
+
+def test_task_decorator_pool_none_uses_default_pool() -> None:
+    with DAG("test", schedule=None) as dag:
+
+        @dag.task
+        def show(number): ...
+
+        show.override(pool=None).expand(number=[1])
+
+    assert dag.get_task("show").pool == "default_pool"
 
 
 def test_mapped_task_applies_default_args_classic():
@@ -251,9 +355,18 @@ def test_mapped_render_template_fields_validating_operator(
         )
         mapped = callable(mapped, task1.output)
 
-    mock_supervisor_comms.get_message.return_value = XComResult(key="return_value", value=["{{ ds }}"])
+    def mock_comms(msg):
+        if isinstance(msg, GetXCom):
+            return XComResult(key=BaseXCom.XCOM_RETURN_KEY, value=["{{ ds }}"])
+        if isinstance(msg, GetXComSequenceSlice):
+            return XComSequenceSliceResult(root=["{{ ds }}"])
+        if isinstance(msg, GetTICount):
+            return TICount(count=1)
+        return mock.DEFAULT
 
-    mapped_ti = create_runtime_ti(task=mapped, map_index=0, upstream_map_indexes={task1.task_id: 1})
+    mock_supervisor_comms.send.side_effect = mock_comms
+
+    mapped_ti = create_runtime_ti(task=mapped, map_index=0)
 
     assert isinstance(mapped_ti.task, MappedOperator)
     mapped_ti.task.render_template_fields(context=mapped_ti.get_template_context())
@@ -272,13 +385,13 @@ def test_mapped_render_nested_template_fields(create_runtime_ti, mock_supervisor
             task_id="t", arg2=NestedFields(field_1="{{ ti.task_id }}", field_2="value_2")
         ).expand(arg1=["{{ ti.task_id }}", ["s", "{{ ti.task_id }}"]])
 
-    ti = create_runtime_ti(task=mapped, map_index=0, upstream_map_indexes={})
+    ti = create_runtime_ti(task=mapped, map_index=0)
     ti.task.render_template_fields(context=ti.get_template_context())
     assert ti.task.arg1 == "t"
     assert ti.task.arg2.field_1 == "t"
     assert ti.task.arg2.field_2 == "value_2"
 
-    ti = create_runtime_ti(task=mapped, map_index=1, upstream_map_indexes={})
+    ti = create_runtime_ti(task=mapped, map_index=1)
     ti.task.render_template_fields(context=ti.get_template_context())
     assert ti.task.arg1 == ["s", "t"]
     assert ti.task.arg2.field_1 == "t"
@@ -299,11 +412,20 @@ def test_expand_kwargs_render_template_fields_validating_operator(
         task1 = BaseOperator(task_id="op1")
         mapped = MockOperator.partial(task_id="a", arg2="{{ ti.task_id }}").expand_kwargs(task1.output)
 
-    mock_supervisor_comms.get_message.return_value = XComResult(
-        key="return_value", value=[{"arg1": "{{ ds }}"}, {"arg1": 2}]
-    )
+    xcom_values = [{"arg1": "{{ ds }}"}, {"arg1": 2}]
 
-    ti = create_runtime_ti(task=mapped, map_index=map_index, upstream_map_indexes={})
+    def mock_comms(msg):
+        if isinstance(msg, GetXCom):
+            return XComResult(key=BaseXCom.XCOM_RETURN_KEY, value=xcom_values)
+        if isinstance(msg, GetXComSequenceSlice):
+            return XComSequenceSliceResult(root=xcom_values)
+        if isinstance(msg, GetTICount):
+            return TICount(count=2)
+        return mock.DEFAULT
+
+    mock_supervisor_comms.send.side_effect = mock_comms
+
+    ti = create_runtime_ti(task=mapped, map_index=map_index)
     assert isinstance(ti.task, MappedOperator)
     ti.task.render_template_fields(context=ti.get_template_context())
     assert isinstance(ti.task, MockOperator)
@@ -405,7 +527,7 @@ def test_nested_mapped_task_groups():
             g1.expand(x=t())
 
 
-RunTI = Callable[[DAG, str, int], TerminalTIState]
+RunTI = Callable[[DAG, str, int], TaskInstanceState]
 
 
 def test_map_cross_product(run_ti: RunTI, mock_supervisor_comms):
@@ -427,19 +549,32 @@ def test_map_cross_product(run_ti: RunTI, mock_supervisor_comms):
 
         show.expand(number=emit_numbers(), letter=emit_letters())
 
-    def xcom_get():
-        # TODO: Tidy this after #45927 is reopened and fixed properly
-        last_request = mock_supervisor_comms.send_request.mock_calls[-1].kwargs["msg"]
-        if not isinstance(last_request, GetXCom):
-            return mock.DEFAULT
-        task = dag.get_task(last_request.task_id)
-        value = task.python_callable()
-        return XComResult(key="return_value", value=value)
+    numbers = [1, 2]
+    letters = {"a": "x", "b": "y", "c": "z"}
 
-    mock_supervisor_comms.get_message.side_effect = xcom_get
+    def mock_comms(msg):
+        if isinstance(msg, GetXCom):
+            if msg.task_id == "emit_numbers":
+                return XComResult(key=BaseXCom.XCOM_RETURN_KEY, value=numbers)
+            if msg.task_id == "emit_letters":
+                return XComResult(key=BaseXCom.XCOM_RETURN_KEY, value=letters)
+        elif isinstance(msg, GetXComSequenceSlice):
+            if msg.task_id == "emit_numbers":
+                return XComSequenceSliceResult(root=numbers)
+            if msg.task_id == "emit_letters":
+                # Convert dict items to list for XComSequenceSliceResult
+                return XComSequenceSliceResult(root=list(letters.items()))
+        elif isinstance(msg, GetTICount):
+            # show is mapped by 6 (2 numbers * 3 letters)
+            if msg.task_ids and msg.task_ids[0] == "show":
+                return TICount(count=6)
+            return TICount(count=1)
+        return mock.DEFAULT
+
+    mock_supervisor_comms.send.side_effect = mock_comms
 
     states = [run_ti(dag, "show", map_index) for map_index in range(6)]
-    assert states == [TerminalTIState.SUCCESS] * 6
+    assert states == [TaskInstanceState.SUCCESS] * 6
     assert outputs == [
         (1, ("a", "x")),
         (1, ("b", "y")),
@@ -467,19 +602,26 @@ def test_map_product_same(run_ti: RunTI, mock_supervisor_comms):
         emit_task = emit_numbers()
         show.expand(a=emit_task, b=emit_task)
 
-    def xcom_get():
-        # TODO: Tidy this after #45927 is reopened and fixed properly
-        last_request = mock_supervisor_comms.send_request.mock_calls[-1].kwargs["msg"]
-        if not isinstance(last_request, GetXCom):
-            return mock.DEFAULT
-        task = dag.get_task(last_request.task_id)
-        value = task.python_callable()
-        return XComResult(key="return_value", value=value)
+    numbers = [1, 2]
 
-    mock_supervisor_comms.get_message.side_effect = xcom_get
+    def mock_comms(msg):
+        if isinstance(msg, GetXCom):
+            if msg.task_id == "emit_numbers":
+                return XComResult(key=BaseXCom.XCOM_RETURN_KEY, value=numbers)
+        elif isinstance(msg, GetXComSequenceSlice):
+            if msg.task_id == "emit_numbers":
+                return XComSequenceSliceResult(root=numbers)
+        elif isinstance(msg, GetTICount):
+            # show is mapped by 4 (2 * 2 cross product)
+            if msg.task_ids and msg.task_ids[0] == "show":
+                return TICount(count=4)
+            return TICount(count=1)
+        return mock.DEFAULT
+
+    mock_supervisor_comms.send.side_effect = mock_comms
 
     states = [run_ti(dag, "show", map_index) for map_index in range(4)]
-    assert states == [TerminalTIState.SUCCESS] * 4
+    assert states == [TaskInstanceState.SUCCESS] * 4
     assert outputs == [(1, 1), (1, 2), (2, 1), (2, 2)]
 
 
@@ -539,7 +681,7 @@ def test_find_mapped_dependants_in_another_group():
 
 
 @pytest.mark.parametrize(
-    "partial_params, mapped_params, expected",
+    ("partial_params", "mapped_params", "expected"),
     [
         pytest.param(None, [{"a": 1}], [{"a": 1}], id="simple"),
         pytest.param({"b": 2}, [{"a": 1}], [{"a": 1, "b": 2}], id="merge"),
@@ -594,22 +736,44 @@ def test_operator_mapped_task_group_receives_value(create_runtime_ti, mock_super
         # Aggregates results from task group.
         t.override(task_id="t3")(tg1)
 
-    def xcom_get():
-        # TODO: Tidy this after #45927 is reopened and fixed properly
-        last_request = mock_supervisor_comms.send_request.mock_calls[-1].kwargs["msg"]
-        if not isinstance(last_request, GetXCom):
-            return mock.DEFAULT
-        key = (last_request.task_id, last_request.map_index)
-        if key in expected_values:
-            value = expected_values[key]
-            return XComResult(key="return_value", value=value)
-        elif last_request.map_index is None:
-            # Get all mapped XComValues for this ti
-            value = [v for k, v in expected_values.items() if k[0] == last_request.task_id]
-            return XComResult(key="return_value", value=value)
+    # Map task group IDs to their expansion counts
+    task_group_expansion = {"tg": 3}
+
+    def mock_comms_response(msg):
+        if isinstance(msg, GetXCom):
+            key = (msg.task_id, msg.map_index)
+            if key in expected_values:
+                value = expected_values[key]
+                return XComResult(key=BaseXCom.XCOM_RETURN_KEY, value=value)
+            if msg.map_index is None:
+                # Get all mapped XComValues for this ti
+                value = [v for k, v in expected_values.items() if k[0] == msg.task_id]
+                return XComResult(key=BaseXCom.XCOM_RETURN_KEY, value=value)
+        elif isinstance(msg, GetXComSequenceSlice):
+            # Handle sequence slicing for pulling all XCom values from mapped tasks
+            task_id = msg.task_id
+            values = [v for k, v in expected_values.items() if k[0] == task_id and k[1] is not None]
+            return XComSequenceSliceResult(root=values)
+        elif isinstance(msg, GetXComSequenceItem):
+            # The aggregated task-group value now resolves lazily, so iterating it fetches one item at a time.
+            task_id = msg.task_id
+            values = [v for k, v in expected_values.items() if k[0] == task_id and k[1] is not None]
+            if 0 <= msg.offset < len(values):
+                return XComSequenceIndexResult(root=values[msg.offset])
+            return ErrorResponse()
+        elif isinstance(msg, GetTICount):
+            # Handle TI count queries for upstream_map_indexes computation
+            if msg.task_ids:
+                task_id = msg.task_ids[0]
+                if task_id in expansion_per_task_id:
+                    return TICount(count=len(list(expansion_per_task_id[task_id])))
+                return TICount(count=1)
+            if msg.task_group_id:
+                return TICount(count=task_group_expansion.get(msg.task_group_id, 0))
+            return TICount(count=0)
         return mock.DEFAULT
 
-    mock_supervisor_comms.get_message.side_effect = xcom_get
+    mock_supervisor_comms.send.side_effect = mock_comms_response
 
     expected_values = {
         ("tg.t1", 0): ["a", "b"],
@@ -618,35 +782,202 @@ def test_operator_mapped_task_group_receives_value(create_runtime_ti, mock_super
         ("tg.t2", 0): ["a", "b"],
         ("tg.t2", 1): [4],
         ("tg.t2", 2): ["z"],
-        ("t3", None): [["a", "b"], [4], ["z"]],
+        ("t3", -1): [["a", "b"], [4], ["z"]],
     }
 
     # We hard-code the number of expansions here as the server is in charge of that.
     expansion_per_task_id = {
         "tg.t1": range(3),
         "tg.t2": range(3),
-        "t3": [None],
+        "t3": [-1],
     }
     for task in dag.tasks:
         for map_index in expansion_per_task_id[task.task_id]:
-            mapped_ti = create_runtime_ti(task=task.prepare_for_execution(), map_index=map_index)
+            mapped_ti = create_runtime_ti(
+                task=task.prepare_for_execution(),
+                map_index=map_index,
+            )
             context = mapped_ti.get_template_context()
             mapped_ti.task.render_template_fields(context)
             mapped_ti.task.execute(context)
     assert results == expected_values
 
 
-@pytest.mark.xfail(reason="SkipMixin hasn't been ported over to use the Task Execution API yet")
+class _OperatorWithConstructorLineage(BaseOperator):
+    """Operator that derives inlets and outlets from constructor arguments."""
+
+    def __init__(
+        self, *, inlet: Asset | AssetRef | None = None, outlet: Asset | AssetRef | None = None, **kwargs
+    ):
+        super().__init__(**kwargs)
+        if inlet is not None:
+            self.inlets.append(inlet)
+        if outlet is not None:
+            self.outlets.append(outlet)
+
+
+def test_mapped_render_template_fields_refreshes_constructor_inlets(create_runtime_ti, mock_supervisor_comms):
+    with DAG("test_dag"):
+        mapped = _OperatorWithConstructorLineage.partial(task_id="t").expand(inlet=[Asset("a"), Asset("b")])
+
+    ti = create_runtime_ti(task=mapped, map_index=1)
+    context = ti.get_template_context()
+    assert context["inlets"] == []
+    assert "asset_state_store" not in context
+
+    ti.task.render_template_fields(context=context)
+
+    assert context["inlets"] == [Asset("b")]
+    assert context["outlets"] == []
+    assert list(context["inlet_events"]) == [Asset("b")]
+    assert context["inlet_events"][Asset("b")] == InletEventsAccessor(asset_name="b", asset_uri="b")
+    assert context["asset_state_store"][Asset("b")] == AssetStateStoreAccessor(name="b")
+
+
+def test_mapped_render_template_fields_refreshes_constructor_outlets(
+    create_runtime_ti, mock_supervisor_comms
+):
+    with DAG("test_dag"):
+        mapped = _OperatorWithConstructorLineage.partial(task_id="t").expand(outlet=[Asset("a"), Asset("b")])
+
+    ti = create_runtime_ti(task=mapped, map_index=0)
+    context = ti.get_template_context()
+    assert "asset_state_store" not in context
+
+    ti.task.render_template_fields(context=context)
+
+    assert context["inlets"] == []
+    assert context["outlets"] == [Asset("a")]
+    accessor = context["asset_state_store"][Asset("a")]
+    assert accessor._stats_tags == {**ti.stats_tags, "operator": "_OperatorWithConstructorLineage"}
+
+
+def test_mapped_render_template_fields_rebinds_asset_context(create_runtime_ti, mock_supervisor_comms):
+    with DAG("test_dag"):
+        mapped = MockOperator.partial(task_id="t", inlets=[Asset("a")], outlets=[Asset("b")]).expand(
+            arg1=["x", "y"]
+        )
+
+    ti = create_runtime_ti(task=mapped, map_index=0)
+    context = ti.get_template_context()
+    inlet_events = context["inlet_events"]
+    asset_state_store = context["asset_state_store"]
+
+    ti.task.render_template_fields(context=context)
+
+    assert context["inlets"] is ti.task.inlets
+    assert context["outlets"] is ti.task.outlets
+    assert context["inlet_events"] is not inlet_events
+    assert context["asset_state_store"] is not asset_state_store
+
+    ti.task.inlets.append(Asset("c"))
+    assert list(context["inlet_events"]) == [Asset("a"), Asset("c")]
+
+
+class _OperatorDroppingInlets(BaseOperator):
+    def __init__(self, *, arg1=None, **kwargs):
+        super().__init__(**kwargs)
+        self.inlets = []
+
+
+def test_mapped_render_template_fields_drops_asset_state_store(create_runtime_ti, mock_supervisor_comms):
+    with DAG("test_dag"):
+        mapped = _OperatorDroppingInlets.partial(task_id="t", inlets=[Asset("a")]).expand(arg1=["x", "y"])
+
+    ti = create_runtime_ti(task=mapped, map_index=0)
+    context = ti.get_template_context()
+    assert "asset_state_store" in context
+
+    ti.task.render_template_fields(context=context)
+    assert context["inlets"] == []
+    assert "asset_state_store" not in context
+
+
+@pytest.mark.parametrize(
+    "make_mapped",
+    [
+        pytest.param(
+            lambda: MockOperator.partial(task_id="t", inlets=[Asset.ref(name="a")]).expand(arg1=["x", "y"]),
+            id="partial",
+        ),
+        pytest.param(
+            lambda: _OperatorWithConstructorLineage.partial(task_id="t").expand(
+                inlet=[Asset.ref(name="a"), Asset.ref(name="b")]
+            ),
+            id="constructor",
+        ),
+    ],
+)
+def test_mapped_asset_refs_resolved_once_after_unmapping(
+    make_mapped, create_runtime_ti, mock_supervisor_comms
+):
+    def get_asset_by_name_calls():
+        return [c for c in mock_supervisor_comms.send.call_args_list if isinstance(c.args[0], GetAssetByName)]
+
+    mock_supervisor_comms.send.return_value = AssetResult(name="a", uri="a", group="asset")
+    with DAG("test_dag"):
+        mapped = make_mapped()
+
+    ti = create_runtime_ti(task=mapped, map_index=0)
+    context = ti.get_template_context()
+    ti.task.render_template_fields(context=context)
+    assert get_asset_by_name_calls() == []
+
+    context["inlet_events"].build_lookups()
+    assert context["inlet_events"][Asset.ref(name="a")] == InletEventsAccessor(asset_name="a")
+    assert get_asset_by_name_calls() == [mock.call(GetAssetByName(name="a"))]
+
+
+def test_mapped_asset_aliases_resolved_once_after_unmapping(create_runtime_ti, mock_supervisor_comms):
+    def get_assets_by_alias_calls():
+        return [
+            c for c in mock_supervisor_comms.send.call_args_list if isinstance(c.args[0], GetAssetsByAlias)
+        ]
+
+    mock_supervisor_comms.send.return_value = AssetsByAliasResult(
+        assets=[AssetResult(name="resolved", uri="resolved", group="asset")]
+    )
+    with DAG("test_dag"):
+        mapped = MockOperator.partial(task_id="t", inlets=[AssetAlias(name="alias")]).expand(arg1=["x", "y"])
+
+    ti = create_runtime_ti(task=mapped, map_index=0)
+    context = ti.get_template_context()
+    ti.task.render_template_fields(context=context)
+    assert get_assets_by_alias_calls() == []
+
+    context["asset_state_store"].build_lookups()
+    assert context["asset_state_store"][Asset("resolved")] == AssetStateStoreAccessor(name="resolved")
+    assert get_assets_by_alias_calls() == [mock.call(GetAssetsByAlias(alias_name="alias"))]
+
+
+def test_mapped_render_template_fields_with_minimal_context():
+    """A task without assets can be rendered with a hand-built context lacking runtime-only values."""
+    with DAG("test_dag") as dag:
+        mapped = MockOperator.partial(task_id="t").expand(arg1=["{{ ti.map_index }}", "y"])
+
+    context: dict = {
+        "ti": SimpleNamespace(map_index=0),
+        "params": {},
+        "dag": dag,
+        "dag_run": SimpleNamespace(conf={}),
+    }
+    mapped.render_template_fields(context)
+
+    assert context["task"].arg1 == "0"
+    assert "asset_state_store" not in context
+
+
 def test_mapped_xcom_push_skipped_tasks(create_runtime_ti, mock_supervisor_comms):
-    from airflow.decorators import task_group
-    from airflow.operators.empty import EmptyOperator
+    from airflow.sdk import task_group
 
     if TYPE_CHECKING:
+        from airflow.providers.standard.operators.empty import EmptyOperator
         from airflow.providers.standard.operators.python import ShortCircuitOperator
     else:
         ShortCircuitOperator = pytest.importorskip(
             "airflow.providers.standard.operators.python"
         ).ShortCircuitOperator
+        EmptyOperator = pytest.importorskip("airflow.providers.standard.operators.empty").EmptyOperator
 
     with DAG("test") as dag:
 
@@ -670,44 +1001,79 @@ def test_mapped_xcom_push_skipped_tasks(create_runtime_ti, mock_supervisor_comms
             ti.task.execute(context)
 
     assert ti
-    # TODO: these tests might not be right
-    mock_supervisor_comms.send_request.assert_has_calls(
+    mock_supervisor_comms.send.assert_has_calls(
         [
-            SetXCom(
-                key="skipmixin_key",
-                value=None,
-                dag_id=ti.dag_id,
-                run_id=ti.run_id,
-                task_id="group.push_xcom_from_shortcircuit",
-                map_index=0,
-            ),
-            SetXCom(
-                key="return_value",
-                value=True,
-                dag_id=ti.dag_id,
-                run_id=ti.run_id,
-                task_id="group.push_xcom_from_shortcircuit",
-                map_index=0,
-            ),
-            SetXCom(
-                key="skipmixin_key",
-                value={"skipped": ["group.empty_task"]},
-                dag_id=ti.dag_id,
-                run_id=ti.run_id,
-                task_id="group.push_xcom_from_shortcircuit",
-                map_index=1,
+            mock.call(
+                msg=SetXCom(
+                    key="skipmixin_key",
+                    value={"skipped": ["group.empty_task"]},
+                    dag_id=ti.dag_id,
+                    run_id=ti.run_id,
+                    task_id="group.push_xcom_from_shortcircuit",
+                    map_index=1,
+                ),
             ),
         ]
     )
-    #
-    # assert (
-    #     tis[0].xcom_pull(task_ids="group.push_xcom_from_shortcircuit", key="return_value", map_indexes=0)
-    #     is True
-    # )
-    # assert (
-    #     tis[0].xcom_pull(task_ids="group.push_xcom_from_shortcircuit", key="skipmixin_key", map_indexes=0)
-    #     is None
-    # )
-    # assert tis[0].xcom_pull(
-    #     task_ids="group.push_xcom_from_shortcircuit", key="skipmixin_key", map_indexes=1
-    # ) == {"skipped": ["group.empty_task"]}
+
+
+@pytest.mark.parametrize(
+    ("setter_name", "old_value", "new_value"),
+    [
+        ("owner", "old_owner", "new_owner"),
+        ("map_index_template", "old_mit", "new_mit"),
+        ("trigger_rule", TriggerRule.ALL_SUCCESS, TriggerRule.ALL_FAILED),
+        ("is_setup", True, False),
+        ("is_teardown", True, False),
+        ("depends_on_past", True, False),
+        ("ignore_first_depends_on_past", True, False),
+        ("wait_for_past_depends_before_skipping", True, False),
+        ("wait_for_downstream", True, False),
+        ("retries", 3, 5),
+        ("queue", "old_queue", "new_queue"),
+        ("pool", "old_pool", "new_pool"),
+        ("pool_slots", 1, 10),
+        ("execution_timeout", timedelta(minutes=5), timedelta(minutes=10)),
+        ("max_retry_delay", timedelta(minutes=5), timedelta(minutes=10)),
+        ("retry_delay", timedelta(minutes=5), timedelta(minutes=10)),
+        ("retry_exponential_backoff", 2.0, 5.0),
+        ("priority_weight", 1, 10),
+        ("max_active_tis_per_dag", 1, 10),
+        ("on_execute_callback", [], [id]),
+        ("on_failure_callback", [], [id]),
+        ("on_retry_callback", [], [id]),
+        ("on_success_callback", [], [id]),
+        ("on_skipped_callback", [], [id]),
+        ("inlets", ["a"], ["b"]),
+        ("outlets", ["a"], ["b"]),
+        ("render_template_as_native_obj", True, False),
+    ],
+)
+def test_setters(setter_name: str, old_value: object, new_value: object) -> None:
+    op = MockOperator.partial(task_id="a", arg1="a").expand(arg2=["a", "b", "c"])
+    setattr(op, setter_name, old_value)
+    assert getattr(op, setter_name) == old_value
+    setattr(op, setter_name, new_value)
+    assert getattr(op, setter_name) == new_value
+
+
+def test_mapped_operator_in_task_group_no_duplicate_prefix():
+    """Test that task_id doesn't get duplicated prefix when unmapping a mapped operator in a task group."""
+    from airflow.sdk.definitions.taskgroup import TaskGroup
+
+    with DAG("test-dag"):
+        with TaskGroup(group_id="tg1") as tg1:
+            # Create a mapped task within the task group
+            mapped_task = MockOperator.partial(task_id="mapped_task", arg1="a").expand(arg2=["a", "b", "c"])
+
+    # Check the mapped operator has correct task_id
+    assert mapped_task.task_id == "tg1.mapped_task"
+    assert mapped_task.task_group == tg1
+    assert mapped_task.task_group.group_id == "tg1"
+
+    # Simulate what happens during execution - unmap the operator
+    # unmap expects resolved kwargs
+    unmapped = mapped_task.unmap({"arg2": "a"})
+
+    # The unmapped operator should have the same task_id, not a duplicate prefix
+    assert unmapped.task_id == "tg1.mapped_task", f"Expected 'tg1.mapped_task' but got '{unmapped.task_id}'"

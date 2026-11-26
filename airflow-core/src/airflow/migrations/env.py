@@ -27,6 +27,12 @@ from alembic import context
 from airflow import models, settings
 from airflow.utils.db import compare_server_default, compare_type
 
+_POSTGRES_ONLY_INDEXES = frozenset(
+    {
+        "idx_asset_event_extra_gin",
+    }
+)
+
 
 def include_object(_, name, type_, *args):
     """Filter objects for autogenerating revisions."""
@@ -36,8 +42,11 @@ def include_object(_, name, type_, *args):
     # Only create migrations for objects that are in the target metadata
     if type_ == "table" and name not in target_metadata.tables:
         return False
-    else:
-        return True
+    # Indexes created by raw SQL in migrations (e.g. Postgres GIN) are not
+    # represented in the SQLAlchemy model; hide them from autogenerate.
+    if type_ == "index" and name in _POSTGRES_ONLY_INDEXES:
+        return False
+    return True
 
 
 # Make sure everything is imported so that alembic can find it all

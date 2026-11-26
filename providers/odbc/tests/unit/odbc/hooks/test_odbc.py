@@ -236,10 +236,30 @@ class TestOdbcHook:
         )
         assert hook.driver == "Blah driver"
 
-    def test_default_driver_set(self):
-        with patch.object(OdbcHook, "default_driver", "Blah driver"):
+    def test_allow_driver_in_extra_is_declared_in_provider_config(self):
+        """
+        The hook reads ``[providers.odbc] allow_driver_in_extra``. The option has to be declared in
+        ``provider.yaml`` so that ``airflow config list`` and the configuration reference know about it.
+        """
+        from airflow.providers.odbc.get_provider_info import get_provider_info
+
+        option = get_provider_info()["config"]["providers.odbc"]["options"]["allow_driver_in_extra"]
+        assert option["type"] == "boolean"
+        assert option["default"] == "False"
+
+    def test_allow_driver_in_extra_default_is_resolved_without_fallback(self):
+        from airflow.providers.common.compat.sdk import conf
+
+        assert conf.getboolean("providers.odbc", "allow_driver_in_extra") is False
+
+    def test_default_driver_set(self, caplog):
+        with (
+            patch.object(OdbcHook, "default_driver", "Blah driver"),
+            caplog.at_level(logging.WARNING, logger="airflow.providers.odbc.hooks.odbc"),
+        ):
             hook = mock_db_hook(OdbcHook)
             assert hook.driver == "Blah driver"
+            assert "You have supplied 'driver' via connection extra" not in caplog.text
 
     def test_driver_extra_works_when_default_driver_set(self):
         with patch.object(OdbcHook, "default_driver", "Blah driver"):
@@ -366,6 +386,45 @@ class TestOdbcHook:
         hook = mock_db_hook(OdbcHook, conn_params={"extra": {"dialect": "oracle"}})
         hook.get_uri = raise_argument_error
         assert hook.dialect_name == "oracle"
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    def test_run_hook_lineage(self, mock_send_lineage):
+        hook = mock_db_hook(OdbcHook)
+        sql = "SELECT 1"
+        hook.run(sql)
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] is None
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    @mock.patch("airflow.providers.common.sql.hooks.sql.DbApiHook._get_pandas_df")
+    def test_get_df_hook_lineage(self, mock_get_pandas_df, mock_send_lineage):
+        hook = mock_db_hook(OdbcHook)
+        sql = "SELECT 1"
+        hook.get_df(sql, df_type="pandas")
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] is None
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    @mock.patch("airflow.providers.common.sql.hooks.sql.DbApiHook._get_pandas_df_by_chunks")
+    def test_get_df_by_chunks_hook_lineage(self, mock_get_pandas_df_by_chunks, mock_send_lineage):
+        hook = mock_db_hook(OdbcHook)
+        sql = "SELECT 1"
+        parameters = ("x",)
+        hook.get_df_by_chunks(sql, parameters=parameters, chunksize=1)
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] == parameters
 
     def test_get_sqlalchemy_engine_verify_creator_is_being_used(self):
         hook = mock_db_hook(OdbcHook, conn_params={"extra": {"sqlalchemy_scheme": "sqlite"}})

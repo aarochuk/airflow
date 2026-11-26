@@ -55,7 +55,7 @@
     :maxdepth: 1
     :caption: Resources
 
-    Example DAGs <https://github.com/apache/airflow/tree/providers-apache-cassandra/|version|/providers/apache/cassandra/tests/system/apache/cassandra>
+    Example Dags <https://github.com/apache/airflow/tree/providers-apache-cassandra/|version|/providers/apache/cassandra/tests/system/apache/cassandra>
     PyPI Repository <https://pypi.org/project/apache-airflow-providers-apache-cassandra/>
     Installing from sources <installing-providers-from-sources>
 
@@ -76,7 +76,7 @@ apache-airflow-providers-apache-cassandra package
 `Apache Cassandra <https://cassandra.apache.org/>`__.
 
 
-Release: 3.7.1
+Release: 3.10.2
 
 Provider package
 ----------------
@@ -87,18 +87,31 @@ All classes for this package are included in the ``airflow.providers.apache.cass
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-apache-cassandra``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-====================  ==================
-PIP package           Version required
-====================  ==================
-``apache-airflow``    ``>=2.9.0``
-``cassandra-driver``  ``>=3.29.1``
-====================  ==================
+==========================================  ==================================================================
+PIP package                                 Version required
+==========================================  ==================================================================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.8.0``
+``cassandra-driver``                        ``>=3.30.1; python_version >= "3.14"``
+``cassandra-driver``                        ``>=3.29.3; python_version >= "3.13" and python_version < "3.14"``
+``cassandra-driver``                        ``>=3.29.2; python_version >= "3.12" and python_version < "3.13"``
+``cassandra-driver``                        ``>=3.29.1; python_version < "3.12"``
+==========================================  ==================================================================
+
+Downloading official packages
+-----------------------------
+
+You can download officially released packages and verify their checksums and signatures from the
+`Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
+
+* `The apache-airflow-providers-apache-cassandra 3.10.2 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_cassandra-3.10.2.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_cassandra-3.10.2.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_cassandra-3.10.2.tar.gz.sha512>`__)
+* `The apache-airflow-providers-apache-cassandra 3.10.2 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_cassandra-3.10.2-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_cassandra-3.10.2-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_apache_cassandra-3.10.2-py3-none-any.whl.sha512>`__)

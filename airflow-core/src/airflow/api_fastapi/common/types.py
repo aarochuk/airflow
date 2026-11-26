@@ -16,7 +16,8 @@
 # under the License.
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import Enum
 from typing import Annotated, Literal
@@ -28,9 +29,12 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     ConfigDict,
+    field_validator,
+    model_serializer,
+    model_validator,
 )
 
-from airflow.utils import timezone
+from airflow._shared.timezones import timezone
 
 UtcDateTime = Annotated[AwareDatetime, AfterValidator(lambda d: d.astimezone(timezone.utc))]
 """UTCDateTime is a datetime with timezone information"""
@@ -67,11 +71,35 @@ class TimeDelta(BaseModel):
 TimeDeltaWithValidation = Annotated[TimeDelta, BeforeValidator(_validate_timedelta_field)]
 
 
+# Common validator for theme icon fields (SVG-only, http(s) or app-relative path).
+def _validate_theme_icon(value: str | None) -> str | None:
+    if value is None:
+        return value
+    from urllib.parse import urlparse
+
+    parsed = urlparse(value)
+    if parsed.scheme in ("http", "https"):
+        path = parsed.path or ""
+    elif parsed.scheme == "" and value.startswith("/"):
+        path = value
+    else:
+        raise ValueError("theme.icon must be http(s) URL or app-relative path starting with '/'")
+    if not path.lower().endswith(".svg"):
+        raise ValueError("theme.icon must point to an SVG file (*.svg)")
+    return value
+
+
+# Alias type for theme icon fields with shared validation
+ThemeIconType = Annotated[str | None, BeforeValidator(_validate_theme_icon)]
+
+
 class Mimetype(str, Enum):
     """Mimetype for the `Content-Type` header."""
 
     TEXT = "text/plain"
     JSON = "application/json"
+    FORM = "application/x-www-form-urlencoded"
+    NDJSON = "application/x-ndjson"
     ANY = "*/*"
 
 
@@ -83,14 +111,38 @@ class ExtraMenuItem:
     href: str
 
 
+@dataclass
+class CliLoginMethods:
+    """
+    Login methods an auth manager offers to command-line clients such as airflowctl.
+
+    Field names follow the OAuth 2.0 Authorization Server Metadata (RFC 8414). An empty
+    ``grant_types_supported`` means the auth manager offers no login method to these clients.
+    Unlike RFC 8414, endpoints are absolute paths, such as ``/auth/token/cli``, that clients
+    resolve against the API server URL, because the auth manager may not know the public URL
+    clients use to reach the API server. They include the path of ``[api] base_url``, if any.
+    """
+
+    grant_types_supported: list[str] = field(default_factory=list)
+    code_challenge_methods_supported: list[str] = field(default_factory=list)
+    authorization_endpoint: str | None = None
+    device_authorization_endpoint: str | None = None
+    token_endpoint: str | None = None
+
+
 class MenuItem(Enum):
     """Define all menu items defined in the menu."""
 
+    REQUIRED_ACTIONS = "Required Actions"
     ASSETS = "Assets"
-    ASSET_EVENTS = "Asset Events"
+    AUDIT_LOG = "Audit Log"
+    CONFIG = "Config"
     CONNECTIONS = "Connections"
     DAGS = "Dags"
+    DAG_BUNDLES = "Dag Bundles"
+    DEADLINES = "Deadlines"
     DOCS = "Docs"
+    JOBS = "Jobs"
     PLUGINS = "Plugins"
     POOLS = "Pools"
     PROVIDERS = "Providers"
@@ -103,3 +155,85 @@ class UIAlert(BaseModel):
 
     text: str
     category: Literal["info", "warning", "error"]
+
+
+class OklchColor(BaseModel):
+    """Validates OKLCH color format from string oklch(l c h)."""
+
+    lightness: float
+    chroma: float
+    hue: float
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_oklch_string(cls, data):
+        if isinstance(data, str):
+            oklch_regex_pattern = r"^oklch\((-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?)\)$"
+            match = re.match(oklch_regex_pattern, data)
+
+            if not match:
+                raise ValueError(f"Invalid OKLCH format: {data} Expected format oklch(l c h)")
+
+            ligthness_str, chroma_str, hue_str = match.groups()
+
+            return {
+                "lightness": float(ligthness_str),
+                "chroma": float(chroma_str),
+                "hue": float(hue_str),
+            }
+        return data
+
+    @field_validator("lightness")
+    @classmethod
+    def validate_lightness(cls, value: float) -> float:
+        if value < 0 or value > 1:
+            raise ValueError(f"Invalid lightness: {value} Must be between 0 and 1")
+        return value
+
+    @field_validator("chroma")
+    @classmethod
+    def validate_chroma(cls, value: float) -> float:
+        if value < 0 or value > 0.5:
+            raise ValueError(f"Invalid chroma: {value} Must be between 0 and 0.5")
+        return value
+
+    @field_validator("hue")
+    @classmethod
+    def validate_hue(cls, value: float) -> float:
+        if value < 0 or value > 360:
+            raise ValueError(f"Invalid hue: {value} Must be between 0 and 360")
+        return value
+
+    @model_serializer(mode="plain")
+    def serialize_model(self) -> str:
+        return f"oklch({self.lightness} {self.chroma} {self.hue})"
+
+
+# Private type aliases for theme token shapes
+_ColorShade = dict[Literal["value"], OklchColor]
+_SHADE_LITERAL = Literal["50", "100", "200", "300", "400", "500", "600", "700", "800", "900", "950"]
+_ColorScale = dict[_SHADE_LITERAL, _ColorShade]
+
+
+class ThemeColors(BaseModel):
+    """Color tokens for the UI theme. All fields are optional; at least one must be provided."""
+
+    brand: _ColorScale | None = None
+    gray: _ColorScale | None = None
+    black: _ColorShade | None = None
+    white: _ColorShade | None = None
+
+    @model_validator(mode="after")
+    def check_at_least_one_color(self) -> ThemeColors:
+        if not any([self.brand, self.gray, self.black, self.white]):
+            raise ValueError("At least one color token must be provided: brand, gray, black, or white")
+        return self
+
+
+class Theme(BaseModel):
+    """JSON to modify Chakra's theme."""
+
+    tokens: dict[Literal["colors"], ThemeColors] | None = None
+    globalCss: dict[str, dict] | None = None
+    icon: ThemeIconType = None
+    icon_dark_mode: ThemeIconType = None

@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -43,6 +42,7 @@
     :caption: References
 
     Python API <_api/airflow/providers/common/messaging/index>
+    Base Provider <_api/airflow/providers/common/messaging/providers/base_provider/index>
 
 .. toctree::
     :hidden:
@@ -76,7 +76,7 @@ apache-airflow-providers-common-messaging package
 ``Common Messaging Provider``
 
 
-Release: 1.0.0
+Release: 2.2.0
 
 Provider package
 ----------------
@@ -87,39 +87,38 @@ All classes for this package are included in the ``airflow.providers.common.mess
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-common-messaging``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``3.0.0.dev0``.
+The minimum Apache Airflow version supported by this provider distribution is ``3.0.1``.
 
 ==================  ==================
 PIP package         Version required
 ==================  ==================
-``apache-airflow``  ``>=3.0.0.dev0``
+``apache-airflow``  ``>=3.0.1``
 ==================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional dependencies
+---------------------
 
-Those are dependencies that might be needed in order to use all the features of the package.
-You need to install the specified providers in order to use them.
-
-You can install such cross-provider dependencies when installing from PyPI. For example:
+These extras install optional third-party libraries that enable additional features of the provider.
+Install them when installing from PyPI. For example:
 
 .. code-block:: bash
 
     pip install apache-airflow-providers-common-messaging[amazon]
 
 
-====================================================================================================  ==========
-Dependent package                                                                                     Extra
-====================================================================================================  ==========
-`apache-airflow-providers-amazon <https://airflow.apache.org/docs/apache-airflow-providers-amazon>`_  ``amazon``
-====================================================================================================  ==========
+================  ================================================
+Extra             Dependencies
+================  ================================================
+``amazon``        ``apache-airflow-providers-amazon>=9.7.0``
+``apache.kafka``  ``apache-airflow-providers-apache-kafka>=1.9.0``
+================  ================================================
 
 Downloading official packages
 -----------------------------
@@ -127,5 +126,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-common-messaging 1.0.0 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_messaging-1.0.0.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_messaging-1.0.0.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_messaging-1.0.0.tar.gz.sha512>`__)
-* `The apache-airflow-providers-common-messaging 1.0.0 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_messaging-1.0.0-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_messaging-1.0.0-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_messaging-1.0.0-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-common-messaging 2.2.0 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_messaging-2.2.0.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_messaging-2.2.0.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_messaging-2.2.0.tar.gz.sha512>`__)
+* `The apache-airflow-providers-common-messaging 2.2.0 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_messaging-2.2.0-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_messaging-2.2.0-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_messaging-2.2.0-py3-none-any.whl.sha512>`__)

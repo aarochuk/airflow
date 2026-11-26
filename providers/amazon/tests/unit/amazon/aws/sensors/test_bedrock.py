@@ -19,16 +19,19 @@ from __future__ import annotations
 
 from unittest import mock
 
+import botocore.session
 import pytest
 
-from airflow.exceptions import AirflowException
+from airflow.providers.amazon.aws.exceptions import SensorTriggerFailedError
 from airflow.providers.amazon.aws.hooks.bedrock import BedrockAgentHook, BedrockHook
 from airflow.providers.amazon.aws.sensors.bedrock import (
+    BedrockBatchInferenceSensor,
     BedrockCustomizeModelCompletedSensor,
     BedrockIngestionJobSensor,
     BedrockKnowledgeBaseActiveSensor,
     BedrockProvisionModelThroughputCompletedSensor,
 )
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred
 
 
 class TestBedrockCustomizeModelCompletedSensor:
@@ -238,9 +241,216 @@ class TestBedrockIngestionJobSensor:
         assert self.sensor.poke({}) is False
 
     @pytest.mark.parametrize("state", SENSOR.FAILURE_STATES)
+    @pytest.mark.parametrize(
+        ("job_detail", "expected_suffix"),
+        [
+            pytest.param({}, "", id="no reasons"),
+            pytest.param(
+                {"failureReasons": ["User is not authorized", "index not found"]},
+                " Failure reasons: User is not authorized; index not found",
+                id="with reasons",
+            ),
+        ],
+    )
     @mock.patch.object(BedrockAgentHook, "conn")
-    def test_poke_failure_states(self, mock_conn, state):
-        mock_conn.get_ingestion_job.return_value = {"ingestionJob": {"status": state}}
+    def test_poke_failure_states(self, mock_conn, state, job_detail, expected_suffix):
+        mock_conn.get_ingestion_job.return_value = {"ingestionJob": {"status": state, **job_detail}}
         sensor = self.SENSOR(**self.default_op_kwargs, aws_conn_id=None)
-        with pytest.raises(AirflowException, match=sensor.FAILURE_MESSAGE):
+        with pytest.raises(AirflowException, match=sensor.FAILURE_MESSAGE) as exception_info:
             sensor.poke({})
+        assert str(exception_info.value) == f"{sensor.FAILURE_MESSAGE}{expected_suffix}"
+
+
+class TestBedrockBatchInferenceSensor:
+    SENSOR = BedrockBatchInferenceSensor
+
+    @pytest.fixture(
+        params=[
+            BedrockBatchInferenceSensor.SuccessState.COMPLETED,
+            BedrockBatchInferenceSensor.SuccessState.SCHEDULED,
+        ]
+    )
+    def success_state(self, request):
+        return request.param
+
+    @pytest.fixture(params=["deferrable", "not deferrable"])
+    def is_deferrable(self, request):
+        # I did it this way instead of passing True/False purely so the pytest names are more descriptive.
+        return request.param == "deferrable"
+
+    def setup_method(self, is_deferrable):
+        self.default_op_kwargs = dict(
+            task_id="test_bedrock_batch_inference_sensor",
+            job_arn="job_arn",
+            deferrable=is_deferrable,
+        )
+
+    def test_base_aws_op_attributes(self, success_state):
+        op = self.SENSOR(**self.default_op_kwargs, success_state=success_state)
+
+        if success_state == BedrockBatchInferenceSensor.SuccessState.COMPLETED:
+            assert "Scheduled" in op.INTERMEDIATE_STATES
+            assert "Scheduled" not in op.SUCCESS_STATES
+        elif success_state == BedrockBatchInferenceSensor.SuccessState.SCHEDULED:
+            assert "Scheduled" in op.SUCCESS_STATES
+            assert "Scheduled" not in op.INTERMEDIATE_STATES
+        assert op.hook.aws_conn_id == "aws_default"
+        assert op.hook._region_name is None
+        assert op.hook._verify is None
+        assert op.hook._config is None
+
+        op = self.SENSOR(
+            **self.default_op_kwargs,
+            aws_conn_id="aws-test-custom-conn",
+            region_name="eu-west-1",
+            verify=False,
+            botocore_config={"read_timeout": 42},
+        )
+        assert op.hook.aws_conn_id == "aws-test-custom-conn"
+        assert op.hook._region_name == "eu-west-1"
+        assert op.hook._verify is False
+        assert op.hook._config is not None
+        assert op.hook._config.read_timeout == 42
+
+    @mock.patch.object(BedrockHook, "conn")
+    def test_poke_success_states(self, mock_conn, success_state, is_deferrable):
+        op = self.SENSOR(**self.default_op_kwargs, success_state=success_state)
+
+        for state in op.SUCCESS_STATES:
+            mock_conn.get_model_invocation_job.return_value = {"status": state}
+
+            if is_deferrable:
+                with pytest.raises(TaskDeferred):
+                    op.execute({})
+            else:
+                assert op.poke({}) is True
+
+    @mock.patch.object(BedrockHook, "conn")
+    def test_poke_intermediate_states(self, mock_conn, success_state, is_deferrable):
+        op = self.SENSOR(**self.default_op_kwargs, success_state=success_state)
+
+        for state in op.INTERMEDIATE_STATES:
+            mock_conn.get_model_invocation_job.return_value = {"status": state}
+
+            if is_deferrable:
+                with pytest.raises(TaskDeferred):
+                    op.execute({})
+            else:
+                assert op.poke({}) is False
+
+    @mock.patch.object(BedrockHook, "conn")
+    def test_poke_in_progress_when_waiting_for_scheduled(self, mock_conn):
+        op = self.SENSOR(
+            **self.default_op_kwargs, success_state=BedrockBatchInferenceSensor.SuccessState.SCHEDULED
+        )
+        mock_conn.get_model_invocation_job.return_value = {"status": "InProgress"}
+
+        assert op.poke({}) is True
+
+    @mock.patch.object(BedrockHook, "conn")
+    def test_poke_failure_states(self, mock_conn, success_state, is_deferrable):
+        op = self.SENSOR(**self.default_op_kwargs, success_state=success_state)
+
+        for state in op.FAILURE_STATES:
+            mock_conn.get_model_invocation_job.return_value = {"status": state}
+
+            if is_deferrable:
+                with pytest.raises(AirflowException, match=op.FAILURE_MESSAGE):
+                    op.poke({})
+            else:
+                with pytest.raises(TaskDeferred):
+                    op.execute({})
+
+    @mock.patch.object(BedrockHook, "conn")
+    def test_success_state_not_shared_between_instances(self, mock_conn):
+        op = self.SENSOR(
+            **self.default_op_kwargs, success_state=BedrockBatchInferenceSensor.SuccessState.COMPLETED
+        )
+        self.SENSOR(
+            **self.default_op_kwargs, success_state=BedrockBatchInferenceSensor.SuccessState.SCHEDULED
+        )
+        mock_conn.get_model_invocation_job.return_value = {"status": "Scheduled"}
+
+        assert op.poke({}) is False
+
+
+SENSORS = [
+    pytest.param(BedrockCustomizeModelCompletedSensor, {"job_name": "job_name"}, id="customize_model"),
+    pytest.param(
+        BedrockProvisionModelThroughputCompletedSensor, {"model_id": "model_id"}, id="provision_throughput"
+    ),
+    pytest.param(
+        BedrockKnowledgeBaseActiveSensor, {"knowledge_base_id": "knowledge_base_id"}, id="knowledge_base"
+    ),
+    pytest.param(
+        BedrockIngestionJobSensor,
+        {
+            "knowledge_base_id": "knowledge_base_id",
+            "data_source_id": "data_source_id",
+            "ingestion_job_id": "ingestion_job_id",
+        },
+        id="ingestion_job",
+    ),
+    pytest.param(BedrockBatchInferenceSensor, {"job_arn": "job_arn"}, id="batch_inference"),
+]
+
+
+class TestBedrockSensorDeferral:
+    @pytest.mark.parametrize(("sensor_class", "kwargs"), SENSORS)
+    def test_execute_defers_to_execute_complete(self, sensor_class, kwargs):
+        sensor = sensor_class(task_id="test_bedrock_sensor", deferrable=True, **kwargs)
+
+        with pytest.raises(TaskDeferred) as deferred:
+            sensor.execute({})
+
+        assert deferred.value.method_name == "execute_complete"
+
+    def test_execute_complete_success_event(self):
+        sensor = BedrockBatchInferenceSensor(task_id="test_bedrock_sensor", job_arn="job_arn")
+
+        assert sensor.execute_complete({}, event={"status": "success", "job_arn": "job_arn"}) is None
+
+    def test_execute_complete_error_event(self):
+        sensor = BedrockBatchInferenceSensor(task_id="test_bedrock_sensor", job_arn="job_arn")
+        event = {"status": "error", "message": "Waiter error: max attempts reached", "job_arn": "job_arn"}
+
+        with pytest.raises(SensorTriggerFailedError, match="max attempts reached"):
+            sensor.execute_complete({}, event=event)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "success_state",
+        [
+            BedrockBatchInferenceSensor.SuccessState.SCHEDULED,
+            BedrockBatchInferenceSensor.SuccessState.COMPLETED,
+        ],
+    )
+    @mock.patch.object(BedrockHook, "get_async_conn")
+    @mock.patch.object(BedrockHook, "conn")
+    async def test_resume_fails_when_trigger_exhausts_attempts(
+        self, mock_conn, mock_get_async_conn, success_state
+    ):
+        pytest.importorskip("aiobotocore")
+        job = {"status": "Submitted"}
+        mock_conn.get_model_invocation_job.return_value = job
+        client = mock.MagicMock()
+        # aiobotocore derives the waiter class name from the service model, so it cannot be a mock.
+        client.meta.service_model = botocore.session.get_session().get_service_model("bedrock")
+        client.get_model_invocation_job = mock.AsyncMock(return_value=job)
+        mock_get_async_conn.return_value.__aenter__.return_value = client
+        sensor = BedrockBatchInferenceSensor(
+            task_id="test_bedrock_sensor",
+            job_arn="job_arn",
+            success_state=success_state,
+            deferrable=True,
+            poke_interval=0,
+            max_retries=2,
+        )
+
+        with pytest.raises(TaskDeferred) as deferred:
+            sensor.execute({})
+        event = await deferred.value.trigger.run().asend(None)
+
+        with pytest.raises(SensorTriggerFailedError, match="max attempts reached"):
+            getattr(sensor, deferred.value.method_name)({}, event=event.payload)
+        assert client.get_model_invocation_job.await_count == 2

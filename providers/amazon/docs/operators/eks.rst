@@ -31,6 +31,11 @@ Prerequisite Tasks
 
 .. include:: ../_partials/prerequisite_tasks.rst
 
+Generic Parameters
+------------------
+
+.. include:: ../_partials/generic_parameters.rst
+
 Operators
 ---------
 
@@ -199,6 +204,36 @@ Note: An Amazon EKS Cluster with underlying compute infrastructure is required.
     :dedent: 4
     :start-after: [START howto_operator_eks_pod_operator]
     :end-before: [END howto_operator_eks_pod_operator]
+
+.. _howto/operator:EksPodExecOperator:
+
+Execute a command in an existing Pod on Amazon EKS
+==================================================
+
+To execute a command in a running container without managing the Pod lifecycle, use
+:class:`~airflow.providers.amazon.aws.operators.eks.EksPodExecOperator`.
+
+This operator requires ``apache-airflow-providers-cncf-kubernetes>=10.22.0``.
+Existing EKS operators remain available with older supported versions of the Kubernetes provider.
+
+As with ``EksPodOperator``, ``kubernetes_conn_id`` defaults to ``kubernetes_default`` and can be
+set to another Kubernetes connection. If the default connection contains ``kube_config`` or
+``cluster_context``, use a separate connection without those settings, since EKS generates its own kubeconfig.
+
+The Pod must already exist and be running. The operator streams command output, waits for the exit code,
+and does not create, restart, or delete the Pod.
+
+The AWS identity must have permission to call ``eks:DescribeCluster`` and be authorized to access the
+EKS cluster. Kubernetes RBAC must allow ``get`` on ``pods`` and both ``get`` and ``create`` on ``pods/exec``.
+
+See :class:`~airflow.providers.cncf.kubernetes.operators.pod_exec.KubernetesPodExecOperator`
+for command, output, XCom, and retry behavior.
+
+.. exampleinclude:: /../../amazon/tests/system/amazon/aws/example_eks_with_nodegroups.py
+    :language: python
+    :dedent: 4
+    :start-after: [START howto_operator_eks_pod_exec]
+    :end-before: [END howto_operator_eks_pod_exec]
 
 Sensors
 -------

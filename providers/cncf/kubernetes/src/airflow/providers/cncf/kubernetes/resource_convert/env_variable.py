@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from kubernetes.client import models as k8s
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 
 
 def convert_env_vars(env_vars) -> list[k8s.V1EnvVar]:
@@ -33,7 +33,7 @@ def convert_env_vars(env_vars) -> list[k8s.V1EnvVar]:
         for k, v in env_vars.items():
             res.append(k8s.V1EnvVar(name=k, value=v))
         return res
-    elif isinstance(env_vars, list):
+    if isinstance(env_vars, list):
         if all([isinstance(e, k8s.V1EnvVar) for e in env_vars]):
             return env_vars
     raise AirflowException(f"Expected dict or list of V1EnvVar, got {type(env_vars)}")

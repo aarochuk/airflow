@@ -30,7 +30,7 @@ class TaskNotRunningDep(BaseTIDep):
     NAME = "Task Instance Not Running"
     IGNORABLE = False
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         """Check if two task instance dependencies are of the same type."""
         return type(self) is type(other)
 
@@ -39,7 +39,7 @@ class TaskNotRunningDep(BaseTIDep):
         return hash(type(self))
 
     @provide_session
-    def _get_dep_statuses(self, ti, session, dep_context=None):
+    def _get_dep_statuses(self, ti, dep_context=None, *, session):
         if ti.state != TaskInstanceState.RUNNING:
             yield self._passing_status(reason="Task is not in running state.")
             return

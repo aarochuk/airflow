@@ -16,35 +16,54 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+import { useTranslation } from "react-i18next";
 import { FiLock } from "react-icons/fi";
 import { Link } from "react-router-dom";
 
-import { useAuthLinksServiceGetAuthLinks } from "openapi/queries";
-import { Menu } from "src/components/ui";
+import { useAuthLinksServiceGetAuthMenus } from "openapi/queries";
+
+import { Menu } from "src/system-components";
 
 import { NavButton } from "./NavButton";
+import { NavMenu } from "./NavMenu";
 
 export const SecurityButton = () => {
-  const { data: authLinks } = useAuthLinksServiceGetAuthLinks();
+  const { data: authLinks } = useAuthLinksServiceGetAuthMenus();
+  const { t: translate } = useTranslation();
 
-  if (authLinks?.total_entries === undefined || authLinks.total_entries < 1) {
+  if (authLinks?.extra_menu_items === undefined || authLinks.extra_menu_items.length < 1) {
     return undefined;
   }
 
+  const securityItems = authLinks.extra_menu_items.map(({ text }) => {
+    const securityKey = text.toLowerCase().replace(" ", "-");
+
+    // The auth manager sends each item's English text rather than a key, and only the five FAB
+    // sends have one. Anything else is better off showing that text than the key it resolves to.
+    return {
+      label: translate(`security.${securityKey}`, { defaultValue: text }),
+      path: `security/${securityKey}`,
+      text,
+    };
+  });
+
   return (
-    <Menu.Root positioning={{ placement: "right" }}>
-      <Menu.Trigger asChild>
-        <NavButton icon={<FiLock size="1.75rem" />} title="Security" />
-      </Menu.Trigger>
-      <Menu.Content>
-        {authLinks.menu_items.map(({ text }) => (
-          <Menu.Item asChild key={text} value={text}>
-            <Link aria-label={text} to={`security/${text.toLowerCase().replace(" ", "-")}`}>
-              {text}
-            </Link>
-          </Menu.Item>
-        ))}
-      </Menu.Content>
-    </Menu.Root>
+    <NavMenu
+      trigger={
+        <NavButton
+          icon={FiLock}
+          title={translate("nav.security")}
+          to={securityItems.map(({ path }) => path)}
+        />
+      }
+    >
+      {securityItems.map(({ label, path, text }) => (
+        <Menu.Item asChild key={text} value={text}>
+          <Link aria-label={label} to={path}>
+            {label}
+          </Link>
+        </Menu.Item>
+      ))}
+    </NavMenu>
   );
 };

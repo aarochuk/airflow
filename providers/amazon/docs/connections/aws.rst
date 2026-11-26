@@ -149,12 +149,11 @@ Snippet to create Connection and convert to URI
     import os
     from airflow.models.connection import Connection
 
-
     conn = Connection(
         conn_id="sample_aws_connection",
         conn_type="aws",
-        login="AKIAIOSFODNN7EXAMPLE",  # Reference to AWS Access Key ID
-        password="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",  # Reference to AWS Secret Access Key
+        login="YOUR_AWS_ACCESS_KEY_ID",  # Reference to AWS Access Key ID
+        password="YOUR_AWS_SECRET_ACCESS_KEY",  # Reference to AWS Secret Access Key
         extra={
             # Specify extra parameters here
             "region_name": "eu-central-1",
@@ -165,7 +164,7 @@ Snippet to create Connection and convert to URI
     env_key = f"AIRFLOW_CONN_{conn.conn_id.upper()}"
     conn_uri = conn.get_uri()
     print(f"{env_key}={conn_uri}")
-    # AIRFLOW_CONN_SAMPLE_AWS_CONNECTION=aws://AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI%2FK7MDENG%2FbPxRfiCYEXAMPLEKEY@/?region_name=eu-central-1
+    # AIRFLOW_CONN_SAMPLE_AWS_CONNECTION=aws://YOUR_AWS_ACCESS_KEY_ID:YOUR_AWS_SECRET_ACCESS_KEY@/?region_name=eu-central-1
 
     os.environ[env_key] = conn_uri
     print(conn.test_connection())  # Validate connection credentials.
@@ -178,7 +177,7 @@ Snippet to create Connection and convert to URI
     - host
     - port
 
-    are not given, see example below. This is a known airflow limitation.
+    are not given, see example below. This is a known Airflow limitation.
 
     ``airflow connections add aws_conn --conn-uri aws://@/?region_name=eu-west-1``
 
@@ -209,7 +208,7 @@ With a AWS IAM key pair
 
   .. code-block:: bash
 
-    export AIRFLOW_CONN_AWS_DEFAULT=aws://AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI%2FK7MDENG%2FbPxRfiCYEXAMPLEKEY@
+    export AIRFLOW_CONN_AWS_DEFAULT=aws://YOUR_AWS_ACCESS_KEY_ID:YOUR_AWS_SECRET_ACCESS_KEY@
 
   Note here, that the secret access key has been URL-encoded (changing ``/`` to ``%2F``), and also the
   trailing ``@`` (without which, it is treated as ``<host>:<port>`` and will not work)
@@ -220,8 +219,8 @@ With a AWS IAM key pair
 
     export AIRFLOW_CONN_AWS_DEFAULT='{
       "conn_type": "aws",
-      "login": "AKIAIOSFODNN7EXAMPLE",
-      "password": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+      "login": "YOUR_AWS_ACCESS_KEY_ID",
+      "password": "YOUR_AWS_SECRET_ACCESS_KEY"
     }'
 
 Examples for the **Extra** field
@@ -299,7 +298,7 @@ This assumes all other Connection fields eg **AWS Access Key ID** or **AWS Secre
           "status_forcelist": [400, 429, 500, 502, 503, 504]
         },
         "log_idp_response":false,
-        "saml_response_xpath":"////INPUT[@NAME='SAMLResponse']/@VALUE",
+        "saml_response_xpath":"////INPUT[@NAME='SAMLResponse']/@VALUE"
       },
       "assume_role_kwargs": { "something":"something" }
     }
@@ -327,6 +326,26 @@ The following settings may be used within the ``assume_role_with_saml`` containe
     - https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_request.html#api_assumerolewithsaml
     - https://pypi.org/project/requests-gssapi/
 
+6. Using S3-compatible storage with virtual-hosted-style addressing
+
+When ``endpoint_url`` is set, ``botocore`` sends path-style requests (``https://s3.example.com/my-bucket/key``).
+If your S3-compatible storage requires virtual-hosted-style requests (``https://my-bucket.s3.example.com/key``),
+set ``addressing_style`` in ``config_kwargs``:
+
+.. code-block:: json
+
+    {
+      "endpoint_url": "https://s3.example.com",
+      "config_kwargs": {
+        "s3": {
+          "addressing_style": "virtual"
+        }
+      }
+    }
+
+.. seealso::
+    - `botocore.config.Config <https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html>`__
+
 
 .. _howto/connection:aws:per-service-configuration:
 
@@ -343,15 +362,17 @@ For enforce to default ``botocore``/``boto3`` behaviour you might set value to `
 The precedence rules are as follows:
 
   1. ``endpoint_url`` specified per service level.
-  2. ``endpoint_url`` specified in root level of connection extra. Please note that **sts** client which are
-     uses in assume role or test connection do not use global parameter.
+  2. ``endpoint_url`` specified in root level of connection extra. Please note that the **sts** clients
+     used for assume role, for test connection, and by
+     :class:`~airflow.providers.amazon.aws.hooks.eks.EksHook` to build the kubeconfig for
+     :class:`~airflow.providers.amazon.aws.operators.eks.EksPodOperator` do not use the global parameter.
   3. Default ``botocore``/``boto3`` behaviour
 
 
 .. code-block:: json
 
     {
-      "endpoint_url": "s3.amazonaws.com"
+      "endpoint_url": "s3.amazonaws.com",
       "service_config": {
         "s3": {
           "endpoint_url": "https://s3.eu-west-1.amazonaws.com"
@@ -383,6 +404,29 @@ provide selected options in the connection's extra field.
       }
     }
 
+
+.. _howto/connection:aws:s3-transfer-config:
+
+S3 Transfer Config
+------------------
+
+You can use the service config to set transfer config options in :class:`~airflow.providers.amazon.aws.hooks.s3.S3Hook` methods.
+
+.. code-block:: json
+
+    {
+      "service_config": {
+        "s3": {
+          "transfer_config_args": {
+            "max_concurrency": 10,
+            "num_download_attempts": 10
+          }
+        }
+      }
+    }
+
+.. seealso::
+    - Boto3 TransferConfig: :external:py:class:`boto3.s3.transfer.TransferConfig`
 
 .. _howto/connection:aws:avoid-throttling-exceptions:
 

@@ -16,24 +16,81 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Stack, StackSeparator } from "@chakra-ui/react";
-import { useEffect } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
-import type { ParamsSpec } from "src/queries/useDagParams";
+import { Heading, Icon, Stack, StackSeparator, Text } from "@chakra-ui/react";
+import { MdError } from "react-icons/md";
+
+import type { ParamsSpec, ParamSpec } from "src/queries/useDagParams";
 import { useParamStore } from "src/queries/useParamStore";
 
-import { Accordion } from "../ui";
+import ReactMarkdown from "../ReactMarkdown";
 import { Row } from "./Row";
+import { isRequired } from "./isParamRequired";
 
-export type FlexibleFormProps = {
-  flexibleFormDefaultSection: string;
-  initialParamsDict: { paramsDict: ParamsSpec };
-  key?: string;
+const FlatSection = ({
+  children,
+  hasError,
+  title,
+}: {
+  readonly children: ReactNode;
+  readonly hasError: boolean;
+  readonly title: string;
+}) => (
+  <Stack gap={2}>
+    <Heading color={hasError ? "fg.error" : undefined} size="lg">
+      {title}
+      {hasError ? (
+        <Icon color="fg.error" margin="-1" ml={1}>
+          <MdError />
+        </Icon>
+      ) : undefined}
+    </Heading>
+    {children}
+  </Stack>
+);
+
+const computeSectionErrors = (
+  params: Record<string, ParamSpec>,
+  defaultSection: string,
+): Map<string, boolean> => {
+  const errors = new Map<string, boolean>();
+
+  Object.values(params).forEach((element) => {
+    if (isRequired(element) && (element.value === null || element.value === "")) {
+      errors.set(element.schema.section ?? defaultSection, true);
+    }
+  });
+
+  return errors;
 };
 
-export const FlexibleForm = ({ flexibleFormDefaultSection, initialParamsDict }: FlexibleFormProps) => {
-  const { paramsDict: params, setinitialParamDict, setParamsDict } = useParamStore();
+export type FlexibleFormProps = {
+  readonly disabled?: boolean;
+  readonly flexFormDescription?: string;
+  readonly flexibleFormDefaultSection: string;
+  readonly initialParamsDict: { paramsDict: ParamsSpec };
+  readonly isHITL?: boolean;
+  readonly key?: string;
+  readonly namespace?: string;
+  readonly setError: (error: boolean) => void;
+  readonly subHeader?: string;
+};
+
+export const FlexibleForm = ({
+  disabled,
+  flexFormDescription,
+  flexibleFormDefaultSection,
+  initialParamsDict,
+  isHITL,
+  namespace = "default",
+  setError,
+  subHeader,
+}: FlexibleFormProps) => {
+  const { paramsDict: params, setDisabled, setInitialParamDict, setParamsDict } = useParamStore(namespace);
   const processedSections = new Map();
+  const [sectionError, setSectionError] = useState<Map<string, boolean>>(new Map());
+  const [hasValidationError, setHasValidationError] = useState(false);
 
   useEffect(() => {
     // Initialize paramsDict and initialParamDict when modal opens
@@ -41,49 +98,83 @@ export const FlexibleForm = ({ flexibleFormDefaultSection, initialParamsDict }: 
       const paramsCopy = structuredClone(initialParamsDict.paramsDict);
 
       setParamsDict(paramsCopy);
-      setinitialParamDict(initialParamsDict.paramsDict);
+      setInitialParamDict(initialParamsDict.paramsDict);
     }
-  }, [initialParamsDict, params, setParamsDict, setinitialParamDict]);
+  }, [initialParamsDict, params, setParamsDict, setInitialParamDict]);
 
   useEffect(
     () => () => {
       // Clear paramsDict and initialParamDict when the component is unmounted or modal closes
       setParamsDict({});
-      setinitialParamDict({});
+      setInitialParamDict({});
     },
-    [setParamsDict, setinitialParamDict],
+    [setParamsDict, setInitialParamDict],
   );
 
-  return Object.entries(params).some(([, param]) => typeof param.schema.section !== "string")
-    ? Object.entries(params).map(([, secParam]) => {
+  useEffect(() => {
+    const newSectionError = computeSectionErrors(params, flexibleFormDefaultSection);
+
+    setSectionError(newSectionError);
+    setError(hasValidationError || newSectionError.size > 0);
+  }, [params, flexibleFormDefaultSection, setError, hasValidationError]);
+
+  useEffect(() => {
+    setDisabled(disabled ?? false);
+  }, [disabled, setDisabled]);
+
+  const onUpdate = (_value?: string, error?: unknown) => {
+    const newSectionError = computeSectionErrors(params, flexibleFormDefaultSection);
+
+    setHasValidationError(Boolean(error));
+    setSectionError(newSectionError);
+    setError(Boolean(error) || newSectionError.size > 0);
+  };
+
+  return Object.keys(params).length > 0 ? (
+    <>
+      {Object.entries(params).map(([, secParam]) => {
         const currentSection = secParam.schema.section ?? flexibleFormDefaultSection;
 
         if (processedSections.has(currentSection)) {
           return undefined;
-        } else {
-          processedSections.set(currentSection, true);
-
-          return (
-            <Accordion.Item key={currentSection} value={currentSection}>
-              <Accordion.ItemTrigger cursor="button">{currentSection}</Accordion.ItemTrigger>
-              <Accordion.ItemContent paddingTop={0}>
-                <Box p={5}>
-                  <Stack separator={<StackSeparator />}>
-                    {Object.entries(params)
-                      .filter(
-                        ([, param]) =>
-                          param.schema.section === currentSection ||
-                          (currentSection === flexibleFormDefaultSection && !Boolean(param.schema.section)),
-                      )
-                      .map(([name]) => (
-                        <Row key={name} name={name} />
-                      ))}
-                  </Stack>
-                </Box>
-              </Accordion.ItemContent>
-            </Accordion.Item>
-          );
         }
-      })
-    : undefined;
+        processedSections.set(currentSection, true);
+
+        return (
+          <FlatSection
+            hasError={Boolean(sectionError.get(currentSection))}
+            key={currentSection}
+            title={currentSection}
+          >
+            {Boolean(subHeader) ? (
+              <Text color="fg.muted" fontSize="xs">
+                {subHeader}
+              </Text>
+            ) : undefined}
+            <Stack separator={<StackSeparator py={2} />}>
+              {Boolean(flexFormDescription) ? (
+                <ReactMarkdown>{flexFormDescription}</ReactMarkdown>
+              ) : undefined}
+              {Object.entries(params)
+                .filter(
+                  ([, param]) =>
+                    param.schema.section === currentSection ||
+                    (currentSection === flexibleFormDefaultSection && !Boolean(param.schema.section)),
+                )
+                .map(([name]) => (
+                  <Row key={name} name={name} namespace={namespace} onUpdate={onUpdate} />
+                ))}
+            </Stack>
+          </FlatSection>
+        );
+      })}
+    </>
+  ) : isHITL ? (
+    <FlatSection
+      hasError={Boolean(sectionError.get(flexibleFormDefaultSection))}
+      title={flexibleFormDefaultSection}
+    >
+      {Boolean(flexFormDescription) ? <ReactMarkdown>{flexFormDescription}</ReactMarkdown> : undefined}
+    </FlatSection>
+  ) : undefined;
 };

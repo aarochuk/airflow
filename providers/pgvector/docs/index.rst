@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -9,7 +8,7 @@
 
  ..   http://www.apache.org/licenses/LICENSE-2.0
 
-.. Unless required by applicable law or agreed to in writing,
+ .. Unless required by applicable law or agreed to in writing,
     software distributed under the License is distributed on an
     "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
     KIND, either express or implied.  See the License for the
@@ -79,7 +78,7 @@ apache-airflow-providers-pgvector package
 `pgvector <https://github.com/pgvector/pgvector>`__
 
 
-Release: 1.4.1
+Release: 1.7.4
 
 Provider package
 ----------------
@@ -90,25 +89,26 @@ All classes for this package are included in the ``airflow.providers.pgvector`` 
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-pgvector``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-=====================================  ==================
-PIP package                            Version required
-=====================================  ==================
-``apache-airflow``                     ``>=2.9.0``
-``apache-airflow-providers-postgres``  ``>=5.7.1``
-``pgvector``                           ``>=0.3.1``
-=====================================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.8.0``
+``apache-airflow-providers-postgres``       ``>=6.6.0``
+``pgvector``                                ``>=0.3.1``
+==========================================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified provider distributions in order to use them.
@@ -124,8 +124,24 @@ You can install such cross-provider dependencies when installing from PyPI. For 
 Dependent package                                                                                             Extra
 ============================================================================================================  ==============
 `apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_  ``common.sql``
-`apache-airflow-providers-postgres <https://airflow.apache.org/docs/apache-airflow-providers-postgres>`_      ``postgres``
 ============================================================================================================  ==============
+
+Optional dependencies
+---------------------
+
+These extras install optional third-party libraries that enable additional features of the provider.
+Install them when installing from PyPI. For example:
+
+.. code-block:: bash
+
+    pip install apache-airflow-providers-pgvector[common.sql]
+
+
+==============  =======================================
+Extra           Dependencies
+==============  =======================================
+``common.sql``  ``apache-airflow-providers-common-sql``
+==============  =======================================
 
 Downloading official packages
 -----------------------------
@@ -133,5 +149,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-pgvector 1.4.1 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pgvector-1.4.1.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pgvector-1.4.1.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pgvector-1.4.1.tar.gz.sha512>`__)
-* `The apache-airflow-providers-pgvector 1.4.1 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pgvector-1.4.1-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pgvector-1.4.1-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pgvector-1.4.1-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-pgvector 1.7.4 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pgvector-1.7.4.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pgvector-1.7.4.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pgvector-1.7.4.tar.gz.sha512>`__)
+* `The apache-airflow-providers-pgvector 1.7.4 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pgvector-1.7.4-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pgvector-1.7.4-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_pgvector-1.7.4-py3-none-any.whl.sha512>`__)

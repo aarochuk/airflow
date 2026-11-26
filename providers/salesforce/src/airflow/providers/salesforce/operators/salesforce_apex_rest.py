@@ -16,17 +16,14 @@
 # under the License.
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.salesforce.hooks.salesforce import SalesforceHook
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class SalesforceApexRestOperator(BaseOperator):
@@ -40,8 +37,10 @@ class SalesforceApexRestOperator(BaseOperator):
     :param endpoint: The REST endpoint for the request.
     :param method: HTTP method for the request (default GET)
     :param payload: A dict of parameters to send in a POST / PUT request
-    :param salesforce_conn_id: The :ref:`Salesforce Connection id <howto/connection:SalesforceHook>`.
+    :param salesforce_conn_id: The :ref:`Salesforce Connection id <howto/connection:salesforce>`.
     """
+
+    template_fields: Sequence[str] = ("salesforce_conn_id",)
 
     def __init__(
         self,

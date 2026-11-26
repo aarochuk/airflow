@@ -23,13 +23,26 @@ to the DAG and which are used to render a trigger form.
 
 from __future__ import annotations
 
+import configparser
 import datetime
 import json
 from pathlib import Path
 
-from airflow.decorators import task
-from airflow.models.dag import DAG
-from airflow.sdk import Param
+from airflow.sdk import DAG, Param, task
+
+
+def _get_script_interfaces_from_config() -> list[str]:
+    config = configparser.ConfigParser()
+    config.read(Path(__file__).with_name("example_params_ui_interfaces.ini"))
+
+    return [section for section in config.sections() if config[section].get("TYPE") == "Script"]
+
+
+SCRIPT_INTERFACES = _get_script_interfaces_from_config()
+DEPLOY_ENVIRONMENTS = [
+    {"name": "dev", "replicas": 1},
+    {"name": "prod", "replicas": 5},
+]
 
 with DAG(
     dag_id=Path(__file__).stem,
@@ -60,7 +73,7 @@ with DAG(
             type="integer",
             title="Your favorite number",
             description_md="Everybody should have a **favorite** number. Not only _math teachers_. "
-            "If you can not think of any at the moment please think of the 42 which is very famous because"
+            "If you can not think of any at the moment please think of the 42 which is very famous because "
             "of the book [The Hitchhiker's Guide to the Galaxy]"
             "(https://en.wikipedia.org/wiki/Phrases_from_The_Hitchhiker%27s_Guide_to_the_Galaxy#"
             "The_Answer_to_the_Ultimate_Question_of_Life,_the_Universe,_and_Everything_is_42).",
@@ -76,6 +89,19 @@ with DAG(
             description="You can use JSON schema enum's to generate drop down selection boxes.",
             enum=[f"value {i}" for i in range(16, 64)],
             section="Typed parameters with Param object",
+        ),
+        "script_interface": Param(
+            SCRIPT_INTERFACES[0],
+            description="Choices are generated from example_params_ui_interfaces.ini at Dag parse time.",
+            schema={
+                "type": "string",
+                "title": "Script interface",
+                "enum": SCRIPT_INTERFACES,
+                "values_display": {
+                    name: name.replace("Interface", "Interface ") for name in SCRIPT_INTERFACES
+                },
+                "section": "Typed parameters with Param object",
+            },
         ),
         # [END section_1]
         # Boolean as proper parameter with description
@@ -95,13 +121,22 @@ with DAG(
             description="Please select a date and time, use the button on the left for a pop-up calendar.",
             section="Typed parameters with Param object",
         ),
+        # Durations are also Supported support for ISO 8601
+        "duration": Param(
+            "PT15M",
+            type="string",
+            format="duration",
+            title="Duration definitions",
+            description="Please enter a duration in ISO 8601 format (e.g. PT15M, PT2H, P1D).",
+            section="Typed parameters with Param object",
+        ),
         "date": Param(
             f"{datetime.date.today()}",
             type="string",
             format="date",
             title="Date Picker",
             description="Please select a date, use the button on the left for a pop-up calendar. "
-            "See that here are no times!",
+            "See that there are no times!",
             section="Typed parameters with Param object",
         ),
         "time": Param(
@@ -139,10 +174,10 @@ with DAG(
         # You can also label the selected values via values_display attribute
         "pick_with_label": Param(
             3,
-            type="number",
+            type=["number", "null"],
             title="Select one Number",
             description="With drop down selections you can also have nice display labels for the values.",
-            enum=[*range(1, 10)],
+            enum=[*range(1, 10), None],
             values_display={
                 1: "One",
                 2: "Two",
@@ -153,6 +188,21 @@ with DAG(
                 7: "Seven",
                 8: "Eight",
                 9: "Nine",
+                None: "None (clear selection)",
+            },
+            section="Drop-Downs and selection lists",
+        ),
+        # Enum values can also be objects. Labels for them are keyed by the JSON text of the object,
+        # any spacing and key order is accepted, so json.dumps() is the easiest way to write the key.
+        "pick_environment": Param(
+            DEPLOY_ENVIRONMENTS[0],
+            type="object",
+            title="Select an Environment",
+            description="Object enum values are shown as a drop down and the selected object is passed as-is.",
+            enum=DEPLOY_ENVIRONMENTS,
+            values_display={
+                json.dumps(DEPLOY_ENVIRONMENTS[0]): "Development (1 replica)",
+                json.dumps(DEPLOY_ENVIRONMENTS[1]): "Production (5 replicas)",
             },
             section="Drop-Downs and selection lists",
         ),
@@ -183,7 +233,7 @@ with DAG(
         # A multiple options selection can also be combined with values_display
         "multi_select_with_label": Param(
             ["2", "3"],
-            "Select from the list of options. See that options can have nicer text and still technical values"
+            "Select from the list of options. See that options can have nicer text and still technical values "
             "are propagated as values during trigger to the DAG.",
             type="array",
             title="Multi Select with Labels",
@@ -236,6 +286,46 @@ with DAG(
             },
             section="Special advanced stuff with form fields",
         ),
+        # Multi-type parameters
+        "batch_size": Param(
+            1000,
+            type=["integer", "string"],
+            title="Batch size (int or 'all')",
+            description_md=(
+                "Number of rows per batch as an integer, **or** the string ``all`` to process "
+                "everything in one pass. Try `500` → integer, `all` → string."
+            ),
+            section="Multi-type parameters",
+        ),
+        "notify": Param(
+            True,
+            type=["boolean", "string"],
+            title="Notification target",
+            description=(
+                "Set true/false to toggle the default recipient, or enter an email address "
+                "(string) to override it."
+            ),
+            section="Multi-type parameters",
+        ),
+        "pipeline_config": Param(
+            "nightly-export",
+            type=["string", "object"],
+            title="Pipeline (name or full config)",
+            description_md=(
+                "Pipeline shorthand name, or a JSON object with the full config, e.g. "
+                '`{"name": "nightly", "retries": 2}`'
+            ),
+            section="Multi-type parameters",
+        ),
+        "priority": Param(
+            5,
+            type=["integer", "string"],
+            title="Priority (number or label)",
+            description=(
+                "Numeric priority as an integer, or one of the named levels: 'low', 'normal', 'high'."
+            ),
+            section="Multi-type parameters",
+        ),
         # If you want to have static parameters which are always passed and not editable by the user
         # then you can use the JSON schema option of passing constant values. These parameters
         # will not be displayed but passed to the DAG
@@ -244,8 +334,7 @@ with DAG(
 ) as dag:
     # [START section_3]
     @task(task_display_name="Show used parameters")
-    def show_params(**kwargs) -> None:
-        params = kwargs["params"]
+    def show_params(params=None) -> None:
         print(f"This DAG was triggered with the following parameters:\n\n{json.dumps(params, indent=4)}\n")
 
     show_params()

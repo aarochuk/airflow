@@ -26,7 +26,7 @@ import stat
 import sys
 import tarfile
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import sleep
 from typing import Any, NamedTuple
@@ -36,8 +36,9 @@ from airflow_breeze.global_constants import (
     ALLOWED_ARCHITECTURES,
     HELM_VERSION,
     KIND_VERSION,
+    SKAFFOLD_VERSION,
 )
-from airflow_breeze.utils.console import Output, get_console
+from airflow_breeze.utils.console import Output, console_print, get_console
 from airflow_breeze.utils.host_info_utils import Architecture, get_host_architecture, get_host_os
 from airflow_breeze.utils.path_utils import AIRFLOW_ROOT_PATH, BUILD_CACHE_PATH
 from airflow_breeze.utils.run_utils import RunCommandResult, run_command
@@ -49,6 +50,7 @@ K8S_BIN_BASE_PATH = K8S_ENV_PATH / "bin"
 KIND_BIN_PATH = K8S_BIN_BASE_PATH / "kind"
 KUBECTL_BIN_PATH = K8S_BIN_BASE_PATH / "kubectl"
 HELM_BIN_PATH = K8S_BIN_BASE_PATH / "helm"
+SKAFFOLD_BIN_PATH = K8S_BIN_BASE_PATH / "skaffold"
 PYTHON_BIN_PATH = K8S_BIN_BASE_PATH / "python"
 SCRIPTS_CI_KUBERNETES_PATH = AIRFLOW_ROOT_PATH / "scripts" / "ci" / "kubernetes"
 PYPROJECT_TOML_AIRFLOW_CORE_PATH = AIRFLOW_ROOT_PATH / "airflow-core" / "pyproject.toml"
@@ -106,9 +108,9 @@ def _download_with_retries(num_tries, path, tool, url):
         except OSError as e:
             num_tries = num_tries - 1
             if num_tries == 0:
-                get_console().print(f"[error]Failing on max retries. Error while downloading {tool}: {e}")
+                console_print(f"[error]Failing on max retries. Error while downloading {tool}: {e}")
                 sys.exit(1)
-            get_console().print(
+            console_print(
                 f"[warning]Retrying: {num_tries} retries  left on error while downloading {tool} tool: {e}"
             )
 
@@ -133,7 +135,7 @@ def _download_tool_if_needed(
         if result.returncode == 0 and not get_dry_run():
             match = re.search(version_pattern, result.stdout)
             if not match:
-                get_console().print(
+                console_print(
                     f"[info]No regexp match for version check in `{tool}` tool output "
                     f"{version_pattern} in:[/]\n{result.stdout}\n"
                     f"[info]Downloading {expected_version}."
@@ -141,33 +143,32 @@ def _download_tool_if_needed(
             else:
                 current_version = match.group(1)
                 if current_version == expected_version:
-                    get_console().print(
+                    console_print(
                         f"[success]Good version of {tool} installed: {expected_version} in "
                         f"{K8S_BIN_BASE_PATH}"
                     )
                     return
-                else:
-                    get_console().print(
-                        f"[info]Currently installed `{tool}` tool version: {current_version}. "
-                        f"Downloading {expected_version}."
-                    )
+                console_print(
+                    f"[info]Currently installed `{tool}` tool version: {current_version}. "
+                    f"Downloading {expected_version}."
+                )
         else:
-            get_console().print(
+            console_print(
                 f"[warning]The version check of `{tool}` tool returned "
                 f"{result.returncode} error. Downloading {expected_version} version."
             )
-            get_console().print(result.stdout)
-            get_console().print(result.stderr)
+            console_print(result.stdout)
+            console_print(result.stderr)
     except FileNotFoundError:
-        get_console().print(
+        console_print(
             f"[info]The `{tool}` tool is not downloaded yet. Downloading {expected_version} version."
         )
     except OSError as e:
-        get_console().print(
+        console_print(
             f"[info]Error when running `{tool}`: {e}. Removing and downloading {expected_version} version."
         )
         path.unlink(missing_ok=True)
-    get_console().print(f"[info]Downloading from:[/] {url}")
+    console_print(f"[info]Downloading from:[/] {url}")
     if get_dry_run():
         return
     path.unlink(missing_ok=True)
@@ -179,11 +180,11 @@ def _download_tool_if_needed(
         with tempfile.NamedTemporaryFile(delete=True) as f:
             _download_with_retries(num_tries, Path(f.name), tool, url)
             tgz_file = tarfile.open(f.name)
-            get_console().print(f"[info]Extracting the {uncompress_file} to {path.parent}[/]")
+            console_print(f"[info]Extracting the {uncompress_file} to {path.parent}[/]")
             with tempfile.TemporaryDirectory() as d:
                 tgz_file.extract(uncompress_file, str(d))
                 target_file = Path(d) / uncompress_file
-                get_console().print(f"[info]Moving the {target_file.name} to {path}[/]")
+                console_print(f"[info]Moving the {target_file.name} to {path}[/]")
                 shutil.move(str(target_file), str(path))
 
 
@@ -229,10 +230,22 @@ def _download_helm_if_needed():
     )
 
 
+def _download_skaffold_if_needed():
+    _download_tool_if_needed(
+        tool="skaffold",
+        version=SKAFFOLD_VERSION,
+        version_pattern=r".*v?(\d+\.\d+\.\d+).*",
+        version_flag=["version"],
+        url=f"https://storage.googleapis.com/skaffold/releases/"
+        f"{SKAFFOLD_VERSION}/skaffold-{get_host_os()}-{get_architecture_string_for_urls()}",
+        path=SKAFFOLD_BIN_PATH,
+    )
+
+
 def _check_architecture_supported():
     architecture, machine = get_host_architecture()
     if architecture not in ALLOWED_ARCHITECTURES:
-        get_console().print(
+        console_print(
             f"[error]The {architecture} is not one "
             f"of the supported: {ALLOWED_ARCHITECTURES}. The original machine: {machine}"
         )
@@ -243,6 +256,12 @@ def make_sure_helm_installed():
     K8S_CLUSTERS_PATH.mkdir(parents=True, exist_ok=True)
     _check_architecture_supported()
     _download_helm_if_needed()
+
+
+def make_sure_skaffold_installed():
+    K8S_CLUSTERS_PATH.mkdir(parents=True, exist_ok=True)
+    _check_architecture_supported()
+    _download_skaffold_if_needed()
 
 
 def make_sure_kubernetes_tools_are_installed():
@@ -261,9 +280,9 @@ def make_sure_kubernetes_tools_are_installed():
         text=True,
     )
     if get_dry_run() or result.returncode == 0 and "stable" in result.stdout:
-        get_console().print("[info]Stable repo is already added")
+        console_print("[info]Stable repo is already added")
     else:
-        get_console().print("[info]Adding stable repo")
+        console_print("[info]Adding stable repo")
         run_command(
             ["helm", "repo", "add", "stable", "https://charts.helm.sh/stable"],
             check=False,
@@ -272,7 +291,8 @@ def make_sure_kubernetes_tools_are_installed():
 
 
 def sync_virtualenv(force_venv_setup: bool) -> RunCommandResult:
-    uv_sync_cmd = ["uv", "sync"]
+    # kubernetes-tests is a workspace member: a plain `uv sync` would re-resolve and rewrite the root uv.lock.
+    uv_sync_cmd = ["uv", "sync", "--frozen"]
     if force_venv_setup:
         uv_sync_cmd.append("--reinstall")
     if os.environ.get("CI", "false") == "true":
@@ -306,6 +326,8 @@ def run_command_with_k8s_env(
 
 
 def get_k8s_env(python: str, kubernetes_version: str, executor: str | None = None) -> dict[str, str]:
+    from packaging.version import Version
+
     new_env = os.environ.copy()
     new_env["PATH"] = str(K8S_BIN_BASE_PATH) + os.pathsep + new_env["PATH"]
     new_env["KUBECONFIG"] = str(get_kubeconfig_file(python=python, kubernetes_version=kubernetes_version))
@@ -318,6 +340,11 @@ def get_k8s_env(python: str, kubernetes_version: str, executor: str | None = Non
     if executor:
         new_env["PS1"] = f"({kubectl_cluster_name}:{executor})> "
         new_env["EXECUTOR"] = executor
+    use_flask_appbuilder = Version(python) < Version("3.13")
+    if use_flask_appbuilder:
+        new_env["USE_FAB_AUTH_MANAGER"] = "true"
+    else:
+        new_env["USE_FAB_AUTH_MANAGER"] = "false"
     return new_env
 
 
@@ -345,12 +372,26 @@ def _get_free_port() -> int:
 def _get_kind_cluster_config_content(python: str, kubernetes_version: str) -> dict[str, Any] | None:
     config_path = get_kind_cluster_config_path(python=python, kubernetes_version=kubernetes_version)
     if not config_path.exists():
-        get_console().print(f"[warning]The kind cluster config file {config_path} does not exist!")
+        console_print(f"[warning]The kind cluster config file {config_path} does not exist!")
         return None
 
     import yaml
 
     return yaml.safe_load(config_path.read_text())
+
+
+# Must match nodePort in scripts/ci/kubernetes/nodeport.yaml.
+FORWARDED_NODE_PORT = 30007
+
+
+def _render_kind_cluster_config(forwarded_port_number: int, k8s_api_server_port: int) -> str:
+    return (
+        (SCRIPTS_CI_KUBERNETES_PATH / "kind-cluster-conf.yaml")
+        .read_text()
+        .replace("{{FORWARDED_NODE_PORT}}", str(FORWARDED_NODE_PORT))
+        .replace("{{FORWARDED_PORT_NUMBER}}", str(forwarded_port_number))
+        .replace("{{API_SERVER_PORT}}", str(k8s_api_server_port))
+    )
 
 
 def set_random_cluster_ports(python: str, kubernetes_version: str, output: Output | None) -> None:
@@ -364,11 +405,8 @@ def set_random_cluster_ports(python: str, kubernetes_version: str, output: Outpu
         f"[info]Random ports: K8S API: {k8s_api_server_port}, API Server: {forwarded_port_number}"
     )
     cluster_conf_path = get_kind_cluster_config_path(python=python, kubernetes_version=kubernetes_version)
-    config = (
-        (AIRFLOW_ROOT_PATH / "scripts" / "ci" / "kubernetes" / "kind-cluster-conf.yaml")
-        .read_text()
-        .replace("{{FORWARDED_PORT_NUMBER}}", str(forwarded_port_number))
-        .replace("{{API_SERVER_PORT}}", str(k8s_api_server_port))
+    config = _render_kind_cluster_config(
+        forwarded_port_number=forwarded_port_number, k8s_api_server_port=k8s_api_server_port
     )
     cluster_conf_path.write_text(config)
     get_console(output=output).print(f"[info]Config created in {cluster_conf_path}:\n")
@@ -376,19 +414,30 @@ def set_random_cluster_ports(python: str, kubernetes_version: str, output: Outpu
     get_console(output=output).print("\n")
 
 
+def _extract_forwarded_host_port(conf: dict[str, Any]) -> int:
+    for node in conf["nodes"]:
+        for port_mapping in node.get("extraPortMappings", []):
+            if port_mapping["containerPort"] == FORWARDED_NODE_PORT:
+                return port_mapping["hostPort"]
+    raise ValueError(
+        f"No node in the kind cluster config has an extraPortMappings entry for "
+        f"containerPort {FORWARDED_NODE_PORT}. Delete and recreate the cluster."
+    )
+
+
 def get_kubernetes_port_numbers(python: str, kubernetes_version: str) -> tuple[int, int]:
     conf = _get_kind_cluster_config_content(python=python, kubernetes_version=kubernetes_version)
     if not conf:
         return 0, 0
     k8s_api_server_port = conf["networking"]["apiServerPort"]
-    api_server_port = conf["nodes"][1]["extraPortMappings"][0]["hostPort"]
+    api_server_port = _extract_forwarded_host_port(conf)
     return k8s_api_server_port, api_server_port
 
 
 def _attempt_to_connect(port_number: int, output: Output | None, wait_seconds: int = 0) -> bool:
     import requests
 
-    start_time = datetime.now(timezone.utc)
+    start_time = datetime.now(UTC)
     sleep_seconds = 5
     for attempt in itertools.count(1):
         get_console(output=output).print(f"[info]Connecting to localhost:{port_number}. Num try: {attempt}")
@@ -407,12 +456,11 @@ def _attempt_to_connect(port_number: int, output: Output | None, wait_seconds: i
                     f"http://localhost:{port_number}/api/v2/monitor/health and it is healthy."
                 )
                 return True
-            else:
-                get_console(output=output).print(
-                    f"[warning]Error when connecting to localhost:{port_number} "
-                    f"{response.status_code}: {response.reason}"
-                )
-        current_time = datetime.now(timezone.utc)
+            get_console(output=output).print(
+                f"[warning]Error when connecting to localhost:{port_number} "
+                f"{response.status_code}: {response.reason}"
+            )
+        current_time = datetime.now(UTC)
         if current_time - start_time > timedelta(seconds=wait_seconds):
             if wait_seconds > 0:
                 get_console(output=output).print(f"[error]More than {wait_seconds} passed. Exiting.")

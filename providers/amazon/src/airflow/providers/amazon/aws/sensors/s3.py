@@ -21,22 +21,19 @@ import fnmatch
 import inspect
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from airflow.configuration import conf
-from airflow.providers.amazon.aws.utils import validate_execute_complete_event
-
-if TYPE_CHECKING:
-    from airflow.utils.context import Context
-
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.amazon.aws.sensors.base_aws import AwsBaseSensor
 from airflow.providers.amazon.aws.triggers.s3 import S3KeysUnchangedTrigger, S3KeyTrigger
+from airflow.providers.amazon.aws.utils import validate_execute_complete_event
 from airflow.providers.amazon.aws.utils.mixins import aws_template_fields
-from airflow.sensors.base import poke_mode_only
+from airflow.providers.common.compat.sdk import AirflowException, conf, poke_mode_only
+
+if TYPE_CHECKING:
+    from airflow.sdk import Context
 
 
 class S3KeySensor(AwsBaseSensor[S3Hook]):
@@ -107,7 +104,7 @@ class S3KeySensor(AwsBaseSensor[S3Hook]):
         self.verify = verify
         self.deferrable = deferrable
         self.use_regex = use_regex
-        self.metadata_keys = metadata_keys if metadata_keys else ["Size"]
+        self.metadata_keys = metadata_keys if metadata_keys else ["Size", "Key"]
 
     def _check_key(self, key, context: Context):
         bucket_name, key = self.hook.get_s3_bucket_key(self.bucket_name, key, "bucket_name", "bucket_key")
@@ -116,13 +113,25 @@ class S3KeySensor(AwsBaseSensor[S3Hook]):
         """
         Set variable `files` which contains a list of dict which contains attributes defined by the user
         Format: [{
-            'Size': int
+            'Size': int,
+            'Key': str,
         }]
         """
         if self.wildcard_match:
             prefix = re.split(r"[\[*?]", key, 1)[0]
-            keys = self.hook.get_file_metadata(prefix, bucket_name)
-            key_matches = [k for k in keys if fnmatch.fnmatch(k["Key"], key)]
+
+            key_matches: list[str] = []
+
+            # Is check_fn is None, then we can return True without having to iterate through each value in
+            # yielded by iter_file_metadata. Otherwise, we'll check for a match, and add all matches to the
+            # key_matches list
+            for k in self.hook.iter_file_metadata(prefix, bucket_name):
+                if fnmatch.fnmatch(k["Key"], key):
+                    if self.check_fn is None:
+                        # This will only wait for a single match, and will immediately return
+                        return True
+                    key_matches.append(k)
+
             if not key_matches:
                 return False
 
@@ -131,21 +140,23 @@ class S3KeySensor(AwsBaseSensor[S3Hook]):
             for f in key_matches:
                 metadata = {}
                 if "*" in self.metadata_keys:
-                    metadata = self.hook.head_object(f["Key"], bucket_name)
+                    metadata = self.hook.head_object(f["Key"], bucket_name)  # type: ignore[index]
                 else:
-                    for key in self.metadata_keys:
+                    for mk in self.metadata_keys:
                         try:
-                            metadata[key] = f[key]
+                            metadata[mk] = f[mk]  # type: ignore[index]
                         except KeyError:
                             # supplied key might be from head_object response
-                            self.log.info("Key %s not found in response, performing head_object", key)
-                            metadata[key] = self.hook.head_object(f["Key"], bucket_name).get(key, None)
+                            self.log.info("Key %s not found in response, performing head_object", mk)
+                            metadata[mk] = self.hook.head_object(f["Key"], bucket_name).get(mk, None)  # type: ignore[index]
                 files.append(metadata)
+
         elif self.use_regex:
-            keys = self.hook.get_file_metadata("", bucket_name)
-            key_matches = [k for k in keys if re.match(pattern=key, string=k["Key"])]
-            if not key_matches:
-                return False
+            for k in self.hook.iter_file_metadata("", bucket_name):
+                if re.match(pattern=key, string=k["Key"]):
+                    return True
+            return False
+
         else:
             obj = self.hook.head_object(key, bucket_name)
             if obj is None:
@@ -176,8 +187,7 @@ class S3KeySensor(AwsBaseSensor[S3Hook]):
     def poke(self, context: Context):
         if isinstance(self.bucket_key, str):
             return self._check_key(self.bucket_key, context=context)
-        else:
-            return all(self._check_key(key, context=context) for key in self.bucket_key)
+        return all(self._check_key(key, context=context) for key in self.bucket_key)
 
     def execute(self, context: Context) -> None:
         """Airflow runs this method on the worker and defers using the trigger."""
@@ -202,6 +212,7 @@ class S3KeySensor(AwsBaseSensor[S3Hook]):
                 poke_interval=self.poke_interval,
                 should_check_fn=bool(self.check_fn),
                 use_regex=self.use_regex,
+                metadata_keys=self.metadata_keys,
             ),
             method_name="execute_complete",
         )
@@ -213,7 +224,7 @@ class S3KeySensor(AwsBaseSensor[S3Hook]):
         Relies on trigger to throw an exception, otherwise it assumes execution was successful.
         """
         if event["status"] == "running":
-            found_keys = self.check_fn(event["files"])  # type: ignore[misc]
+            found_keys = self.check_fn(event["files"], **context)  # type: ignore[misc]
             if not found_keys:
                 self._defer()
         elif event["status"] == "error":

@@ -15,11 +15,11 @@ google
 grpc
 hashicorp
 http
-imap
 microsoft.azure
 mysql
 odbc
 openlineage
+opensearch
 postgres
 redis
 sendgrid
@@ -27,6 +27,5 @@ sftp
 slack
 smtp
 snowflake
-sqlite
 ssh
 standard

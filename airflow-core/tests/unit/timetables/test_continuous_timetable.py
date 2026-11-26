@@ -41,12 +41,28 @@ def timetable():
     return ContinuousTimetable()
 
 
-def test_no_runs_without_start_date(timetable):
+@time_machine.travel(DURING_DATE)
+def test_runs_without_start_date(timetable):
     next_info = timetable.next_dagrun_info(
         last_automated_data_interval=None,
         restriction=TimeRestriction(earliest=None, latest=None, catchup=False),
     )
-    assert next_info is None
+    assert next_info is not None
+    assert next_info.run_after == DURING_DATE
+    assert next_info.data_interval.start == DURING_DATE
+    assert next_info.data_interval.end == DURING_DATE
+
+
+@time_machine.travel(AFTER_DATE)
+def test_subsequent_runs_without_start_date(timetable):
+    next_info = timetable.next_dagrun_info(
+        last_automated_data_interval=DataInterval(DURING_DATE, DURING_DATE),
+        restriction=TimeRestriction(earliest=None, latest=None, catchup=False),
+    )
+    assert next_info is not None
+    assert next_info.run_after == AFTER_DATE
+    assert next_info.data_interval.start == DURING_DATE
+    assert next_info.data_interval.end == AFTER_DATE
 
 
 @time_machine.travel(DURING_DATE)
@@ -89,3 +105,14 @@ def test_no_runs_after_end_date(timetable, restriction):
     )
 
     assert next_info is None
+
+
+@time_machine.travel(BEFORE_DATE)
+def test_no_false_triggering_with_future_start_date_after_run(timetable, restriction):
+    next_info = timetable.next_dagrun_info(
+        last_automated_data_interval=DataInterval(BEFORE_DATE, BEFORE_DATE.add(hours=1)),
+        restriction=restriction,
+    )
+
+    assert next_info is not None
+    assert next_info.data_interval.start == START_DATE

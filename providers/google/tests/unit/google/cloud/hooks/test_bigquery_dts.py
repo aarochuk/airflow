@@ -63,7 +63,7 @@ class TestBigQueryDataTransferHook:
             new=mock_base_gcp_hook_no_default_project_id,
         ):
             self.hook = BiqQueryDataTransferServiceHook()
-            self.hook.get_credentials = mock.MagicMock(return_value=CREDENTIALS)  # type: ignore
+            self.hook.get_credentials = mock.MagicMock(return_value=CREDENTIALS)
 
     def test_disable_auto_scheduling(self):
         expected = deepcopy(TRANSFER_CONFIG)
@@ -134,10 +134,6 @@ class TestAsyncBiqQueryDataTransferServiceHook:
             f"{self.HOOK_MODULE_PATH}.AsyncBiqQueryDataTransferServiceHook._get_conn",
             new_callable=AsyncMock,
         ) as mock_client:
-            transfer_result = Future()
-            transfer_result.set_result(mock.MagicMock())
-
-            mock_client.return_value.get_transfer_run = mock.MagicMock(return_value=transfer_result)
             yield mock_client
 
     @pytest.fixture
@@ -147,6 +143,10 @@ class TestAsyncBiqQueryDataTransferServiceHook:
     @pytest.mark.db_test
     @pytest.mark.asyncio
     async def test_get_transfer_run(self, mock_client, hook):
+        transfer_result = Future()
+        transfer_result.set_result(mock.MagicMock())
+        mock_client.return_value.get_transfer_run = mock.MagicMock(return_value=transfer_result)
+
         await hook.get_transfer_run(
             run_id=RUN_ID,
             config_id=TRANSFER_CONFIG_ID,

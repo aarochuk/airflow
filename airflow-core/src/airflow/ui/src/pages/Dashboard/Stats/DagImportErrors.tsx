@@ -1,0 +1,82 @@
+/*!
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+import { Box, Button, Skeleton, useDisclosure } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
+import { LuFileWarning } from "react-icons/lu";
+
+import { useImportErrorServiceGetImportErrors } from "openapi/queries/queries";
+
+import { StateBadge } from "src/components/StateBadge";
+import { StatsCard } from "src/components/StatsCard";
+
+import { formatNumber } from "src/utils";
+
+import { DagImportErrorsModal } from "./DagImportErrorsModal";
+
+type DagImportErrorsProps = {
+  readonly bundleName?: string;
+  readonly iconOnly?: boolean;
+};
+
+export const DagImportErrors = ({ bundleName, iconOnly = false }: DagImportErrorsProps) => {
+  const { onClose, onOpen, open } = useDisclosure();
+  const { i18n, t: translate } = useTranslation("dashboard");
+
+  const isRTL = i18n.dir() === "rtl";
+
+  const { data, isLoading } = useImportErrorServiceGetImportErrors({ bundleName, limit: 1 });
+  const importErrorsCount = data?.total_entries ?? 0;
+
+  if (isLoading) {
+    return <Skeleton height="9" width="225px" />;
+  }
+
+  if (importErrorsCount === 0) {
+    return undefined;
+  }
+
+  return (
+    <Box alignItems="center" display="flex">
+      {iconOnly ? (
+        <StateBadge
+          aria-label={translate("importErrors.dagImportError", { count: importErrorsCount })}
+          as={Button}
+          colorPalette="failed"
+          height={7}
+          onClick={onOpen}
+          title={translate("importErrors.dagImportError", { count: importErrorsCount })}
+        >
+          <LuFileWarning size={8} />
+          {formatNumber(importErrorsCount, i18n.language)}
+        </StateBadge>
+      ) : (
+        <StatsCard
+          colorScheme="failed"
+          count={importErrorsCount}
+          icon={<LuFileWarning />}
+          isLoading={isLoading}
+          isRTL={isRTL}
+          label={translate("importErrors.dagImportError", { count: importErrorsCount })}
+          onClick={onOpen}
+        />
+      )}
+      <DagImportErrorsModal bundleName={bundleName} onClose={onClose} open={open} />
+    </Box>
+  );
+};

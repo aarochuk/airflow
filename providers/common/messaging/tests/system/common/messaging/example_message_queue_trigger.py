@@ -16,25 +16,22 @@
 # under the License.
 from __future__ import annotations
 
-from airflow.models.dag import DAG
+# [START howto_trigger_message_queue]
 from airflow.providers.common.messaging.triggers.msg_queue import MessageQueueTrigger
 from airflow.providers.standard.operators.empty import EmptyOperator
-from airflow.sdk.definitions.asset import Asset, AssetWatcher
+from airflow.sdk import DAG, Asset, AssetWatcher
 
-# [START howto_trigger_message_queue]
-trigger = MessageQueueTrigger(queue="https://sqs.us-east-1.amazonaws.com/0123456789/my-queue")
-asset = Asset("sqs_asset", watchers=[AssetWatcher(name="sqs_asset_watcher", trigger=trigger)])
+# Define a trigger that listens to an external message queue (AWS SQS in this case)
+trigger = MessageQueueTrigger(scheme="sqs", sqs_queue="https://sqs.us-east-1.amazonaws.com/0123456789/Test")
+# Define an asset that watches for messages on the queue
+asset = Asset("sqs_queue_asset", watchers=[AssetWatcher(name="sqs_watcher", trigger=trigger)])
 
-with DAG(
-    dag_id="example_msgq_watcher",
-    schedule=[asset],
-    catchup=False,
-) as dag:
+with DAG(dag_id="example_msgq_watcher", schedule=[asset]) as dag:
     EmptyOperator(task_id="task")
 # [END howto_trigger_message_queue]
 
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

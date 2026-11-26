@@ -17,15 +17,19 @@
 # under the License.
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib import parse
 
 from elasticsearch import Elasticsearch
 
-from airflow.hooks.base import BaseHook
+from airflow.providers.common.compat.sdk import BaseHook
 from airflow.providers.common.sql.hooks.sql import DbApiHook
+from airflow.providers.elasticsearch._compat import apply_compat_with
+from airflow.providers.elasticsearch.utils.sql import read_sql_to_polars, read_sql_to_polars_by_chunks
 
 if TYPE_CHECKING:
     from elastic_transport import ObjectApiResponse
@@ -55,6 +59,10 @@ class ElasticsearchSQLCursor:
         }
         self._response: ObjectApiResponse | None = None
 
+        # Internal mutable row buffer used to progressively consume
+        # paginated Elasticsearch SQL cursor results.
+        self._rows: deque[list[Any]] = deque()
+
     @property
     def response(self) -> ObjectApiResponse:
         return self._response or {}  # type: ignore
@@ -69,11 +77,11 @@ class ElasticsearchSQLCursor:
 
     @property
     def rows(self):
-        return self.response.get("rows", [])
+        return self._rows
 
     @property
     def rowcount(self) -> int:
-        return len(self.rows)
+        return len(self.response.get("rows", []))
 
     @property
     def description(self) -> list[tuple]:
@@ -82,26 +90,57 @@ class ElasticsearchSQLCursor:
     def execute(
         self, statement: str, params: Iterable | Mapping[str, Any] | None = None
     ) -> ObjectApiResponse:
-        self.body["query"] = statement
-        if params:
-            self.body["params"] = params
-        self.response = self.es.sql.query(body=self.body)
+
+        if self.body.get("cursor"):
+            self.response = self.es.sql.query(cursor=self.body["cursor"])
+        else:
+            self.body["query"] = statement
+
+            if params:
+                self.body["params"] = params
+
+            self.response = self.es.sql.query(**self.body)
+
+        self._rows = deque(self.response.get("rows", []))
+
         if self.cursor:
             self.body["cursor"] = self.cursor
         else:
             self.body.pop("cursor", None)
+
         return self.response
 
     def fetchone(self):
-        if self.rows:
-            return self.rows[0]
-        return None
+        while True:
+            if self._rows:
+                return self._rows.popleft()
+
+            if not self.cursor:
+                return None
+
+            self.execute(statement=self.body["query"])
 
     def fetchmany(self, size: int | None = None):
-        raise NotImplementedError()
+        size = size or self.body["fetch_size"]
+
+        results: list[list[Any]] = []
+
+        while len(results) < size:
+            while self._rows and len(results) < size:
+                results.append(self._rows.popleft())
+
+            if len(results) >= size:
+                break
+
+            if not self.cursor:
+                break
+
+            self.execute(statement=self.body["query"])
+
+        return results
 
     def fetchall(self):
-        results = self.rows
+        results = list(self.rows)
         while self.cursor:
             self.execute(statement=self.body["query"])
             results.extend(self.rows)
@@ -128,13 +167,15 @@ class ESConnection:
         self.user = user
         self.password = password
         self.scheme = scheme
-        self.kwargs = kwargs
+        self.kwargs = deepcopy(kwargs)
+        kwargs.pop("fetch_size", None)
+        kwargs.pop("field_multi_value_leniency", None)
         netloc = f"{host}:{port}"
         self.url = parse.urlunparse((scheme, netloc, "/", None, None, None))
         if user and password:
-            self.es = Elasticsearch(self.url, http_auth=(user, password), **self.kwargs)
+            self.es = apply_compat_with(Elasticsearch(self.url, basic_auth=(user, password), **kwargs))
         else:
-            self.es = Elasticsearch(self.url, **self.kwargs)
+            self.es = apply_compat_with(Elasticsearch(self.url, **kwargs))
 
     def cursor(self) -> ElasticsearchSQLCursor:
         return ElasticsearchSQLCursor(self.es, **self.kwargs)
@@ -176,8 +217,8 @@ class ElasticsearchSQLHook(DbApiHook):
         conn = self.connection
 
         conn_args = {
-            "host": conn.host,
-            "port": conn.port,
+            "host": cast("str", conn.host),
+            "port": cast("int", conn.port),
             "user": conn.login or None,
             "password": conn.password or None,
             "scheme": conn.schema or "http",
@@ -188,7 +229,7 @@ class ElasticsearchSQLHook(DbApiHook):
         if conn_args.get("http_compress", False):
             conn_args["http_compress"] = bool(conn_args["http_compress"])
 
-        return connect(**conn_args)
+        return connect(**conn_args)  # type: ignore[arg-type]
 
     def get_uri(self) -> str:
         conn = self.connection
@@ -196,7 +237,7 @@ class ElasticsearchSQLHook(DbApiHook):
         login = ""
         if conn.login:
             login = f"{conn.login}:{conn.password}@"
-        host = conn.host
+        host = conn.host or ""
         if conn.port is not None:
             host += f":{conn.port}"
         uri = f"{conn.conn_type}+{conn.schema}://{login}{host}/"
@@ -216,6 +257,62 @@ class ElasticsearchSQLHook(DbApiHook):
 
         return uri
 
+    def _get_polars_df(
+        self,
+        sql,
+        parameters: list | tuple | Mapping[str, Any] | None = None,
+        **kwargs,
+    ):
+        """
+        Execute an Elasticsearch SQL query and return the results as a Polars DataFrame.
+
+        This method uses Elasticsearch SQL cursor-based pagination instead of DB-API,
+        as Elasticsearch is not fully compatible with polars.read_database.
+
+        :param sql: SQL query string
+        :param parameters: Optional query parameters
+        :param kwargs: Additional arguments passed to the underlying reader
+        :return: polars.DataFrame
+        """
+        client = self.get_conn().es
+
+        return read_sql_to_polars(
+            client=client,
+            query=sql,
+            params=parameters,
+            **kwargs,
+        )
+
+    def _get_polars_df_by_chunks(
+        self,
+        sql,
+        parameters=None,
+        *,
+        chunksize: int,
+        **kwargs,
+    ):
+        """
+        Execute an Elasticsearch SQL query and return the results as chunked Polars DataFrames.
+
+        This method uses Elasticsearch SQL cursor-based pagination instead of DB-API,
+        as Elasticsearch is not fully compatible with polars.read_database.
+
+        :param sql: SQL query string
+        :param parameters: Optional query parameters
+        :param chunksize: Number of rows per yielded DataFrame
+        :param kwargs: Additional arguments passed to the underlying reader
+        :return: Generator of polars.DataFrame objects
+        """
+        client = self.get_conn().es
+
+        yield from read_sql_to_polars_by_chunks(
+            client=client,
+            query=sql,
+            params=parameters,
+            chunksize=chunksize,
+            **kwargs,
+        )
+
 
 class ElasticsearchPythonHook(BaseHook):
     """
@@ -233,7 +330,7 @@ class ElasticsearchPythonHook(BaseHook):
 
     def _get_elastic_connection(self):
         """Return the Elasticsearch client."""
-        client = Elasticsearch(self.hosts, **self.es_conn_args)
+        client = apply_compat_with(Elasticsearch(self.hosts, **self.es_conn_args))
 
         return client
 
@@ -252,5 +349,5 @@ class ElasticsearchPythonHook(BaseHook):
         :returns: dict: The response 'hits' object from Elasticsearch
         """
         es_client = self.get_conn
-        result = es_client.search(index=index, body=query)
+        result = es_client.search(index=index, **query)
         return result["hits"]

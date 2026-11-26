@@ -26,79 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-amazon",
         "name": "Amazon",
         "description": "Amazon integration (including `Amazon Web Services (AWS) <https://aws.amazon.com/>`__).\n",
-        "state": "ready",
-        "source-date-epoch": 1743477760,
-        "versions": [
-            "9.5.0",
-            "9.4.0",
-            "9.2.0",
-            "9.1.0",
-            "9.0.0",
-            "8.29.0",
-            "8.28.0",
-            "8.27.0",
-            "8.26.0",
-            "8.25.0",
-            "8.24.0",
-            "8.23.0",
-            "8.22.0",
-            "8.21.0",
-            "8.20.0",
-            "8.19.0",
-            "8.18.0",
-            "8.17.0",
-            "8.16.0",
-            "8.15.0",
-            "8.14.0",
-            "8.13.0",
-            "8.12.0",
-            "8.11.0",
-            "8.10.0",
-            "8.9.0",
-            "8.8.0",
-            "8.7.1",
-            "8.7.0",
-            "8.6.0",
-            "8.5.1",
-            "8.5.0",
-            "8.4.0",
-            "8.3.1",
-            "8.3.0",
-            "8.2.0",
-            "8.1.0",
-            "8.0.0",
-            "7.4.1",
-            "7.4.0",
-            "7.3.0",
-            "7.2.1",
-            "7.2.0",
-            "7.1.0",
-            "7.0.0",
-            "6.2.0",
-            "6.1.0",
-            "6.0.0",
-            "5.1.0",
-            "5.0.0",
-            "4.1.0",
-            "4.0.0",
-            "3.4.0",
-            "3.3.0",
-            "3.2.0",
-            "3.1.1",
-            "3.0.0",
-            "2.6.0",
-            "2.5.0",
-            "2.4.0",
-            "2.3.0",
-            "2.2.0",
-            "2.1.0",
-            "2.0.0",
-            "1.4.0",
-            "1.3.0",
-            "1.2.0",
-            "1.1.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Amazon Athena",
@@ -107,7 +34,14 @@ def get_provider_info():
                 "how-to-guide": [
                     "/docs/apache-airflow-providers-amazon/operators/athena/athena_boto.rst",
                     "/docs/apache-airflow-providers-amazon/operators/athena/athena_sql.rst",
+                    "/docs/apache-airflow-providers-amazon/operators/athena/athena_spark.rst",
                 ],
+                "tags": ["aws"],
+            },
+            {
+                "integration-name": "DuckDB on AWS",
+                "external-doc-url": "https://duckdb.org/docs/stable/extensions/httpfs/s3api",
+                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/duckdb.rst"],
                 "tags": ["aws"],
             },
             {
@@ -167,12 +101,14 @@ def get_provider_info():
                 "integration-name": "Amazon Elastic Container Registry (ECR)",
                 "external-doc-url": "https://aws.amazon.com/ecr/",
                 "logo": "/docs/integration-logos/Amazon-Elastic-Container-Registry_light-bg@4x.png",
+                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/ecr.rst"],
                 "tags": ["aws"],
             },
             {
                 "integration-name": "Amazon ECS",
                 "external-doc-url": "https://aws.amazon.com/ecs/",
                 "logo": "/docs/integration-logos/Amazon-Elastic-Container-Service_light-bg@4x.png",
+                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/ecs.rst"],
                 "tags": ["aws"],
             },
             {
@@ -295,7 +231,7 @@ def get_provider_info():
                 "integration-name": "Amazon Simple Email Service (SES)",
                 "external-doc-url": "https://aws.amazon.com/ses/",
                 "logo": "/docs/integration-logos/Amazon-Simple-Email-Service-SES_light-bg@4x.png",
-                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/ecs.rst"],
+                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/ses.rst"],
                 "tags": ["aws"],
             },
             {
@@ -320,9 +256,17 @@ def get_provider_info():
                 "tags": ["aws"],
             },
             {
+                "integration-name": "Amazon S3 Tables",
+                "external-doc-url": "https://aws.amazon.com/s3/features/tables/",
+                "logo": "/docs/integration-logos/Amazon-Simple-Storage-Service-S3_light-bg@4x.png",
+                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/s3_tables.rst"],
+                "tags": ["aws"],
+            },
+            {
                 "integration-name": "Amazon Systems Manager (SSM)",
                 "external-doc-url": "https://aws.amazon.com/systems-manager/",
                 "logo": "/docs/integration-logos/AWS-Systems-Manager_light-bg@4x.png",
+                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/ssm.rst"],
                 "tags": ["aws"],
             },
             {
@@ -348,7 +292,10 @@ def get_provider_info():
                 "integration-name": "AWS Glue",
                 "external-doc-url": "https://aws.amazon.com/glue/",
                 "logo": "/docs/integration-logos/AWS-Glue_light-bg@4x.png",
-                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/glue.rst"],
+                "how-to-guide": [
+                    "/docs/apache-airflow-providers-amazon/operators/glue.rst",
+                    "/docs/apache-airflow-providers-amazon/operators/glue_catalog.rst",
+                ],
                 "tags": ["aws"],
             },
             {
@@ -406,17 +353,60 @@ def get_provider_info():
                 "tags": ["aws"],
             },
             {
+                "integration-name": "Amazon MWAA Serverless",
+                "external-doc-url": "https://docs.aws.amazon.com/mwaa/latest/userguide/mwaa-serverless.html",
+                "logo": "/docs/integration-logos/Amazon-MWAA.png",
+                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/mwaa_serverless.rst"],
+                "tags": ["aws"],
+            },
+            {
                 "integration-name": "Amazon Neptune",
                 "external-doc-url": "https://aws.amazon.com/neptune/",
                 "logo": "/docs/integration-logos/Amazon-Neptune_64.png",
                 "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/neptune.rst"],
                 "tags": ["aws"],
             },
+            {
+                "integration-name": "Amazon Kinesis Data Stream",
+                "external-doc-url": "https://aws.amazon.com/kinesis/",
+                "logo": "/docs/integration-logos/Amazon-Kinesis-Data-Firehose_light-bg@4x.png",
+                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/kinesis_analytics.rst"],
+                "tags": ["aws"],
+            },
+            {
+                "integration-name": "Amazon Managed Workflows for Apache Airflow (MWAA)",
+                "external-doc-url": "https://aws.amazon.com/managed-workflows-for-apache-airflow/",
+                "logo": "/docs/integration-logos/Amazon-MWAA.png",
+                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/mwaa.rst"],
+                "tags": ["aws"],
+            },
+            {
+                "integration-name": "Amazon Neptune Analytics",
+                "external-doc-url": "https://docs.aws.amazon.com/neptune-analytics/latest/userguide/gettingStarted.html",
+                "logo": "/docs/integration-logos/Amazon-Neptune_64.png",
+                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/neptune_analytics.rst"],
+                "tags": ["aws"],
+            },
+            {
+                "integration-name": "Amazon MSK",
+                "external-doc-url": "https://aws.amazon.com/msk/",
+                "tags": ["aws"],
+            },
+            {
+                "integration-name": "Amazon S3 Vectors",
+                "external-doc-url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors.html",
+                "logo": "/docs/integration-logos/Amazon-Simple-Storage-Service-S3_light-bg@4x.png",
+                "how-to-guide": ["/docs/apache-airflow-providers-amazon/operators/s3_vectors.rst"],
+                "tags": ["aws"],
+            },
         ],
         "operators": [
             {
                 "integration-name": "Amazon Athena",
-                "python-modules": ["airflow.providers.amazon.aws.operators.athena"],
+                "python-modules": [
+                    "airflow.providers.amazon.aws.operators.athena",
+                    "airflow.providers.amazon.aws.operators.athena_spark",
+                ],
             },
             {
                 "integration-name": "Amazon Web Services",
@@ -451,6 +441,10 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.amazon.aws.operators.ec2"],
             },
             {
+                "integration-name": "Amazon Elastic Container Registry (ECR)",
+                "python-modules": ["airflow.providers.amazon.aws.operators.ecr"],
+            },
+            {
                 "integration-name": "Amazon ECS",
                 "python-modules": ["airflow.providers.amazon.aws.operators.ecs"],
             },
@@ -478,6 +472,7 @@ def get_provider_info():
                 "integration-name": "AWS Glue",
                 "python-modules": [
                     "airflow.providers.amazon.aws.operators.glue",
+                    "airflow.providers.amazon.aws.operators.glue_catalog",
                     "airflow.providers.amazon.aws.operators.glue_crawler",
                 ],
             },
@@ -494,8 +489,20 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.amazon.aws.operators.mwaa"],
             },
             {
+                "integration-name": "Amazon MWAA Serverless",
+                "python-modules": ["airflow.providers.amazon.aws.operators.mwaa_serverless"],
+            },
+            {
+                "integration-name": "Amazon OpenSearch Serverless",
+                "python-modules": ["airflow.providers.amazon.aws.operators.opensearch_serverless"],
+            },
+            {
                 "integration-name": "Amazon Simple Storage Service (S3)",
                 "python-modules": ["airflow.providers.amazon.aws.operators.s3"],
+            },
+            {
+                "integration-name": "Amazon S3 Tables",
+                "python-modules": ["airflow.providers.amazon.aws.operators.s3_tables"],
             },
             {
                 "integration-name": "Amazon SageMaker",
@@ -503,7 +510,14 @@ def get_provider_info():
             },
             {
                 "integration-name": "Amazon SageMaker Unified Studio",
-                "python-modules": ["airflow.providers.amazon.aws.operators.sagemaker_unified_studio"],
+                "python-modules": [
+                    "airflow.providers.amazon.aws.operators.sagemaker_unified_studio",
+                    "airflow.providers.amazon.aws.operators.sagemaker_unified_studio_notebook",
+                ],
+            },
+            {
+                "integration-name": "Amazon Simple Email Service (SES)",
+                "python-modules": ["airflow.providers.amazon.aws.operators.ses"],
             },
             {
                 "integration-name": "Amazon Simple Notification Service (SNS)",
@@ -516,6 +530,10 @@ def get_provider_info():
             {
                 "integration-name": "AWS Step Functions",
                 "python-modules": ["airflow.providers.amazon.aws.operators.step_function"],
+            },
+            {
+                "integration-name": "Amazon Systems Manager (SSM)",
+                "python-modules": ["airflow.providers.amazon.aws.operators.ssm"],
             },
             {
                 "integration-name": "Amazon RDS",
@@ -542,13 +560,23 @@ def get_provider_info():
             },
             {
                 "integration-name": "Amazon Neptune",
-                "python-modules": ["airflow.providers.amazon.aws.operators.neptune"],
+                "python-modules": [
+                    "airflow.providers.amazon.aws.operators.neptune",
+                    "airflow.providers.amazon.aws.operators.neptune_analytics",
+                ],
+            },
+            {
+                "integration-name": "Amazon S3 Vectors",
+                "python-modules": ["airflow.providers.amazon.aws.operators.s3_vectors"],
             },
         ],
         "sensors": [
             {
                 "integration-name": "Amazon Athena",
-                "python-modules": ["airflow.providers.amazon.aws.sensors.athena"],
+                "python-modules": [
+                    "airflow.providers.amazon.aws.sensors.athena",
+                    "airflow.providers.amazon.aws.sensors.athena_spark",
+                ],
             },
             {
                 "integration-name": "Amazon Web Services",
@@ -623,6 +651,10 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.amazon.aws.sensors.mwaa"],
             },
             {
+                "integration-name": "Amazon MWAA Serverless",
+                "python-modules": ["airflow.providers.amazon.aws.sensors.mwaa_serverless"],
+            },
+            {
                 "integration-name": "Amazon OpenSearch Serverless",
                 "python-modules": ["airflow.providers.amazon.aws.sensors.opensearch_serverless"],
             },
@@ -644,7 +676,10 @@ def get_provider_info():
             },
             {
                 "integration-name": "Amazon SageMaker Unified Studio",
-                "python-modules": ["airflow.providers.amazon.aws.sensors.sagemaker_unified_studio"],
+                "python-modules": [
+                    "airflow.providers.amazon.aws.sensors.sagemaker_unified_studio",
+                    "airflow.providers.amazon.aws.sensors.sagemaker_unified_studio_notebook",
+                ],
             },
             {
                 "integration-name": "Amazon Simple Queue Service (SQS)",
@@ -653,6 +688,10 @@ def get_provider_info():
             {
                 "integration-name": "AWS Step Functions",
                 "python-modules": ["airflow.providers.amazon.aws.sensors.step_function"],
+            },
+            {
+                "integration-name": "Amazon Systems Manager (SSM)",
+                "python-modules": ["airflow.providers.amazon.aws.sensors.ssm"],
             },
             {
                 "integration-name": "Amazon QuickSight",
@@ -665,7 +704,13 @@ def get_provider_info():
                 "handler": "airflow.providers.amazon.aws.assets.s3.sanitize_uri",
                 "to_openlineage_converter": "airflow.providers.amazon.aws.assets.s3.convert_asset_to_openlineage",
                 "factory": "airflow.providers.amazon.aws.assets.s3.create_asset",
-            }
+            },
+            {
+                "schemes": ["redshift"],
+                "handler": "airflow.providers.amazon.aws.assets.redshift.sanitize_uri",
+                "factory": "airflow.providers.amazon.aws.assets.redshift.create_asset",
+                "to_openlineage_converter": "airflow.providers.amazon.aws.assets.redshift.convert_asset_to_openlineage",
+            },
         ],
         "dataset-uris": [
             {
@@ -673,9 +718,21 @@ def get_provider_info():
                 "handler": "airflow.providers.amazon.aws.assets.s3.sanitize_uri",
                 "to_openlineage_converter": "airflow.providers.amazon.aws.assets.s3.convert_asset_to_openlineage",
                 "factory": "airflow.providers.amazon.aws.assets.s3.create_asset",
-            }
+            },
+            {
+                "schemes": ["redshift"],
+                "handler": "airflow.providers.amazon.aws.assets.redshift.sanitize_uri",
+                "factory": "airflow.providers.amazon.aws.assets.redshift.create_asset",
+                "to_openlineage_converter": "airflow.providers.amazon.aws.assets.redshift.convert_asset_to_openlineage",
+            },
         ],
         "filesystems": ["airflow.providers.amazon.aws.fs.s3"],
+        "object-storage-providers": [
+            {
+                "storage-type": "s3",
+                "provider-class-name": "airflow.providers.amazon.aws.datafusion.object_storage.S3ObjectStorageProvider",
+            }
+        ],
         "hooks": [
             {
                 "integration-name": "Amazon Athena",
@@ -683,6 +740,10 @@ def get_provider_info():
                     "airflow.providers.amazon.aws.hooks.athena",
                     "airflow.providers.amazon.aws.hooks.athena_sql",
                 ],
+            },
+            {
+                "integration-name": "DuckDB on AWS",
+                "python-modules": ["airflow.providers.amazon.aws.hooks.duckdb"],
             },
             {
                 "integration-name": "Amazon Bedrock",
@@ -759,8 +820,12 @@ def get_provider_info():
                 ],
             },
             {
-                "integration-name": "Amazon Kinesis Data Firehose",
+                "integration-name": "Amazon Kinesis Data Stream",
                 "python-modules": ["airflow.providers.amazon.aws.hooks.kinesis"],
+            },
+            {
+                "integration-name": "Amazon Kinesis Data Firehose",
+                "python-modules": ["airflow.providers.amazon.aws.hooks.firehose"],
             },
             {
                 "integration-name": "AWS Lambda",
@@ -796,12 +861,19 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.amazon.aws.hooks.s3"],
             },
             {
+                "integration-name": "Amazon S3 Tables",
+                "python-modules": ["airflow.providers.amazon.aws.hooks.s3_tables"],
+            },
+            {
                 "integration-name": "Amazon SageMaker",
                 "python-modules": ["airflow.providers.amazon.aws.hooks.sagemaker"],
             },
             {
                 "integration-name": "Amazon SageMaker Unified Studio",
-                "python-modules": ["airflow.providers.amazon.aws.hooks.sagemaker_unified_studio"],
+                "python-modules": [
+                    "airflow.providers.amazon.aws.hooks.sagemaker_unified_studio",
+                    "airflow.providers.amazon.aws.hooks.sagemaker_unified_studio_notebook",
+                ],
             },
             {
                 "integration-name": "Amazon Simple Email Service (SES)",
@@ -849,8 +921,18 @@ def get_provider_info():
             },
             {
                 "integration-name": "Amazon Neptune",
-                "python-modules": ["airflow.providers.amazon.aws.hooks.neptune"],
+                "python-modules": [
+                    "airflow.providers.amazon.aws.hooks.neptune",
+                    "airflow.providers.amazon.aws.hooks.neptune_analytics",
+                ],
             },
+            {"integration-name": "Amazon MSK", "python-modules": ["airflow.providers.amazon.aws.hooks.msk"]},
+        ],
+        "bundles": [
+            {
+                "integration-name": "Amazon Simple Storage Service (S3)",
+                "python-modules": ["airflow.providers.amazon.aws.bundles.s3"],
+            }
         ],
         "triggers": [
             {
@@ -874,12 +956,20 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.amazon.aws.triggers.comprehend"],
             },
             {
+                "integration-name": "Amazon DynamoDB",
+                "python-modules": ["airflow.providers.amazon.aws.triggers.dynamodb"],
+            },
+            {
                 "integration-name": "Amazon EC2",
                 "python-modules": ["airflow.providers.amazon.aws.triggers.ec2"],
             },
             {
                 "integration-name": "AWS Lambda",
                 "python-modules": ["airflow.providers.amazon.aws.triggers.lambda_function"],
+            },
+            {
+                "integration-name": "Amazon Kinesis Data Stream",
+                "python-modules": ["airflow.providers.amazon.aws.triggers.kinesis"],
             },
             {
                 "integration-name": "Amazon Managed Workflows for Apache Airflow (MWAA)",
@@ -906,7 +996,10 @@ def get_provider_info():
             },
             {
                 "integration-name": "Amazon SageMaker Unified Studio",
-                "python-modules": ["airflow.providers.amazon.aws.triggers.sagemaker_unified_studio"],
+                "python-modules": [
+                    "airflow.providers.amazon.aws.triggers.sagemaker_unified_studio",
+                    "airflow.providers.amazon.aws.triggers.sagemaker_unified_studio_notebook",
+                ],
             },
             {
                 "integration-name": "AWS Glue",
@@ -918,6 +1011,10 @@ def get_provider_info():
             {
                 "integration-name": "Amazon Simple Storage Service (S3)",
                 "python-modules": ["airflow.providers.amazon.aws.triggers.s3"],
+            },
+            {
+                "integration-name": "Amazon Systems Manager (SSM)",
+                "python-modules": ["airflow.providers.amazon.aws.triggers.ssm"],
             },
             {
                 "integration-name": "Amazon EMR",
@@ -949,11 +1046,18 @@ def get_provider_info():
             },
             {
                 "integration-name": "Amazon Neptune",
-                "python-modules": ["airflow.providers.amazon.aws.triggers.neptune"],
+                "python-modules": [
+                    "airflow.providers.amazon.aws.triggers.neptune",
+                    "airflow.providers.amazon.aws.triggers.neptune_analytics",
+                ],
             },
             {
                 "integration-name": "AWS Database Migration Service",
                 "python-modules": ["airflow.providers.amazon.aws.triggers.dms"],
+            },
+            {
+                "integration-name": "Amazon QuickSight",
+                "python-modules": ["airflow.providers.amazon.aws.triggers.quicksight"],
             },
         ],
         "transfers": [
@@ -1038,6 +1142,7 @@ def get_provider_info():
             {
                 "source-integration-name": "Exasol",
                 "target-integration-name": "Amazon Simple Storage Service (S3)",
+                "how-to-guide": "/docs/apache-airflow-providers-amazon/transfer/exasol_to_s3.rst",
                 "python-module": "airflow.providers.amazon.aws.transfers.exasol_to_s3",
             },
             {
@@ -1111,28 +1216,88 @@ def get_provider_info():
             "airflow.providers.amazon.aws.links.datasync.DataSyncTaskExecutionLink",
             "airflow.providers.amazon.aws.links.ec2.EC2InstanceLink",
             "airflow.providers.amazon.aws.links.ec2.EC2InstanceDashboardLink",
+            "airflow.providers.amazon.aws.links.neptune_analytics.NeptuneGraphLink",
+            "airflow.providers.amazon.aws.links.neptune_analytics.NeptuneImportTaskLink",
+            "airflow.providers.amazon.aws.links.ec2.VpcEndpointLink",
         ],
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.amazon.aws.hooks.base_aws.AwsGenericHook",
+                "hook-name": "Amazon Web Services",
                 "connection-type": "aws",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["host", "schema", "port"],
+                    "relabeling": {"login": "AWS Access Key ID", "password": "AWS Secret Access Key"},
+                    "placeholders": {
+                        "login": "YOUR_AWS_ACCESS_KEY_ID",
+                        "password": "YOUR_AWS_SECRET_ACCESS_KEY",
+                        "extra": '{\n  "region_name": "us-east-1",\n  "session_kwargs": {"profile_name": "default"},\n  "config_kwargs": {"retries": {"mode": "standard", "max_attempts": 10}},\n  "role_arn": "arn:aws:iam::123456789098:role/role-name",\n  "assume_role_method": "assume_role",\n  "assume_role_kwargs": {"RoleSessionName": "airflow"},\n  "aws_session_token": "YOUR_AWS_SESSION_TOKEN",\n  "endpoint_url": "http://localhost:4566"\n}\n',
+                    },
+                },
             },
             {
                 "hook-class-name": "airflow.providers.amazon.aws.hooks.chime.ChimeWebhookHook",
+                "hook-name": "Amazon Chime Webhook",
                 "connection-type": "chime",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["login", "port", "extra"],
+                    "relabeling": {"host": "Chime Webhook Endpoint", "password": "Chime Webhook token"},
+                    "placeholders": {
+                        "schema": "https",
+                        "host": "hooks.chime.aws/incomingwebhook/",
+                        "password": "T00000000?token=XXXXXXXXXXXXXXXXXXXXXXXX",
+                    },
+                },
             },
-            {"hook-class-name": "airflow.providers.amazon.aws.hooks.emr.EmrHook", "connection-type": "emr"},
+            {
+                "hook-class-name": "airflow.providers.amazon.aws.hooks.duckdb.AwsDuckDBHook",
+                "hook-name": "DuckDB on AWS",
+                "connection-type": "duckdb_aws",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["login", "password", "port", "schema"],
+                    "relabeling": {"host": "Database path"},
+                    "placeholders": {
+                        "host": "/tmp/analytics.duckdb (leave empty for an in-memory database)",
+                        "extra": '{\n  "credential_strategy": "credential_chain",\n  "region_name": "us-east-1",\n  "memory_limit": "2GB",\n  "threads": 4\n}\n',
+                    },
+                },
+            },
+            {
+                "hook-class-name": "airflow.providers.amazon.aws.hooks.emr.EmrHook",
+                "hook-name": "Amazon Elastic MapReduce",
+                "connection-type": "emr",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["host", "schema", "port", "login", "password"],
+                    "relabeling": {"extra": "Run Job Flow Configuration"},
+                    "placeholders": {
+                        "extra": '{\n  "Name": "MyClusterName",\n  "ReleaseLabel": "emr-5.36.0",\n  "Applications": [{"Name": "Spark"}],\n  "Instances": {\n    "InstanceGroups": [{\n      "Name": "Primary node",\n      "Market": "SPOT",\n      "InstanceRole": "MASTER",\n      "InstanceType": "m5.large",\n      "InstanceCount": 1\n    }],\n    "KeepJobFlowAliveWhenNoSteps": false,\n    "TerminationProtected": false\n  },\n  "StepConcurrencyLevel": 2\n}\n'
+                    },
+                },
+            },
             {
                 "hook-class-name": "airflow.providers.amazon.aws.hooks.redshift_sql.RedshiftSQLHook",
+                "hook-name": "Amazon Redshift",
                 "connection-type": "redshift",
+                "ui-field-behaviour": {"relabeling": {"login": "User", "schema": "Database"}},
             },
             {
                 "hook-class-name": "airflow.providers.amazon.aws.hooks.athena_sql.AthenaSQLHook",
+                "hook-name": "Amazon Athena",
                 "connection-type": "athena",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["host", "port"],
+                    "relabeling": {"login": "AWS Access Key ID", "password": "AWS Secret Access Key"},
+                    "placeholders": {
+                        "login": "YOUR_AWS_ACCESS_KEY_ID",
+                        "password": "YOUR_AWS_SECRET_ACCESS_KEY",
+                        "extra": '{\n  "aws_domain": "amazonaws.com",\n  "driver": "rest",\n  "s3_staging_dir": "s3://bucket_name/staging/",\n  "work_group": "primary",\n  "region_name": "us-east-1",\n  "session_kwargs": {"profile_name": "default"},\n  "config_kwargs": {"retries": {"mode": "standard", "max_attempts": 10}},\n  "role_arn": "arn:aws:iam::123456789098:role/role-name",\n  "assume_role_method": "assume_role",\n  "assume_role_kwargs": {"RoleSessionName": "airflow"},\n  "aws_session_token": "YOUR_AWS_SESSION_TOKEN",\n  "endpoint_url": "http://localhost:4566"\n}\n',
+                    },
+                },
             },
         ],
         "notifications": [
             "airflow.providers.amazon.aws.notifications.chime.ChimeNotifier",
+            "airflow.providers.amazon.aws.notifications.ses.SesNotifier",
             "airflow.providers.amazon.aws.notifications.sns.SnsNotifier",
             "airflow.providers.amazon.aws.notifications.sqs.SqsNotifier",
         ],
@@ -1140,9 +1305,17 @@ def get_provider_info():
             "airflow.providers.amazon.aws.secrets.secrets_manager.SecretsManagerBackend",
             "airflow.providers.amazon.aws.secrets.systems_manager.SystemsManagerParameterStoreBackend",
         ],
+        "email-backends": ["airflow.providers.amazon.aws.utils.emailer.send_email"],
         "logging": [
             "airflow.providers.amazon.aws.log.s3_task_handler.S3TaskHandler",
             "airflow.providers.amazon.aws.log.cloudwatch_task_handler.CloudwatchTaskHandler",
+        ],
+        "remote-logging": [
+            {
+                "classpath": "airflow.providers.amazon.aws.log.cloudwatch_task_handler.CloudWatchRemoteLogIO",
+                "scheme": "cloudwatch",
+            },
+            {"classpath": "airflow.providers.amazon.aws.log.s3_task_handler.S3RemoteLogIO", "scheme": "s3"},
         ],
         "config": {
             "aws": {
@@ -1161,6 +1334,13 @@ def get_provider_info():
                         "version_added": "8.7.2",
                         "example": "airflow.providers.amazon.aws.log.cloudwatch_task_handler.json_serialize",
                         "default": "airflow.providers.amazon.aws.log.cloudwatch_task_handler.json_serialize_legacy",
+                    },
+                    "s3_task_handler_acl_policy": {
+                        "description": "The ACL applied to task log objects uploaded to S3 by the S3 remote log handler,\nfor example ``bucket-owner-full-control``.\n\nThis is primarily useful for cross-account remote logging: when Airflow runs under one AWS\naccount but writes logs to a bucket owned by another account, S3 makes the writing account\nthe object owner, so the bucket owner cannot read or manage the log objects. Setting\n``bucket-owner-full-control`` grants the bucket owner full control over the uploaded logs.\n\nWhen unset, no ACL is sent and the bucket's default object ownership applies.\n",
+                        "type": "string",
+                        "version_added": "9.34.0",
+                        "example": "bucket-owner-full-control",
+                        "default": None,
                     },
                 },
             },
@@ -1222,6 +1402,74 @@ def get_provider_info():
                         "type": "string",
                         "example": '{"Tags": [{"Key": "key", "Value": "value"}]}',
                         "default": None,
+                    },
+                },
+            },
+            "aws_lambda_executor": {
+                "description": "This section only applies if you are using the AwsLambdaExecutor in\nAirflow's ``[core.executor]`` configuration.\nFor more information see:\nhttps://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/lambda/client/invoke.html\nhttps://boto3.amazonaws.com/v1/documentation/api/latest/guide/configuration.html\nhttps://airflow.apache.org/docs/apache-airflow-providers-amazon/stable/executors/lambda-executor.html\n",
+                "options": {
+                    "conn_id": {
+                        "description": "The Airflow connection (i.e. credentials) used by the Lambda executor to make API calls.\n",
+                        "version_added": "9.9.0",
+                        "type": "string",
+                        "example": "aws_default",
+                        "default": "aws_default",
+                    },
+                    "region_name": {
+                        "description": "The name of the AWS Region where Amazon Lambda is configured.\n",
+                        "version_added": "9.9.0",
+                        "type": "string",
+                        "example": "us-east-1",
+                        "default": None,
+                    },
+                    "check_health_on_startup": {
+                        "description": "Whether or not to check the Lambda Executor health on startup.\n",
+                        "version_added": "9.9.0",
+                        "type": "boolean",
+                        "example": "True",
+                        "default": "True",
+                    },
+                    "max_invoke_attempts": {
+                        "description": "The maximum number of times the Lambda Executor should attempt to start an Airflow task.\n",
+                        "version_added": "9.9.0",
+                        "type": "integer",
+                        "example": "3",
+                        "default": "3",
+                    },
+                    "queue_url": {
+                        "description": "The URL of the SQS queue to use for the Lambda executor. Required.\nThe Lambda executor will poll this queue for results of the lambda function's Airflow Task.\n",
+                        "version_added": "9.9.0",
+                        "type": "string",
+                        "example": "airflow-lambda-executor-results-queue",
+                        "default": None,
+                    },
+                    "dead_letter_queue_url": {
+                        "description": "The URL of the SQS dead letter queue to use for the Lambda function. The Lambda executor\nwill poll this queue for timeout/exception results of the lambda function. Required\n",
+                        "version_added": "9.9.0",
+                        "type": "string",
+                        "example": "airflow-lambda-executor-dlq",
+                        "default": None,
+                    },
+                    "function_name": {
+                        "description": "The name of the Lambda function to invoke. Required.\n",
+                        "version_added": "9.9.0",
+                        "type": "string",
+                        "example": "airflow-lambda-executor-function",
+                        "default": None,
+                    },
+                    "qualifier": {
+                        "description": "The version or alias of the Lambda function to invoke. If not specified, the latest version is used.\n",
+                        "version_added": "9.9.0",
+                        "type": "string",
+                        "example": "1",
+                        "default": None,
+                    },
+                    "end_wait_timeout": {
+                        "description": "The number of seconds to wait for all lambda executor invocations to complete when terminating the\nexecutor/scheduler. Default of 0 means wait indefinitely.\n",
+                        "version_added": "9.9.0",
+                        "type": "integer",
+                        "example": "500",
+                        "default": "0",
                     },
                 },
             },
@@ -1312,6 +1560,13 @@ def get_provider_info():
                         "example": "3",
                         "default": "3",
                     },
+                    "run_task_concurrency": {
+                        "description": "The maximum number of ECS RunTask calls the ECS Executor makes in parallel. With 1, tasks are\nlaunched one at a time and the scheduler loop waits for each call. With more, the calls run in\nbackground threads and the scheduler loop does not wait for them.\n",
+                        "version_added": "9.40.0",
+                        "type": "integer",
+                        "example": "16",
+                        "default": "1",
+                    },
                     "run_task_kwargs": {
                         "description": "A JSON string containing arguments to provide the ECS `run_task` API (see url above).\n",
                         "version_added": "8.10",
@@ -1328,16 +1583,42 @@ def get_provider_info():
                     },
                 },
             },
+            "aws_eks_executor": {
+                "description": "This section only applies if you are using the AwsEksExecutor in\nAirflow's ``[core]`` configuration. It requires the ``cncf.kubernetes``\nextra of this provider. The executor supplies the Kubernetes client for\nthe configured Amazon EKS cluster; all pod-level settings are still read\nfrom the ``[kubernetes_executor]`` section.\nFor boto3 credential management, see\nhttps://boto3.amazonaws.com/v1/documentation/api/latest/guide/configuration.html\n",
+                "options": {
+                    "conn_id": {
+                        "description": "The Airflow connection (i.e. credentials) used by the EKS executor to\nmake API calls to Amazon EKS.\n",
+                        "version_added": "9.39.0",
+                        "type": "string",
+                        "example": "aws_default",
+                        "default": "aws_default",
+                    },
+                    "region_name": {
+                        "description": "The name of the AWS Region where the EKS cluster is located. If not\nspecified, falls back to the AWS connection's region, then boto3's.\n",
+                        "version_added": "9.39.0",
+                        "type": "string",
+                        "example": "us-east-1",
+                        "default": None,
+                    },
+                    "check_health_on_startup": {
+                        "description": "Whether or not to check the EKS Executor health on startup.\n",
+                        "version_added": "9.39.0",
+                        "type": "boolean",
+                        "example": "True",
+                        "default": "True",
+                    },
+                    "cluster_name": {
+                        "description": "The name of the Amazon EKS cluster to run Airflow tasks on. Required.\n",
+                        "version_added": "9.39.0",
+                        "type": "string",
+                        "example": "airflow-eks-cluster",
+                        "default": None,
+                    },
+                },
+            },
             "aws_auth_manager": {
                 "description": "This section only applies if you are using the AwsAuthManager. In other words, if you set\n``[core] auth_manager = airflow.providers.amazon.aws.auth_manager.aws_auth_manager.AwsAuthManager`` in\nAirflow's configuration.\n",
                 "options": {
-                    "enable": {
-                        "description": "AWS auth manager is not ready to be used. Turn on this flag to use it anyway.\nDo that at your own risk since the AWS auth manager is not in an usable state.\n",
-                        "version_added": "8.12.0",
-                        "type": "boolean",
-                        "example": "True",
-                        "default": "False",
-                    },
                     "conn_id": {
                         "description": "The Airflow connection (i.e. credentials) used by the AWS auth manager to make API calls to AWS\nIdentity Center and Amazon Verified Permissions.\n",
                         "version_added": "8.12.0",
@@ -1366,59 +1647,26 @@ def get_provider_info():
                         "example": None,
                         "default": None,
                     },
+                    "allow_idp_initiated_login": {
+                        "description": "Whether to accept SAML assertions that no login started from Airflow asked for, such as\nthe ones produced by clicking the Airflow tile in the AWS Identity Center access portal\n(IdP-initiated SSO).\n\nWhen this is disabled, a SAML response is only accepted if it answers an AuthnRequest that\nthe same browser started. That binding is what stops an assertion obtained elsewhere from\nbeing accepted in another user's browser, which would sign that user in as the assertion's\nsubject. Enable it only where the access portal flow is required and that trade-off is\naccepted.\n",
+                        "version_added": "9.37.0",
+                        "type": "boolean",
+                        "example": "True",
+                        "default": "False",
+                    },
                 },
             },
         },
-        "executors": ["airflow.providers.amazon.aws.executors.ecs.ecs_executor.AwsEcsExecutor"],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-common-compat>=1.6.0",
-            "apache-airflow-providers-common-sql>=1.20.0",
-            "apache-airflow-providers-http",
-            "boto3>=1.37.0",
-            "botocore>=1.34.90",
-            "inflection>=0.5.1",
-            "watchtower>=3.0.0,!=3.3.0,<4",
-            "jsonpath_ng>=1.5.3",
-            "redshift_connector>=2.0.918",
-            "asgiref>=2.3.0",
-            "PyAthena>=3.0.10",
-            "jmespath>=0.7.0",
-            "python3-saml>=1.16.0",
-            "xmlsec!=1.3.15,>=1.3.14",
-            "sagemaker-studio>=1.0.9",
+        "executors": [
+            "airflow.providers.amazon.aws.executors.aws_lambda.lambda_executor.AwsLambdaExecutor",
+            "airflow.providers.amazon.aws.executors.batch.batch_executor.AwsBatchExecutor",
+            "airflow.providers.amazon.aws.executors.ecs.ecs_executor.AwsEcsExecutor",
+            "airflow.providers.amazon.aws.executors.eks.eks_executor.AwsEksExecutor",
         ],
-        "optional-dependencies": {
-            "pandas": ["pandas>=2.1.2,<2.2"],
-            "aiobotocore": ["aiobotocore[boto3]>=2.13.0"],
-            "cncf.kubernetes": ["apache-airflow-providers-cncf-kubernetes>=7.2.0"],
-            "s3fs": ["s3fs>=2023.10.0"],
-            "python3-saml": ["python3-saml>=1.16.0"],
-            "apache.hive": ["apache-airflow-providers-apache-hive"],
-            "exasol": ["apache-airflow-providers-exasol"],
-            "fab": ["apache-airflow-providers-fab"],
-            "ftp": ["apache-airflow-providers-ftp"],
-            "google": ["apache-airflow-providers-google"],
-            "imap": ["apache-airflow-providers-imap"],
-            "microsoft.azure": ["apache-airflow-providers-microsoft-azure"],
-            "mongo": ["apache-airflow-providers-mongo"],
-            "openlineage": ["apache-airflow-providers-openlineage"],
-            "salesforce": ["apache-airflow-providers-salesforce"],
-            "ssh": ["apache-airflow-providers-ssh"],
-            "standard": ["apache-airflow-providers-standard"],
-        },
-        "devel-dependencies": [
-            "aiobotocore>=2.13.0",
-            "aws_xray_sdk>=2.12.0",
-            "moto[cloudformation,glue]>=5.1.2",
-            "mypy-boto3-appflow>=1.37.0",
-            "mypy-boto3-rds>=1.34.90",
-            "mypy-boto3-redshift-data>=1.34.0",
-            "mypy-boto3-s3>=1.34.90",
-            "s3fs>=2023.10.0",
-            "openapi-schema-validator>=0.6.2",
-            "openapi-spec-validator>=0.7.1",
-            "opensearch-py>=2.2.0",
-            "responses>=0.25.0",
+        "auth-managers": ["airflow.providers.amazon.aws.auth_manager.aws_auth_manager.AwsAuthManager"],
+        "cli": ["airflow.providers.amazon.aws.cli.definition.get_aws_cli_commands"],
+        "queues": [
+            "airflow.providers.amazon.aws.queues.kinesis.KinesisMessageQueueProvider",
+            "airflow.providers.amazon.aws.queues.sqs.SqsMessageQueueProvider",
         ],
     }

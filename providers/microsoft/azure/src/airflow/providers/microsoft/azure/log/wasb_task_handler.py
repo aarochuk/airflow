@@ -17,16 +17,18 @@
 # under the License.
 from __future__ import annotations
 
+import inspect
 import os
 import shutil
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
 
 import attrs
-from azure.core.exceptions import HttpResponseError
+from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 
-from airflow.configuration import conf
+from airflow.providers.common.compat.sdk import conf
 from airflow.providers.microsoft.azure.version_compat import AIRFLOW_V_3_0_PLUS
 from airflow.utils.log.file_task_handler import FileTaskHandler
 from airflow.utils.log.logging_mixin import LoggingMixin
@@ -35,6 +37,7 @@ if TYPE_CHECKING:
     import logging
 
     from airflow.models.taskinstance import TaskInstance
+    from airflow.sdk.types import RuntimeTaskInstanceProtocol as RuntimeTI
     from airflow.utils.log.file_task_handler import LogMessages, LogSourceInfo
 
 
@@ -48,7 +51,35 @@ class WasbRemoteLogIO(LoggingMixin):  # noqa: D101
 
     processors = ()
 
-    def upload(self, path: str | os.PathLike):
+    @classmethod
+    def from_config(cls) -> WasbRemoteLogIO:
+        """Build the remote log IO from Airflow logging configuration."""
+        remote_task_handler_kwargs = conf.getjson("logging", "remote_task_handler_kwargs", fallback={})
+        if not isinstance(remote_task_handler_kwargs, dict):
+            raise ValueError(
+                "logging/remote_task_handler_kwargs must be a JSON object (a python dict), we got "
+                f"{type(remote_task_handler_kwargs)}"
+            )
+        fth_params = frozenset(inspect.signature(FileTaskHandler.__init__).parameters) - {
+            "self",
+            "base_log_folder",
+        }
+        io_kwargs = {k: v for k, v in remote_task_handler_kwargs.items() if k not in fth_params}
+        return cls(
+            **{
+                "base_log_folder": os.path.expanduser(conf.get_mandatory_value("logging", "base_log_folder")),
+                "remote_base": conf.get_mandatory_value("logging", "remote_base_log_folder").removeprefix(
+                    "wasb://"
+                ),
+                "delete_local_copy": conf.getboolean("logging", "delete_local_logs"),
+                "wasb_container": conf.get_mandatory_value(
+                    "azure_remote_logging", "remote_wasb_log_container", fallback="airflow-logs"
+                ),
+            }
+            | io_kwargs,
+        )
+
+    def upload(self, path: str | os.PathLike, ti: RuntimeTI | None = None) -> None:
         """Upload the given log path to the remote storage."""
         path = Path(path)
         if path.is_absolute():
@@ -58,12 +89,23 @@ class WasbRemoteLogIO(LoggingMixin):  # noqa: D101
             local_loc = self.base_log_folder.joinpath(path)
             remote_loc = os.path.join(self.remote_base, path)
 
+        # ``joinpath``/``relative_to`` are lexical and do not normalise ``..``, so a caller-supplied
+        # path can escape ``base_log_folder``. Mirrors the check in ``CloudWatchRemoteLogIO.upload``.
+        base = self.base_log_folder.resolve()
+        try:
+            local_loc.resolve().relative_to(base)
+        except ValueError:
+            self.log.warning("Skipping upload: path %s is outside base_log_folder %s", local_loc, base)
+            return
+
         if local_loc.is_file():
             # read log and remove old logs to get just the latest additions
             log = local_loc.read_text()
             has_uploaded = self.write(log, remote_loc)
             if has_uploaded and self.delete_local_copy:
                 shutil.rmtree(os.path.dirname(local_loc))
+            elif has_uploaded:
+                local_loc.write_text("")
 
     @cached_property
     def hook(self):
@@ -83,7 +125,35 @@ class WasbRemoteLogIO(LoggingMixin):  # noqa: D101
             )
             return None
 
-    def read(self, relative_path) -> tuple[LogSourceInfo, LogMessages | None]:
+    def _build_legacy_url(self, blob_name: str) -> str:
+        return f"https://{self.wasb_container}.blob.core.windows.net/{blob_name}"
+
+    def _build_log_source_url(self, blob_name: str) -> str:
+        if not self.hook:
+            return self._build_legacy_url(blob_name)
+
+        blob_service_client = self.hook.blob_service_client
+        account_name = getattr(blob_service_client, "account_name", None)
+        endpoint = getattr(blob_service_client, "primary_endpoint", None)
+        if isinstance(endpoint, str) and endpoint:
+            parsed = urlsplit(endpoint)
+            if parsed.scheme and parsed.netloc:
+                endpoint_path = parsed.path.rstrip("/")
+                # Azurite keeps the account name in the path; WASB SAS-token auth can put a token there.
+                if endpoint_path:
+                    first_path_segment = endpoint_path.strip("/").split("/", maxsplit=1)[0]
+                    if not (isinstance(account_name, str) and first_path_segment == account_name):
+                        endpoint_path = ""
+                account_url = urlunsplit((parsed.scheme, parsed.netloc, endpoint_path, "", ""))
+                return f"{account_url}/{self.wasb_container}/{blob_name}"
+
+        # Best-effort fallback for clients without primary_endpoint; custom endpoints use the branch above.
+        if isinstance(account_name, str) and account_name:
+            return f"https://{account_name}.blob.core.windows.net/{self.wasb_container}/{blob_name}"
+
+        return self._build_legacy_url(blob_name)
+
+    def read(self, relative_path, ti: RuntimeTI | None) -> tuple[LogSourceInfo, LogMessages | None]:
         messages = []
         logs = []
         # TODO: fix this - "relative path" i.e currently REMOTE_BASE_LOG_FOLDER should start with "wasb"
@@ -99,9 +169,9 @@ class WasbRemoteLogIO(LoggingMixin):  # noqa: D101
             self.log.exception("can't list blobs")
 
         if blob_names:
-            uris = [f"https://{self.wasb_container}.blob.core.windows.net/{b}" for b in blob_names]
+            uris = (self._build_log_source_url(b) for b in blob_names)
             if AIRFLOW_V_3_0_PLUS:
-                messages = uris
+                messages = list(uris)
             else:
                 messages.extend(["Found remote logs:", *[f"  * {x}" for x in sorted(uris)]])
         else:
@@ -159,11 +229,27 @@ class WasbRemoteLogIO(LoggingMixin):  # noqa: D101
         :param log: the log to write to the remote_log_location
         :param remote_log_location: the log's location in remote storage
         :param append: if False, any existing log file is overwritten. If True,
-            the new log is appended to any existing logs.
+            the new log is appended to any existing logs; if the existing log cannot be
+            read, nothing is written and ``False`` is returned.
         """
-        if append and self.wasb_log_exists(remote_log_location):
-            old_log = self.wasb_read(remote_log_location)
-            log = f"{old_log}\n{log}" if old_log else log
+        if append:
+            try:
+                old_log = self.hook.read_file(self.wasb_container, remote_log_location)
+            except ResourceNotFoundError:
+                old_log = ""
+            except Exception as e:
+                # Uploading only the new content here would replace the existing blob and lose the
+                # log history already stored in it. Keep the local log and let the next upload retry.
+                self.log.warning(
+                    "Refusing to overwrite remote log %s: could not read existing content (%s). "
+                    "Keeping local logs for later retry.",
+                    remote_log_location,
+                    e,
+                )
+                return False
+            if old_log:
+                sep = "" if old_log.endswith("\n") else "\n"
+                log = f"{old_log}{sep}{log}"
 
         try:
             self.hook.load_string(log, self.wasb_container, remote_log_location, overwrite=True)
@@ -187,9 +273,15 @@ class WasbTaskHandler(FileTaskHandler, LoggingMixin):
         base_log_folder: str,
         wasb_log_folder: str,
         wasb_container: str,
+        max_bytes: int = 0,
+        backup_count: int = 0,
+        delay: bool = False,
         **kwargs,
     ) -> None:
-        super().__init__(base_log_folder)
+        # support log file size handling of FileTaskHandler
+        super().__init__(
+            base_log_folder=base_log_folder, max_bytes=max_bytes, backup_count=backup_count, delay=delay
+        )
         self.handler: logging.FileHandler | None = None
         self.log_relative_path = ""
         self.closed = False
@@ -210,6 +302,7 @@ class WasbTaskHandler(FileTaskHandler, LoggingMixin):
         if TYPE_CHECKING:
             assert self.handler is not None
 
+        self.ti = ti
         full_path = self.handler.baseFilename
         self.log_relative_path = Path(full_path).relative_to(self.local_base).as_posix()
         is_trigger_log_context = getattr(ti, "is_trigger_log_context", False)
@@ -229,7 +322,8 @@ class WasbTaskHandler(FileTaskHandler, LoggingMixin):
         if not self.upload_on_close:
             return
 
-        self.io.upload(self.log_relative_path)
+        if hasattr(self, "ti"):
+            self.io.upload(self.log_relative_path, self.ti)
 
         # Mark closed so we don't double write if close is called twice
         self.closed = True
@@ -240,7 +334,7 @@ class WasbTaskHandler(FileTaskHandler, LoggingMixin):
         # in set_context method.
         worker_log_rel_path = self._render_filename(ti, try_number)
 
-        messages, logs = self.io.read(worker_log_rel_path)
+        messages, logs = self.io.read(worker_log_rel_path, ti)
 
         if logs is None:
             logs = []

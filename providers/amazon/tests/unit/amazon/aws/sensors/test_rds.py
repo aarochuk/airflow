@@ -21,7 +21,6 @@ from unittest.mock import patch
 import pytest
 from moto import mock_aws
 
-from airflow.exceptions import AirflowException
 from airflow.models import DAG
 from airflow.providers.amazon.aws.hooks.rds import RdsHook
 from airflow.providers.amazon.aws.sensors.rds import (
@@ -31,7 +30,10 @@ from airflow.providers.amazon.aws.sensors.rds import (
     RdsSnapshotExistenceSensor,
 )
 from airflow.providers.amazon.aws.utils.rds import RdsDbType
-from airflow.utils import timezone
+from airflow.providers.common.compat.sdk import AirflowException
+
+from tests_common.test_utils.compat import timezone
+from unit.amazon.aws.utils.test_template_fields import validate_template_fields
 
 DEFAULT_DATE = timezone.datetime(2019, 1, 1)
 
@@ -146,6 +148,16 @@ class TestRdsSnapshotExistenceSensor:
         del cls.dag
         del cls.hook
 
+    def test_template_fields(self):
+        sensor = RdsSnapshotExistenceSensor(
+            task_id="test_template_fields",
+            db_type="instance",
+            db_snapshot_identifier=DB_INSTANCE_SNAPSHOT,
+            aws_conn_id=AWS_CONN,
+            region_name="us-east-1",
+        )
+        validate_template_fields(sensor)
+
     @mock_aws
     def test_db_instance_snapshot_poke_true(self):
         _create_db_instance_snapshot(self.hook)
@@ -209,6 +221,15 @@ class TestRdsExportTaskExistenceSensor:
         del cls.dag
         del cls.hook
 
+    def test_template_fields(self):
+        sensor = RdsExportTaskExistenceSensor(
+            task_id="test_template_fields",
+            export_task_identifier=EXPORT_TASK_NAME,
+            aws_conn_id=AWS_CONN,
+            region_name="us-east-1",
+        )
+        validate_template_fields(sensor)
+
     @mock_aws
     def test_export_task_poke_true(self):
         _create_db_instance_snapshot(self.hook)
@@ -263,6 +284,15 @@ class TestRdsDbSensor:
     def teardown_class(cls):
         del cls.dag
         del cls.hook
+
+    def test_template_fields(self):
+        sensor = RdsDbSensor(
+            task_id="test_template_fields",
+            db_identifier=DB_INSTANCE_NAME,
+            aws_conn_id=AWS_CONN,
+            region_name="us-east-1",
+        )
+        validate_template_fields(sensor)
 
     @mock_aws
     def test_poke_true_instance(self):

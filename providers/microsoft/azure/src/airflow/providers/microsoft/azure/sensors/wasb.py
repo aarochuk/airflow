@@ -21,14 +21,12 @@ from collections.abc import Sequence
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator, conf
 from airflow.providers.microsoft.azure.hooks.wasb import WasbHook
 from airflow.providers.microsoft.azure.triggers.wasb import WasbBlobSensorTrigger, WasbPrefixSensorTrigger
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class WasbBlobSensor(BaseSensorOperator):
@@ -44,7 +42,7 @@ class WasbBlobSensor(BaseSensorOperator):
     :param public_read: whether an anonymous public read access should be used. Default is False
     """
 
-    template_fields: Sequence[str] = ("container_name", "blob_name")
+    template_fields: Sequence[str] = ("container_name", "blob_name", "wasb_conn_id")
 
     def __init__(
         self,
@@ -122,7 +120,7 @@ class WasbPrefixSensor(BaseSensorOperator):
     :param deferrable: Run operator in the deferrable mode.
     """
 
-    template_fields: Sequence[str] = ("container_name", "prefix")
+    template_fields: Sequence[str] = ("container_name", "prefix", "wasb_conn_id")
 
     def __init__(
         self,

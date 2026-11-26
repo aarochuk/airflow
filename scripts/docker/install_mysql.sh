@@ -24,53 +24,66 @@ set -euo pipefail
 common::get_colors
 declare -a packages
 
-# https://dev.mysql.com/blog-archive/introducing-mysql-innovation-and-long-term-support-lts-versions/
-readonly MYSQL_LTS_VERSION="8.0"
-# https://mariadb.org/about/#maintenance-policy
-readonly MARIADB_LTS_VERSION="10.11"
 
 : "${INSTALL_MYSQL_CLIENT:?Should be true or false}"
 : "${INSTALL_MYSQL_CLIENT_TYPE:-mariadb}"
 
-install_mysql_client() {
-    if [[ "${1}" == "dev" ]]; then
-        packages=("libmysqlclient-dev" "mysql-client")
-    elif [[ "${1}" == "prod" ]]; then
-        # `libmysqlclientXX` where XX is number, and it should be increased every new GA MySQL release, for example
-        # 18 - MySQL 5.6.48
-        # 20 - MySQL 5.7.42
-        # 21 - MySQL 8.0.34
-        # 22 - MySQL 8.1
-        packages=("libmysqlclient21" "mysql-client")
-    else
-        echo
-        echo "${COLOR_RED}Specify either prod or dev${COLOR_RESET}"
-        echo
-        exit 1
-    fi
-
-    common::import_trusted_gpg "B7B3B788A8D3785C" "mysql"
-
+if [[ "${INSTALL_MYSQL_CLIENT}" != "true" && "${INSTALL_MYSQL_CLIENT}" != "false" ]]; then
     echo
-    echo "${COLOR_BLUE}Installing Oracle MySQL client version ${MYSQL_LTS_VERSION}: ${1}${COLOR_RESET}"
+    echo "${COLOR_RED}INSTALL_MYSQL_CLIENT must be either true or false${COLOR_RESET}"
     echo
+    exit 1
+fi
 
-    echo "deb http://repo.mysql.com/apt/debian/ $(lsb_release -cs) mysql-${MYSQL_LTS_VERSION}" > \
-        /etc/apt/sources.list.d/mysql.list
-    apt-get update
-    apt-get install --no-install-recommends -y "${packages[@]}"
-    apt-get autoremove -yqq --purge
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+if [[ "${INSTALL_MYSQL_CLIENT_TYPE}" != "mysql" && "${INSTALL_MYSQL_CLIENT_TYPE}" != "mariadb" ]]; then
+    echo
+    echo "${COLOR_RED}INSTALL_MYSQL_CLIENT_TYPE must be either mysql or mariadb${COLOR_RESET}"
+    echo
+    exit 1
+fi
 
-    # Remove mysql repository from sources.list.d as MySQL repos have a basic flaw that they put expiry
-    # date on their GPG signing keys and they sign their repo with those keys. This means that after a
-    # certain date, the GPG key becomes invalid and if you have the repository added in your sources.list
-    # then you will not be able to install anything from any other repository. This id unlike any other
-    # repository we have seen (for example Postgres, MariaDB, MsSQL - all have non-expiring signing keys)
-    rm /etc/apt/sources.list.d/mysql.list
+if [[ "${INSTALL_MYSQL_CLIENT_TYPE}" == "mysql" ]]; then
+    echo
+    echo "${COLOR_RED}The 'mysql' client type is not supported any more. Use 'mariadb' instead.${COLOR_RESET}"
+    echo
+    echo "The MySQL drivers are wrongly packaged and released by Oracle with an expiration date on their GPG keys,"
+    echo "which causes builds to fail after the expiration date. MariaDB client is protocol-compatible with MySQL client."
+    echo ""
+    echo "Every two years the MySQL packages fail and Oracle team is always surprised and struggling"
+    echo "with fixes and re-signing the packages which lasts few days"
+    echo "See https://bugs.mysql.com/bug.php?id=113432 for more details."
+    echo "As a community we are not able to support this broken packaging practice from Oracle"
+    echo "Feel free however to install MySQL drivers on your own as extension of the image."
+    echo
+    exit 1
+fi
+
+retry() {
+    local retries=3
+    local count=0
+    # adding delay of 10 seconds
+    local delay=10
+    until "$@"; do
+        exit_code=$?
+        count=$((count + 1))
+        if [[ $count -lt $retries ]]; then
+            echo "Command failed. Attempt $count/$retries. Retrying in ${delay}s..."
+            sleep $delay
+        else
+            echo "Command failed after $retries attempts."
+            return $exit_code
+        fi
+    done
 }
 
 install_mariadb_client() {
+    # https://mariadb.org/about/#maintenance-policy
+    # MariaDB publishes each LTS series only for the Debian releases current when it came out - 10.11
+    # has no trixie repository and 11.8 is the first LTS that does.
+    local mariadb_lts_version="10.11"
+    if [[ "$(common::debian_codename)" != "bookworm" ]]; then
+        mariadb_lts_version="11.8"
+    fi
     # List of compatible package Oracle MySQL -> MariaDB:
     # `mysql-client` -> `mariadb-client` or `mariadb-client-compat` (11+)
     # `libmysqlclientXX` (where XX is a number) -> `libmariadb3-compat`
@@ -90,45 +103,28 @@ install_mariadb_client() {
         echo
         exit 1
     fi
+    if [[ "${mariadb_lts_version%%.*}" -ge 11 ]]; then
+        # From 11.0 mariadb-client no longer ships the "mysql" named commands
+        packages+=("mariadb-client-compat")
+    fi
 
     common::import_trusted_gpg "0xF1656F24C74CD1D8" "mariadb"
 
     echo
-    echo "${COLOR_BLUE}Installing MariaDB client version ${MARIADB_LTS_VERSION}: ${1}${COLOR_RESET}"
+    echo "${COLOR_BLUE}Installing MariaDB client version ${mariadb_lts_version}: ${1}${COLOR_RESET}"
     echo "${COLOR_YELLOW}MariaDB client protocol-compatible with MySQL client.${COLOR_RESET}"
     echo
 
-    echo "deb [arch=amd64,arm64] https://archive.mariadb.org/mariadb-${MARIADB_LTS_VERSION}/repo/debian/ $(lsb_release -cs) main" > \
+    echo "deb [arch=amd64,arm64] https://archive.mariadb.org/mariadb-${mariadb_lts_version}/repo/debian/ $(common::debian_codename) main" > \
         /etc/apt/sources.list.d/mariadb.list
     # Make sure that dependencies from MariaDB repo are preferred over Debian dependencies
     printf "Package: *\nPin: release o=MariaDB\nPin-Priority: 999\n" > /etc/apt/preferences.d/mariadb
-    apt-get update
-    apt-get install --no-install-recommends -y "${packages[@]}"
+    retry apt-get update
+    retry apt-get install --no-install-recommends -y "${packages[@]}"
     apt-get autoremove -yqq --purge
     apt-get clean && rm -rf /var/lib/apt/lists/*
 }
 
-# Install MySQL client only if it is not disabled.
-# INSTALL_MYSQL_CLIENT_TYPE=mysql : Install MySQL client from Oracle repository.
-# INSTALL_MYSQL_CLIENT_TYPE=mariadb : Install MariaDB client from MariaDB repository.
-# https://mariadb.com/kb/en/mariadb-clientserver-tcp-protocol/
-# For ARM64 INSTALL_MYSQL_CLIENT_TYPE ignored and always install MariaDB.
 if [[ ${INSTALL_MYSQL_CLIENT:="true"} == "true" ]]; then
-    if [[ $(uname -m) == "arm64" || $(uname -m) == "aarch64" ]]; then
-        INSTALL_MYSQL_CLIENT_TYPE="mariadb"
-        echo
-        echo "${COLOR_YELLOW}Client forced to mariadb for ARM${COLOR_RESET}"
-        echo
-    fi
-
-    if [[ "${INSTALL_MYSQL_CLIENT_TYPE}" == "mysql" ]]; then
-        install_mysql_client "${@}"
-    elif [[ "${INSTALL_MYSQL_CLIENT_TYPE}" == "mariadb" ]]; then
-        install_mariadb_client "${@}"
-    else
-        echo
-        echo "${COLOR_RED}Specify either mysql or mariadb, got ${INSTALL_MYSQL_CLIENT_TYPE}${COLOR_RESET}"
-        echo
-        exit 1
-    fi
+    install_mariadb_client "${@}"
 fi

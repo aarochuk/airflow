@@ -26,13 +26,11 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-qdrant",
         "name": "Qdrant",
         "description": "`Qdrant <https://qdrant.tech/documentation>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477876,
-        "versions": ["1.3.2", "1.3.1", "1.3.0", "1.2.0", "1.1.2", "1.1.1", "1.1.0", "1.0.0"],
         "integrations": [
             {
                 "integration-name": "Qdrant",
                 "external-doc-url": "https://qdrant.tech/documentation",
+                "logo": "/docs/integration-logos/Qdrant.svg",
                 "how-to-guide": ["/docs/apache-airflow-providers-qdrant/operators/qdrant.rst"],
                 "tags": ["software"],
             }
@@ -43,12 +41,54 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.qdrant.hooks.qdrant.QdrantHook",
+                "hook-name": "Qdrant",
                 "connection-type": "qdrant",
+                "conn-fields": {
+                    "url": {
+                        "label": "URL",
+                        "schema": {
+                            "type": ["string", "null"],
+                            "description": "Optional. Qualified URL of the Qdrant instance. Example: https://xyz-example.eu-central.aws.cloud.qdrant.io:6333",
+                        },
+                    },
+                    "grpc_port": {
+                        "label": "GRPC Port",
+                        "schema": {
+                            "type": ["integer", "null"],
+                            "default": 6334,
+                            "description": "Optional. Port of the gRPC interface.",
+                        },
+                    },
+                    "prefer_gprc": {
+                        "label": "Prefer GRPC",
+                        "schema": {
+                            "type": ["boolean", "null"],
+                            "default": False,
+                            "description": "Optional. Whether to use gPRC interface whenever possible in custom methods.",
+                        },
+                    },
+                    "https": {
+                        "label": "HTTPS",
+                        "schema": {
+                            "type": ["boolean", "null"],
+                            "description": "Optional. Whether to use HTTPS(SSL) protocol.",
+                        },
+                    },
+                    "prefix": {
+                        "label": "Prefix",
+                        "schema": {
+                            "type": ["string", "null"],
+                            "description": "Optional. Prefix to the REST URL path. Example: service/v1 will result in http://localhost:6333/service/v1/{qdrant-endpoint} for REST API.",
+                        },
+                    },
+                },
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema", "login", "extra"],
+                    "relabeling": {"password": "API Key"},
+                },
             }
         ],
         "operators": [
             {"integration-name": "Qdrant", "python-modules": ["airflow.providers.qdrant.operators.qdrant"]}
         ],
-        "dependencies": ["qdrant_client>=1.10.1", "apache-airflow>=2.9.0"],
-        "devel-dependencies": [],
     }

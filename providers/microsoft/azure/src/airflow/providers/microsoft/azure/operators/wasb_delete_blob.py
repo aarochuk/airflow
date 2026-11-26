@@ -20,11 +20,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.microsoft.azure.hooks.wasb import WasbHook
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class WasbDeleteBlobOperator(BaseOperator):
@@ -41,7 +41,7 @@ class WasbDeleteBlobOperator(BaseOperator):
         blob does not exist.
     """
 
-    template_fields: Sequence[str] = ("container_name", "blob_name")
+    template_fields: Sequence[str] = ("container_name", "blob_name", "wasb_conn_id")
 
     def __init__(
         self,

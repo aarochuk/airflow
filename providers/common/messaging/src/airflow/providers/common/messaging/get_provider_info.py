@@ -26,16 +26,17 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-common-messaging",
         "name": "Common Messaging",
         "description": "``Common Messaging Provider``\n",
-        "state": "not-ready",
-        "source-date-epoch": 1741121853,
-        "versions": ["1.0.0"],
+        "integrations": [
+            {
+                "integration-name": "Common Messaging",
+                "external-doc-url": "https://airflow.apache.org/docs/apache-airflow-providers-common-messaging/",
+                "tags": ["software"],
+            }
+        ],
         "triggers": [
             {
-                "integration-name": "Message queue",
+                "integration-name": "Common Messaging",
                 "python-modules": ["airflow.providers.common.messaging.triggers.msg_queue"],
             }
         ],
-        "dependencies": ["apache-airflow>=3.0.0.dev0"],
-        "optional-dependencies": {"amazon": ["apache-airflow-providers-amazon"]},
-        "devel-dependencies": [],
     }

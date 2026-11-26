@@ -23,7 +23,7 @@
 
 Package ``apache-airflow-providers-google``
 
-Release: ``14.1.0``
+Release: ``23.0.0``
 
 
 Google services including:
@@ -43,95 +43,108 @@ This is a provider package for ``google`` provider. All classes for this provide
 are in ``airflow.providers.google`` python package.
 
 You can find package information and changelog for the provider
-in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-google/14.1.0/>`_.
+in the `documentation <https://airflow.apache.org/docs/apache-airflow-providers-google/23.0.0/>`_.
 
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation (see ``Requirements`` below
+You can install this package on top of an existing Airflow installation (see ``Requirements`` below
 for the minimum Airflow version supported) via
 ``pip install apache-airflow-providers-google``
 
-The package supports the following python versions: 3.9,3.10,3.11,3.12
+The package supports the following python versions: 3.11,3.12,3.13,3.14
 
 Requirements
 ------------
 
-==========================================  ======================================
+==========================================  ==================================================================
 PIP package                                 Version required
-==========================================  ======================================
-``apache-airflow``                          ``>=2.9.0``
-``apache-airflow-providers-common-compat``  ``>=1.4.0``
-``apache-airflow-providers-common-sql``     ``>=1.20.0``
-``asgiref``                                 ``>=3.5.2``
+==========================================  ==================================================================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.23.0``
+``apache-airflow-providers-common-sql``     ``>=1.32.0``
+``asgiref``                                 ``>=3.5.2; python_version < "3.14"``
+``asgiref``                                 ``>=3.11.1; python_version >= "3.14"``
 ``dill``                                    ``>=0.2.3``
 ``gcloud-aio-auth``                         ``>=5.2.0``
 ``gcloud-aio-bigquery``                     ``>=6.1.2``
 ``gcloud-aio-storage``                      ``>=9.0.0``
 ``gcsfs``                                   ``>=2023.10.0``
-``google-ads``                              ``>=26.0.0``
+``google-ads``                              ``>=26.0.0,!=28.0.0.post2``
 ``google-analytics-admin``                  ``>=0.9.0``
-``google-api-core``                         ``>=2.11.0,!=2.16.0,!=2.18.0``
-``google-api-python-client``                ``>=2.0.2``
+``google-api-core``                         ``>=2.30.3``
+``google-api-python-client``                ``>=2.196.0``
 ``google-auth``                             ``>=2.29.0``
 ``google-auth-httplib2``                    ``>=0.0.1``
-``google-cloud-aiplatform[evaluation]``     ``>=1.73.0``
-``google-cloud-alloydb``                    ``>=0.4.0``
-``google-cloud-automl``                     ``>=2.12.0``
-``google-cloud-bigquery``                   ``!=3.21.*,!=3.22.0,!=3.23.*,>=3.4.0``
-``google-cloud-bigquery-datatransfer``      ``>=3.13.0``
-``google-cloud-bigtable``                   ``>=2.17.0``
-``google-cloud-build``                      ``>=3.31.0``
-``google-cloud-compute``                    ``>=1.10.0``
-``google-cloud-container``                  ``>=2.52.0``
-``google-cloud-datacatalog``                ``>=3.23.0``
-``google-cloud-dataflow-client``            ``>=0.8.6``
-``google-cloud-dataform``                   ``>=0.5.0``
-``google-cloud-dataplex``                   ``>=2.6.0``
-``google-cloud-dataproc``                   ``>=5.12.0``
-``google-cloud-dataproc-metastore``         ``>=1.12.0``
-``google-cloud-dlp``                        ``>=3.12.0``
-``google-cloud-kms``                        ``>=2.15.0``
-``google-cloud-language``                   ``>=2.9.0``
-``google-cloud-logging``                    ``>=3.5.0``
-``google-cloud-managedkafka``               ``>=0.1.6``
-``google-cloud-memcache``                   ``>=1.7.0``
-``google-cloud-monitoring``                 ``>=2.18.0``
-``google-cloud-orchestration-airflow``      ``>=1.10.0``
-``google-cloud-os-login``                   ``>=2.9.1``
-``google-cloud-pubsub``                     ``>=2.21.3``
-``google-cloud-redis``                      ``>=2.12.0``
-``google-cloud-secret-manager``             ``>=2.16.0``
-``google-cloud-spanner``                    ``>=3.11.1,!=3.49.0``
-``google-cloud-speech``                     ``>=2.18.0``
-``google-cloud-storage``                    ``>=2.7.0``
-``google-cloud-storage-transfer``           ``>=1.4.1``
-``google-cloud-tasks``                      ``>=2.13.0``
-``google-cloud-texttospeech``               ``>=2.14.1``
-``google-cloud-translate``                  ``>=3.16.0``
-``google-cloud-videointelligence``          ``>=2.11.0``
-``google-cloud-vision``                     ``>=3.4.0``
-``google-cloud-workflows``                  ``>=1.10.0``
-``google-cloud-run``                        ``>=0.10.0``
-``google-cloud-batch``                      ``>=0.13.0``
-``grpcio-gcp``                              ``>=0.2.2``
-``httpx``                                   ``>=0.25.0``
+``google-genai``                            ``>=2.8.0``
+``google-cloud-aiplatform``                 ``>=1.164.0``
+``jsonschema``                              ``>=4.19.1``
+``pyyaml``                                  ``>=6.0.3``
+``ruamel.yaml``                             ``>=0.18.0``
+``scikit-learn``                            ``>=1.4.2; python_version < "3.13"``
+``scikit-learn``                            ``>=1.5.2; python_version >= "3.13" and python_version < "3.14"``
+``scikit-learn``                            ``>=1.7.2; python_version >= "3.14"``
+``tqdm``                                    ``>=4.67.1``
+``ray[default]``                            ``>=2.42.0; python_version < "3.13"``
+``ray[default]``                            ``>=2.49.0; python_version >= "3.13" and python_version < "3.14"``
+``ray[default]``                            ``>=2.55.0; python_version >= "3.14" and python_version < "3.15"``
+``google-cloud-bigquery-storage``           ``>=2.38.0; python_version < "3.13"``
+``google-cloud-bigquery-storage``           ``>=2.38.0; python_version >= "3.13"``
+``google-cloud-alloydb``                    ``>=0.9.0``
+``google-cloud-bigquery``                   ``>=3.41.0``
+``google-cloud-bigquery-datatransfer``      ``>=3.22.0``
+``google-cloud-bigtable``                   ``>=2.38.0``
+``google-cloud-build``                      ``>=3.36.0``
+``google-cloud-compute``                    ``>=1.47.0``
+``google-cloud-container``                  ``>=2.64.0``
+``google-cloud-dataflow-client``            ``>=0.13.0``
+``google-cloud-dataform``                   ``>=0.10.0``
+``google-cloud-dataplex``                   ``>=2.19.0``
+``google-cloud-dataproc``                   ``>=5.32.0``
+``google-cloud-dataproc-metastore``         ``>=1.22.0``
+``google-cloud-dlp``                        ``>=3.36.0``
+``google-cloud-kms``                        ``>=3.13.0``
+``google-cloud-language``                   ``>=2.20.0``
+``google-cloud-logging``                    ``>=3.15.0``
+``google-cloud-managedkafka``               ``>=0.4.0``
+``google-cloud-memcache``                   ``>=1.15.0``
+``google-cloud-monitoring``                 ``>=2.30.0``
+``google-cloud-orchestration-airflow``      ``>=1.21.0``
+``google-cloud-os-login``                   ``>=2.21.0``
+``google-cloud-pubsub``                     ``>=2.38.0``
+``google-cloud-redis``                      ``>=2.21.0``
+``google-cloud-secret-manager``             ``>=2.28.0``
+``google-cloud-spanner``                    ``>=3.66.0``
+``google-cloud-speech``                     ``>=2.39.0``
+``google-cloud-storage``                    ``>=3.10.1``
+``google-cloud-storage-transfer``           ``>=1.20.0``
+``google-cloud-tasks``                      ``>=2.22.0``
+``google-cloud-texttospeech``               ``>=2.36.0``
+``google-cloud-translate``                  ``>=3.26.0``
+``google-cloud-videointelligence``          ``>=2.19.0``
+``google-cloud-vision``                     ``>=3.14.0``
+``google-cloud-workflows``                  ``>=1.22.0``
+``google-cloud-run``                        ``>=0.16.0``
+``google-cloud-batch``                      ``>=0.21.0``
+``httpx2``                                  ``>=2.0.0``
 ``looker-sdk``                              ``>=22.4.0,!=24.18.0``
 ``pandas-gbq``                              ``>=0.7.0``
-``pandas``                                  ``>=2.1.2,<2.2``
-``proto-plus``                              ``>=1.19.6``
-``pyarrow``                                 ``>=14.0.1``
+``pandas``                                  ``>=2.1.2; python_version < "3.13"``
+``pandas``                                  ``>=2.2.3; python_version >= "3.13" and python_version < "3.14"``
+``pandas``                                  ``>=2.3.3; python_version >= "3.14"``
+``proto-plus``                              ``>=1.26.0``
+``pyarrow``                                 ``>=18.0.0; python_version < "3.14"``
+``pyarrow``                                 ``>=22.0.0; python_version >= "3.14"``
+``pydantic``                                ``>=2.13.1; python_version >= "3.14"``
 ``python-slugify``                          ``>=7.0.0``
-``PyOpenSSL``                               ``>=23.0.0``
 ``sqlalchemy-bigquery``                     ``>=1.2.1``
 ``sqlalchemy-spanner``                      ``>=1.6.2``
-``tenacity``                                ``>=8.1.0``
+``tenacity``                                ``>=8.3.0``
 ``immutabledict``                           ``>=4.2.0``
-``types-protobuf``                          ``!=5.29.1.20250402``
-==========================================  ======================================
+==========================================  ==================================================================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified providers in order to use them.
@@ -150,11 +163,13 @@ Dependent package                                                               
 `apache-airflow-providers-apache-beam <https://airflow.apache.org/docs/apache-airflow-providers-apache-beam>`_            ``apache.beam``
 `apache-airflow-providers-apache-cassandra <https://airflow.apache.org/docs/apache-airflow-providers-apache-cassandra>`_  ``apache.cassandra``
 `apache-airflow-providers-cncf-kubernetes <https://airflow.apache.org/docs/apache-airflow-providers-cncf-kubernetes>`_    ``cncf.kubernetes``
-`apache-airflow-providers-common-compat <https://airflow.apache.org/docs/apache-airflow-providers-common-compat>`_        ``common.compat``
-`apache-airflow-providers-common-sql <https://airflow.apache.org/docs/apache-airflow-providers-common-sql>`_              ``common.sql``
+`apache-airflow-providers-common-ai <https://airflow.apache.org/docs/apache-airflow-providers-common-ai>`_                ``common.ai``
+`apache-airflow-providers-common-messaging <https://airflow.apache.org/docs/apache-airflow-providers-common-messaging>`_  ``common.messaging``
 `apache-airflow-providers-facebook <https://airflow.apache.org/docs/apache-airflow-providers-facebook>`_                  ``facebook``
+`apache-airflow-providers-http <https://airflow.apache.org/docs/apache-airflow-providers-http>`_                          ``http``
 `apache-airflow-providers-microsoft-azure <https://airflow.apache.org/docs/apache-airflow-providers-microsoft-azure>`_    ``microsoft.azure``
 `apache-airflow-providers-microsoft-mssql <https://airflow.apache.org/docs/apache-airflow-providers-microsoft-mssql>`_    ``microsoft.mssql``
+`apache-airflow-providers-mongo <https://airflow.apache.org/docs/apache-airflow-providers-mongo>`_                        ``mongo``
 `apache-airflow-providers-mysql <https://airflow.apache.org/docs/apache-airflow-providers-mysql>`_                        ``mysql``
 `apache-airflow-providers-openlineage <https://airflow.apache.org/docs/apache-airflow-providers-openlineage>`_            ``openlineage``
 `apache-airflow-providers-oracle <https://airflow.apache.org/docs/apache-airflow-providers-oracle>`_                      ``oracle``
@@ -163,8 +178,40 @@ Dependent package                                                               
 `apache-airflow-providers-salesforce <https://airflow.apache.org/docs/apache-airflow-providers-salesforce>`_              ``salesforce``
 `apache-airflow-providers-sftp <https://airflow.apache.org/docs/apache-airflow-providers-sftp>`_                          ``sftp``
 `apache-airflow-providers-ssh <https://airflow.apache.org/docs/apache-airflow-providers-ssh>`_                            ``ssh``
+`apache-airflow-providers-standard <https://airflow.apache.org/docs/apache-airflow-providers-standard>`_                  ``standard``
 `apache-airflow-providers-trino <https://airflow.apache.org/docs/apache-airflow-providers-trino>`_                        ``trino``
 ========================================================================================================================  ====================
 
+Optional dependencies
+----------------------
+
+====================  =====================================================
+Extra                 Dependencies
+====================  =====================================================
+``apache.beam``       ``apache-airflow-providers-apache-beam>=6.2.2``
+``cncf.kubernetes``   ``apache-airflow-providers-cncf-kubernetes>=10.25.0``
+``fab``               ``apache-airflow-providers-fab>=2.0.0``
+``leveldb``           ``plyvel>=1.5.1; python_version < '3.13'``
+``oracle``            ``apache-airflow-providers-oracle>=3.1.0``
+``facebook``          ``apache-airflow-providers-facebook>=2.2.0``
+``amazon``            ``apache-airflow-providers-amazon>=2.6.0``
+``apache.cassandra``  ``apache-airflow-providers-apache-cassandra``
+``microsoft.azure``   ``apache-airflow-providers-microsoft-azure>=13.0.0``
+``microsoft.mssql``   ``apache-airflow-providers-microsoft-mssql``
+``mongo``             ``apache-airflow-providers-mongo``
+``mysql``             ``apache-airflow-providers-mysql``
+``openlineage``       ``apache-airflow-providers-openlineage``
+``postgres``          ``apache-airflow-providers-postgres``
+``presto``            ``apache-airflow-providers-presto``
+``salesforce``        ``apache-airflow-providers-salesforce``
+``sftp``              ``apache-airflow-providers-sftp>=5.3.3``
+``ssh``               ``apache-airflow-providers-ssh``
+``trino``             ``apache-airflow-providers-trino``
+``http``              ``apache-airflow-providers-http``
+``standard``          ``apache-airflow-providers-standard``
+``common.ai``         ``apache-airflow-providers-common-ai>=0.11.0``
+``common.messaging``  ``apache-airflow-providers-common-messaging>=2.0.0``
+====================  =====================================================
+
 The changelog for the provider package can be found in the
-`changelog <https://airflow.apache.org/docs/apache-airflow-providers-google/14.1.0/changelog.html>`_.
+`changelog <https://airflow.apache.org/docs/apache-airflow-providers-google/23.0.0/changelog.html>`_.

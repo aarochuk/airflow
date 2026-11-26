@@ -26,66 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-snowflake",
         "name": "Snowflake",
         "description": "`Snowflake <https://www.snowflake.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477893,
-        "versions": [
-            "6.1.1",
-            "6.1.0",
-            "6.0.0",
-            "5.8.1",
-            "5.8.0",
-            "5.7.1",
-            "5.7.0",
-            "5.6.1",
-            "5.6.0",
-            "5.5.2",
-            "5.5.1",
-            "5.5.0",
-            "5.4.0",
-            "5.3.1",
-            "5.3.0",
-            "5.2.1",
-            "5.2.0",
-            "5.1.2",
-            "5.1.1",
-            "5.1.0",
-            "5.0.1",
-            "5.0.0",
-            "4.4.2",
-            "4.4.1",
-            "4.4.0",
-            "4.3.1",
-            "4.3.0",
-            "4.2.0",
-            "4.1.0",
-            "4.0.5",
-            "4.0.4",
-            "4.0.3",
-            "4.0.2",
-            "4.0.1",
-            "4.0.0",
-            "3.3.0",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.7.0",
-            "2.6.0",
-            "2.5.2",
-            "2.5.1",
-            "2.5.0",
-            "2.4.0",
-            "2.3.1",
-            "2.3.0",
-            "2.2.0",
-            "2.1.1",
-            "2.1.0",
-            "2.0.0",
-            "1.3.0",
-            "1.2.0",
-            "1.1.1",
-            "1.1.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Snowflake",
@@ -93,6 +33,8 @@ def get_provider_info():
                 "how-to-guide": [
                     "/docs/apache-airflow-providers-snowflake/operators/snowflake.rst",
                     "/docs/apache-airflow-providers-snowflake/operators/snowpark.rst",
+                    "/docs/apache-airflow-providers-snowflake/operators/snowpark_containers.rst",
+                    "/docs/apache-airflow-providers-snowflake/operators/cortex_agent.rst",
                 ],
                 "logo": "/docs/integration-logos/Snowflake.png",
                 "tags": ["service"],
@@ -104,6 +46,8 @@ def get_provider_info():
                 "python-modules": [
                     "airflow.providers.snowflake.operators.snowflake",
                     "airflow.providers.snowflake.operators.snowpark",
+                    "airflow.providers.snowflake.operators.snowpark_containers",
+                    "airflow.providers.snowflake.operators.cortex_agent",
                 ],
             }
         ],
@@ -113,12 +57,30 @@ def get_provider_info():
                 "name": "snowpark",
             }
         ],
+        "asset-uris": [
+            {
+                "schemes": ["snowflake"],
+                "handler": "airflow.providers.snowflake.assets.snowflake.sanitize_uri",
+                "factory": "airflow.providers.snowflake.assets.snowflake.create_asset",
+                "to_openlineage_converter": "airflow.providers.snowflake.assets.snowflake.convert_asset_to_openlineage",
+            }
+        ],
+        "dataset-uris": [
+            {
+                "schemes": ["snowflake"],
+                "handler": "airflow.providers.snowflake.assets.snowflake.sanitize_uri",
+                "factory": "airflow.providers.snowflake.assets.snowflake.create_asset",
+                "to_openlineage_converter": "airflow.providers.snowflake.assets.snowflake.convert_asset_to_openlineage",
+            }
+        ],
         "hooks": [
             {
                 "integration-name": "Snowflake",
                 "python-modules": [
+                    "airflow.providers.snowflake.hooks.cortex_model",
                     "airflow.providers.snowflake.hooks.snowflake",
-                    "airflow.providers.snowflake.hooks.snowflake_sql_api",
+                    "airflow.providers.snowflake.hooks.sql_api",
+                    "airflow.providers.snowflake.hooks.cortex_agent",
                 ],
             }
         ],
@@ -133,35 +95,134 @@ def get_provider_info():
                 "source-integration-name": "Google Cloud Storage (GCS)",
                 "target-integration-name": "Snowflake",
                 "python-module": "airflow.providers.snowflake.transfers.copy_into_snowflake",
+                "how-to-guide": "/docs/apache-airflow-providers-snowflake/operators/copy_into_snowflake.rst",
             },
             {
                 "source-integration-name": "Microsoft Azure Blob Storage",
                 "target-integration-name": "Snowflake",
                 "python-module": "airflow.providers.snowflake.transfers.copy_into_snowflake",
+                "how-to-guide": "/docs/apache-airflow-providers-snowflake/operators/copy_into_snowflake.rst",
             },
         ],
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.snowflake.hooks.snowflake.SnowflakeHook",
+                "hook-name": "Snowflake",
                 "connection-type": "snowflake",
-            }
+                "ui-field-behaviour": {
+                    "hidden-fields": ["port", "host"],
+                    "relabeling": {},
+                    "placeholders": {
+                        "extra": '{\n  "private_key_file": "private key",\n  "session_parameters": "session parameters",\n  "client_request_mfa_token": "client request mfa token",\n  "client_store_temporary_credential": "client store temporary credential (externalbrowser mode)",\n  "grant_type": "refresh_token client_credentials",\n  "token_endpoint": "token endpoint",\n  "refresh_token": "refresh token",\n  "scope": "scope",\n  "oauth_username": "IdP resource owner user name (password grant type)",\n  "oauth_password": "IdP resource owner user password (password grant type)",\n  "proxy_host": "proxy.example.com",\n  "proxy_port": "8080",\n  "proxy_user": "proxy_username",\n  "proxy_password": "proxy_password"\n}\n',
+                        "schema": "snowflake schema",
+                        "login": "snowflake username",
+                        "password": "snowflake password",
+                        "account": "snowflake account name",
+                        "warehouse": "snowflake warehouse name",
+                        "database": "snowflake db name",
+                        "region": "snowflake hosted region",
+                        "role": "snowflake role",
+                        "authenticator": "snowflake (default), oauth, programmatic_access_token, WORKLOAD_IDENTITY",
+                        "private_key_file": "Path of snowflake private key (PEM Format)",
+                        "private_key_content": "Content to snowflake private key (PEM format)",
+                        "workload_identity_provider": "AWS, AZURE, GCP or OIDC",
+                        "insecure_mode": "insecure mode",
+                        "proxy_host": "Proxy server hostname",
+                        "proxy_port": "Proxy server port",
+                        "proxy_user": "Proxy username (optional)",
+                        "proxy_password": "Proxy password (optional)",
+                    },
+                },
+                "conn-fields": {
+                    "account": {"label": "Account", "schema": {"type": ["string", "null"]}},
+                    "warehouse": {"label": "Warehouse", "schema": {"type": ["string", "null"]}},
+                    "database": {"label": "Database", "schema": {"type": ["string", "null"]}},
+                    "region": {"label": "Region", "schema": {"type": ["string", "null"]}},
+                    "role": {"label": "Role", "schema": {"type": ["string", "null"]}},
+                    "authenticator": {"label": "Authenticator", "schema": {"type": ["string", "null"]}},
+                    "private_key_file": {
+                        "label": "Private key (Path)",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "private_key_content": {
+                        "label": "Private key (Text)",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    },
+                    "workload_identity_provider": {
+                        "label": "Workload Identity Provider",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "insecure_mode": {
+                        "label": "Insecure Mode",
+                        "schema": {"type": ["boolean", "null"]},
+                        "description": "Turns off OCSP certificate checks",
+                    },
+                    "enable_server_session_keep_alive_auto_detection": {
+                        "label": "Keep session while async queries run",
+                        "schema": {"type": ["boolean", "null"], "default": True},
+                        "description": "Skip logout on close while async queries are running (snowflake-connector-python 5.0+)",
+                    },
+                    "proxy_host": {"label": "Proxy Host", "schema": {"type": ["string", "null"]}},
+                    "proxy_port": {"label": "Proxy Port", "schema": {"type": ["integer", "null"]}},
+                    "proxy_user": {"label": "Proxy User", "schema": {"type": ["string", "null"]}},
+                    "proxy_password": {
+                        "label": "Proxy Password",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    },
+                },
+            },
+            {
+                "hook-class-name": "airflow.providers.snowflake.hooks.cortex_model.PydanticAISnowflakeHook",
+                "hook-name": "Pydantic AI (Snowflake Cortex)",
+                "connection-type": "pydanticai_snowflake",
+                "external-services": ["Snowflake Cortex"],
+                "ui-field-behaviour": {
+                    "hidden-fields": ["schema", "port", "login", "host", "password"],
+                    "relabeling": {},
+                    "placeholders": {
+                        "extra": '{"model": "snowflake:claude-4-sonnet", "snowflake_conn_id": "snowflake_default"}'
+                    },
+                },
+                "conn-fields": {
+                    "model": {
+                        "label": "Model",
+                        "description": "Cortex model identifier (e.g. snowflake:claude-4-sonnet)",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                    "fallback_conn_ids": {
+                        "label": "Fallback Connections",
+                        "description": "Connection IDs to fail over to, in order, while this provider is unavailable.",
+                        "schema": {"type": ["array", "null"], "items": {"type": "string"}},
+                    },
+                    "snowflake_conn_id": {
+                        "label": "Snowflake Connection ID",
+                        "description": "Connection ID of an existing Snowflake connection to source credentials from.",
+                        "schema": {"type": ["string", "null"]},
+                    },
+                },
+            },
         ],
         "triggers": [
             {
                 "integration-name": "Snowflake",
-                "python-modules": ["airflow.providers.snowflake.triggers.snowflake_trigger"],
+                "python-modules": [
+                    "airflow.providers.snowflake.triggers.snowflake_trigger",
+                    "airflow.providers.snowflake.triggers.snowpark_containers",
+                ],
             }
         ],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-common-compat>=1.6.0",
-            "apache-airflow-providers-common-sql>=1.20.0",
-            "pandas>=2.1.2,<2.2",
-            "pyarrow>=14.0.1",
-            "snowflake-connector-python>=3.7.1",
-            "snowflake-sqlalchemy>=1.4.0",
-            "snowflake-snowpark-python>=1.17.0;python_version<'3.12'",
-        ],
-        "optional-dependencies": {"openlineage": ["apache-airflow-providers-openlineage"]},
-        "devel-dependencies": ["responses>=0.25.0"],
+        "config": {
+            "snowflake": {
+                "description": "Configuration for Snowflake hooks and operators.\n",
+                "options": {
+                    "azure_oauth_scope": {
+                        "description": "The scope to use while retrieving OAuth token for Snowflake from Azure Entra authentication.\n",
+                        "version_added": "6.6.0",
+                        "type": "string",
+                        "example": None,
+                        "default": "api://snowflake_oauth_server/.default",
+                    }
+                },
+            }
+        },
     }

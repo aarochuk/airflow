@@ -21,18 +21,13 @@ from collections.abc import Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
-from airflow.models import BaseOperator
 from airflow.providers.cohere.hooks.cohere import CohereHook
+from airflow.providers.common.compat.sdk import BaseOperator
 
 if TYPE_CHECKING:
     from cohere.core.request_options import RequestOptions
-    from cohere.types import EmbedByTypeResponseEmbeddings
 
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class CohereEmbeddingOperator(BaseOperator):
@@ -61,7 +56,10 @@ class CohereEmbeddingOperator(BaseOperator):
         - additional_body_parameters: typing.Dict[str, typing.Any]. A dictionary containing additional parameters to spread into the request's body parameters dict
     """
 
-    template_fields: Sequence[str] = ("input_text",)
+    template_fields: Sequence[str] = (
+        "input_text",
+        "conn_id",
+    )
 
     def __init__(
         self,
@@ -73,8 +71,6 @@ class CohereEmbeddingOperator(BaseOperator):
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
-        if isinstance(input_text, str):
-            input_text = [input_text]
         self.conn_id = conn_id
         self.input_text = input_text
         self.timeout = timeout
@@ -91,6 +87,16 @@ class CohereEmbeddingOperator(BaseOperator):
             request_options=self.request_options,
         )
 
-    def execute(self, context: Context) -> EmbedByTypeResponseEmbeddings:
+    def execute(self, context: Context) -> list[list[float]]:
         """Embed texts using Cohere embed services."""
-        return self.hook.create_embeddings(self.input_text)
+        # input_text is a template field, so normalize a single string into a list here
+        # (after rendering) rather than in __init__, where it would act on the un-rendered value.
+        input_text = [self.input_text] if isinstance(self.input_text, str) else self.input_text
+        embedding_response = self.hook.create_embeddings(input_text)
+        # NOTE: Return type `EmbedByTypeResponseEmbeddings` was removed temporarily due to limitations
+        # in XCom serialization/deserialization of complex types like Cohere embeddings and Pydantic models.
+        #
+        # Tracking issue: https://github.com/apache/airflow/issues/50867
+        # Once that issue is resolved, XCom (de)serialization of such types will be supported, and
+        # we can safely restore the `EmbedByTypeResponseEmbeddings` return type here.
+        return embedding_response

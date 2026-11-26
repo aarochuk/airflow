@@ -22,16 +22,17 @@ from typing import TypedDict
 RESOURCE_ACTION = "Permissions"
 RESOURCE_ADMIN_MENU = "Admin"
 RESOURCE_AUDIT_LOG = "Audit Logs"
+RESOURCE_AUDIT_LOG_ALL = "All Audit Logs"
 RESOURCE_BACKFILL = "Backfills"
 RESOURCE_BROWSE_MENU = "Browse"
 RESOURCE_CONFIG = "Configurations"
 RESOURCE_CONNECTION = "Connections"
 RESOURCE_DAG = "DAGs"
+RESOURCE_DAG_BUNDLE = "Dag Bundles"
 RESOURCE_DAG_CODE = "DAG Code"
 RESOURCE_DAG_DEPENDENCIES = "DAG Dependencies"
 RESOURCE_DAG_PREFIX = "DAG:"
 RESOURCE_DAG_RUN = "DAG Runs"
-RESOURCE_DAG_RUN_PREFIX = "DAG Run:"
 RESOURCE_DAG_VERSION = "DAG Versions"
 RESOURCE_DAG_WARNING = "DAG Warnings"
 RESOURCE_CLUSTER_ACTIVITY = "Cluster Activity"
@@ -39,7 +40,9 @@ RESOURCE_ASSET = "Assets"
 RESOURCE_ASSET_ALIAS = "Asset Aliases"
 RESOURCE_DOCS = "Documentation"
 RESOURCE_DOCS_MENU = "Docs"
+RESOURCE_HITL_DETAIL = "HITL Detail"
 RESOURCE_IMPORT_ERROR = "ImportError"
+RESOURCE_IMPORT_ERROR_ALL = "All Import Errors"
 RESOURCE_JOB = "Jobs"
 RESOURCE_MY_PASSWORD = "My Password"
 RESOURCE_MY_PROFILE = "My Profile"
@@ -48,6 +51,7 @@ RESOURCE_PERMISSION = "Permission Views"  # Refers to a Perm <-> View mapping, n
 RESOURCE_PLUGIN = "Plugins"
 RESOURCE_POOL = "Pools"
 RESOURCE_PROVIDER = "Providers"
+RESOURCE_REPARSE_ALL = "All Reparses"
 RESOURCE_RESOURCE = "View Menus"
 RESOURCE_ROLE = "Roles"
 RESOURCE_SLA_MISS = "SLA Misses"
@@ -87,40 +91,15 @@ RESOURCE_DETAILS_MAP = {
     ),
     RESOURCE_DAG_RUN: ResourceDetails(
         actions={ACTION_CAN_READ, ACTION_CAN_CREATE, ACTION_CAN_DELETE, ACTION_CAN_ACCESS_MENU},
-        prefix=RESOURCE_DAG_RUN_PREFIX,
+        prefix="DAG Run:",
     ),
 }
 PREFIX_LIST = [details["prefix"] for details in RESOURCE_DETAILS_MAP.values()]
 PREFIX_RESOURCES_MAP = {details["prefix"]: resource for resource, details in RESOURCE_DETAILS_MAP.items()}
 
 
-def resource_name(root_dag_id: str, resource: str) -> str:
-    """
-    Return the resource name for a DAG id.
-
-    Note that since a sub-DAG should follow the permission of its
-    parent DAG, you should pass ``DagModel.root_dag_id`` to this function,
-    for a subdag. A normal dag should pass the ``DagModel.dag_id``.
-    """
-    if root_dag_id in RESOURCE_DETAILS_MAP.keys():
-        return root_dag_id
-    if root_dag_id.startswith(tuple(PREFIX_RESOURCES_MAP.keys())):
-        return root_dag_id
-    return f"{RESOURCE_DETAILS_MAP[resource]['prefix']}{root_dag_id}"
-
-
-def resource_name_for_dag(root_dag_id: str) -> str:
-    """
-    Return the resource name for a DAG id.
-
-    Note that since a sub-DAG should follow the permission of its
-    parent DAG, you should pass ``DagModel.root_dag_id`` to this function,
-    for a subdag. A normal dag should pass the ``DagModel.dag_id``.
-
-    Note: This function is kept for backwards compatibility.
-    """
-    if root_dag_id == RESOURCE_DAG:
-        return root_dag_id
-    if root_dag_id.startswith(RESOURCE_DAG_PREFIX):
-        return root_dag_id
-    return f"{RESOURCE_DAG_PREFIX}{root_dag_id}"
+def resource_name(dag_id: str, resource: str) -> str:
+    """Return the resource name for a DAG id."""
+    if dag_id.startswith(tuple(PREFIX_RESOURCES_MAP.keys())):
+        return dag_id
+    return f"{RESOURCE_DETAILS_MAP[resource]['prefix']}{dag_id}"

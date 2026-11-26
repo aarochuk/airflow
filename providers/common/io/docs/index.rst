@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -38,6 +37,7 @@
     Transferring a file <transfer>
     Operators <operators>
     Object Storage XCom Backend <xcom_backend>
+    Object Storage State Store Backend <state_store_backend>
 
 .. toctree::
     :hidden:
@@ -58,7 +58,7 @@
     :maxdepth: 1
     :caption: Resources
 
-    Example DAGs <https://github.com/apache/airflow/tree/providers-common-io/|version|/providers/common/io/tests/system/common/io>
+    Example Dags <https://github.com/apache/airflow/tree/providers-common-io/|version|/providers/common/io/tests/system/common/io>
     PyPI Repository <https://pypi.org/project/apache-airflow-providers-common-io/>
     Installing from sources <installing-providers-from-sources>
 
@@ -76,10 +76,10 @@
 apache-airflow-providers-common-io package
 ------------------------------------------------------
 
-``Common IO Provider``
+Common IO Provider
 
 
-Release: 1.5.2
+Release: 1.11.1
 
 Provider package
 ----------------
@@ -90,23 +90,24 @@ All classes for this package are included in the ``airflow.providers.common.io``
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-common-io``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-==================  ==================
-PIP package         Version required
-==================  ==================
-``apache-airflow``  ``>=2.9.0``
-==================  ==================
+==========================================  ==================
+PIP package                                 Version required
+==========================================  ==================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-common-compat``  ``>=1.23.0``
+==========================================  ==================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified provider distributions in order to use them.
@@ -115,15 +116,31 @@ You can install such cross-provider dependencies when installing from PyPI. For 
 
 .. code-block:: bash
 
-    pip install apache-airflow-providers-common-io[common.compat]
+    pip install apache-airflow-providers-common-io[openlineage]
 
 
-==================================================================================================================  =================
-Dependent package                                                                                                   Extra
-==================================================================================================================  =================
-`apache-airflow-providers-common-compat <https://airflow.apache.org/docs/apache-airflow-providers-common-compat>`_  ``common.compat``
-`apache-airflow-providers-openlineage <https://airflow.apache.org/docs/apache-airflow-providers-openlineage>`_      ``openlineage``
-==================================================================================================================  =================
+==============================================================================================================  ===============
+Dependent package                                                                                               Extra
+==============================================================================================================  ===============
+`apache-airflow-providers-openlineage <https://airflow.apache.org/docs/apache-airflow-providers-openlineage>`_  ``openlineage``
+==============================================================================================================  ===============
+
+Optional dependencies
+---------------------
+
+These extras install optional third-party libraries that enable additional features of the provider.
+Install them when installing from PyPI. For example:
+
+.. code-block:: bash
+
+    pip install apache-airflow-providers-common-io[openlineage]
+
+
+===============  ========================================
+Extra            Dependencies
+===============  ========================================
+``openlineage``  ``apache-airflow-providers-openlineage``
+===============  ========================================
 
 Downloading official packages
 -----------------------------
@@ -131,5 +148,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-common-io 1.5.2 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_io-1.5.2.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_io-1.5.2.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_io-1.5.2.tar.gz.sha512>`__)
-* `The apache-airflow-providers-common-io 1.5.2 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_io-1.5.2-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_io-1.5.2-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_io-1.5.2-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-common-io 1.11.1 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_io-1.11.1.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_io-1.11.1.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_io-1.11.1.tar.gz.sha512>`__)
+* `The apache-airflow-providers-common-io 1.11.1 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_io-1.11.1-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_io-1.11.1-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_common_io-1.11.1-py3-none-any.whl.sha512>`__)

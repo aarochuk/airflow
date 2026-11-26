@@ -22,11 +22,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 from airflow.providers.google.suite.hooks.drive import GoogleDriveHook
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class GoogleDriveFileExistenceSensor(BaseSensorOperator):
@@ -53,6 +53,7 @@ class GoogleDriveFileExistenceSensor(BaseSensorOperator):
         "file_name",
         "drive_id",
         "impersonation_chain",
+        "gcp_conn_id",
     )
     ui_color = "#f0eee4"
 

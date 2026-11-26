@@ -1,10 +1,10 @@
-.. Licensed to the Apache Software Foundation (ASF) under one
-   or more contributor license agreements.  See the NOTICE file
-   distributed with this work for additional information
-   regarding copyright ownership.  The ASF licenses this file
-   to you under the Apache License, Version 2.0 (the
-   "License"); you may not use this file except in compliance
-   with the License.  You may obtain a copy of the License at
+ .. Licensed to the Apache Software Foundation (ASF) under one
+    or more contributor license agreements.  See the NOTICE file
+    distributed with this work for additional information
+    regarding copyright ownership.  The ASF licenses this file
+    to you under the Apache License, Version 2.0 (the
+    "License"); you may not use this file except in compliance
+    with the License.  You may obtain a copy of the License at
 
  ..   http://www.apache.org/licenses/LICENSE-2.0
 
@@ -37,12 +37,16 @@ config_kwargs: dict
     The kwargs used for initializing the SparkConf object. This overrides
     the spark configuration options set in the connection.
 
+You can use :ref:`Jinja templating <concepts:jinja-templating>` with the ``conn_id`` and
+``config_kwargs`` parameters, which allows you to dynamically determine values, for example
+``config_kwargs={"spark.app.name": "app-{{ ds }}"}``.
+
 
 Example
 -------
 
 The following example shows how to use the ``@task.pyspark`` decorator. Note
-that the ``spark`` and ``sc`` objects are injected into the function.
+that the ``spark`` object is injected into the function.
 
 .. exampleinclude:: /../tests/system/apache/spark/example_pyspark.py
     :language: python

@@ -17,12 +17,16 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BeforeValidator, ConfigDict, field_validator
+from pydantic import BeforeValidator, ConfigDict, Field, RootModel, field_validator, model_validator
 
 from airflow.api_fastapi.core_api.base import BaseModel
-from airflow.plugins_manager import AirflowPluginSource
+from airflow.plugins_manager import (
+    AirflowPluginSource,
+    BaseDestinationLiteral,
+    PluginActionDestinationLiteral,
+)
 
 
 def coerce_to_string(data: Any) -> Any:
@@ -36,6 +40,15 @@ class FastAPIAppResponse(BaseModel):
 
     app: str
     url_prefix: str
+    name: str
+
+
+class FastAPIRootMiddlewareResponse(BaseModel):
+    """Serializer for Plugin FastAPI root middleware responses."""
+
+    model_config = ConfigDict(extra="allow")
+
+    middleware: str
     name: str
 
 
@@ -56,19 +69,134 @@ class AppBuilderMenuItemResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     name: str
-    href: str | None = None
+    href: str
     category: str | None = None
+
+
+class PluginAppliesToResponse(RootModel[dict[str, list[str]]]):
+    """
+    Serializer for the optional scoping criteria of a UI plugin.
+
+    An open map of dotted field path to the values that path may take -- not a closed set of
+    criteria. ``{"state": ["failed"], "dag.tags.name": ["ml"]}`` scopes to failed entities of
+    ml-tagged Dags. An unqualified path is rooted at the entity the ``destination`` is about;
+    a path may instead name a related record (``dag``, ``dag_run``, ``task``, ``task_instance``)
+    as its first segment. Matching is equality against the listed values, OR within a path and
+    AND across paths, and is evaluated client-side.
+    """
+
+    root: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class BasePluginActionResponse(BaseModel):
+    """
+    Base serializer for a user-defined action rendered beside an entity's built-in actions.
+
+    Permissive like its ``ExternalViewResponse`` and ``ReactAppResponse`` siblings: the config
+    reaches the OpenAPI schema and the generated clients, so forbidding extras here would make
+    the day an optional field is added the day older clients fail to parse ``GET /plugins``.
+    Author mistakes are caught at load time instead, by ``_describe_ui_action_error``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+    destination: PluginActionDestinationLiteral
+    icon: str | None = None
+    icon_dark_mode: str | None = None
+    # Same semantics as `BaseUIResponse.applies_to`. A path whose root record the rendering
+    # surface does not have is skipped rather than failing the match, so one block can be shared
+    # across a plugin's Dag- and task-level destinations. Display gating, not authorization.
+    applies_to: PluginAppliesToResponse | None = None
+
+
+class PluginLinkActionResponse(BasePluginActionResponse):
+    """Serializer for a UI action that opens a URL."""
+
+    action_type: Literal["link"]
+    # Templated with the entity's context tokens. Resolved client-side: a same-origin URL under
+    # the UI's base path navigates in-app, anything else opens as an ordinary link.
+    href: str
+
+
+class PluginReactActionResponse(BasePluginActionResponse):
+    """Serializer for a UI action that mounts a React component behind a button."""
+
+    action_type: Literal["react"]
+    bundle_url: str
+
+
+# Discriminated so a missing `action_type` is an error rather than silently defaulting to one
+# variant. As a field annotation this emits an inline `anyOf`, so no named schema is generated
+# for the union itself; the UI declares the equivalent alias by hand.
+PluginActionResponse = Annotated[
+    PluginLinkActionResponse | PluginReactActionResponse,
+    Field(discriminator="action_type"),
+]
+
+
+class BaseUIResponse(BaseModel):
+    """Base serializer for UI Plugin responses."""
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+    icon: str | None = None
+    icon_dark_mode: str | None = None
+    url_route: str | None = None
+    category: str | None = None
+    nav_top_level: bool | None = False
+    # Optional visibility scoping, evaluated client-side. Values are OR-ed within a path and
+    # AND-ed across paths, but only across paths whose root record the current destination
+    # actually has (a `task_instance.*` path cannot be judged on a Dag-level page, so it is
+    # skipped there rather than failing the match). Omitting `applies_to` shows the item
+    # everywhere. Display gating only, not an authorization boundary.
+    applies_to: PluginAppliesToResponse | None = None
+    # Only read by plugin tabs: show the icon beside the label at full width, not only when the
+    # tab bar collapses to icons. Has no effect without an `icon`.
+    show_icon_with_label: bool | None = False
+
+
+class ExternalViewResponse(BaseUIResponse):
+    """Serializer for External View Plugin responses."""
+
+    model_config = ConfigDict(extra="allow")
+
+    href: str
+    destination: BaseDestinationLiteral = "nav"
+
+
+class ReactAppResponse(BaseUIResponse):
+    """Serializer for React App Plugin responses."""
+
+    model_config = ConfigDict(extra="allow")
+
+    bundle_url: str
+    destination: Literal[BaseDestinationLiteral, "dashboard", "dag_overview", "task_overview"] = "nav"
 
 
 class PluginResponse(BaseModel):
     """Plugin serializer."""
 
     name: str
+    team_name: str | None = None
     macros: list[str]
     flask_blueprints: list[str]
     fastapi_apps: list[FastAPIAppResponse]
+    fastapi_root_middlewares: list[FastAPIRootMiddlewareResponse]
+    external_views: list[ExternalViewResponse] = Field(
+        description="Aggregate all external views. Both 'external_views' and 'appbuilder_menu_items' are included here."
+    )
+    react_apps: list[ReactAppResponse]
+    ui_actions: list[PluginActionResponse] = Field(
+        default_factory=list,
+        description="User-defined actions rendered on Dag, Dag Run, and Task Instance "
+        "table rows and header cards.",
+    )
     appbuilder_views: list[AppBuilderViewResponse]
-    appbuilder_menu_items: list[AppBuilderMenuItemResponse]
+    appbuilder_menu_items: list[AppBuilderMenuItemResponse] = Field(
+        deprecated="Kept for backward compatibility, use `external_views` instead.",
+    )
     global_operator_extra_links: list[str]
     operator_extra_links: list[str]
     source: Annotated[str, BeforeValidator(coerce_to_string)]
@@ -82,9 +210,29 @@ class PluginResponse(BaseModel):
             return str(data)
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def convert_external_views(cls, data: Any) -> Any:
+        data["external_views"] = [*data["external_views"], *data["appbuilder_menu_items"]]
+        return data
+
 
 class PluginCollectionResponse(BaseModel):
     """Plugin Collection serializer."""
 
     plugins: list[PluginResponse]
+    total_entries: int
+
+
+class PluginImportErrorResponse(BaseModel):
+    """Plugin Import Error serializer for responses."""
+
+    source: str
+    error: str
+
+
+class PluginImportErrorCollectionResponse(BaseModel):
+    """Plugin Import Error Collection serializer."""
+
+    import_errors: list[PluginImportErrorResponse]
     total_entries: int

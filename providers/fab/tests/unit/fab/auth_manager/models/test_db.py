@@ -20,11 +20,14 @@ import re
 from unittest import mock
 
 import pytest
+import sqlalchemy as sa
+from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import MetaData
 
 import airflow.providers.fab as provider_fab
+from airflow import settings
 from airflow.settings import engine
 from airflow.utils.db import (
     compare_server_default,
@@ -32,6 +35,16 @@ from airflow.utils.db import (
 )
 
 pytestmark = [pytest.mark.db_test]
+
+
+def _email_unique_constraint_names(bind) -> list[str]:
+    return sorted(
+        uq["name"]
+        for uq in sa.inspect(bind).get_unique_constraints("ab_register_user")
+        if "email" in uq["column_names"]
+    )
+
+
 try:
     from airflow.providers.fab.auth_manager.models.db import FABDBManager
 
@@ -70,6 +83,15 @@ try:
                 },
             )
             diff = compare_metadata(mctx, all_meta_data)
+            ignores = [
+                # These are conditionally added in ORM by the event listener
+                lambda t: t[0] == "remove_index" and t[1].name == "idx_ab_register_user_username",
+                lambda t: t[0] == "remove_index" and t[1].name == "idx_ab_user_username",
+                lambda t: t[0] == "add_index" and t[1].name == "idx_ab_register_user_username",
+                lambda t: t[0] == "add_index" and t[1].name == "idx_ab_user_username",
+            ]
+            for ignore in ignores:
+                diff = [d for d in diff if not ignore(d)]
 
             assert not diff, "Database schema and SQLAlchemy model are not in sync: " + str(diff)
 
@@ -102,11 +124,121 @@ try:
         @mock.patch.object(FABDBManager, "get_current_revision")
         def test_sqlite_offline_upgrade_raises_with_revision(self, mock_gcr, session):
             with mock.patch(
-                "airflow.providers.fab.auth_manager.models.db.settings.engine.dialect"
-            ) as dialect:
-                dialect.name = "sqlite"
+                "airflow.providers.fab.auth_manager.models.db.settings.SQL_ALCHEMY_CONN",
+                "sqlite:////tmp/fab-test.db",
+            ):
                 with pytest.raises(SystemExit, match="Offline migration not supported for SQLite"):
                     FABDBManager(session).upgradedb(from_revision=None, to_revision=None, show_sql_only=True)
+
+        @pytest.mark.parametrize(
+            ("direction", "revision_range", "expected_statements"),
+            [
+                (
+                    "upgrade",
+                    "6709f7a774b9:02ca36b0235b",
+                    (
+                        "CREATE PROCEDURE CreateIdxPermissionViewId()",
+                        "CREATE PROCEDURE CreateIdxRoleId()",
+                        "CREATE PROCEDURE DropEmailUqIfExists()",
+                        "UPDATE alembic_version_fab SET version_num='02ca36b0235b'",
+                    ),
+                ),
+                (
+                    "downgrade",
+                    "02ca36b0235b:6709f7a774b9",
+                    (
+                        "CREATE PROCEDURE DropUniqueIfExists()",
+                        "CREATE PROCEDURE DropIndexIfExists()",
+                        "UPDATE alembic_version_fab SET version_num='6709f7a774b9'",
+                    ),
+                ),
+            ],
+        )
+        @mock.patch("airflow.settings.SQL_ALCHEMY_CONN", "mysql+pymysql://user:pass@host/airflow")
+        def test_offline_mysql_sql_generation(
+            self, session, capsys, direction, revision_range, expected_statements
+        ):
+            # Offline mode hands the migration a MockConnection rather than None, so every
+            # introspection has to be gated on the context's as_sql flag or it raises
+            # NoInspectionAvailable and no script is produced at all. The version stamp is
+            # emitted last, so asserting it proves the whole revision ran.
+            config = FABDBManager(session=session).get_alembic_config()
+
+            getattr(command, direction)(config, revision_range, sql=True)
+
+            script = capsys.readouterr().out
+            for statement in expected_statements:
+                assert statement in script
+
+        @mock.patch("alembic.command.upgrade")
+        @mock.patch.object(FABDBManager, "create_db_from_orm")
+        @mock.patch.object(FABDBManager, "_has_existing_manager_tables", return_value=False)
+        @mock.patch.object(FABDBManager, "get_current_revision", return_value=None)
+        def test_upgradedb_empty_db_without_migration_files_uses_create_db_from_orm(
+            self,
+            mock_get_current_revision,
+            mock_has_existing_manager_tables,
+            mock_create_db_from_orm,
+            mock_upgrade,
+            session,
+        ):
+            FABDBManager(session).upgradedb()
+
+            mock_has_existing_manager_tables.assert_called_once()
+            mock_create_db_from_orm.assert_called_once()
+            mock_upgrade.assert_not_called()
+            mock_get_current_revision.assert_called_once()
+
+        @mock.patch("alembic.command.upgrade")
+        @mock.patch("alembic.command.stamp")
+        @mock.patch.object(FABDBManager, "get_script_object")
+        @mock.patch.object(FABDBManager, "get_alembic_config", return_value=object())
+        @mock.patch.object(FABDBManager, "create_db_from_orm")
+        @mock.patch.object(FABDBManager, "_has_existing_manager_tables", return_value=True)
+        @mock.patch.object(FABDBManager, "get_current_revision", return_value=None)
+        def test_upgradedb_existing_tables_without_version_stamps_base_then_runs_migrations(
+            self,
+            mock_get_current_revision,
+            mock_has_existing_manager_tables,
+            mock_create_db_from_orm,
+            mock_get_alembic_config,
+            mock_get_script_object,
+            mock_stamp,
+            mock_upgrade,
+            session,
+        ):
+            base_revision = mock.Mock(revision="base-revision", down_revision=None)
+            mock_get_script_object.return_value.walk_revisions.return_value = [
+                mock.Mock(revision="head-revision", down_revision="base-revision"),
+                base_revision,
+            ]
+
+            FABDBManager(session).upgradedb()
+
+            mock_has_existing_manager_tables.assert_called_once()
+            mock_create_db_from_orm.assert_not_called()
+            mock_stamp.assert_called_once_with(mock_get_alembic_config.return_value, "base-revision")
+            mock_upgrade.assert_called_once_with(mock_get_alembic_config.return_value, revision="heads")
+            mock_get_current_revision.assert_called_once()
+
+        @mock.patch("alembic.command.upgrade")
+        @mock.patch.object(FABDBManager, "create_db_from_orm")
+        @mock.patch.object(FABDBManager, "get_current_revision", return_value=None)
+        @mock.patch.object(FABDBManager, "get_alembic_config", return_value=object())
+        def test_upgradedb_empty_db_with_use_migration_files_runs_alembic_upgrade(
+            self,
+            mock_get_alembic_config,
+            mock_get_current_revision,
+            mock_create_db_from_orm,
+            mock_upgrade,
+            session,
+        ):
+            FABDBManager(session).upgradedb(use_migration_files=True)
+
+            mock_create_db_from_orm.assert_not_called()
+            mock_get_current_revision.assert_called_once()
+            mock_get_alembic_config.assert_called_once()
+            mock_upgrade.assert_called_once_with(mock_get_alembic_config.return_value, revision="heads")
 
         @mock.patch("airflow.utils.db_manager.inspect")
         @mock.patch.object(FABDBManager, "metadata")
@@ -114,8 +246,10 @@ try:
         def test_drop_tables(self, mock__get_flask_db, mock_metadata, mock_inspect, session):
             manager = FABDBManager(session)
             connection = mock.MagicMock()
+            db = mock.MagicMock()
+            mock__get_flask_db.return_value = db, mock.MagicMock()
             manager.drop_tables(connection)
-            mock__get_flask_db.return_value.drop_all.assert_called_once_with()
+            db.drop_all.assert_called_once_with()
             mock_metadata.drop_all.assert_called_once_with(connection)
 
         @pytest.mark.parametrize("skip_init", [True, False])
@@ -130,6 +264,135 @@ try:
                 mock_initdb.assert_not_called()
             else:
                 mock_initdb.assert_called_once()
+
+        @pytest.mark.backend("mysql")
+        def test_upgradedb_mysql_keeps_permission_view_role_indexes_after_fk_recreation(self, session):
+            manager = FABDBManager(session=session)
+            original_revision = manager.get_current_revision()
+
+            try:
+                manager.downgrade(to_revision="6709f7a774b9")
+                manager.upgradedb(to_revision="02ca36b0235b")
+
+                index_names = {
+                    index["name"] for index in sa.inspect(engine).get_indexes("ab_permission_view_role")
+                }
+
+                assert "idx_permission_view_id" in index_names
+                assert "idx_role_id" in index_names
+            finally:
+                current_revision = manager.get_current_revision()
+                if original_revision and current_revision != original_revision:
+                    manager.upgradedb(to_revision=original_revision)
+
+        @pytest.mark.backend("mysql")
+        def test_upgradedb_mysql_succeeds_with_implicit_fk_names(self, session):
+            # Legacy MySQL DBs carry FKs auto-named like ``<table>_ibfk_N`` rather than the
+            # naming-convention names ``batch_op.f()`` produces. The upgrade must resolve the
+            # live FK names via introspection so the drops issue the correct identifiers.
+            manager = FABDBManager(session=session)
+            original_revision = manager.get_current_revision()
+
+            try:
+                manager.downgrade(to_revision="6709f7a774b9")
+
+                replacements = {
+                    "ab_permission_view_role": [
+                        ("permission_view_id", "ab_permission_view", "id"),
+                        ("role_id", "ab_role", "id"),
+                    ],
+                    "ab_user_role": [
+                        ("user_id", "ab_user", "id"),
+                        ("role_id", "ab_role", "id"),
+                    ],
+                }
+                with engine.begin() as conn:
+                    for table_name, fks in replacements.items():
+                        for fk in sa.inspect(conn).get_foreign_keys(table_name):
+                            if fk["name"]:
+                                conn.execute(
+                                    sa.text(f"ALTER TABLE `{table_name}` DROP FOREIGN KEY `{fk['name']}`")
+                                )
+                        for column, ref_table, ref_column in fks:
+                            conn.execute(
+                                sa.text(
+                                    f"ALTER TABLE `{table_name}` "
+                                    f"ADD FOREIGN KEY (`{column}`) "
+                                    f"REFERENCES `{ref_table}` (`{ref_column}`) ON DELETE CASCADE"
+                                )
+                            )
+
+                implicit_fk_names = {
+                    fk["name"] for fk in sa.inspect(engine).get_foreign_keys("ab_permission_view_role")
+                }
+                assert any(name and "_ibfk_" in name for name in implicit_fk_names)
+
+                manager.upgradedb(to_revision="02ca36b0235b")
+
+                pvr_fk_names = {
+                    fk["name"] for fk in sa.inspect(engine).get_foreign_keys("ab_permission_view_role")
+                }
+                user_role_fk_names = {
+                    fk["name"] for fk in sa.inspect(engine).get_foreign_keys("ab_user_role")
+                }
+                assert "ab_permission_view_role_role_id_fkey" in pvr_fk_names
+                assert "ab_permission_view_role_permission_view_id_fkey" in pvr_fk_names
+                assert "ab_user_role_role_id_fkey" in user_role_fk_names
+                assert "ab_user_role_user_id_fkey" in user_role_fk_names
+            finally:
+                current_revision = manager.get_current_revision()
+                if original_revision and current_revision != original_revision:
+                    manager.upgradedb(to_revision=original_revision)
+
+        @pytest.mark.backend("mysql")
+        def test_upgradedb_and_downgrade_mysql_run_under_pymysql(self, session):
+            # pymysql leaves CLIENT_MULTI_STATEMENTS off (mysqlclient, which CI uses, turns it
+            # on), so the server rejects any revision that packs several statements into one
+            # op.execute(). Drive the revision over a pymysql connection to keep it split.
+            pytest.importorskip("pymysql")
+
+            manager = FABDBManager(session=session)
+            original_revision = manager.get_current_revision()
+            pymysql_url = sa.engine.make_url(settings.SQL_ALCHEMY_CONN).set(drivername="mysql+pymysql")
+            pymysql_engine = sa.create_engine(pymysql_url)
+
+            try:
+                manager.downgrade(to_revision="6709f7a774b9")
+
+                # An Airflow 2.x database reaches this revision with FAB's own unique index on
+                # email, named after the column. That is what the revision has to find and drop.
+                with pymysql_engine.begin() as setup:
+                    for name in _email_unique_constraint_names(setup):
+                        setup.execute(sa.text(f"ALTER TABLE `ab_register_user` DROP INDEX `{name}`"))
+                    setup.execute(sa.text("ALTER TABLE `ab_register_user` ADD UNIQUE KEY `email` (`email`)"))
+
+                config = manager.get_alembic_config()
+                with pymysql_engine.connect() as connection:
+                    config.attributes["connection"] = connection
+                    assert connection.dialect.driver == "pymysql"
+
+                    command.upgrade(config, revision="02ca36b0235b")
+                    assert _email_unique_constraint_names(connection) == ["ab_register_user_email_uq"]
+
+                    command.downgrade(config, revision="6709f7a774b9")
+                    assert _email_unique_constraint_names(connection) == []
+                    index_names = {
+                        index["name"]
+                        for index in sa.inspect(connection).get_indexes("ab_permission_view_role")
+                    }
+                    assert "idx_permission_view_id" not in index_names
+                    assert "idx_role_id" not in index_names
+
+                    # The downgrade left no unique constraint on email at all, so this second
+                    # upgrade runs the drops against objects that are already gone — the state a
+                    # database is in after the revision failed part-way through.
+                    command.upgrade(config, revision="02ca36b0235b")
+                    assert _email_unique_constraint_names(connection) == ["ab_register_user_email_uq"]
+            finally:
+                pymysql_engine.dispose()
+                current_revision = manager.get_current_revision()
+                if original_revision and current_revision != original_revision:
+                    manager.upgradedb(to_revision=original_revision)
 
 except ModuleNotFoundError:
     pass

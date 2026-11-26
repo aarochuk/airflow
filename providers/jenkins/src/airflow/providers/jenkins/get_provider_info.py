@@ -26,40 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-jenkins",
         "name": "Jenkins",
         "description": "`Jenkins <https://jenkins.io/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477840,
-        "versions": [
-            "4.0.3",
-            "4.0.2",
-            "4.0.0",
-            "3.7.2",
-            "3.7.1",
-            "3.7.0",
-            "3.6.1",
-            "3.6.0",
-            "3.5.1",
-            "3.5.0",
-            "3.4.0",
-            "3.3.2",
-            "3.3.1",
-            "3.3.0",
-            "3.2.1",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.1.0",
-            "2.0.7",
-            "2.0.6",
-            "2.0.5",
-            "2.0.4",
-            "2.0.3",
-            "2.0.2",
-            "2.0.1",
-            "2.0.0",
-            "1.1.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Jenkins",
@@ -83,9 +49,25 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.jenkins.hooks.jenkins.JenkinsHook",
+                "hook-name": "Jenkins",
                 "connection-type": "jenkins",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["extra"],
+                    "relabeling": {},
+                    "placeholders": {
+                        "login": "Login for the Jenkins service you would like to connect to",
+                        "password": "Password for the Jenkins service you would like to connect too",
+                        "host": "Host for your Jenkins server. Should NOT contain scheme (http:// or https://)",
+                        "port": "Specify a port number",
+                    },
+                },
+                "conn-fields": {
+                    "use_https": {
+                        "label": "Use Https",
+                        "description": "Specifies whether to use https scheme. Defaults to http",
+                        "schema": {"type": ["boolean", "null"]},
+                    }
+                },
             }
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "python-jenkins>=1.0.0"],
-        "devel-dependencies": [],
     }

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+from types import MappingProxyType
 from unittest import mock
 
 import pytest
@@ -61,6 +62,91 @@ class TestExasolHookConn:
         args, kwargs = mock_connect.call_args
         assert args == ()
         assert kwargs["encryption"] is True
+
+
+class TestExasolHookSqlalchemy:
+    def get_connection(self, extra: dict | None = None) -> models.Connection:
+        return models.Connection(
+            login="login",
+            password="password",
+            host="host",
+            port=1234,
+            schema="schema",
+            extra=extra,
+        )
+
+    @pytest.mark.parametrize(
+        ("init_scheme", "extra_scheme", "expected_result", "expect_error"),
+        [
+            (None, None, "exa+websocket", False),
+            ("exa+pyodbc", None, "exa+pyodbc", False),
+            (None, "exa+turbodbc", "exa+turbodbc", False),
+            ("exa+invalid", None, None, True),
+            (None, "exa+invalid", None, True),
+        ],
+        ids=[
+            "default",
+            "from_init_arg",
+            "from_extra",
+            "invalid_from_init_arg",
+            "invalid_from_extra",
+        ],
+    )
+    def test_sqlalchemy_scheme_property(self, init_scheme, extra_scheme, expected_result, expect_error):
+        hook = ExasolHook(sqlalchemy_scheme=init_scheme) if init_scheme else ExasolHook()
+        connection = self.get_connection(extra={"sqlalchemy_scheme": extra_scheme} if extra_scheme else None)
+        hook.get_connection = mock.Mock(return_value=connection)
+
+        if not expect_error:
+            assert hook.sqlalchemy_scheme == expected_result
+        else:
+            with pytest.raises(ValueError, match="sqlalchemy_scheme in connection extra should be one of"):
+                _ = hook.sqlalchemy_scheme
+
+    @pytest.mark.parametrize(
+        ("hook_scheme", "extra", "expected_url"),
+        [
+            (None, {}, "exa+websocket://login:password@host:1234/schema"),
+            (
+                None,
+                {"CONNECTIONLCALL": "en_US.UTF-8", "driver": "EXAODBC"},
+                "exa+websocket://login:password@host:1234/schema?CONNECTIONLCALL=en_US.UTF-8&driver=EXAODBC",
+            ),
+            (
+                None,
+                {"sqlalchemy_scheme": "exa+turbodbc", "CONNECTIONLCALL": "en_US.UTF-8", "driver": "EXAODBC"},
+                "exa+turbodbc://login:password@host:1234/schema?CONNECTIONLCALL=en_US.UTF-8&driver=EXAODBC",
+            ),
+            (
+                "exa+pyodbc",
+                {
+                    "sqlalchemy_scheme": "exa+turbodbc",  # should be overridden
+                    "CONNECTIONLCALL": "en_US.UTF-8",
+                    "driver": "EXAODBC",
+                },
+                "exa+pyodbc://login:password@host:1234/schema?CONNECTIONLCALL=en_US.UTF-8&driver=EXAODBC",
+            ),
+        ],
+        ids=[
+            "default",
+            "default_with_extra",
+            "scheme_from_extra_turbodbc",
+            "scheme_from_hook",
+        ],
+    )
+    def test_sqlalchemy_url_property(self, hook_scheme, extra, expected_url):
+        hook = ExasolHook(sqlalchemy_scheme=hook_scheme) if hook_scheme else ExasolHook()
+        hook.get_connection = mock.Mock(return_value=self.get_connection(extra=extra))
+        assert hook.sqlalchemy_url.render_as_string(hide_password=False) == expected_url
+
+    def test_get_uri(self):
+        hook = ExasolHook()
+        connection = self.get_connection(extra={"CONNECTIONLCALL": "en_US.UTF-8", "driver": "EXAODBC"})
+        hook.get_connection = mock.Mock(return_value=connection)
+        assert (
+            hook.get_uri()
+            == "exa+websocket://login:password@host:1234/schema?CONNECTIONLCALL=en_US.UTF-8&driver=EXAODBC"
+        )
 
 
 class TestExasolHook:
@@ -109,11 +195,33 @@ class TestExasolHook:
 
     def test_run_with_parameters(self):
         sql = "SQL"
-        parameters = ("param1", "param2")
+        parameters = {"param1": "val1", "param2": "val2"}
         self.db_hook.run(sql, autocommit=True, parameters=parameters)
         self.conn.set_autocommit.assert_called_once_with(True)
         self.conn.execute.assert_called_once_with(sql, parameters)
         self.conn.commit.assert_not_called()
+
+    def test_run_normalizes_mapping_parameters(self):
+        # pyexasol 2.x types ``query_params`` as ``dict``, so any other mapping
+        # is copied into one before it reaches the driver.
+        self.db_hook.run("SQL", parameters=MappingProxyType({"param1": "val1"}))
+        passed = self.conn.execute.call_args.args[1]
+        assert passed == {"param1": "val1"}
+        assert type(passed) is dict
+
+    def test_run_rejects_positional_parameters(self):
+        # pyexasol substitutes named placeholders via ``**query_params``, so a
+        # sequence never reached the driver intact.
+        with pytest.raises(TypeError, match="named query parameters only"):
+            self.db_hook.run("SQL", parameters=("param1", "param2"))
+
+    def test_get_records_rejects_statement_list(self):
+        with pytest.raises(TypeError, match="single statement"):
+            self.db_hook.get_records(["SQL1", "SQL2"])
+
+    def test_get_first_rejects_statement_list(self):
+        with pytest.raises(TypeError, match="single statement"):
+            self.db_hook.get_first(["SQL1", "SQL2"])
 
     def test_run_multi_queries(self):
         sql = ["SQL1", "SQL2"]
@@ -128,9 +236,67 @@ class TestExasolHook:
         self.conn.commit.assert_not_called()
 
     def test_run_no_queries(self):
-        with pytest.raises(ValueError) as err:
+        with pytest.raises(ValueError, match="List of SQL statements is empty"):
             self.db_hook.run(sql=[])
-        assert err.value.args[0] == "List of SQL statements is empty"
+
+    @mock.patch("airflow.providers.exasol.hooks.exasol.send_sql_hook_lineage")
+    def test_run_calls_hook_lineage(self, mock_send_lineage):
+        sql = "SELECT 1"
+        self.db_hook.run(sql, autocommit=True)
+        mock_send_lineage.assert_called()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] is None
+        assert call_kw["row_count"] == 0
+
+    @mock.patch("airflow.providers.exasol.hooks.exasol.send_sql_hook_lineage")
+    def test_get_records_hook_lineage(self, mock_send_lineage):
+        sql = "SELECT 1"
+        self.db_hook.get_records(sql)
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] is None
+        assert call_kw["cur"] is self.cur
+
+    @mock.patch("airflow.providers.exasol.hooks.exasol.send_sql_hook_lineage")
+    def test_get_first_hook_lineage(self, mock_send_lineage):
+        sql = "SELECT 1"
+        self.db_hook.get_first(sql)
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] is None
+        assert call_kw["cur"] is self.cur
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    def test_get_df_hook_lineage(self, mock_send_lineage):
+        statement = "SQL"
+        self.db_hook.get_df(statement, df_type="pandas")
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == statement
+        assert call_kw["sql_parameters"] is None
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    @mock.patch("airflow.providers.common.sql.hooks.sql.DbApiHook._get_pandas_df_by_chunks")
+    def test_get_df_by_chunks_hook_lineage(self, mock_get_pandas_df_by_chunks, mock_send_lineage):
+        statement = "SELECT 1"
+        parameters = ("x",)
+        self.db_hook.get_df_by_chunks(statement, parameters=parameters, chunksize=1)
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == statement
+        assert call_kw["sql_parameters"] == parameters
 
     def test_no_result_set(self):
         """Queries like DROP and SELECT are of type rowCount (not resultSet),
@@ -171,3 +337,23 @@ class TestExasolHook:
             query_params=query_params,
             export_params=export_params,
         )
+
+    def test_get_df_pandas(self):
+        statement = "SQL"
+        column = "col"
+        result_sets = [("row1",), ("row2",)]
+        mock_df = mock.MagicMock()
+        mock_df.columns = [column]
+        mock_df.values.tolist.return_value = result_sets
+        self.conn.export_to_pandas.return_value = mock_df
+
+        df = self.db_hook.get_df(statement, df_type="pandas")
+
+        assert column == df.columns[0]
+
+        assert result_sets[0][0] == df.values.tolist()[0][0]
+        assert result_sets[1][0] == df.values.tolist()[1][0]
+
+    def test_get_df_polars(self):
+        with pytest.raises(NotImplementedError):
+            self.db_hook.get_df("SQL", df_type="polars")

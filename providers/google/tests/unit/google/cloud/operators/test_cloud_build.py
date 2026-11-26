@@ -30,10 +30,10 @@ import pytest
 from google.api_core.gapic_v1.method import DEFAULT
 from google.cloud.devtools.cloudbuild_v1.types import Build, BuildTrigger, RepoSource, StorageSource
 
-from airflow.exceptions import AirflowException, TaskDeferred
 from airflow.models import DAG
 from airflow.models.dagrun import DagRun
 from airflow.models.taskinstance import TaskInstance
+from airflow.providers.common.compat.sdk import AirflowException, TaskDeferred, timezone
 from airflow.providers.google.cloud.operators.cloud_build import (
     BuildProcessor,
     CloudBuildCancelBuildOperator,
@@ -49,7 +49,6 @@ from airflow.providers.google.cloud.operators.cloud_build import (
     CloudBuildUpdateBuildTriggerOperator,
 )
 from airflow.providers.google.cloud.triggers.cloud_build import CloudBuildCreateBuildTrigger
-from airflow.utils.timezone import datetime
 from airflow.utils.types import DagRunType
 
 GCP_CONN_ID = "google_cloud_default"
@@ -138,7 +137,7 @@ class TestCloudBuildOperator:
             CloudBuildCreateBuildOperator(task_id="id")
 
     @pytest.mark.parametrize(
-        "file_type, file_content",
+        ("file_type", "file_content"),
         [
             (
                 ".json",
@@ -165,6 +164,28 @@ class TestCloudBuildOperator:
             operator.prepare_template()
             expected_body = {"steps": [{"name": "ubuntu", "args": ["echo", "Hello {{ params.name }}!"]}]}
             assert expected_body == operator.build
+
+    def test_init_does_not_duplicate_build(self):
+        build_path = "path/to/build.json"
+        operator = CloudBuildCreateBuildOperator(build=build_path, task_id="task-id")
+        assert operator.build == build_path
+        # Any second attribute referencing the same object would be a copy prepare_template()
+        # could read instead of self.build, whatever it is named.
+        assert [name for name, value in vars(operator).items() if value is build_path] == ["build"]
+
+    def test_prepare_template_second_call_is_no_op(self, tmp_path):
+        expected_body = {"steps": [{"name": "ubuntu", "args": ["echo", "Hello {{ params.name }}!"]}]}
+        build_file = tmp_path / "build.json"
+        build_file.write_text(json.dumps(expected_body))
+
+        operator = CloudBuildCreateBuildOperator(build=str(build_file), task_id="task-id")
+        operator.prepare_template()
+        assert expected_body == operator.build
+
+        build_file.unlink()
+
+        operator.prepare_template()
+        assert expected_body == operator.build
 
     @mock.patch(CLOUD_BUILD_HOOK_PATH)
     def test_create_build_trigger(self, mock_hook):
@@ -333,7 +354,7 @@ class TestBuildProcessor:
             BuildProcessor(build={"source": {}}).process_body()
 
     @pytest.mark.parametrize(
-        "url, expected_dict",
+        ("url", "expected_dict"),
         [
             (
                 "https://source.cloud.google.com/airflow-project/airflow-repo",
@@ -372,7 +393,7 @@ class TestBuildProcessor:
             BuildProcessor(build=body).process_body()
 
     @pytest.mark.parametrize(
-        "url, expected_dict",
+        ("url", "expected_dict"),
         [
             (
                 "gs://bucket-name/airflow-object.tar.gz",
@@ -413,7 +434,7 @@ def set_execute_complete(session, ti, **next_kwargs):
 @pytest.mark.db_test
 @mock.patch(CLOUD_BUILD_HOOK_PATH)
 def test_async_create_build_fires_correct_trigger_should_execute_successfully(
-    mock_hook, create_task_instance_of_operator, session
+    mock_hook, dag_maker, create_task_instance_of_operator, session
 ):
     mock_hook.return_value.create_build_without_waiting_for_result.return_value = (BUILD, BUILD_ID)
 
@@ -426,7 +447,7 @@ def test_async_create_build_fires_correct_trigger_should_execute_successfully(
     )
 
     with pytest.raises(TaskDeferred) as exc:
-        ti.task.execute({"ti": ti})
+        dag_maker.dag.get_task(ti.task_id).execute({"ti": ti, "task_instance": ti})
 
     assert isinstance(exc.value.trigger, CloudBuildCreateBuildTrigger), (
         "Trigger is not a CloudBuildCreateBuildTrigger"
@@ -457,7 +478,7 @@ def test_async_create_build_without_wait_should_execute_successfully(mock_hook):
 @pytest.mark.db_test
 @mock.patch(CLOUD_BUILD_HOOK_PATH)
 def test_async_create_build_correct_logging_should_execute_successfully(
-    mock_hook, create_task_instance_of_operator, session
+    mock_hook, dag_maker, create_task_instance_of_operator, session
 ):
     mock_hook.return_value.create_build_without_waiting_for_result.return_value = (BUILD, BUILD_ID)
     mock_hook.return_value.get_build.return_value = Build()
@@ -470,9 +491,10 @@ def test_async_create_build_correct_logging_should_execute_successfully(
         dag_id="cloud_build_create_build_logging",
     )
 
-    with mock.patch.object(ti.task.log, "info") as mock_log_info:
-        ti.task.execute_complete(
-            context={"ti": ti},
+    task = dag_maker.dag.get_task(ti.task_id)
+    with mock.patch.object(task.log, "info") as mock_log_info:
+        task.execute_complete(
+            context={"ti": ti, "task": ti.task},
             event={
                 "instance": TEST_BUILD_INSTANCE,
                 "status": "success",
@@ -502,7 +524,7 @@ def test_async_create_build_with_missing_build_should_throw_exception(mock_hook)
 
 
 @pytest.mark.parametrize(
-    "file_type, file_content",
+    ("file_type", "file_content"),
     [
         (
             ".json",
@@ -536,7 +558,7 @@ def test_async_load_templated_should_execute_successfully(file_type, file_conten
 
 def create_context(task):
     dag = DAG(dag_id="dag", schedule=None)
-    logical_date = datetime(2022, 1, 1, 0, 0, 0)
+    logical_date = timezone.datetime(2022, 1, 1, 0, 0, 0)
     dag_run = DagRun(
         dag_id=dag.dag_id,
         logical_date=logical_date,

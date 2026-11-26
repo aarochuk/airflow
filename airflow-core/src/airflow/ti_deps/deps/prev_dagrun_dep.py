@@ -24,6 +24,7 @@ from sqlalchemy import func, or_, select
 from airflow.models.backfill import BackfillDagRun
 from airflow.models.dagrun import DagRun
 from airflow.models.taskinstance import PAST_DEPENDS_MET, TaskInstance as TI
+from airflow.models.xcom import LazyXComSelectSequence
 from airflow.ti_deps.deps.base_ti_dep import BaseTIDep
 from airflow.utils.db import exists_query
 from airflow.utils.session import provide_session
@@ -32,9 +33,22 @@ from airflow.utils.state import TaskInstanceState
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
-    from airflow.sdk.types import Operator
+    from airflow.serialization.definitions.mappedoperator import Operator
 
 _SUCCESSFUL_STATES = (TaskInstanceState.SKIPPED, TaskInstanceState.SUCCESS)
+
+
+def is_past_depends_met(ti: TI, *, session: Session) -> bool:
+    """Return whether this task instance recorded that its past depends were met."""
+    value = ti.xcom_pull(
+        task_ids=ti.task_id, key=PAST_DEPENDS_MET, session=session, default=False, full=False
+    )
+    # XCom is read as plain JSON here, so only the literal ``True`` this dep pushes counts; a
+    # non-empty mapping or other truthy value does not. A mapped task instance's read returns
+    # the value of every map index.
+    if isinstance(value, LazyXComSelectSequence):
+        return any(item is True for item in value)
+    return value is True
 
 
 class PrevDagrunDep(BaseTIDep):
@@ -62,6 +76,7 @@ class PrevDagrunDep(BaseTIDep):
         This function exists for easy mocking in tests.
         """
         return exists_query(
+            TI.working_set.is_(True),
             TI.dag_id == dagrun.dag_id,
             TI.task_id == task_id,
             TI.run_id == dagrun.run_id,
@@ -76,6 +91,7 @@ class PrevDagrunDep(BaseTIDep):
         This function exists for easy mocking in tests.
         """
         query = exists_query(
+            TI.working_set.is_(True),
             TI.dag_id == ti.dag_id,
             TI.task_id == ti.task_id,
             TI.logical_date < ti.logical_date,
@@ -94,14 +110,16 @@ class PrevDagrunDep(BaseTIDep):
 
         This function exists for easy mocking in tests.
         """
-        return session.scalar(
+        unsuccessful_tis_count = session.scalar(
             select(func.count()).where(
+                TI.working_set.is_(True),
                 TI.dag_id == dagrun.dag_id,
                 TI.task_id == task_id,
                 TI.run_id == dagrun.run_id,
                 or_(TI.state.is_(None), TI.state.not_in(_SUCCESSFUL_STATES)),
             )
         )
+        return 0 if unsuccessful_tis_count is None else unsuccessful_tis_count
 
     @staticmethod
     def _has_unsuccessful_dependants(dagrun: DagRun, task: Operator, *, session: Session) -> bool:
@@ -117,6 +135,7 @@ class PrevDagrunDep(BaseTIDep):
         if not task.downstream_task_ids:
             return False
         return exists_query(
+            TI.working_set.is_(True),
             TI.dag_id == dagrun.dag_id,
             TI.task_id.in_(task.downstream_task_ids),
             TI.run_id == dagrun.run_id,
@@ -125,7 +144,7 @@ class PrevDagrunDep(BaseTIDep):
         )
 
     @provide_session
-    def _get_dep_statuses(self, ti: TI, session: Session, dep_context):
+    def _get_dep_statuses(self, ti: TI, dep_context, *, session: Session):
         if TYPE_CHECKING:
             assert ti.task
         if dep_context.ignore_depends_on_past:
@@ -159,7 +178,7 @@ class PrevDagrunDep(BaseTIDep):
         # Don't depend on the previous task instance if we are the first task.
         catchup = ti.task.dag and ti.task.dag.catchup
         if catchup:
-            last_dagrun = DagRun.get_previous_scheduled_dagrun(dr.id, session)
+            last_dagrun = DagRun.get_previous_scheduled_dagrun(dr.id, session=session)
         else:
             last_dagrun = DagRun.get_previous_dagrun(dr, session=session)
         # First ever run for this DAG.
@@ -169,7 +188,12 @@ class PrevDagrunDep(BaseTIDep):
             return
 
         # There was a DAG run, but the task wasn't active back then.
-        if catchup and last_dagrun.logical_date < ti.task.start_date:
+        if (
+            catchup
+            and ti.task.start_date is not None
+            and last_dagrun.logical_date is not None
+            and last_dagrun.logical_date < ti.task.start_date
+        ):
             self._push_past_deps_met_xcom_if_needed(ti, dep_context)
             yield self._passing_status(reason="This task instance was the first task instance for its task.")
             return

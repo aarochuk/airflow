@@ -26,36 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-alibaba",
         "name": "Alibaba",
         "description": "Alibaba Cloud integration (including `Alibaba Cloud <https://www.alibabacloud.com/>`__).\n",
-        "state": "ready",
-        "source-date-epoch": 1743477758,
-        "versions": [
-            "3.0.1",
-            "3.0.0",
-            "2.9.1",
-            "2.9.0",
-            "2.8.1",
-            "2.8.0",
-            "2.7.3",
-            "2.7.2",
-            "2.7.1",
-            "2.7.0",
-            "2.6.0",
-            "2.5.3",
-            "2.5.2",
-            "2.5.1",
-            "2.5.0",
-            "2.4.1",
-            "2.4.0",
-            "2.3.0",
-            "2.2.0",
-            "2.1.0",
-            "2.0.1",
-            "2.0.0",
-            "1.1.1",
-            "1.1.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Alibaba Cloud OSS",
@@ -70,6 +40,12 @@ def get_provider_info():
                 "how-to-guide": ["/docs/apache-airflow-providers-alibaba/operators/analyticdb_spark.rst"],
                 "tags": ["alibaba"],
             },
+            {
+                "integration-name": "Alibaba Cloud MaxCompute",
+                "external-doc-url": "https://www.alibabacloud.com/help/en/dataworks/developer-reference/maxcompute",
+                "how-to-guide": ["/docs/apache-airflow-providers-alibaba/operators/oss.rst"],
+                "tags": ["alibaba"],
+            },
         ],
         "operators": [
             {
@@ -79,6 +55,10 @@ def get_provider_info():
             {
                 "integration-name": "Alibaba Cloud AnalyticDB Spark",
                 "python-modules": ["airflow.providers.alibaba.cloud.operators.analyticdb_spark"],
+            },
+            {
+                "integration-name": "Alibaba Cloud MaxCompute",
+                "python-modules": ["airflow.providers.alibaba.cloud.operators.maxcompute"],
             },
         ],
         "sensors": [
@@ -94,29 +74,74 @@ def get_provider_info():
         "hooks": [
             {
                 "integration-name": "Alibaba Cloud OSS",
-                "python-modules": ["airflow.providers.alibaba.cloud.hooks.oss"],
+                "python-modules": [
+                    "airflow.providers.alibaba.cloud.hooks.oss",
+                    "airflow.providers.alibaba.cloud.hooks.base_alibaba",
+                ],
             },
             {
                 "integration-name": "Alibaba Cloud AnalyticDB Spark",
                 "python-modules": ["airflow.providers.alibaba.cloud.hooks.analyticdb_spark"],
             },
+            {
+                "integration-name": "Alibaba Cloud MaxCompute",
+                "python-modules": ["airflow.providers.alibaba.cloud.hooks.maxcompute"],
+            },
         ],
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.alibaba.cloud.hooks.oss.OSSHook",
+                "hook-name": "OSS",
                 "connection-type": "oss",
             },
             {
                 "hook-class-name": "airflow.providers.alibaba.cloud.hooks.analyticdb_spark.AnalyticDBSparkHook",
+                "hook-name": "AnalyticDB Spark",
                 "connection-type": "adb_spark",
+            },
+            {
+                "hook-class-name": "airflow.providers.alibaba.cloud.hooks.base_alibaba.AlibabaBaseHook",
+                "hook-name": "Alibaba Cloud",
+                "connection-type": "alibaba_cloud",
+                "conn-fields": {
+                    "access_key_id": {
+                        "label": "Access Key ID",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    },
+                    "access_key_secret": {
+                        "label": "Access Key Secret",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    },
+                },
+            },
+            {
+                "hook-class-name": "airflow.providers.alibaba.cloud.hooks.maxcompute.MaxComputeHook",
+                "hook-name": "MaxCompute",
+                "connection-type": "maxcompute",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["host", "schema", "login", "password", "port", "extra"],
+                    "relabeling": {},
+                },
+                "conn-fields": {
+                    "access_key_id": {
+                        "label": "Access Key ID",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    },
+                    "access_key_secret": {
+                        "label": "Access Key Secret",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    },
+                    "project": {"label": "Project", "schema": {"type": ["string", "null"]}},
+                    "endpoint": {"label": "Endpoint", "schema": {"type": ["string", "null"]}},
+                },
             },
         ],
         "logging": ["airflow.providers.alibaba.cloud.log.oss_task_handler.OSSTaskHandler"],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "oss2>=2.14.0",
-            "alibabacloud_adb20211201>=1.0.0",
-            "alibabacloud_tea_openapi>=0.3.7",
+        "remote-logging": [
+            {
+                "classpath": "airflow.providers.alibaba.cloud.log.oss_task_handler.OSSRemoteLogIO",
+                "scheme": "oss",
+            }
         ],
-        "devel-dependencies": [],
+        "extra-links": ["airflow.providers.alibaba.cloud.links.maxcompute.MaxComputeLogViewLink"],
     }

@@ -52,20 +52,16 @@ In some cases the upgrade happens automatically - it depends if in your deployme
 built-in as post-install action. For example when you are using :doc:`helm-chart:index` with
 post-upgrade hooks enabled, the database upgrade happens automatically right after the new software
 is installed. Similarly all Airflow-As-A-Service solutions perform the upgrade automatically for you,
-when you choose to upgrade airflow via their UI.
+when you choose to upgrade Airflow via their UI.
 
 How to upgrade
 ==============
 
 Reinstall Apache Airflow®, specifying the desired new version.
 
-To upgrade a bootstrapped local instance, you can set the ``AIRFLOW_VERSION`` environment variable to the
-intended version prior to rerunning the installation command. Upgrade incrementally by patch version: e.g.,
-if upgrading from version 2.8.2 to 2.8.4, upgrade first to 2.8.3. For more detailed guidance, see
-:doc:`/start`.
-
 To upgrade a PyPI package, rerun the ``pip install`` command in your environment using the desired version
-as a constraint. For more detailed guidance, see :doc:`/installation/installing-from-pypi`.
+as a constraint. For detailed installation and upgrade scenarios, see
+:ref:`installing-from-pypi-installation-and-upgrade-scenarios`.
 
 In order to manually migrate the database you should run the ``airflow db migrate`` command in your
 environment. It can be run either in your virtual environment or in the containers that give
@@ -74,7 +70,7 @@ you access to Airflow ``CLI`` :doc:`/howto/usage-cli` and the database.
 Offline SQL migration scripts
 =============================
 If you want to run the upgrade script offline, you can use the ``-s`` or ``--show-sql-only`` flag
-to get the SQL statements that would be executed. You may also specify the starting airflow version with the ``--from-version`` flag and the ending airflow version with the ``-n`` or ``--to-version`` flag. This feature is supported in Postgres and MySQL
+to get the SQL statements that would be executed. You may also specify the starting Airflow version with the ``--from-version`` flag and the ending Airflow version with the ``-n`` or ``--to-version`` flag. This feature is supported in Postgres and MySQL
 from Airflow 2.0.0 onward.
 
 Sample usage for Airflow version 2.7.0 or greater:
@@ -93,7 +89,7 @@ Handling migration problems
 Wrong Encoding in MySQL database
 ................................
 
-If you are using old Airflow 1.10 as a database created initially either manually or with previous version of MySQL,
+If you have an old Airflow 1.10 database that was created initially either manually or with a previous version of MySQL,
 depending on the original character set of your database, you might have problems with migrating to a newer
 version of Airflow and your migration might fail with strange errors ("key size too big", "missing indexes" etc).
 The next chapter describes how to fix the problem manually.
@@ -132,7 +128,7 @@ Get familiar with the internal Database structure of Airflow which you might fin
 
 Make sure to copy the output. You will need it in the last step. Your
 ``dag_id``, ``run_id``, ``task_id`` and ``key`` columns should have ``utf8`` or ``utf8mb3`` character
-set set explicitly, similar to:
+set explicitly, similar to:
 
 .. code-block:: text
 

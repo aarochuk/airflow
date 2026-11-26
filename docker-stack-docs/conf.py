@@ -35,14 +35,13 @@ import logging
 import os
 from typing import Any
 
-import airflow
-from chart.docs.conf import CHART_DOC_PATH
 from docs.utils.conf_constants import (
     AIRFLOW_FAVICON_PATH,
     AIRFLOW_REPO_ROOT_PATH,
     AUTOAPI_OPTIONS,
     BASIC_AUTOAPI_IGNORE_PATTERNS,
     BASIC_SPHINX_EXTENSIONS,
+    CHART_DOC_PATH,
     SMARTQUOTES_EXCLUDES,
     SPELLING_WORDLIST_PATH,
     SPHINX_DESIGN_STATIC_PATH,
@@ -56,13 +55,13 @@ from docs.utils.conf_constants import (
     get_rst_epilogue,
 )
 
+import airflow
+
 PACKAGE_NAME = "docker-stack"
 DOCKER_STACK_DOCS_PATH = AIRFLOW_REPO_ROOT_PATH / "docker-stack-docs"
 os.environ["AIRFLOW_PACKAGE_NAME"] = PACKAGE_NAME
 
 PACKAGE_VERSION: str = "stable"
-
-conf_py_path = f"/docs/{PACKAGE_NAME}/"
 
 # Adds to environment variables for easy access from other plugins like airflow_intersphinx.
 os.environ["AIRFLOW_PACKAGE_NAME"] = PACKAGE_NAME
@@ -136,10 +135,19 @@ html_favicon = AIRFLOW_FAVICON_PATH.as_posix()
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = [SPHINX_DESIGN_STATIC_PATH.as_posix()]
+html_static_path = [SPHINX_DESIGN_STATIC_PATH.as_posix(), "_static"]
+
+# Redirects links to sections that moved to other pages or were renamed
+html_js_files = ["anchor-redirects.js"]
 
 # Substitute in links
-manual_substitutions_in_generated_html = ["build.html", "index.html"]
+manual_substitutions_in_generated_html = [
+    "build.html",
+    "build-customizing.html",
+    "index.html",
+    "security-scan-results.html",
+    "why-build-your-own-image.html",
+]
 
 html_css_files = ["custom.css"]
 
@@ -155,6 +163,7 @@ html_show_copyright = False
 
 html_theme_options: dict[str, Any] = get_html_theme_options()
 
+conf_py_path = "/docker-stack-docs/"
 # A dictionary of values to pass into the template engine's context for all pages.
 html_context = get_html_context(conf_py_path)
 
@@ -223,7 +232,7 @@ autoapi_options = AUTOAPI_OPTIONS
 suppress_warnings = SUPPRESS_WARNINGS
 
 # -- Options for ext.exampleinclude --------------------------------------------
-exampleinclude_sourceroot = os.path.abspath("..")
+exampleinclude_sourceroot = os.path.abspath(".")
 
 # -- Options for ext.redirects -------------------------------------------------
 redirects_file = "redirects.txt"

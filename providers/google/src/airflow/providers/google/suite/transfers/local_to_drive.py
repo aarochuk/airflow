@@ -23,12 +23,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from airflow.exceptions import AirflowFailException
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import AirflowFailException
 from airflow.providers.google.suite.hooks.drive import GoogleDriveHook
+from airflow.providers.google.version_compat import BaseOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class LocalFilesystemToGoogleDriveOperator(BaseOperator):
@@ -74,6 +74,7 @@ class LocalFilesystemToGoogleDriveOperator(BaseOperator):
     template_fields = (
         "local_paths",
         "drive_folder",
+        "gcp_conn_id",
     )
 
     def __init__(

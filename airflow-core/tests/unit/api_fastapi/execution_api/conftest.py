@@ -16,24 +16,96 @@
 # under the License.
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
-
 import pytest
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from starlette.routing import Mount
 
+from airflow import settings
 from airflow.api_fastapi.app import cached_app
-from airflow.api_fastapi.auth.tokens import JWTValidator
 from airflow.api_fastapi.execution_api.app import lifespan
+from airflow.api_fastapi.execution_api.datamodels.token import TIClaims, TIToken
+from airflow.api_fastapi.execution_api.in_process import InProcessExecutionAPI
+from airflow.api_fastapi.execution_api.security import require_auth
+from airflow.sdk.api.client import Client
+
+
+@pytest.fixture(autouse=True)
+def _restore_lifespan_registry():
+    snapshot = dict(lifespan.registry._services)
+    yield
+    lifespan.registry._services = snapshot
+
+
+def _get_execution_api_app(root_app: FastAPI) -> FastAPI:
+    """Find the mounted execution API sub-app."""
+    for route in root_app.routes:
+        if isinstance(route, Mount) and route.path == "/execution" and isinstance(route.app, FastAPI):
+            return route.app
+    raise RuntimeError("Execution API sub-app not found")
 
 
 @pytest.fixture
-def client(request: pytest.FixtureRequest):
+def exec_app(client):
+    """Return the execution API sub-app."""
+    return _get_execution_api_app(client.app)
+
+
+@pytest.fixture
+def async_db_engine():
+    previous_engine, previous_session = settings.async_engine, settings.AsyncSession
+    settings._configure_async_session()
+    try:
+        yield settings.async_engine
+    finally:
+        settings.async_engine, settings.AsyncSession = previous_engine, previous_session
+
+
+@pytest.fixture
+def client(request: pytest.FixtureRequest, async_db_engine):
     app = cached_app(apps="execution")
+    exec_app = _get_execution_api_app(app)
+
+    async def mock_require_auth(request: Request) -> TIToken:
+        from uuid import UUID
+
+        raw_id = request.path_params.get(
+            "task_instance_id",
+            request.path_params.get(
+                "connection_test_id",
+                request.path_params.get("callback_id", "00000000-0000-0000-0000-000000000000"),
+            ),
+        )
+        try:
+            ti_id = UUID(raw_id)
+        except ValueError:
+            # Raw (uncoerced) path param; fall back so the route's own validation returns 422.
+            ti_id = UUID("00000000-0000-0000-0000-000000000000")
+        return TIToken(id=ti_id, claims=TIClaims(scope="execution"))
+
+    exec_app.dependency_overrides[require_auth] = mock_require_auth
 
     with TestClient(app, headers={"Authorization": "Bearer fake"}) as client:
-        auth = AsyncMock(spec=JWTValidator)
-        auth.avalidated_claims.return_value = {"sub": "edb09971-4e0e-4221-ad3f-800852d38085"}
+        try:
+            yield client
+        finally:
+            client.portal.call(async_db_engine.dispose)
 
-        # Inject our fake JWTValidator object. Can be over-ridden by tests if they want
-        lifespan.registry.register_value(JWTValidator, auth)
+    exec_app.dependency_overrides.pop(require_auth, None)
+
+
+@pytest.fixture
+def task_sdk_client():
+    """
+    A Task SDK client that sends its real requests to this tree's Execution API in process.
+
+    It is built the way the Dag processor and triggerer build theirs. Requests carry the
+    client's real ``Airflow-API-Version`` header and reach the real routes and database,
+    so a mismatch between what the client assumes and what the server does fails here.
+    Authorization is bypassed in process; the security tests cover it.
+    """
+    client = Client(base_url=None, token="", dry_run=True, transport=InProcessExecutionAPI().transport)
+    client.base_url = "http://in-process.invalid./"
+    # The transport stops its event loop and thread when it is garbage collected.
+    with client:
         yield client

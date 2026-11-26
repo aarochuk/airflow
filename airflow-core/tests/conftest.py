@@ -17,18 +17,14 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import sys
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest import mock
 
 import pytest
-
-from tests_common.test_utils.log_handlers import non_pytest_handlers
 
 # We should set these before loading _any_ of the rest of airflow so that the
 # unit test mode config is set as early as possible.
@@ -43,39 +39,6 @@ collect_ignore = [
     "tests/unit/dags_corrupted/test_impersonation_custom.py",
     "tests_common/test_utils/perf/dags/elastic_dag.py",
 ]
-
-
-@pytest.fixture
-def reset_environment():
-    """Resets env variables."""
-    init_env = os.environ.copy()
-    yield
-    changed_env = os.environ
-    for key in changed_env:
-        if key not in init_env:
-            del os.environ[key]
-        else:
-            os.environ[key] = init_env[key]
-
-
-def remove_non_pytest_log_handlers(logger, *classes):
-    for handler in non_pytest_handlers(logger.handlers):
-        logger.removeHandler(handler)
-
-
-def remove_all_non_pytest_log_handlers():
-    # Remove handlers from the root logger
-    remove_non_pytest_log_handlers(logging.getLogger())
-    # Remove handlers from all other loggers
-    for logger_name in logging.root.manager.loggerDict:
-        remove_non_pytest_log_handlers(logging.getLogger(logger_name))
-
-
-@pytest.fixture
-def clear_all_logger_handlers():
-    remove_all_non_pytest_log_handlers()
-    yield
-    remove_all_non_pytest_log_handlers()
 
 
 @contextmanager
@@ -126,14 +89,6 @@ def test_zip_path(tmp_path: Path):
     return os.fspath(zipped)
 
 
-@pytest.fixture
-def mock_supervisor_comms():
-    with mock.patch(
-        "airflow.sdk.execution_time.task_runner.SUPERVISOR_COMMS", create=True
-    ) as supervisor_comms:
-        yield supervisor_comms
-
-
 if TYPE_CHECKING:
     # Static checkers do not know about pytest fixtures' types and return,
     # In case if them distributed through third party packages.
@@ -170,3 +125,12 @@ if TYPE_CHECKING:
     # time-machine
     @pytest.fixture  # type: ignore[no-redef]
     def time_machine() -> TimeMachineFixture: ...
+
+
+@pytest.fixture(autouse=True)
+def _clear_in_process_api_cache():
+    """Clear the cached InProcessExecutionAPI after each test to prevent state leakage."""
+    yield
+    supervisor_module = sys.modules.get("airflow.sdk.execution_time.supervisor")
+    if supervisor_module is not None:
+        supervisor_module.in_process_api_server.cache_clear()

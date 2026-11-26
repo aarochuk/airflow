@@ -17,41 +17,21 @@
 # under the License.
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
 from functools import cached_property
 from glob import glob
 from typing import TYPE_CHECKING, Any
 
-from airflow.configuration import conf
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator, conf
 from airflow.providers.standard.hooks.filesystem import FSHook
 from airflow.providers.standard.triggers.file import FileTrigger
-from airflow.sensors.base import BaseSensorOperator
-
-try:
-    from airflow.triggers.base import StartTriggerArgs
-except ImportError:
-    # TODO: Remove this when min airflow version is 2.10.0 for standard provider
-    @dataclass
-    class StartTriggerArgs:  # type: ignore[no-redef]
-        """Arguments required for start task execution from triggerer."""
-
-        trigger_cls: str
-        next_method: str
-        trigger_kwargs: dict[str, Any] | None = None
-        next_kwargs: dict[str, Any] | None = None
-        timeout: datetime.timedelta | None = None
-
+from airflow.triggers.base import StartTriggerArgs
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class FileSensor(BaseSensorOperator):
@@ -80,7 +60,10 @@ class FileSensor(BaseSensorOperator):
 
     """
 
-    template_fields: Sequence[str] = ("filepath",)
+    template_fields: Sequence[str] = (
+        "filepath",
+        "fs_conn_id",
+    )
     ui_color = "#91818a"
     start_trigger_args = StartTriggerArgs(
         trigger_cls="airflow.providers.standard.triggers.file.FileTrigger",
@@ -111,11 +94,17 @@ class FileSensor(BaseSensorOperator):
         self.start_from_trigger = start_from_trigger
 
         if self.deferrable and self.start_from_trigger:
-            self.start_trigger_args.timeout = datetime.timedelta(seconds=self.timeout)
-            self.start_trigger_args.trigger_kwargs = dict(
-                filepath=self.path,
-                recursive=self.recursive,
-                poke_interval=self.poke_interval,
+            # Replaced rather than mutated: ``start_trigger_args`` is a class attribute, so
+            # assigning through it would overwrite the arguments of every other task built
+            # from this operator.
+            self.start_trigger_args = dataclasses.replace(
+                self.start_trigger_args,
+                timeout=datetime.timedelta(seconds=self.timeout),
+                trigger_kwargs=dict(
+                    filepath=self.path,
+                    recursive=self.recursive,
+                    poke_interval=self.poke_interval,
+                ),
             )
 
     @cached_property
@@ -140,8 +129,12 @@ class FileSensor(BaseSensorOperator):
 
     def execute(self, context: Context) -> None:
         if not self.deferrable:
+            # The sync path blocks in BaseSensorOperator.execute until poke succeeds, so the
+            # deferrable branch must not run afterwards: a file consumed between the two pokes
+            # would otherwise defer a sensor the caller asked not to defer, and on a deployment
+            # with no triggerer the task then sits in ``deferred`` until execution_timeout.
             super().execute(context=context)
-        if not self.poke(context=context):
+        elif not self.poke(context=context):
             self.defer(
                 timeout=datetime.timedelta(seconds=self.timeout),
                 trigger=FileTrigger(
@@ -154,5 +147,5 @@ class FileSensor(BaseSensorOperator):
 
     def execute_complete(self, context: Context, event: bool | None = None) -> None:
         if not event:
-            raise AirflowException("%s task failed as %s not found.", self.task_id, self.filepath)
+            raise AirflowException(f"{self.task_id} task failed as {self.filepath} not found.")
         self.log.info("%s completed successfully as %s found.", self.task_id, self.filepath)

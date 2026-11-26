@@ -22,15 +22,11 @@ import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 from airflow.providers.ftp.hooks.ftp import FTPHook, FTPSHook
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class FTPSensor(BaseSensorOperator):
@@ -44,7 +40,10 @@ class FTPSensor(BaseSensorOperator):
         reference to run the sensor against.
     """
 
-    template_fields: Sequence[str] = ("path",)
+    template_fields: Sequence[str] = (
+        "path",
+        "ftp_conn_id",
+    )
 
     """Errors that are transient in nature, and where action can be retried"""
     transient_errors = [421, 425, 426, 434, 450, 451, 452]

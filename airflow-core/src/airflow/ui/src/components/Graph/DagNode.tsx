@@ -16,42 +16,73 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Flex, HStack, Link } from "@chakra-ui/react";
+import { Flex, HStack, LinkOverlay, Text } from "@chakra-ui/react";
 import type { NodeProps, Node as NodeType } from "@xyflow/react";
 import { Link as RouterLink } from "react-router-dom";
 
-import { useDagServiceGetDag } from "openapi/queries";
-import { DagIcon } from "src/assets/DagIcon";
+import { useDagRunServiceGetDagRuns, useDagServiceGetDag } from "openapi/queries";
+
 import { TogglePause } from "src/components/TogglePause";
+
+import { DagIcon } from "src/assets/DagIcon";
+import { useAutoRefresh } from "src/utils";
 
 import { NodeWrapper } from "./NodeWrapper";
 import type { CustomNodeProps } from "./reactflowUtils";
 
 export const DagNode = ({
-  data: { height, isOpen, isSelected, label, width },
+  data: { height, isOpen, isSelected, label, team, width },
 }: NodeProps<NodeType<CustomNodeProps, "dag">>) => {
-  const { data: dag } = useDagServiceGetDag({ dagId: label });
+  const refetchInterval = useAutoRefresh({ dagId: label });
+  const { data: dag } = useDagServiceGetDag({ dagId: label }, undefined, {
+    refetchInterval: (query) => query.state.data?.scheduling_state === "draining" && refetchInterval,
+  });
+  const { data: unfinishedRuns } = useDagRunServiceGetDagRuns(
+    { dagId: label, limit: 1, state: ["queued", "running"] },
+    undefined,
+    { enabled: dag?.scheduling_state === "active" },
+  );
 
   return (
     <NodeWrapper>
       <Flex
         bg={isOpen ? "bg.muted" : "bg"}
+        borderColor={isSelected ? "border.inverted" : "border"}
         borderRadius={5}
-        borderWidth={isSelected ? 6 : 2}
+        borderWidth={isSelected ? 4 : 2}
         cursor="default"
         flexDirection="column"
         height={`${height}px`}
         px={3}
-        py={isSelected ? 0 : 1}
+        py={1}
         width={`${width}px`}
       >
         <HStack alignItems="center" justifyContent="space-between">
           <DagIcon />
-          <TogglePause dagId={dag?.dag_id ?? label} disabled={!Boolean(dag)} isPaused={dag?.is_paused} />
+          <TogglePause
+            dagId={dag?.dag_id ?? label}
+            disabled={!Boolean(dag)}
+            hasUnfinishedRuns={unfinishedRuns === undefined ? undefined : unfinishedRuns.dag_runs.length > 0}
+            isPaused={dag?.is_paused}
+            schedulingState={dag?.scheduling_state}
+            style={{ zIndex: 2 }}
+          />
         </HStack>
-        <Link asChild color="fg.info" mb={2}>
+        <LinkOverlay asChild>
           <RouterLink to={`/dags/${dag?.dag_id ?? label}`}>{dag?.dag_display_name ?? label}</RouterLink>
-        </Link>
+        </LinkOverlay>
+        {team !== undefined && team !== null ? (
+          <Text
+            color="fg.muted"
+            fontSize="xs"
+            fontStyle="italic"
+            overflow="hidden"
+            textOverflow="ellipsis"
+            whiteSpace="nowrap"
+          >
+            {team}
+          </Text>
+        ) : undefined}
       </Flex>
     </NodeWrapper>
   );

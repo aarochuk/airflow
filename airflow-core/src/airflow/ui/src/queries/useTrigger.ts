@@ -17,47 +17,75 @@
  * under the License.
  */
 import { useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useTranslation } from "react-i18next";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 
-import {
-  UseDagRunServiceGetDagRunsKeyFn,
-  useDagRunServiceTriggerDagRun,
-  useDagServiceGetDagsKey,
-  useDagsServiceRecentDagRunsKey,
-  UseGridServiceGridDataKeyFn,
-  UseTaskInstanceServiceGetTaskInstancesKeyFn,
-} from "openapi/queries";
-import type { DagRunTriggerParams } from "src/components/TriggerDag/TriggerDAGForm";
-import { toaster } from "src/components/ui";
+import { UseDagServiceGetDagKeyFn, useDagRunServiceTriggerDagRun } from "openapi/queries";
+import type { TriggerDagRunData, TriggerDagRunResponse } from "openapi/requests/types.gen";
+
+import { toaster } from "src/system-components";
+
+import type { DagRunTriggerParams } from "src/components/TriggerDag/types";
+
+import { SearchParamsKeys } from "src/constants/searchParams";
+import { dagListQueryKeys, gridQueryKeys } from "src/queries/gridViewQueryKeys";
+import { createErrorToaster, toNullablePartitionKey } from "src/utils";
 
 export const useTrigger = ({ dagId, onSuccessConfirm }: { dagId: string; onSuccessConfirm: () => void }) => {
   const queryClient = useQueryClient();
-  const [error, setError] = useState<unknown>(undefined);
+  const { t: translate } = useTranslation("components");
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { dagId: selectedDagId } = useParams();
 
-  const onSuccess = async () => {
-    const queryKeys = [
-      [useDagServiceGetDagsKey],
-      [useDagsServiceRecentDagRunsKey],
-      UseDagRunServiceGetDagRunsKeyFn({ dagId }, [{ dagId }]),
-      UseTaskInstanceServiceGetTaskInstancesKeyFn({ dagId, dagRunId: "~" }, [{ dagId, dagRunId: "~" }]),
-      UseGridServiceGridDataKeyFn({ dagId }, [{ dagId }]),
-    ];
+  const onSuccess = async (dagRun: TriggerDagRunResponse, variables: TriggerDagRunData) => {
+    const drainKeys = variables.requestBody.drain_dag
+      ? [UseDagServiceGetDagKeyFn({ dagId }, [{ dagId }])]
+      : [];
 
-    await Promise.all(queryKeys.map((key) => queryClient.invalidateQueries({ queryKey: key })));
+    await Promise.all(
+      [...dagListQueryKeys, ...gridQueryKeys(dagId), ...drainKeys].map((key) =>
+        queryClient.invalidateQueries({ queryKey: key }),
+      ),
+    );
 
     toaster.create({
-      description: "DAG run has been successfully triggered.",
-      title: "DAG Run Request Submitted",
+      description: translate("triggerDag.toaster.success.description"),
+      title: translate("triggerDag.toaster.success.title"),
       type: "success",
     });
     onSuccessConfirm();
+
+    // Only redirect if we're already on the dag page.
+    // Preserve search params so layout state (Grid limit, filters) survives the navigation,
+    // but drop the Grid date window — carrying an older ceiling forward would hide the
+    // newly triggered run, which sits at the current time.
+    if (selectedDagId === dagRun.dag_id) {
+      const params = new URLSearchParams(location.search);
+
+      params.delete(SearchParamsKeys.RUN_AFTER_LTE);
+      params.delete(SearchParamsKeys.RUN_AFTER_GTE);
+      const search = params.toString();
+
+      void Promise.resolve(
+        navigate({
+          pathname: `/dags/${dagRun.dag_id}/runs/${dagRun.dag_run_id}`,
+          search: search === "" ? "" : `?${search}`,
+        }),
+      );
+    }
   };
 
-  const onError = (_error: unknown) => {
-    setError(_error);
+  const onError = (apiError: unknown) => {
+    createErrorToaster(apiError, { titleKey: "components:triggerDag.toaster.error.title" }, translate);
   };
 
-  const { isPending, mutate } = useDagRunServiceTriggerDagRun({
+  const {
+    error,
+    isPending,
+    mutate,
+    reset: resetError,
+  } = useDagRunServiceTriggerDagRun({
     onError,
     onSuccess,
   });
@@ -66,9 +94,17 @@ export const useTrigger = ({ dagId, onSuccessConfirm }: { dagId: string; onSucce
     const parsedConfig = JSON.parse(dagRunRequestBody.conf) as Record<string, unknown>;
 
     const logicalDate = dagRunRequestBody.logicalDate ? new Date(dagRunRequestBody.logicalDate) : undefined;
-
-    // eslint-disable-next-line unicorn/no-null
     const formattedLogicalDate = logicalDate?.toISOString() ?? null;
+
+    const dataIntervalStart = dagRunRequestBody.dataIntervalStart
+      ? new Date(dagRunRequestBody.dataIntervalStart)
+      : undefined;
+    const formattedDataIntervalStart = dataIntervalStart?.toISOString() ?? null;
+
+    const dataIntervalEnd = dagRunRequestBody.dataIntervalEnd
+      ? new Date(dagRunRequestBody.dataIntervalEnd)
+      : undefined;
+    const formattedDataIntervalEnd = dataIntervalEnd?.toISOString() ?? null;
 
     const checkDagRunId = dagRunRequestBody.dagRunId === "" ? undefined : dagRunRequestBody.dagRunId;
     const checkNote = dagRunRequestBody.note === "" ? undefined : dagRunRequestBody.note;
@@ -78,11 +114,20 @@ export const useTrigger = ({ dagId, onSuccessConfirm }: { dagId: string; onSucce
       requestBody: {
         conf: parsedConfig,
         dag_run_id: checkDagRunId,
+        data_interval_end: formattedDataIntervalEnd,
+        data_interval_start: formattedDataIntervalStart,
+        drain_dag: dagRunRequestBody.drainDag,
         logical_date: formattedLogicalDate,
         note: checkNote,
+        partition_key: toNullablePartitionKey(dagRunRequestBody.partitionKey),
       },
     });
   };
 
-  return { error, isPending, triggerDagRun };
+  return {
+    error,
+    isPending,
+    resetError,
+    triggerDagRun,
+  };
 };

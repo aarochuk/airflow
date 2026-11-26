@@ -17,7 +17,7 @@
  * under the License.
  */
 import { Button, Field, Input, Stack } from "@chakra-ui/react";
-import React from "react";
+import type { SyntheticEvent } from "react";
 import { Controller, useForm } from "react-hook-form";
 
 import type { LoginBody } from "./Login";
@@ -41,7 +41,7 @@ export const LoginForm = ({ isPending, onLogin }: LoginFormProps) => {
 
   return (
     <form
-      onSubmit={(event: React.SyntheticEvent) => {
+      onSubmit={(event: SyntheticEvent) => {
         event.preventDefault();
         void handleSubmit(onLogin)();
       }}
@@ -53,7 +53,8 @@ export const LoginForm = ({ isPending, onLogin }: LoginFormProps) => {
           render={({ field, fieldState }) => (
             <Field.Root invalid={Boolean(fieldState.error)} required>
               <Field.Label>Username</Field.Label>
-              <Input {...field} />
+              {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
+              <Input autoFocus variant="subtle" {...field} />
             </Field.Root>
           )}
           rules={{ required: true }}
@@ -65,13 +66,13 @@ export const LoginForm = ({ isPending, onLogin }: LoginFormProps) => {
           render={({ field, fieldState }) => (
             <Field.Root invalid={Boolean(fieldState.error)} required>
               <Field.Label>Password</Field.Label>
-              <Input {...field} type="password" />
+              <Input variant="subtle" {...field} type="password" />
             </Field.Root>
           )}
           rules={{ required: true }}
         />
 
-        <Button colorPalette="blue" disabled={!isValid || isPending} type="submit">
+        <Button colorPalette="brand" disabled={!isValid || isPending} type="submit">
           Sign in
         </Button>
       </Stack>

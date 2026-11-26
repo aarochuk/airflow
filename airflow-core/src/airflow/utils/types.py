@@ -14,31 +14,23 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
 from __future__ import annotations
 
 import enum
-from typing import TYPE_CHECKING, TypedDict
 
-import airflow.sdk.definitions._internal.types
-
-if TYPE_CHECKING:
-    from airflow.typing_compat import TypeAlias
-
-ArgNotSet: TypeAlias = airflow.sdk.definitions._internal.types.ArgNotSet
-
-NOTSET = airflow.sdk.definitions._internal.types.NOTSET
+from airflow.utils.deprecation_tools import add_deprecated_classes
 
 
-class DagRunType(str, enum.Enum):
+class DagRunType(enum.StrEnum):
     """Class with DagRun types."""
 
     BACKFILL_JOB = "backfill"
     SCHEDULED = "scheduled"
     MANUAL = "manual"
+    OPERATOR_TRIGGERED = "operator_triggered"
     ASSET_TRIGGERED = "asset_triggered"
-
-    def __str__(self) -> str:
-        return self.value
+    ASSET_MATERIALIZATION = "asset_materialization"
 
     def generate_run_id(self, *, suffix: str) -> str:
         """
@@ -57,12 +49,6 @@ class DagRunType(str, enum.Enum):
         return DagRunType.MANUAL
 
 
-class EdgeInfoType(TypedDict):
-    """Extra metadata that the DAG can store about an edge, usually generated from an EdgeModifier."""
-
-    label: str | None
-
-
 class DagRunTriggeredByType(enum.Enum):
     """Class with TriggeredBy types for DagRun."""
 
@@ -74,3 +60,14 @@ class DagRunTriggeredByType(enum.Enum):
     TIMETABLE = "timetable"  # for timetable based triggering
     ASSET = "asset"  # for asset_triggered run type
     BACKFILL = "backfill"
+
+
+add_deprecated_classes(
+    {
+        __name__: {
+            "ArgNotSet": "airflow.serialization.definitions.notset.ArgNotSet",
+            "NOTSET": "airflow.serialization.definitions.notset.ArgNotSet",
+        },
+    },
+    package=__name__,
+)

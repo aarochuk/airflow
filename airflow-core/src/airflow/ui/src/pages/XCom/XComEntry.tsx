@@ -16,29 +16,129 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Skeleton, HStack, Text } from "@chakra-ui/react";
+import { useState } from "react";
+
+import { Skeleton, Button, HStack, Text, Link } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
+import { FiAlertCircle } from "react-icons/fi";
 
 import { useXcomServiceGetXcomEntry } from "openapi/queries";
-import type { XComResponseString } from "openapi/requests/types.gen";
-import { ClipboardIconButton, ClipboardRoot } from "src/components/ui";
+import type { XComResponseNative } from "openapi/requests/types.gen";
+
+import { ClipboardIconButton, ClipboardRoot } from "src/system-components";
+
+import { ErrorAlert, type ExpandedApiError } from "src/components/ErrorAlert";
+import { ErrorModal } from "src/components/ErrorModal";
+import RenderedJsonField from "src/components/RenderedJsonField";
+
+import { urlRegex } from "src/constants/urlRegex";
 
 type XComEntryProps = {
   readonly dagId: string;
   readonly mapIndex: number;
+  readonly open?: boolean;
+  readonly regionId?: string;
+  readonly regionIndex?: number;
   readonly runId: string;
   readonly taskId: string;
   readonly xcomKey: string;
 };
 
-export const XComEntry = ({ dagId, mapIndex, runId, taskId, xcomKey }: XComEntryProps) => {
-  const { data, isLoading } = useXcomServiceGetXcomEntry<XComResponseString>({
+const renderTextWithLinks = (text: string) => {
+  const urls = text.match(urlRegex);
+  const parts = text.split(/(\s+)/u);
+
+  return (
+    <>
+      {parts.map((part) => {
+        if (urls?.includes(part)) {
+          return (
+            <Link
+              color="fg.info"
+              href={part}
+              key={part}
+              rel="noopener noreferrer"
+              target="_blank"
+              textDecoration="underline"
+            >
+              {part}
+            </Link>
+          );
+        }
+
+        return part;
+      })}
+    </>
+  );
+};
+
+const XComError = ({ error }: { readonly error: unknown }) => {
+  const { t: translate } = useTranslation("common");
+  const [errorOpen, setErrorOpen] = useState(false);
+  const { status } = error as Partial<ExpandedApiError>;
+  const errorTitle = translate("error.title");
+
+  return (
+    <>
+      <Button
+        aria-haspopup="dialog"
+        aria-label={status === undefined ? errorTitle : `${errorTitle} ${String(status)}`}
+        color="fg.error"
+        data-testid="xcom-entry-error"
+        fontSize="sm"
+        gap={1}
+        onClick={() => setErrorOpen(true)}
+        px={0}
+        size="xs"
+        variant="plain"
+      >
+        <FiAlertCircle aria-hidden="true" />
+        {status ?? errorTitle}
+      </Button>
+      <ErrorModal
+        icon={<FiAlertCircle />}
+        onClose={() => setErrorOpen(false)}
+        open={errorOpen}
+        title={errorTitle}
+      >
+        <ErrorAlert error={error} />
+      </ErrorModal>
+    </>
+  );
+};
+
+export const XComEntry = ({
+  dagId,
+  mapIndex,
+  open = false,
+  regionId,
+  regionIndex,
+  runId,
+  taskId,
+  xcomKey,
+}: XComEntryProps) => {
+  const { data, error, isLoading } = useXcomServiceGetXcomEntry<XComResponseNative>({
     dagId,
     dagRunId: runId,
+    deserialize: true,
     mapIndex,
-    stringify: true,
+    regionId,
+    regionIndex,
+    stringify: false,
     taskId,
     xcomKey,
   });
+
+  if (Boolean(error)) {
+    return <XComError error={error} />;
+  }
+
+  // When deserialize=true, the API returns a stringified representation
+  // so we don't need to JSON.stringify it again
+  const xcomValue = data?.value;
+  const isObjectOrArray = Array.isArray(xcomValue) || (xcomValue !== null && typeof xcomValue === "object");
+  const valueFormatted = typeof xcomValue === "string" ? xcomValue : JSON.stringify(xcomValue, undefined, 4);
+  const hasNewline = typeof xcomValue === "string" && xcomValue.includes("\n");
 
   return isLoading ? (
     <Skeleton
@@ -47,14 +147,26 @@ export const XComEntry = ({ dagId, mapIndex, runId, taskId, xcomKey }: XComEntry
       height="10px"
       width={200} // TODO: Make Skeleton take style from column definition
     />
-  ) : (data?.value?.length ?? 0) > 0 ? (
-    <HStack>
-      <Text>{data?.value}</Text>
-      {Boolean(data?.value) ? (
-        <ClipboardRoot value={data?.value ?? ""}>
+  ) : (
+    <HStack data-testid="xcom-value">
+      {isObjectOrArray ? (
+        <RenderedJsonField collapsed={!open} content={xcomValue as object} enableClipboard={false} />
+      ) : (
+        <Text
+          maxHeight="200px"
+          minWidth={hasNewline ? "250px" : undefined}
+          overflowWrap="anywhere"
+          overflowY="auto"
+          whiteSpace="pre-wrap"
+        >
+          {renderTextWithLinks(valueFormatted)}
+        </Text>
+      )}
+      {xcomValue === undefined || xcomValue === null ? undefined : (
+        <ClipboardRoot value={valueFormatted}>
           <ClipboardIconButton />
         </ClipboardRoot>
-      ) : undefined}
+      )}
     </HStack>
-  ) : undefined;
+  );
 };

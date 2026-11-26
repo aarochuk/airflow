@@ -20,21 +20,21 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 from airflow.providers.redis.hooks.redis import RedisHook
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class RedisKeySensor(BaseSensorOperator):
-    """Checks for the existence of a key in a Redis."""
+    """
+    Checks for the existence of a key in a Redis.
 
-    template_fields: Sequence[str] = ("key",)
+    :param redis_conn_id: the redis connection id (templated)
+    """
+
+    template_fields: Sequence[str] = ("key", "redis_conn_id")
     ui_color = "#f0eee4"
 
     def __init__(self, *, key: str, redis_conn_id: str, **kwargs) -> None:

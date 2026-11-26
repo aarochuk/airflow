@@ -16,55 +16,86 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+import { Badge, Box, createListCollection, HStack, type SelectValueChangeDetails } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 import {
-  Badge,
-  Box,
-  createListCollection,
-  HStack,
-  IconButton,
-  type SelectValueChangeDetails,
-} from "@chakra-ui/react";
-import { useCallback } from "react";
-import { MdOutlineOpenInFull } from "react-icons/md";
+  MdAccessTime,
+  MdCode,
+  MdCompress,
+  MdExpand,
+  MdOutlineFileDownload,
+  MdOutlineLabel,
+  MdOutlineOpenInFull,
+  MdSettings,
+  MdWrapText,
+} from "react-icons/md";
 import { useSearchParams } from "react-router-dom";
 
-import type { TaskInstanceResponse } from "openapi/requests/types.gen";
+import type { TaskInstanceResponse, TaskInstanceHistoryResponse } from "openapi/requests/types.gen";
+
+import { IconButton, Menu, Select, LazyClipboard } from "src/system-components";
+
 import { TaskTrySelect } from "src/components/TaskTrySelect";
-import { Button, Select } from "src/components/ui";
-import { SearchParamsKeys } from "src/constants/searchParams";
-import { system } from "src/theme";
+
+import { LOG_SEARCH_PARAMS } from "src/constants/persistentSearchParams";
+import { defaultSystem } from "src/theme";
 import { type LogLevel, logLevelColorMapping, logLevelOptions } from "src/utils/logs";
 
-type Props = {
+import { LogSearchInput, type LogSearchInputProps } from "./LogSearchInput";
+
+export type TaskLogHeaderProps = {
+  readonly downloadLogs?: () => void;
+  readonly expanded?: boolean;
+  readonly getLogString: () => string;
   readonly isFullscreen?: boolean;
   readonly onSelectTryNumber: (tryNumber: number) => void;
+  readonly search: LogSearchInputProps;
+  readonly showLogLevel: boolean;
+  readonly showSource: boolean;
+  readonly showTimestamp: boolean;
   readonly sourceOptions?: Array<string>;
-  readonly taskInstance?: TaskInstanceResponse;
+  readonly taskInstance?: TaskInstanceHistoryResponse | TaskInstanceResponse;
+  readonly toggleExpanded?: () => void;
   readonly toggleFullscreen: () => void;
+  readonly toggleLogLevel: () => void;
+  readonly toggleSource: () => void;
+  readonly toggleTimestamp: () => void;
   readonly toggleWrap: () => void;
   readonly tryNumber?: number;
   readonly wrap: boolean;
 };
 
 export const TaskLogHeader = ({
+  downloadLogs,
+  expanded,
+  getLogString,
   isFullscreen = false,
   onSelectTryNumber,
+  search,
+  showLogLevel,
+  showSource,
+  showTimestamp,
   sourceOptions,
   taskInstance,
+  toggleExpanded,
   toggleFullscreen,
+  toggleLogLevel,
+  toggleSource,
+  toggleTimestamp,
   toggleWrap,
   tryNumber,
   wrap,
-}: Props) => {
+}: TaskLogHeaderProps) => {
+  const { t: translate } = useTranslation(["common", "dag", "components"]);
   const [searchParams, setSearchParams] = useSearchParams();
-  const sources = searchParams.getAll(SearchParamsKeys.SOURCE);
-  const logLevels = searchParams.getAll(SearchParamsKeys.LOG_LEVEL);
+  const sources = searchParams.getAll(LOG_SEARCH_PARAMS.source);
+  const logLevels = searchParams.getAll(LOG_SEARCH_PARAMS.level);
   const hasLogLevels = logLevels.length > 0;
 
-  // Have select zIndex greater than modal zIndex in fullscreen so that
-  // select options are displayed.
+  // Have select zIndex greater than dialog zIndex in fullscreen so that
+  // select options are displayed. Dialog uses zIndex.popover since Chakra 3.34.0.
   const zIndex = isFullscreen
-    ? Number(system.tokens.categoryMap.get("zIndex")?.get("modal")?.value ?? 1400) + 1
+    ? Number(defaultSystem.tokens.categoryMap.get("zIndex")?.get("popover")?.value ?? 1500) + 1
     : undefined;
 
   const sourceOptionList = createListCollection<{
@@ -72,55 +103,49 @@ export const TaskLogHeader = ({
     value: string;
   }>({
     items: [
-      { label: "All Sources", value: "all" },
+      { label: translate("dag:logs.allSources"), value: "all" },
       ...(sourceOptions ?? []).map((source) => ({ label: source, value: source })),
     ],
   });
 
-  const handleLevelChange = useCallback(
-    ({ value }: SelectValueChangeDetails<string>) => {
-      const [val, ...rest] = value;
+  const handleLevelChange = ({ value }: SelectValueChangeDetails<string>) => {
+    const [val, ...rest] = value;
 
-      if ((val === undefined || val === "all") && rest.length === 0) {
-        searchParams.delete(SearchParamsKeys.LOG_LEVEL);
-      } else {
-        searchParams.delete(SearchParamsKeys.LOG_LEVEL);
-        value
-          .filter((state) => state !== "all")
-          .map((state) => searchParams.append(SearchParamsKeys.LOG_LEVEL, state));
-      }
-      setSearchParams(searchParams);
-    },
-    [searchParams, setSearchParams],
-  );
+    if (((val === undefined || val === "all") && rest.length === 0) || rest.includes("all")) {
+      searchParams.delete(LOG_SEARCH_PARAMS.level);
+    } else {
+      searchParams.delete(LOG_SEARCH_PARAMS.level);
+      value
+        .filter((state) => state !== "all")
+        .map((state) => searchParams.append(LOG_SEARCH_PARAMS.level, state));
+    }
+    setSearchParams(searchParams);
+  };
 
-  const handleSourceChange = useCallback(
-    ({ value }: SelectValueChangeDetails<string>) => {
-      const [val, ...rest] = value;
+  const handleSourceChange = ({ value }: SelectValueChangeDetails<string>) => {
+    const [val, ...rest] = value;
 
-      if ((val === undefined || val === "all") && rest.length === 0) {
-        searchParams.delete(SearchParamsKeys.SOURCE);
-      } else {
-        searchParams.delete(SearchParamsKeys.SOURCE);
-        value
-          .filter((state) => state !== "all")
-          .map((state) => searchParams.append(SearchParamsKeys.SOURCE, state));
-      }
-      setSearchParams(searchParams);
-    },
-    [searchParams, setSearchParams],
-  );
+    if (((val === undefined || val === "all") && rest.length === 0) || rest.includes("all")) {
+      searchParams.delete(LOG_SEARCH_PARAMS.source);
+    } else {
+      searchParams.delete(LOG_SEARCH_PARAMS.source);
+      value
+        .filter((state) => state !== "all")
+        .map((state) => searchParams.append(LOG_SEARCH_PARAMS.source, state));
+    }
+    setSearchParams(searchParams);
+  };
 
   return (
     <Box>
-      {taskInstance === undefined || tryNumber === undefined || taskInstance.try_number <= 1 ? undefined : (
+      {taskInstance === undefined || tryNumber === undefined ? undefined : (
         <TaskTrySelect
           onSelectTryNumber={onSelectTryNumber}
           selectedTryNumber={tryNumber}
           taskInstance={taskInstance}
         />
       )}
-      <HStack justifyContent="space-between" mb={2}>
+      <HStack flexWrap="wrap" gap={2} justifyContent="space-between">
         <Select.Root
           collection={logLevelOptions}
           maxW="250px"
@@ -133,7 +158,7 @@ export const TaskLogHeader = ({
             <Select.ValueText>
               {() =>
                 hasLogLevels ? (
-                  <HStack flexWrap="wrap" fontSize="sm" gap="4px" paddingY="8px">
+                  <HStack flexWrap="wrap" fontSize="md" gap="4px" paddingY="8px">
                     {logLevels.map((level) => (
                       <Badge colorPalette={logLevelColorMapping[level as LogLevel]} key={level}>
                         {level.toUpperCase()}
@@ -141,7 +166,7 @@ export const TaskLogHeader = ({
                     ))}
                   </HStack>
                 ) : (
-                  "All Log Levels"
+                  translate("dag:logs.allLevels")
                 )
               }
             </Select.ValueText>
@@ -150,9 +175,11 @@ export const TaskLogHeader = ({
             {logLevelOptions.items.map((option) => (
               <Select.Item item={option} key={option.label}>
                 {option.value === "all" ? (
-                  option.label
+                  translate(option.label)
                 ) : (
-                  <Badge colorPalette={logLevelColorMapping[option.value as LogLevel]}>{option.label}</Badge>
+                  <Badge colorPalette={logLevelColorMapping[option.value as LogLevel]}>
+                    {translate(option.label)}
+                  </Badge>
                 )}
               </Select.Item>
             ))}
@@ -167,9 +194,9 @@ export const TaskLogHeader = ({
             value={sources}
           >
             <Select.Trigger clearable>
-              <Select.ValueText placeholder="All Sources" />
+              <Select.ValueText placeholder={translate("dag:logs.allSources")} />
             </Select.Trigger>
-            <Select.Content>
+            <Select.Content zIndex={zIndex}>
               {sourceOptionList.items.map((option) => (
                 <Select.Item item={option} key={option.label}>
                   {option.label}
@@ -178,15 +205,65 @@ export const TaskLogHeader = ({
             </Select.Content>
           </Select.Root>
         ) : undefined}
-        <HStack>
-          <Button aria-label={wrap ? "Unwrap" : "Wrap"} bg="bg.panel" onClick={toggleWrap} variant="outline">
-            {wrap ? "Unwrap" : "Wrap"}
-          </Button>
+        <LogSearchInput {...search} />
+        <HStack gap={1}>
+          <Menu.Root tooltipLabel={translate("dag:logs.settings")}>
+            <Menu.Trigger asChild>
+              <IconButton aria-label={translate("dag:logs.settings")} data-testid="log-settings-button">
+                <MdSettings />
+              </IconButton>
+            </Menu.Trigger>
+            <Menu.Content zIndex={zIndex}>
+              <Menu.Item data-testid="log-settings-wrap" onClick={toggleWrap} value="wrap">
+                <MdWrapText /> {wrap ? translate("wrap.unwrap") : translate("wrap.wrap")}
+                <Menu.ItemCommand>{translate("wrap.hotkey")}</Menu.ItemCommand>
+              </Menu.Item>
+              <Menu.Item data-testid="log-settings-timestamp" onClick={toggleTimestamp} value="timestamp">
+                <MdAccessTime /> {showTimestamp ? translate("timestamp.hide") : translate("timestamp.show")}
+                <Menu.ItemCommand>{translate("timestamp.hotkey")}</Menu.ItemCommand>
+              </Menu.Item>
+              <Menu.Item data-testid="log-settings-log-level" onClick={toggleLogLevel} value="log-level">
+                <MdOutlineLabel /> {showLogLevel ? translate("logLevel.hide") : translate("logLevel.show")}
+                <Menu.ItemCommand>{translate("logLevel.hotkey")}</Menu.ItemCommand>
+              </Menu.Item>
+              <Menu.Item data-testid="log-settings-expand" onClick={toggleExpanded} value="expand">
+                {expanded ? (
+                  <>
+                    <MdCompress /> {translate("expand.collapse")}
+                  </>
+                ) : (
+                  <>
+                    <MdExpand /> {translate("expand.expand")}
+                  </>
+                )}
+                <Menu.ItemCommand>{translate("expand.hotkey")}</Menu.ItemCommand>
+              </Menu.Item>
+              <Menu.Item data-testid="log-settings-source" onClick={toggleSource} value="source">
+                <MdCode /> {showSource ? translate("source.hide") : translate("source.show")}
+                <Menu.ItemCommand>{translate("source.hotkey")}</Menu.ItemCommand>
+              </Menu.Item>
+            </Menu.Content>
+          </Menu.Root>
           {!isFullscreen && (
-            <IconButton aria-label="Full screen" bg="bg.panel" onClick={toggleFullscreen} variant="outline">
+            <IconButton label={translate("fullscreen.tooltip", { hotkey: "f" })} onClick={toggleFullscreen}>
               <MdOutlineOpenInFull />
             </IconButton>
           )}
+
+          <LazyClipboard
+            getValue={getLogString}
+            label={translate("components:clipboard.copy")}
+            size="md"
+            variant="ghost"
+          />
+
+          <IconButton
+            data-testid="download-logs-button"
+            label={translate("download.tooltip", { hotkey: "d" })}
+            onClick={downloadLogs}
+          >
+            <MdOutlineFileDownload />
+          </IconButton>
         </HStack>
       </HStack>
     </Box>

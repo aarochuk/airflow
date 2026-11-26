@@ -26,18 +26,18 @@ already existing ``providers`` and the dependencies are isolated and simplified 
 packages.
 
 While the original installation methods via ``apache-airflow`` distribution package and extras still
-work as previously and it installs complete airflow installation ready to serve as scheduler, webserver, triggerer
+work as previously and it installs complete Airflow installation ready to serve as scheduler, webserver, triggerer
 and worker, the ``apache-airflow`` package is now a meta-package that installs all the other distribution
 packages, it's also possible to install only the distribution packages that are needed for a specific
-component you want to run airflow with.
+component you want to run Airflow with.
 
 The following distribution packages are available:
 
 +----------------------------+------------------------------------------------------------------+----------------------------------------------------------+
 | Distribution package       | Purpose                                                          |                      Optional extras                     |
 +----------------------------+------------------------------------------------------------------+----------------------------------------------------------+
-| apache-airflow-core        | This is the core distribution package that contains              | * Core extras that add optional functionality to airflow |
-|                            | the airflow scheduler, webserver, triggerer code.                |   core system - enhancing its functionality across       |
+| apache-airflow-core        | This is the core distribution package that contains              | * Core extras that add optional functionality to Airflow |
+|                            | the Airflow scheduler, webserver, triggerer code.                |   core system - enhancing its functionality across       |
 |                            |                                                                  |   multiple providers.                                    |
 |                            |                                                                  |                                                          |
 |                            |                                                                  | * Group ``all`` extra that installs all optional         |
@@ -71,7 +71,7 @@ The following distribution packages are available:
 
 As mentioned above, Airflow has a number of optional "extras" that you can use to add features to your
 installation when you are installing Airflow. Those extras are a good way for the users to manage their
-installation, but also they are useful for contributors to airflow when they want to contribute some of
+installation, but also they are useful for contributors to Airflow when they want to contribute some of
 the features - including optional integrations of Airflow - via providers.
 
 Here's the list of all the extra dependencies of Apache Airflow.
@@ -79,52 +79,72 @@ Here's the list of all the extra dependencies of Apache Airflow.
 Core Airflow extras
 -------------------
 
-These are core airflow extras that extend capabilities of core Airflow. They usually do not install provider
-packages (with the exception of ``celery`` and ``cncf.kubernetes`` extras), they just install necessary
-python dependencies for the provided package.
+These are core Airflow extras that extend capabilities of core Airflow. They do not install provider
+packages, they just install necessary
+python dependencies for the provided package. The same extras are available as ``airflow-core`` package extras.
+
++---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
+| extra               | install command                                     | enables                                                                    |
++=====================+=====================================================+============================================================================+
+| async               | ``pip install 'apache-airflow[async]'``             | Async worker classes for Gunicorn                                          |
++---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
+| graphviz            | ``pip install 'apache-airflow[graphviz]'``          | Graphviz renderer for converting Dag to graphical output                   |
++---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
+| kerberos            | ``pip install 'apache-airflow[kerberos]'``          | Kerberos integration for Kerberized services (Hadoop, Presto, Trino)       |
++---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
+| memray              | ``pip install 'apache-airflow[memray]'``            | Required for memory profiling with memray                                  |
++---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
+| otel                | ``pip install 'apache-airflow[otel]'``              | Required for OpenTelemetry metrics                                         |
++---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
+| sentry              | ``pip install 'apache-airflow[sentry]'``            | Sentry service for application logging and monitoring                      |
++---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
+| standard            | ``pip install apache-airflow[standard]'``           | Standard hooks and operators                                               |
++---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
+| statsd              | ``pip install 'apache-airflow[statsd]'``            | Needed by StatsD metrics                                                   |
++---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
+
+Meta-airflow package extras
+---------------------------
+
+Airflow 3 is released in several packages. The ``apache-airflow`` package is a meta-package that installs
+all the other packages when you run Airflow as a standalone installation, and it also has several extras
+that are not extending Airflow core functionality, but they are useful for the users who want to install
+other packages that can be used by airflow or some of its providers.
 
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
 | extra               | install command                                     | enables                                                                    |
 +=====================+=====================================================+============================================================================+
 | aiobotocore         | ``pip install 'apache-airflow[aiobotocore]'``       | Support for asynchronous (deferrable) operators for Amazon integration     |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
-| async               | ``pip install 'apache-airflow[async]'``             | Async worker classes for Gunicorn                                          |
+| amazon-aws-auth     | ``pip install apache-airflow[amazon-aws-auth]``     | Amazon-aws-auth AWS authentication                                         |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
-| cgroups             | ``pip install 'apache-airflow[cgroups]'``           | Needed To use CgroupTaskRunner                                             |
+| cloudpickle         | ``pip install apache-airflow[cloudpickle]``         | Cloudpickle serialization support                                          |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
-| edge                | ``pip install 'apache-airflow[edge]'``              | Connect Edge Workers via HTTP to the scheduler                             |
+| fab-oauth           | ``pip install 'apache-airflow[fab-oauth]'``         | FAB OAuth authentication (authlib)                                         |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
 | github-enterprise   | ``pip install 'apache-airflow[github-enterprise]'`` | GitHub Enterprise auth backend                                             |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
 | google-auth         | ``pip install 'apache-airflow[google-auth]'``       | Google auth backend                                                        |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
-| graphviz            | ``pip install 'apache-airflow[graphviz]'``          | Graphviz renderer for converting DAG to graphical output                   |
+| graphviz            | ``pip install 'apache-airflow[graphviz]'``          | Graphviz renderer for converting Dag to graphical output                   |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
-| kerberos            | ``pip install 'apache-airflow[kerberos]'``          | Kerberos integration for Kerberized services (Hadoop, Presto, Trino)       |
+| gunicorn            | ``pip install 'apache-airflow[gunicorn]'``          | Gunicorn server with rolling worker restarts for the API server            |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
 | ldap                | ``pip install 'apache-airflow[ldap]'``              | LDAP authentication for users                                              |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
 | leveldb             | ``pip install 'apache-airflow[leveldb]'``           | Required for use leveldb extra in google provider                          |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
-| otel                | ``pip install 'apache-airflow[otel]'``              | Required for OpenTelemetry metrics                                         |
-+---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
 | pandas              | ``pip install 'apache-airflow[pandas]'``            | Install Pandas library compatible with Airflow                             |
++---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
+| polars              | ``pip install 'apache-airflow[polars]'``            | Polars hooks and operators                                                 |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
 | rabbitmq            | ``pip install 'apache-airflow[rabbitmq]'``          | RabbitMQ support as a Celery backend                                       |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
-| sentry              | ``pip install 'apache-airflow[sentry]'``            | Sentry service for application logging and monitoring                      |
-+---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
 | s3fs                | ``pip install 'apache-airflow[s3fs]'``              | Support for S3 as Airflow FS                                               |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
-| saml                | ``pip install 'apache-airflow[saml]'``              | Support for SAML authentication in Airflow                                 |
-+---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
-| standard            | ``pip install apache-airflow[standard]'``           | Standard hooks and operators                                               |
-+---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
-| statsd              | ``pip install 'apache-airflow[statsd]'``            | Needed by StatsD metrics                                                   |
+| saml                | ``pip install 'apache-airflow[saml]'``              | Support for SAML authentication in Amazon provider                         |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
 | uv                  | ``pip install 'apache-airflow[uv]'``                | Install uv - fast, Rust-based package installer (experimental)             |
-+---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
-| cloudpickle         | ``pip install apache-airflow[cloudpickle]``         | Cloudpickle hooks and operators                                            |
 +---------------------+-----------------------------------------------------+----------------------------------------------------------------------------+
 
 
@@ -133,7 +153,7 @@ Providers extras
 
 These providers extras are simply convenience extras to install providers so that you can install the providers with simple command - including
 provider package and necessary dependencies in single command, which allows PIP to resolve any conflicting dependencies. This is extremely useful
-for first time installation where you want to repeatably install version of dependencies which are 'valid' for both airflow and providers installed.
+for first time installation where you want to repeatably install version of dependencies which are 'valid' for both Airflow and providers installed.
 
 For example the below command will install:
 
@@ -150,7 +170,7 @@ with a consistent set of dependencies based on constraint files provided by Airf
     :substitutions:
 
     pip install apache-airflow[google,amazon,apache-spark]==|version| \
-      --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-|version|/constraints-3.9.txt"
+      --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-|version|/constraints-3.11.txt"
 
 Note, that this will install providers in the versions that were released at the time of Airflow |version| release. You can later
 upgrade those providers manually if you want to use latest versions of the providers.
@@ -170,6 +190,8 @@ custom bash/python providers).
 +---------------------+-----------------------------------------------------+------------------------------------------------+
 | extra               | install command                                     | enables                                        |
 +=====================+=====================================================+================================================+
+| apache-arrow        | ``pip install 'apache-airflow[apache-arrow]'``      | Apache Arrow ADBC hooks                        |
++---------------------+-----------------------------------------------------+------------------------------------------------+
 | apache-atlas        | ``pip install 'apache-airflow[apache-atlas]'``      | Apache Atlas                                   |
 +---------------------+-----------------------------------------------------+------------------------------------------------+
 | apache-beam         | ``pip install 'apache-airflow[apache-beam]'``       | Apache Beam operators & hooks                  |
@@ -200,7 +222,11 @@ custom bash/python providers).
 +---------------------+-----------------------------------------------------+------------------------------------------------+
 | apache-pinot        | ``pip install 'apache-airflow[apache-pinot]'``      | All Pinot related hooks                        |
 +---------------------+-----------------------------------------------------+------------------------------------------------+
+| apache-polaris      | ``pip install 'apache-airflow[apache-polaris]'``    | Polaris hooks and operators                    |
++---------------------+-----------------------------------------------------+------------------------------------------------+
 | apache-spark        | ``pip install 'apache-airflow[apache-spark]'``      | All Spark related operators & hooks            |
++---------------------+-----------------------------------------------------+------------------------------------------------+
+| apache-tinkerpop    | ``pip install apache-airflow[apache-tinkerpop]``    | Apache-tinkerpop hooks and operators           |
 +---------------------+-----------------------------------------------------+------------------------------------------------+
 | apache-webhdfs      | ``pip install 'apache-airflow[apache-webhdfs]'``    | HDFS hooks and operators                       |
 +---------------------+-----------------------------------------------------+------------------------------------------------+
@@ -215,17 +241,25 @@ These are extras that add dependencies needed for integration with external serv
 +=====================+=====================================================+=====================================================+
 | airbyte             | ``pip install 'apache-airflow[airbyte]'``           | Airbyte hooks and operators                         |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
+| akeyless            | ``pip install 'apache-airflow[akeyless]'``          | Akeyless Vault secrets and hooks                    |
++---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | alibaba             | ``pip install 'apache-airflow[alibaba]'``           | Alibaba Cloud                                       |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | apprise             | ``pip install 'apache-airflow[apprise]'``           | Apprise Notification                                |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | amazon              | ``pip install 'apache-airflow[amazon]'``            | Amazon Web Services                                 |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
+| anthropic           | ``pip install 'apache-airflow[anthropic]'``         | Anthropic hooks and operators                       |
++---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | asana               | ``pip install 'apache-airflow[asana]'``             | Asana hooks and operators                           |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | atlassian-jira      | ``pip install 'apache-airflow[atlassian-jira]'``    | Jira hooks and operators                            |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | microsoft-azure     | ``pip install 'apache-airflow[microsoft-azure]'``   | Microsoft Azure                                     |
++---------------------+-----------------------------------------------------+-----------------------------------------------------+
+| modal               | ``pip install 'apache-airflow[modal]'``             | Modal hook and connection                           |
++---------------------+-----------------------------------------------------+-----------------------------------------------------+
+| clickhousedb        | ``pip install 'apache-airflow[clickhousedb]'``      | ClickHouse hooks and operators                      |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | cloudant            | ``pip install 'apache-airflow[cloudant]'``          | Cloudant hook                                       |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
@@ -248,6 +282,8 @@ These are extras that add dependencies needed for integration with external serv
 | google              | ``pip install 'apache-airflow[google]'``            | Google Cloud                                        |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | hashicorp           | ``pip install 'apache-airflow[hashicorp]'``         | Hashicorp Services (Vault)                          |
++---------------------+-----------------------------------------------------+-----------------------------------------------------+
+| huggingface         | ``pip install 'apache-airflow[huggingface]'``       | Hugging Face                                        |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | openai              | ``pip install 'apache-airflow[openai]'``            | Open AI hooks and operators                         |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
@@ -279,6 +315,8 @@ These are extras that add dependencies needed for integration with external serv
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | vertica             | ``pip install 'apache-airflow[vertica]'``           | Vertica hook support as an Airflow backend          |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
+| vespa               | ``pip install 'apache-airflow[vespa]'``             | Vespa hooks and operators                           |
++---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | weaviate            | ``pip install 'apache-airflow[weaviate]'``          | Weaviate hook and operators                         |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------+
 | yandex              | ``pip install 'apache-airflow[yandex]'``            | Yandex.cloud hooks and operators                    |
@@ -299,13 +337,15 @@ Some of those enable Airflow to use executors to run tasks with them - other tha
 +=====================+=====================================================+=================================================================+==============================================+
 | arangodb            | ``pip install 'apache-airflow[arangodb]'``          | ArangoDB operators, sensors and hook                            |                                              |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
-| celery              | ``pip install 'apache-airflow[celery]'``            | Celery dependencies and sensor                                  | CeleryExecutor, CeleryKubernetesExecutor     |
+| celery              | ``pip install 'apache-airflow[celery]'``            | Celery dependencies and sensor                                  | CeleryExecutor                               |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
-| cncf-kubernetes     | ``pip install 'apache-airflow[cncf-kubernetes]'``   | Kubernetes client libraries, KubernetesPodOperator & friends    | KubernetesExecutor, LocalKubernetesExecutor  |
+| cncf-kubernetes     | ``pip install 'apache-airflow[cncf-kubernetes]'``   | Kubernetes client libraries, KubernetesPodOperator & friends    | KubernetesExecutor                           |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
 | docker              | ``pip install 'apache-airflow[docker]'``            | Docker hooks and operators                                      |                                              |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
-| edge                | ``pip install 'apache-airflow[edge]'``              | Connect Edge Workers via HTTP to the scheduler                  | EdgeExecutor                                 |
+| duckdb              | ``pip install 'apache-airflow[duckdb]'``            | DuckDB hooks and operators                                      |                                              |
++---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
+| edge3               | ``pip install 'apache-airflow[edge3]'``             | Connect Edge Workers via HTTP to the scheduler                  | EdgeExecutor                                 |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
 | elasticsearch       | ``pip install 'apache-airflow[elasticsearch]'``     | Elasticsearch hooks and Log Handler                             |                                              |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
@@ -317,7 +357,11 @@ Some of those enable Airflow to use executors to run tasks with them - other tha
 +---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
 | github              | ``pip install 'apache-airflow[github]'``            | GitHub operators and hook                                       |                                              |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
+| ibm-db2             | ``pip install 'apache-airflow[ibm-db2]'``           | IBM Db2 hook                                                    |                                              |
++---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
 | influxdb            | ``pip install 'apache-airflow[influxdb]'``          | Influxdb operators and hook                                     |                                              |
++---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
+| ibm-mq              | ``pip install 'apache-airflow[ibm-mq]'``            | IBM MQ hook and trigger                                         |                                              |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
 | jenkins             | ``pip install 'apache-airflow[jenkins]'``           | Jenkins hooks and operators                                     |                                              |
 +---------------------+-----------------------------------------------------+-----------------------------------------------------------------+----------------------------------------------+
@@ -360,45 +404,53 @@ The entries with ``*`` in the ``Preinstalled`` column indicate that those extras
 pre-installed when Airflow is installed.
 
 
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| extra               | install command                                     | enables                              | Preinstalled |
-+=====================+=====================================================+======================================+==============+
-| common-compat       | ``pip install 'apache-airflow[common-compat]'``     | Compatibility code for old Airflow   |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| common-io           | ``pip install 'apache-airflow[common-io]'``         | Core IO Operators                    |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| common-messaging    | ``pip install 'apache-airflow[common-messaging]'``  | Core Messaging Operators             |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| common-sql          | ``pip install 'apache-airflow[common-sql]'``        | Core SQL Operators                   |      *       |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| ftp                 | ``pip install 'apache-airflow[ftp]'``               | FTP hooks and operators              |      *       |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| grpc                | ``pip install 'apache-airflow[grpc]'``              | Grpc hooks and operators             |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| http                | ``pip install 'apache-airflow[http]'``              | HTTP hooks, operators and sensors    |      *       |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| imap                | ``pip install 'apache-airflow[imap]'``              | IMAP hooks and sensors               |      *       |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| jdbc                | ``pip install 'apache-airflow[jdbc]'``              | JDBC hooks and operators             |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| microsoft-psrp      | ``pip install 'apache-airflow[microsoft-psrp]'``    | PSRP hooks and operators             |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| microsoft-winrm     | ``pip install 'apache-airflow[microsoft-winrm]'``   | WinRM hooks and operators            |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| openlineage         | ``pip install 'apache-airflow[openlineage]'``       | Sending OpenLineage events           |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| opensearch          | ``pip install 'apache-airflow[opensearch]'``        | Opensearch hooks and operators       |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| papermill           | ``pip install 'apache-airflow[papermill]'``         | Papermill hooks and operators        |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| sftp                | ``pip install 'apache-airflow[sftp]'``              | SFTP hooks, operators and sensors    |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| smtp                | ``pip install 'apache-airflow[smtp]'``              | SMTP hooks and operators             |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| sqlite              | ``pip install 'apache-airflow[sqlite]'``            | SQLite hooks and operators           |      *       |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
-| ssh                 | ``pip install 'apache-airflow[ssh]'``               | SSH hooks and operators              |              |
-+---------------------+-----------------------------------------------------+--------------------------------------+--------------+
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| extra               | install command                                      | enables                              | Preinstalled |
++=====================+======================================================+======================================+==============+
+| common-ai           | ``pip install 'apache-airflow[common-ai]'``          | Common AI Operators and Hooks        |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| common-compat       | ``pip install 'apache-airflow[common-compat]'``      | Compatibility code for old Airflow   |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| common-dataquality  | ``pip install 'apache-airflow[common-dataquality]'`` | Common Data Quality provider         |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| common-io           | ``pip install 'apache-airflow[common-io]'``          | Core IO Operators                    |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| common-messaging    | ``pip install 'apache-airflow[common-messaging]'``   | Core Messaging Operators             |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| common-sql          | ``pip install 'apache-airflow[common-sql]'``         | Core SQL Operators                   |      *       |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| ftp                 | ``pip install 'apache-airflow[ftp]'``                | FTP hooks and operators              |      *       |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| grpc                | ``pip install 'apache-airflow[grpc]'``               | Grpc hooks and operators             |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| http                | ``pip install 'apache-airflow[http]'``               | HTTP hooks, operators and sensors    |      *       |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| imap                | ``pip install 'apache-airflow[imap]'``               | IMAP hooks and sensors               |      *       |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| jdbc                | ``pip install 'apache-airflow[jdbc]'``               | JDBC hooks and operators             |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| keycloak            | ``pip install apache-airflow[keycloak]``             | Keycloak hooks and operators         |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| microsoft-psrp      | ``pip install 'apache-airflow[microsoft-psrp]'``     | PSRP hooks and operators             |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| microsoft-winrm     | ``pip install 'apache-airflow[microsoft-winrm]'``    | WinRM hooks and operators            |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| openlineage         | ``pip install 'apache-airflow[openlineage]'``        | Sending OpenLineage events           |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| opensearch          | ``pip install 'apache-airflow[opensearch]'``         | Opensearch hooks and operators       |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| papermill           | ``pip install 'apache-airflow[papermill]'``          | Papermill hooks and operators        |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| sftp                | ``pip install 'apache-airflow[sftp]'``               | SFTP hooks, operators and sensors    |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| smtp                | ``pip install 'apache-airflow[smtp]'``               | SMTP hooks and operators             |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| sqlite              | ``pip install 'apache-airflow[sqlite]'``             | SQLite hooks and operators           |      *       |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| ssh                 | ``pip install 'apache-airflow[ssh]'``                | SSH hooks and operators              |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
+| informatica         | ``pip install 'apache-airflow[informatica]'``        | Informatica hooks and operators      |              |
++---------------------+------------------------------------------------------+--------------------------------------+--------------+
 
 Group extras
 ------------
@@ -406,10 +458,12 @@ Group extras
 The group extras are convenience extras. Such extra installs many optional dependencies together.
 It is not recommended to use it in production, but it is useful for CI, development and testing purposes.
 
-+---------+--------------------------------------------+---------------------------------------------------+
-| extra   | install command                            | enables                                           |
-+=========+============================================+===================================================+
-| all       | ``pip install apache-airflow[all]``      | All optional dependencies including all providers |
-+-----------+------------------------------------------+---------------------------------------------------+
-| all-core  | ``pip install apache-airflow[all-core]`` | All optional core dependencies                    |
-+-----------+------------------------------------------+---------------------------------------------------+
++--------------+----------------------------------------------+---------------------------------------------------+
+| extra        | install command                              | enables                                           |
++==============+==============================================+===================================================+
+| all          | ``pip install apache-airflow[all]``          | All optional dependencies including all providers |
++--------------+----------------------------------------------+---------------------------------------------------+
+| all-core     | ``pip install apache-airflow[all-core]``     | All optional core dependencies                    |
++--------------+----------------------------------------------+---------------------------------------------------+
+| all-task-sdk | ``pip install apache-airflow[all-task-sdk]`` | All optional task SDK dependencies                |
++--------------+----------------------------------------------+---------------------------------------------------+

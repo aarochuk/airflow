@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from google.api_core.exceptions import NotFound
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from google.api_core.retry import Retry
     from google.protobuf.field_mask_pb2 import FieldMask
 
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class CreateEndpointOperator(GoogleCloudBaseOperator):
@@ -65,7 +65,7 @@ class CreateEndpointOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("region", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = ("region", "project_id", "impersonation_chain", "gcp_conn_id")
     operator_extra_links = (VertexAIEndpointLink(),)
 
     def __init__(
@@ -93,6 +93,13 @@ class CreateEndpointOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "region": self.region,
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = EndpointServiceHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -115,8 +122,8 @@ class CreateEndpointOperator(GoogleCloudBaseOperator):
         endpoint_id = hook.extract_endpoint_id(endpoint)
         self.log.info("Endpoint was created. Endpoint ID: %s", endpoint_id)
 
-        self.xcom_push(context, key="endpoint_id", value=endpoint_id)
-        VertexAIEndpointLink.persist(context=context, task_instance=self, endpoint_id=endpoint_id)
+        context["ti"].xcom_push(key="endpoint_id", value=endpoint_id)
+        VertexAIEndpointLink.persist(context=context, endpoint_id=endpoint_id)
         return endpoint
 
 
@@ -141,7 +148,13 @@ class DeleteEndpointOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("region", "endpoint_id", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = (
+        "region",
+        "endpoint_id",
+        "project_id",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,
@@ -225,7 +238,14 @@ class DeployModelOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("region", "endpoint_id", "project_id", "deployed_model", "impersonation_chain")
+    template_fields: Sequence[str] = (
+        "region",
+        "endpoint_id",
+        "project_id",
+        "deployed_model",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
     operator_extra_links = (VertexAIModelLink(),)
 
     def __init__(
@@ -255,6 +275,13 @@ class DeployModelOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "region": self.region,
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = EndpointServiceHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -278,8 +305,8 @@ class DeployModelOperator(GoogleCloudBaseOperator):
         deployed_model_id = hook.extract_deployed_model_id(deploy_model)
         self.log.info("Model was deployed. Deployed Model ID: %s", deployed_model_id)
 
-        self.xcom_push(context, key="deployed_model_id", value=deployed_model_id)
-        VertexAIModelLink.persist(context=context, task_instance=self, model_id=deployed_model_id)
+        context["ti"].xcom_push(key="deployed_model_id", value=deployed_model_id)
+        VertexAIModelLink.persist(context=context, model_id=deployed_model_id)
         return deploy_model
 
 
@@ -304,7 +331,13 @@ class GetEndpointOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("region", "endpoint_id", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = (
+        "region",
+        "endpoint_id",
+        "project_id",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
     operator_extra_links = (VertexAIEndpointLink(),)
 
     def __init__(
@@ -330,6 +363,13 @@ class GetEndpointOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "region": self.region,
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = EndpointServiceHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -346,7 +386,7 @@ class GetEndpointOperator(GoogleCloudBaseOperator):
                 timeout=self.timeout,
                 metadata=self.metadata,
             )
-            VertexAIEndpointLink.persist(context=context, task_instance=self, endpoint_id=self.endpoint_id)
+            VertexAIEndpointLink.persist(context=context, endpoint_id=self.endpoint_id)
             self.log.info("Endpoint was gotten.")
             return Endpoint.to_dict(endpoint_obj)
         except NotFound:
@@ -395,7 +435,7 @@ class ListEndpointsOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("region", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = ("region", "project_id", "impersonation_chain", "gcp_conn_id")
     operator_extra_links = (VertexAIEndpointListLink(),)
 
     def __init__(
@@ -429,6 +469,12 @@ class ListEndpointsOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = EndpointServiceHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -446,7 +492,7 @@ class ListEndpointsOperator(GoogleCloudBaseOperator):
             timeout=self.timeout,
             metadata=self.metadata,
         )
-        VertexAIEndpointListLink.persist(context=context, task_instance=self)
+        VertexAIEndpointListLink.persist(context=context)
         return [Endpoint.to_dict(result) for result in results]
 
 
@@ -478,7 +524,14 @@ class UndeployModelOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("region", "endpoint_id", "deployed_model_id", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = (
+        "region",
+        "endpoint_id",
+        "deployed_model_id",
+        "project_id",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,
@@ -552,7 +605,13 @@ class UpdateEndpointOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("region", "endpoint_id", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = (
+        "region",
+        "endpoint_id",
+        "project_id",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
     operator_extra_links = (VertexAIEndpointLink(),)
 
     def __init__(
@@ -582,6 +641,13 @@ class UpdateEndpointOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "region": self.region,
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = EndpointServiceHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -599,5 +665,5 @@ class UpdateEndpointOperator(GoogleCloudBaseOperator):
             metadata=self.metadata,
         )
         self.log.info("Endpoint was updated")
-        VertexAIEndpointLink.persist(context=context, task_instance=self, endpoint_id=self.endpoint_id)
+        VertexAIEndpointLink.persist(context=context, endpoint_id=self.endpoint_id)
         return Endpoint.to_dict(result)

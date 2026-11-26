@@ -17,31 +17,40 @@
 # under the License.
 from __future__ import annotations
 
+from datetime import timedelta
 from os.path import isabs
 
 from flask import Flask
-from flask_appbuilder import SQLA
 from flask_wtf.csrf import CSRFProtect
 from sqlalchemy.engine.url import make_url
 
 from airflow import settings
 from airflow.api_fastapi.app import get_auth_manager
-from airflow.configuration import conf
 from airflow.exceptions import AirflowConfigException
 from airflow.logging_config import configure_logging
+from airflow.providers.common.compat.sdk import conf
+from airflow.providers.fab.version_compat import AIRFLOW_V_3_1_8_PLUS
+from airflow.providers.fab.www.db import AirflowSQLAlchemy
 from airflow.providers.fab.www.extensions.init_appbuilder import init_appbuilder
 from airflow.providers.fab.www.extensions.init_jinja_globals import init_jinja_globals
 from airflow.providers.fab.www.extensions.init_manifest_files import configure_manifest_files
-from airflow.providers.fab.www.extensions.init_security import init_api_auth, init_xframe_protection
-from airflow.providers.fab.www.extensions.init_session import init_airflow_session_interface
+from airflow.providers.fab.www.extensions.init_security import init_api_auth
+from airflow.providers.fab.www.extensions.init_session import (
+    init_airflow_session_interface,
+    init_session_max_lifetime,
+    init_session_token_generation,
+)
 from airflow.providers.fab.www.extensions.init_views import (
-    init_api_auth_provider,
-    init_api_error_handlers,
     init_error_handlers,
     init_plugins,
 )
+from airflow.providers.fab.www.extensions.init_wsgi_middlewares import init_wsgi_middleware
+from airflow.providers.fab.www.utils import get_session_lifetime_config
 
-app: Flask | None = None
+if AIRFLOW_V_3_1_8_PLUS:
+    from airflow.api_fastapi.app import get_cookie_path
+else:
+    get_cookie_path = lambda: "/"
 
 # Initializes at the module level, so plugins can access it.
 # See: /docs/plugins.rst
@@ -53,9 +62,39 @@ def create_app(enable_plugins: bool):
     from airflow.providers.fab.auth_manager.fab_auth_manager import FabAuthManager
 
     flask_app = Flask(__name__)
-    flask_app.secret_key = conf.get("webserver", "SECRET_KEY")
+
+    @flask_app.after_request
+    def remove_duplicate_date_header(response):
+        # Remove the application-level Date header so the ASGI/WSGI server
+        # can emit a single Date header for the final response.
+        response.headers.pop("Date", None)
+        return response
+
+    flask_app.secret_key = conf.get("api", "SECRET_KEY")
     flask_app.config["SQLALCHEMY_DATABASE_URI"] = conf.get("database", "SQL_ALCHEMY_CONN")
     flask_app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    flask_app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=get_session_lifetime_config())
+
+    flask_app.config["SESSION_COOKIE_HTTPONLY"] = True
+    flask_app.config["SESSION_COOKIE_PATH"] = get_cookie_path()
+    if conf.has_option("fab", "COOKIE_SECURE"):
+        flask_app.config["SESSION_COOKIE_SECURE"] = conf.getboolean("fab", "COOKIE_SECURE")
+    if conf.has_option("fab", "COOKIE_SAMESITE"):
+        flask_app.config["SESSION_COOKIE_SAMESITE"] = conf.get("fab", "COOKIE_SAMESITE")
+
+    webserver_config = conf.get_mandatory_value("fab", "config_file")
+    # Enable customizations in webserver_config.py to be applied via Flask.current_app.
+    with flask_app.app_context():
+        flask_app.config.from_pyfile(webserver_config, silent=True)
+
+    # Bridge ``[fab] auth_role_public`` Airflow config into the Flask app config so legacy FAB
+    # code paths that read ``AUTH_ROLE_PUBLIC`` from ``current_app.config`` (e.g.
+    # ``AnonymousUser.roles``, basic_auth, kerberos_auth, security manager) stay in sync with
+    # the FastAPI-based auth flow. The Airflow config takes precedence over
+    # ``webserver_config.py`` when both are set so there is a single source of truth.
+    auth_role_public_conf = conf.get("fab", "auth_role_public", fallback="") or ""
+    if auth_role_public_conf:
+        flask_app.config["AUTH_ROLE_PUBLIC"] = auth_role_public_conf
 
     url = make_url(flask_app.config["SQLALCHEMY_DATABASE_URI"])
     if url.drivername == "sqlite" and url.database and not isabs(url.database):
@@ -69,9 +108,10 @@ def create_app(enable_plugins: bool):
 
     csrf.init_app(flask_app)
 
-    db = SQLA()
+    db = AirflowSQLAlchemy(flask_app)
+    if settings.Session is None:
+        raise RuntimeError("Session not configured. Call configure_orm() first.")
     db.session = settings.Session
-    db.init_app(flask_app)
 
     configure_logging()
     configure_manifest_files(flask_app)
@@ -87,26 +127,15 @@ def create_app(enable_plugins: bool):
         # FAB auth manager. One example is ``run_update_fastapi_api_spec``, it calls
         # ``FabAuthManager().get_fastapi_app()`` to generate the openapi documentation regardless of the
         # configured auth manager.
+        is_fab_auth_manager = isinstance(get_auth_manager(), FabAuthManager)
         if enable_plugins:
             init_plugins(flask_app)
-        elif isinstance(get_auth_manager(), FabAuthManager):
-            init_api_auth_provider(flask_app)
-            init_api_error_handlers(flask_app)
+        if is_fab_auth_manager:
+            # The plugins app serves the FAB login views too, so its sessions follow the same
+            # ``[fab]`` session settings as the FAB auth manager app.
+            init_airflow_session_interface(flask_app, db)
+            init_session_max_lifetime(flask_app)
+            init_session_token_generation(flask_app)
         init_jinja_globals(flask_app, enable_plugins=enable_plugins)
-        init_xframe_protection(flask_app)
-        init_airflow_session_interface(flask_app)
+        init_wsgi_middleware(flask_app)
     return flask_app
-
-
-def cached_app():
-    """Return cached instance of Airflow WWW app."""
-    global app
-    if not app:
-        app = create_app()
-    return app
-
-
-def purge_cached_app():
-    """Remove the cached version of the app in global state."""
-    global app
-    app = None

@@ -27,6 +27,426 @@
 Changelog
 ---------
 
+6.4.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Pass asset state store accessors to the HttpEventTrigger response check callable (#72287)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] Upgrade important CI environment (#76278)``
+   * ``Remove duplicate HTTP header override test (#75899)``
+
+6.3.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add http_conn_id to HttpOperator and HttpSensor template_fields (#72582)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix HttpAsyncHook crash on stream/cert/trust_env connection extras (#71524)``
+
+Misc
+~~~~
+
+* ``Drop support for Python 3.10 (#74157)``
+
+Doc-only
+~~~~~~~~
+
+* ``Update provider READMEs for the Python 3.11 baseline (#74158)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] Upgrade important CI environment (#73629)``
+   * ``Make the SRV test fixture reset dns package attributes (#73659)``
+
+6.2.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add SRV DNS record support to HTTP Operator (#70960)``
+* ``Template every connection id accepted by provider operators (#73286)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Preserve DELETE request bodies in HttpAsyncHook (#72720)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert "[main] Upgrade important CI environment (#73308)" (#73621)``
+   * ``[main] Upgrade important CI environment (#73308)``
+
+6.1.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add warning for HttpOperator deferrable with non-idempotent methods (#69748)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix HttpOperator deferrable pagination returning only the last page (#72388)``
+* ``Keep HttpEventTrigger asset watchers polling after a failed request (#72376)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Use common.compat.sdk for the remaining provider timezone imports (#71209)``
+   * ``Add unit tests for HTTP provider exceptions (#69231)``
+   * ``Prepare providers release 2026-08-18 (#71794)``
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+   * ``Update changelog with better wording (#71161)``
+   * ``Prepare providers release 2026-08-01 (#70932)``
+   * ``Remove stale type-ignore TODO in HTTP hook run_with_advanced_retry (#67685)``
+
+6.0.5
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Honor async hook subclass overrides in get_async_connection (#69140)``
+
+Doc-only
+~~~~~~~~
+
+* ``Enhancing docs for 'HttpEventTrigger' (#70073)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+
+6.0.4
+.....
+
+Misc
+~~~~
+
+* ``Explicitly add pydantic dependency to the http provider (#68321)``
+* ``Bump aiohttp>=3.14.0 (#67978)``
+
+Doc-only
+~~~~~~~~
+
+* ``Fix Typo in HTTP Connection Example (#68076)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+6.0.3
+.....
+
+Misc
+~~~~
+
+* ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+
+Doc-only
+~~~~~~~~
+
+* ``Clarify HttpOperator response_filter XCom usage (#66597)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix stale system test documentation links (#65071)``
+
+
+6.0.2
+.....
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+6.0.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Allow override of HTTP method in run_method of LivyAsyncHook (#64150)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+* ``Refactor HttpAsyncHook to support session-based async HTTP operations and simplify LivyAsyncHook (#60458)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix typo in HTTP hook test comment (#63654)``
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+
+6.0.0
+.....
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+.. warning::
+  The HTTP provider now uses JSON-based serialization for HTTP responses in deferred tasks
+  instead of pickle. Deferred HTTP tasks from previous provider versions will fail with a
+  ``TypeError`` after upgrade.
+
+  Before upgrading, ensure all HTTP tasks with ``deferrable=True`` that are currently in
+  ``deferred`` state have completed or been cleared.
+
+* ``Replace pickle with json serialization for http triggers (#61662)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``YAML first discovery for connection form metadata (#60410)``
+   * ``CI: Upgrade important CI environment (#61417)``
+
+5.6.4
+.....
+
+Misc
+~~~~
+
+* ``Use common provider's get_async_connection in other providers (#56791)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.6.3
+.....
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+* ``Update conf imports for http provider (#60090)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.6.2
+.....
+
+Misc
+~~~~
+
+* ``Remove top-level SDK reference in Core (#59817)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``TaskInstance unused method cleanup (#59835)``
+
+5.6.1
+.....
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+Doc-only
+~~~~~~~~
+
+* ``Correct header parameter description in HTTP operator (#59105)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.6.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+
+5.5.0
+.....
+
+Features
+~~~~~~~~
+
+* ``HTTP Notifier implementation (#56160)``
+* ``Add poll_interval attribute to HttpEventTrigger (#57583)``
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+* ``Migrate 'http' provider to 'common.compat' (#57089)``
+
+Doc-only
+~~~~~~~~
+
+* ``[Doc] Fixing some typos and spelling errors (#57225)``
+* ``Fixing some typos and spelling errors (#57186)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to http Provider test (#57917)``
+
+5.4.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Create HttpEventTrigger for AssetWatcher library (#51253)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.3.4
+.....
+
+
+Bug Fixes
+~~~~~~~~~
+
+* ``fix(http): Fix HttpHook.url_from_endpoint() lazy initialization (#54202)``
+
+Doc-only
+~~~~~~~~
+
+* ``Make term Dag consistent in providers docs (#55101)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Switch pre-commit to prek (#54258)``
+   * ``Prepare release for Aug 2025 1st wave of providers (#54193)``
+   * ``Conn docs extra fix (#53942)``
+   * ``Fix Airflow 2 reference in README/index of providers (#55240)``
+
+5.3.3
+.....
+
+Misc
+~~~~
+
+* ``Cleanup type ignores (#53294)``
+* ``Remove type ignore across codebase after mypy upgrade (#53243)``
+* ``Make http provider compatible with mypy 1.16.1 (#53108)``
+* ``Remove upper-binding for "python-requires" (#52980)``
+* ``Temporarily switch to use >=,< pattern instead of '~=' (#52967)``
+* ``Move all BaseHook usages to version_compat in HTTP (#52814)``
+* ``Add Python 3.13 support for Airflow. (#46891)``
+* ``Bump aiohttp to 3.12.14 (#53830)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Resolve timeout in ''HttpSensor'' test by fixing template rendering (#53676)``
+
+5.3.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Ensure  'HttpHook.run()' does not alter 'extra_options' passed to it (#51893)``
+* ``Fix HttpOperator(deferrable=True) crash when connection has login / password (#52050)``
+* ``Enable extra_options even when extra not defined for HttpHook.run (#51746)``
+
+Misc
+~~~~
+
+* ``Move 'BaseHook' implementation to task SDK (#51873)``
+* ``Provider Migration: Replace 'BaseOperator' to Task SDK for 'apache/http' (#52528)``
+* ``Drop support for Python 3.9 (#52072)``
+* ``Use BaseSensorOperator from task sdk in providers (#52296)``
+* ``Add deprecation to 'airflow/sensors/base.py' (#52249)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert "Replace models.BaseOperator to Task SDK for http (#52506)" (#52515)``
+   * ``Replace models.BaseOperator to Task SDK for http (#52506)``
+   * ``Remove db usage from http provider tests (#52227)``
+
+5.3.1
+.....
+
+Misc
+~~~~
+
+* ``Bump some provider dependencies for faster resolution (#51727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Increasing task timeout by 2 seconds for more resilient runs (#50578)``
+
+5.3.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.10+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump min Airflow version in providers to 2.10 (#49843)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Update description of provider.yaml dependencies (#50231)``
+   * ``Avoid committing history for providers (#49907)``
+
+5.2.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``HttpHook: allways add port if given (#48573)``
+
+Misc
+~~~~
+
+* ``remove superfluous else block (#49199)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare docs for Apr 2nd wave of providers (#49051)``
+   * ``Remove unnecessary entries in get_provider_info and update the schema (#48849)``
+   * ``Remove fab from preinstalled providers (#48457)``
+   * ``Improve documentation building iteration (#48760)``
+   * ``Prepare docs for Apr 1st wave of providers (#48828)``
+   * ``Simplify tooling by switching completely to uv (#48223)``
+   * ``Upgrade ruff to latest version (#48553)``
+   * ``Move 'BaseSensorOperator' to TaskSDK definitions (#48244)``
+   * ``Prepare docs for Mar 2nd wave of providers (#48383)``
+   * ``Upgrade providers flit build requirements to 3.12.0 (#48362)``
+   * ``Move airflow sources to airflow-core package (#47798)``
+   * ``Remove links to x/twitter.com (#47801)``
+
 5.2.1
 .....
 
@@ -51,7 +471,7 @@ Misc
 .....
 
 .. note::
-  This version has no code changes. It's released due to yank of previous version due to packaging issues.
+  This version contains no code changes. It was released to replace a previous version that was yanked due to a packaging issue.
 
 5.1.0
 .....
@@ -111,8 +531,6 @@ Misc
    appropriate section above if needed. Do not delete the lines(!):
    * ``Correct new changelog breaking changes header (#44659)``
    * ``Use Python 3.9 as target version for Ruff & Black rules (#44298)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Update path of example dags in docs (#45069)``
 
 4.13.3
@@ -144,7 +562,7 @@ Bug Fixes
 Misc
 ~~~~
 
-* ``add lowerbount to requests-toolbelt and replace requests_toolbelt with requests-toolbelt (#43020)``
+* ``add lower bound to requests-toolbelt and replace requests_toolbelt with requests-toolbelt (#43020)``
 * ``Set lower bound to asgiref>=2.3.0 (#43001)``
 
 
@@ -443,7 +861,7 @@ Misc
 Features
 ~~~~~~~~
 
-* ``Add non login-password auth support for SimpleHttpOpeator (#29206)``
+* ``Add non login-password auth support for SimpleHttpOperator (#29206)``
 
 4.2.0
 .....
@@ -625,13 +1043,13 @@ Features
 
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):
-   * ``Check synctatic correctness for code-snippets (#16005)``
+   * ``Check syntactic correctness for code-snippets (#16005)``
    * ``Prepares provider release after PIP 21 compatibility (#15576)``
    * ``Remove Backport Providers (#14886)``
    * ``Updated documentation for June 2021 provider release (#16294)``
    * ``Add documentation for the HTTP connection (#15379)``
    * ``More documentation update for June providers release (#16405)``
-   * ``Synchronizes updated changelog after buggfix release (#16464)``
+   * ``Synchronizes updated changelog after bugfix release (#16464)``
 
 1.1.1
 .....

@@ -25,20 +25,34 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Union
+from subprocess import CalledProcessError, CompletedProcess
+from typing import Any
 
 from rich.markup import escape
 
+from airflow_breeze.global_constants import SIMPLE_AUTH_MANAGER_VITE_DEV_PORT, VITE_DEV_PORT
 from airflow_breeze.utils.ci_group import ci_group
-from airflow_breeze.utils.console import Output, get_console
+from airflow_breeze.utils.console import Output, console_print, get_console
 from airflow_breeze.utils.functools_cache import clearable_cache
 from airflow_breeze.utils.path_utils import (
     AIRFLOW_ROOT_PATH,
+    COMMON_AI_PLUGIN_PREK_HOOK,
+    COMMON_AI_UI_PLUGIN_DIST_PATH,
+    COMMON_AI_UI_PLUGIN_NODE_MODULES_PATH,
+    EDGE_PLUGIN_PREK_HOOK,
+    EDGE_PLUGIN_UI_DIST_PATH,
+    EDGE_PLUGIN_UI_NODE_MODULES_PATH,
+    FAB_AUTH_MANAGER_WWW_DIST_PATH,
+    FAB_AUTH_MANAGER_WWW_NODE_MODULES_PATH,
+    FAB_AUTH_MANAGER_WWW_PREK_HOOK,
+    FAST_API_SIMPLE_AUTH_MANAGER_DIST_PATH,
+    FAST_API_SIMPLE_AUTH_MANAGER_NODE_MODULES_PATH,
     UI_ASSET_COMPILE_LOCK,
     UI_ASSET_HASH_PATH,
     UI_ASSET_OUT_DEV_MODE_FILE,
@@ -48,7 +62,8 @@ from airflow_breeze.utils.path_utils import (
 )
 from airflow_breeze.utils.shared_options import get_dry_run, get_verbose
 
-RunCommandResult = Union[subprocess.CompletedProcess, subprocess.CalledProcessError]
+# RunCommandResult = type[subprocess.CompletedProcess] | type[subprocess.CalledProcessError]
+RunCommandResult = CompletedProcess[Any] | CalledProcessError
 
 OPTION_MATCHER = re.compile(r"^[A-Z_]*=.*$")
 
@@ -66,6 +81,7 @@ def run_command(
     output_outside_the_group: bool = False,
     verbose_override: bool | None = None,
     dry_run_override: bool | None = None,
+    quiet: bool = False,
     **kwargs,
 ) -> RunCommandResult:
     """
@@ -81,7 +97,7 @@ def run_command(
 
     :param cmd: command to run
     :param title: optional title for the command (otherwise likely title is automatically determined)
-    :param check: whether to check status value and run exception (same as POpem)
+    :param check: whether to check status value and run exception (same as Popen)
     :param no_output_dump_on_exception: whether to suppress printing logs from output when command fails
     :param env: mapping of environment variables to set for the run command
     :param cwd: working directory to set for the command
@@ -91,6 +107,7 @@ def run_command(
         outside the "CI folded group" in CI - so that it is immediately visible without unfolding.
     :param verbose_override: override verbose parameter with the one specified if not None.
     :param dry_run_override: override dry_run parameter with the one specified if not None.
+    :param quiet: if True, suppresses all output (including the command itself) and runs it in
     :param kwargs: kwargs passed to POpen
     """
 
@@ -136,9 +153,16 @@ def run_command(
             kwargs["stderr"] = subprocess.STDOUT
     command_to_print = " ".join(shlex.quote(c) for c in cmd) if isinstance(cmd, list) else cmd
     env_to_print = get_environments_to_print(env)
-    if not get_verbose(verbose_override) and not get_dry_run(dry_run_override):
+    verbose = get_verbose(verbose_override)
+    dry_run = get_dry_run(dry_run_override)
+    if dry_run and quiet:
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+    if not dry_run and (not verbose or quiet):
+        if quiet and not kwargs.get("capture_output"):
+            kwargs["stdout"] = subprocess.DEVNULL
+            kwargs["stderr"] = subprocess.DEVNULL
         return subprocess.run(cmd, input=input, check=check, env=cmd_env, cwd=workdir, **kwargs)
-    with ci_group(title=f"Running command: {title}", message_type=None):
+    with ci_group(f"Running command: {title}"):
         get_console(output=output).print(f"\n[info]Working directory {workdir}\n")
         if input:
             get_console(output=output).print("[info]Input:")
@@ -148,11 +172,11 @@ def run_command(
         get_console(output=output).print(
             f"\n[info]{env_to_print}{escape(command_to_print)}[/]\n", soft_wrap=True
         )
-        if get_dry_run(dry_run_override):
+        if dry_run:
             return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
         try:
             if output_outside_the_group and os.environ.get("GITHUB_ACTIONS") == "true":
-                get_console().print("::endgroup::")
+                console_print("::endgroup::")
             return subprocess.run(cmd, input=input, check=check, env=cmd_env, cwd=workdir, **kwargs)
         except subprocess.CalledProcessError as ex:
             if no_output_dump_on_exception:
@@ -197,73 +221,97 @@ def get_environments_to_print(env: Mapping[str, str] | None):
     return env_to_print
 
 
-def assert_pre_commit_installed():
+def assert_prek_installed():
     """
-    Check if pre-commit is installed in the right version.
+    Check if prek is installed in the right version.
 
-    :return: True is the pre-commit is installed in the right version.
+    :return: True is the prek is installed in the right version.
     """
     # Local import to make autocomplete work
     import yaml
     from packaging.version import Version
 
-    pre_commit_config = yaml.safe_load((AIRFLOW_ROOT_PATH / ".pre-commit-config.yaml").read_text())
-    min_pre_commit_version = pre_commit_config["minimum_pre_commit_version"]
+    prek_config = yaml.safe_load((AIRFLOW_ROOT_PATH / ".pre-commit-config.yaml").read_text())
+    min_prek_version = prek_config["minimum_prek_version"]
 
-    python_executable = sys.executable
-    get_console().print(f"[info]Checking pre-commit installed for {python_executable}[/]")
-    need_to_reinstall_precommit = False
+    console_print(f"[info]Checking prek installed for {sys.executable}[/]")
+    need_to_reinstall_prek = False
     try:
         command_result = run_command(
-            ["pre-commit", "--version"],
+            [sys.executable, "-m", "prek", "--version"],
             capture_output=True,
             text=True,
             check=False,
         )
         if command_result.returncode == 0:
             if command_result.stdout:
-                pre_commit_version = command_result.stdout.split(" ")[1].strip()
-                if Version(pre_commit_version) >= Version(min_pre_commit_version):
-                    get_console().print(
-                        f"\n[success]Package pre_commit is installed. "
-                        f"Good version {pre_commit_version} (>= {min_pre_commit_version})[/]\n"
+                prek_version = command_result.stdout.split(" ")[1].strip()
+                if Version(prek_version) >= Version(min_prek_version):
+                    console_print(
+                        f"\n[success]Package prek is installed. "
+                        f"Good version {prek_version} (>= {min_prek_version})[/]\n"
                     )
                 else:
-                    get_console().print(
-                        f"\n[error]Package name pre_commit version is wrong. It should be "
-                        f"at least {min_pre_commit_version} and is {pre_commit_version}.[/]\n\n"
+                    console_print(
+                        f"\n[error]Package name prek version is wrong. It should be "
+                        f"at least {min_prek_version} and is {prek_version}.[/]\n\n"
                     )
                     sys.exit(1)
-                if "pre-commit-uv" not in command_result.stdout:
-                    get_console().print(
-                        "\n[warning]You can significantly improve speed of installing your pre-commit envs "
-                        "by installing `pre-commit-uv` with it.[/]\n"
-                    )
-                    get_console().print(
-                        "\n[warning]With uv you can install it with:[/]\n\n"
-                        "        uv tool install pre-commit --with pre-commit-uv --force-reinstall\n"
-                    )
-                    get_console().print(
-                        "\n[warning]With pipx you can install it with:[/]\n\n"
-                        "        pipx inject pre-commit pre-commit-uv # optionally if you want to use uv to "
-                        "install virtualenvs\n"
-                    )
             else:
-                get_console().print(
-                    "\n[warning]Could not determine version of pre-commit. You might need to update it![/]\n"
+                console_print(
+                    "\n[warning]Could not determine version of prek. You might need to update it![/]\n"
                 )
         else:
-            need_to_reinstall_precommit = True
-            get_console().print("\n[error]Error checking for pre-commit-installation:[/]\n")
-            get_console().print(command_result.stderr)
+            need_to_reinstall_prek = True
+            console_print("\n[error]Error checking for prek-installation:[/]\n")
+            console_print(command_result.stderr)
     except FileNotFoundError as e:
-        need_to_reinstall_precommit = True
-        get_console().print(f"\n[error]Error checking for pre-commit-installation: [/]\n{e}\n")
-    if need_to_reinstall_precommit:
-        get_console().print("[info]Make sure to install pre-commit. For example by running:\n")
-        get_console().print("   uv tool install pre-commit --with pre-commit-uv\n")
-        get_console().print("Or if you prefer pipx:\n")
-        get_console().print("   pipx install pre-commit")
+        need_to_reinstall_prek = True
+        console_print(f"\n[error]Error checking for prek installation: [/]\n{e}\n")
+    if need_to_reinstall_prek:
+        console_print(
+            "[info]Reinstall breeze:[/]\n"
+            "  - For the recommended uvx-based setup, clear the cached env:\n"
+            "        uv cache clean apache-airflow-breeze\n"
+            "  - For a legacy global install:\n"
+            "        uv tool install -e ./dev/breeze --force"
+        )
+        sys.exit(1)
+
+
+def check_pnpm_installed():
+    """
+    Check if pnpm is installed and install it if npm is available.
+    """
+    if shutil.which("pnpm"):
+        return
+
+    console_print("[warning]pnpm is not installed. Installing pnpm...[/]")
+
+    # Check if npm is available (required to install pnpm)
+    if not shutil.which("npm"):
+        console_print("[error]npm is not installed. Please install Node.js and npm first.[/]")
+        console_print("[warning]Visit: https://nodejs.org/[/]")
+        sys.exit(1)
+
+    try:
+        console_print("[info]Installing pnpm using npm...[/]")
+        result = run_command(
+            ["npm", "install", "-g", "pnpm"],
+            no_output_dump_on_exception=True,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            console_print("[success]pnpm has been installed successfully![/]")
+        else:
+            console_print(f"[error]Failed to install pnpm: {result.stderr}[/]")
+            console_print("[warning]Please install pnpm manually: https://pnpm.io/installation[/]")
+            sys.exit(1)
+    except Exception as e:
+        console_print(f"[error]Failed to install pnpm: {e}[/]")
+        console_print("[warning]Please install pnpm manually: https://pnpm.io/installation[/]")
         sys.exit(1)
 
 
@@ -291,8 +339,8 @@ def get_filesystem_type(filepath: str):
 
 def instruct_build_image(python: str):
     """Print instructions to the user that they should build the image"""
-    get_console().print(f"[warning]\nThe CI image for Python version {python} may be outdated[/]\n")
-    get_console().print(
+    console_print(f"[warning]\nThe CI image for Python version {python} may be outdated[/]\n")
+    console_print(
         f"\n[info]Please run at the earliest convenience:[/]\n\nbreeze ci-image build --python {python}\n\n"
     )
 
@@ -330,7 +378,7 @@ def change_directory_permission(directory_to_fix: Path):
 def fix_group_permissions():
     """Fixes permissions of all the files and directories that have group-write access."""
     if get_verbose():
-        get_console().print("[info]Fixing group permissions[/]")
+        console_print("[info]Fixing group permissions[/]")
     files_to_fix_result = run_command(["git", "ls-files", "./"], capture_output=True, check=False, text=True)
     if files_to_fix_result.returncode == 0:
         files_to_fix = files_to_fix_result.stdout.strip().splitlines()
@@ -375,7 +423,18 @@ def check_if_buildx_plugin_installed() -> bool:
         text=True,
         check=False,
     )
-    if docker_buildx_version_result.returncode == 0:
+    if "buildah" in docker_buildx_version_result.stdout.lower():
+        console_print(
+            "[warning]Detected buildah installation.[/]\n"
+            "[warning]The Dockerfiles are only compatible with BuildKit.[/]\n"
+            "[warning]Please see the syntax declaration at the top of the Dockerfiles for BuildKit version\n"
+        )
+        return False
+    if (
+        docker_buildx_version_result.returncode == 0
+        and "buildx" in docker_buildx_version_result.stdout.lower()
+    ):
+        console_print("[success]Docker BuildKit is installed and will be used for the image build.[/]\n")
         return True
     return False
 
@@ -386,8 +445,7 @@ def commit_sha():
     command_result = run_command(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
     if command_result.stdout:
         return command_result.stdout.strip()
-    else:
-        return "COMMIT_SHA_NOT_FOUND"
+    return "COMMIT_SHA_NOT_FOUND"
 
 
 def check_if_image_exists(image: str) -> bool:
@@ -407,38 +465,43 @@ def _run_compile_internally(
 
     env = os.environ.copy()
     if dev:
-        return run_command(
-            command_to_execute,
-            check=False,
-            no_output_dump_on_exception=True,
-            text=True,
-            env=env,
-        )
-    else:
-        compile_lock.parent.mkdir(parents=True, exist_ok=True)
+        # Clean up stale lock file
         compile_lock.unlink(missing_ok=True)
-        try:
-            with SoftFileLock(compile_lock, timeout=5):
-                with open(asset_out, "w") as output_file:
-                    result = run_command(
-                        command_to_execute,
-                        check=False,
-                        no_output_dump_on_exception=True,
-                        text=True,
-                        env=env,
-                        stderr=subprocess.STDOUT,
-                        stdout=output_file,
-                    )
-                if result.returncode == 0:
-                    asset_out.unlink(missing_ok=True)
-                return result
-        except Timeout:
-            get_console().print("[error]Another asset compilation is running. Exiting[/]\n")
-            get_console().print("[warning]If you are sure there is no other compilation,[/]")
-            get_console().print("[warning]Remove the lock file and re-run compilation:[/]")
-            get_console().print(compile_lock)
-            get_console().print()
-            sys.exit(1)
+        UI_ASSET_OUT_DEV_MODE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(UI_ASSET_OUT_DEV_MODE_FILE, "w") as output_file:
+            return run_command(
+                command_to_execute,
+                check=False,
+                no_output_dump_on_exception=True,
+                text=True,
+                env=env,
+                stderr=subprocess.STDOUT,
+                stdout=output_file,
+            )
+    compile_lock.parent.mkdir(parents=True, exist_ok=True)
+    compile_lock.unlink(missing_ok=True)
+    try:
+        with SoftFileLock(compile_lock, timeout=5):
+            with open(asset_out, "w") as output_file:
+                result = run_command(
+                    command_to_execute,
+                    check=False,
+                    no_output_dump_on_exception=True,
+                    text=True,
+                    env=env,
+                    stderr=subprocess.STDOUT,
+                    stdout=output_file,
+                )
+            if result.returncode == 0:
+                asset_out.unlink(missing_ok=True)
+            return result
+    except Timeout:
+        console_print("[error]Another asset compilation is running. Exiting[/]\n")
+        console_print("[warning]If you are sure there is no other compilation,[/]")
+        console_print("[warning]Remove the lock file and re-run compilation:[/]")
+        console_print(compile_lock)
+        console_print()
+        sys.exit(1)
 
 
 def kill_process_group(gid: int):
@@ -447,44 +510,119 @@ def kill_process_group(gid: int):
 
     :param gid: process group id
     """
-    try:
+    with contextlib.suppress(OSError):
         os.killpg(gid, signal.SIGTERM)
-    except OSError:
-        pass
 
 
-def clean_ui_assets():
-    get_console().print("[info]Cleaning ui assets[/]")
+def _clean_ui_assets(additional_ui_hooks: list[str]):
+    console_print("[info]Cleaning ui assets[/]")
     UI_ASSET_HASH_PATH.unlink(missing_ok=True)
     shutil.rmtree(UI_NODE_MODULES_PATH, ignore_errors=True)
     shutil.rmtree(UI_DIST_PATH, ignore_errors=True)
-    get_console().print("[success]Cleaned ui assets[/]")
+    shutil.rmtree(FAST_API_SIMPLE_AUTH_MANAGER_NODE_MODULES_PATH, ignore_errors=True)
+    shutil.rmtree(FAST_API_SIMPLE_AUTH_MANAGER_DIST_PATH, ignore_errors=True)
+    if EDGE_PLUGIN_PREK_HOOK in additional_ui_hooks:
+        shutil.rmtree(EDGE_PLUGIN_UI_NODE_MODULES_PATH, ignore_errors=True)
+        shutil.rmtree(EDGE_PLUGIN_UI_DIST_PATH, ignore_errors=True)
+    if FAB_AUTH_MANAGER_WWW_PREK_HOOK in additional_ui_hooks:
+        shutil.rmtree(FAB_AUTH_MANAGER_WWW_NODE_MODULES_PATH, ignore_errors=True)
+        shutil.rmtree(FAB_AUTH_MANAGER_WWW_DIST_PATH, ignore_errors=True)
+    if COMMON_AI_PLUGIN_PREK_HOOK in additional_ui_hooks:
+        shutil.rmtree(COMMON_AI_UI_PLUGIN_NODE_MODULES_PATH, ignore_errors=True)
+        shutil.rmtree(COMMON_AI_UI_PLUGIN_DIST_PATH, ignore_errors=True)
+
+    console_print("[success]Cleaned ui assets[/]")
+
+
+def _find_occupied_local_ports(ports: Iterable[str]) -> list[str]:
+    occupied_ports = []
+    for port in ports:
+        with contextlib.suppress(OSError):
+            with socket.create_connection(("localhost", int(port)), timeout=0.1):
+                occupied_ports.append(port)
+    return occupied_ports
+
+
+def _find_local_port_listeners(ports: Iterable[str]) -> dict[str, tuple[int, str]]:
+    """
+    Finds processes listening on the given local ports.
+
+    :param ports: ports to look up
+    :return: mapping of port to (pid, command line) for each port whose listener could be found
+    """
+    # We import it locally so that click autocomplete works
+    try:
+        import psutil
+    except ImportError:
+        return {}
+
+    ports_by_number = {int(port): port for port in ports}
+    listeners: dict[str, tuple[int, str]] = {}
+    for process in psutil.process_iter():
+        with contextlib.suppress(psutil.Error):
+            for connection in process.net_connections(kind="tcp"):
+                if connection.status != psutil.CONN_LISTEN or connection.laddr.port not in ports_by_number:
+                    continue
+                command_line = " ".join(process.cmdline()) or process.name()
+                listeners[ports_by_number[connection.laddr.port]] = (process.pid, command_line)
+    return listeners
+
+
+def _format_occupied_ports_error(occupied_ports: list[str], listeners: dict[str, tuple[int, str]]) -> str:
+    message = (
+        "[error]Cannot start UI development servers because the following local port(s) "
+        f"are already in use: {', '.join(occupied_ports)}.[/]\n"
+    )
+    pids: dict[int, None] = {}
+    for port in occupied_ports:
+        if port in listeners:
+            pid, command_line = listeners[port]
+            pids[pid] = None
+            message += f"[info]Port {port} is used by PID {pid}: {escape(command_line)}[/]\n"
+    if pids:
+        kill_hint = " ".join(str(pid) for pid in pids)
+        message += (
+            f"[info]Stop the processes using these ports (for example `kill {kill_hint}`) and try again.[/]"
+        )
+    else:
+        message += "[info]Stop the processes using these ports and try again.[/]"
+    return message
 
 
 def run_compile_ui_assets(
     dev: bool,
     run_in_background: bool,
     force_clean: bool,
+    additional_ui_hooks: list[str],
 ):
-    if force_clean:
-        clean_ui_assets()
     if dev:
-        get_console().print("\n[warning] The command below will run forever until you press Ctrl-C[/]\n")
-        get_console().print(
+        occupied_ports = _find_occupied_local_ports((VITE_DEV_PORT, SIMPLE_AUTH_MANAGER_VITE_DEV_PORT))
+        if occupied_ports:
+            listeners = _find_local_port_listeners(occupied_ports)
+            console_print(_format_occupied_ports_error(occupied_ports, listeners))
+            sys.exit(1)
+    if force_clean:
+        _clean_ui_assets(additional_ui_hooks)
+    if dev:
+        console_print("\n[warning] The command below will run forever until you press Ctrl-C[/]\n")
+        console_print(
             "\n[info]If you want to see output of the compilation command,\n"
             "[info]cancel it, go to airflow/ui folder and run 'pnpm dev'.\n"
             "[info]However, it requires you to have local pnpm installation.\n"
         )
     command_to_execute = [
-        "pre-commit",
+        sys.executable,
+        "-m",
+        "prek",
         "run",
-        "--hook-stage",
+        "--stage",
         "manual",
         "compile-ui-assets-dev" if dev else "compile-ui-assets",
+        *additional_ui_hooks,
         "--all-files",
         "--verbose",
     ]
-    get_console().print(
+    console_print(
         "[info]The output of the asset compilation is stored in: [/]"
         f"{UI_ASSET_OUT_DEV_MODE_FILE if dev else UI_ASSET_OUT_FILE}\n"
     )

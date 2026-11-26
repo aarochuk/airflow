@@ -21,10 +21,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from airflow.exceptions import AirflowException
 from airflow.models import DAG, DagBag
-from airflow.providers.google.cloud.operators.looker import LookerStartPdtBuildOperator
-from airflow.utils.timezone import datetime
+from airflow.providers.common.compat.sdk import AirflowException, timezone
+from airflow.providers.google.cloud.operators.looker import (
+    DataStudioStartPdtBuildOperator,
+    LookerStartPdtBuildOperator,
+)
 
 from tests_common.test_utils.db import clear_db_runs, clear_db_xcom
 
@@ -36,14 +38,18 @@ MODEL = "test_model"
 VIEW = "test_view"
 
 TEST_DAG_ID = "test-looker-operators"
-DEFAULT_DATE = datetime(2020, 1, 1)
+DEFAULT_DATE = timezone.datetime(2020, 1, 1)
 TEST_JOB_ID = "123"
+
+
+def test_data_studio_aliases():
+    assert DataStudioStartPdtBuildOperator is LookerStartPdtBuildOperator
 
 
 class LookerTestBase:
     @classmethod
     def setUpClass(cls):
-        cls.dagbag = DagBag(dag_folder="/dev/null", include_examples=False)
+        cls.dagbag = DagBag(dag_folder="/dev/null")
         cls.dag = DAG(TEST_DAG_ID, default_args={"owner": "airflow", "start_date": DEFAULT_DATE})
 
     def setup_method(self):

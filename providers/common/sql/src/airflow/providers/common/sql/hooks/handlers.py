@@ -19,7 +19,9 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 
-def return_single_query_results(sql: str | Iterable[str], return_last: bool, split_statements: bool | None):
+def return_single_query_results(
+    sql: str | Iterable[str], return_last: bool, split_statements: bool | None
+) -> bool:
     """
     Determine when results of single query only should be returned.
 
@@ -49,6 +51,15 @@ def return_single_query_results(sql: str | Iterable[str], return_last: bool, spl
     return isinstance(sql, str) and return_last
 
 
+def get_row_count(cursor) -> int | None:
+    # According to PEP 249, this is -1 or None when query result is not applicable.
+    # We standardize so it's either None (when not applicable) or positive integer / 0 (when applicable)
+    row_count = getattr(cursor, "rowcount", None)
+    if isinstance(row_count, int) and row_count >= 0:
+        return row_count
+    return None
+
+
 def fetch_all_handler(cursor) -> list[tuple] | None:
     """Return results for DbApiHook.run()."""
     if not hasattr(cursor, "description"):
@@ -58,11 +69,10 @@ def fetch_all_handler(cursor) -> list[tuple] | None:
         )
     if cursor.description is not None:
         return cursor.fetchall()
-    else:
-        return None
+    return None
 
 
-def fetch_one_handler(cursor) -> list[tuple] | None:
+def fetch_one_handler(cursor) -> tuple | None:
     """Return first result for DbApiHook.run()."""
     if not hasattr(cursor, "description"):
         raise RuntimeError(
@@ -71,5 +81,4 @@ def fetch_one_handler(cursor) -> list[tuple] | None:
         )
     if cursor.description is not None:
         return cursor.fetchone()
-    else:
-        return None
+    return None

@@ -16,15 +16,15 @@
 # under the License.
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import json
+import tempfile
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from airflow import configuration, models
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.tableau.hooks.tableau import TableauHook, TableauJobFinishCode
-from airflow.utils import db
-
-pytestmark = pytest.mark.db_test
 
 
 class TestTableauHook:
@@ -32,10 +32,11 @@ class TestTableauHook:
     Test class for TableauHook
     """
 
-    def setup_method(self):
+    @pytest.fixture(autouse=True)
+    def setup_connections(self, create_connection_without_db):
         configuration.conf.load_test_config()
 
-        db.merge_conn(
+        create_connection_without_db(
             models.Connection(
                 conn_id="tableau_test_password",
                 conn_type="tableau",
@@ -45,7 +46,7 @@ class TestTableauHook:
                 extra='{"site_id": "my_site"}',
             )
         )
-        db.merge_conn(
+        create_connection_without_db(
             models.Connection(
                 conn_id="tableau_test_ssl_connection_certificates_path",
                 conn_type="tableau",
@@ -55,7 +56,7 @@ class TestTableauHook:
                 extra='{"verify": "my_cert_path", "cert": "my_client_cert_path"}',
             )
         )
-        db.merge_conn(
+        create_connection_without_db(
             models.Connection(
                 conn_id="tableau_test_ssl_false_connection",
                 conn_type="tableau",
@@ -65,7 +66,7 @@ class TestTableauHook:
                 extra='{"verify": "False"}',
             )
         )
-        db.merge_conn(
+        create_connection_without_db(
             models.Connection(
                 conn_id="tableau_test_ssl_bool_param_connection",
                 conn_type="tableau",
@@ -75,9 +76,54 @@ class TestTableauHook:
                 extra='{"verify": false}',
             )
         )
+        create_connection_without_db(
+            models.Connection(
+                conn_id="tableau_test_jwt_auth",
+                conn_type="tableau",
+                host="tableau",
+                extra='{"auth": "jwt", "jwt_token": "fake_jwt_token", "site_id": ""}',
+            )
+        )
+        create_connection_without_db(
+            models.Connection(
+                conn_id="tableau_test_ssl_connection_certificates_path_with_jwt",
+                conn_type="tableau",
+                host="tableau",
+                extra='{"auth": "jwt", "jwt_token": "fake_jwt_token", "site_id": "", "verify": "my_cert_path", "cert": "my_client_cert_path"}',
+            )
+        )
+        create_connection_without_db(
+            models.Connection(
+                conn_id="tableau_test_jwt_auth_no_token",
+                conn_type="tableau",
+                host="tableau",
+                extra='{"auth": "jwt", "site_id": ""}',
+            )
+        )
+        create_connection_without_db(
+            models.Connection(
+                conn_id="tableau_test_both_auth",
+                conn_type="tableau",
+                host="tableau",
+                login="user",
+                password="password",
+                extra='{"auth": "jwt", "jwt_token": "fake_jwt_token", "site_id": ""}',
+            )
+        )
+        create_connection_without_db(
+            models.Connection(
+                conn_id="tableau_test_with_schema",
+                conn_type="tableau",
+                host="tableau",
+                schema="https",
+                login="user",
+                password="password",
+                extra='{"site_id": "my_site"}',
+            )
+        )
 
-    @patch("airflow.providers.tableau.hooks.tableau.TableauAuth")
-    @patch("airflow.providers.tableau.hooks.tableau.Server")
+    @patch("tableauserverclient.TableauAuth")
+    @patch("tableauserverclient.Server")
     def test_get_conn_auth_via_password_and_site_in_connection(self, mock_server, mock_tableau_auth):
         """
         Test get conn auth via password
@@ -92,8 +138,128 @@ class TestTableauHook:
             mock_server.return_value.auth.sign_in.assert_called_once_with(mock_tableau_auth.return_value)
         mock_server.return_value.auth.sign_out.assert_called_once_with()
 
-    @patch("airflow.providers.tableau.hooks.tableau.TableauAuth")
-    @patch("airflow.providers.tableau.hooks.tableau.Server")
+    @patch("tableauserverclient.JWTAuth")
+    @patch("tableauserverclient.Server")
+    def test_jwt_auth(self, mock_server, mock_tableau_jwt_auth):
+        """
+        Test get conn using JWT authentication via a token string
+        """
+        with TableauHook(tableau_conn_id="tableau_test_jwt_auth") as tableau_hook:
+            mock_server.assert_called_once_with(tableau_hook.conn.host)
+            mock_tableau_jwt_auth.assert_called_once_with(
+                jwt="fake_jwt_token",
+                site_id="",
+            )
+            mock_server.return_value.auth.sign_in.assert_called_once_with(mock_tableau_jwt_auth.return_value)
+        mock_server.return_value.auth.sign_out.assert_called_once_with()
+
+    @patch("tableauserverclient.JWTAuth")
+    @patch("tableauserverclient.Server")
+    def test_jwt_auth_with_ssl(self, mock_server, mock_tableau_jwt_auth):
+        """
+        Test get conn using JWT authentication via a token string and ssl
+        """
+        with TableauHook(
+            tableau_conn_id="tableau_test_ssl_connection_certificates_path_with_jwt"
+        ) as tableau_hook:
+            mock_server.assert_called_once_with(tableau_hook.conn.host)
+            mock_server.return_value.add_http_options.assert_called_once_with(
+                options_dict={
+                    "verify": tableau_hook.conn.extra_dejson["verify"],
+                    "cert": tableau_hook.conn.extra_dejson["cert"],
+                }
+            )
+            mock_tableau_jwt_auth.assert_called_once_with(
+                jwt="fake_jwt_token",
+                site_id="",
+            )
+            mock_server.return_value.auth.sign_in.assert_called_once_with(mock_tableau_jwt_auth.return_value)
+        mock_server.return_value.auth.sign_out.assert_called_once_with()
+
+    def test_jwt_auth_with_no_token_provided(self):
+        """
+        Test get conn using JWT authentication without providing a token
+        """
+        with pytest.raises(
+            ValueError,
+            match=r"When auth set to 'jwt' then expected exactly one parameter 'jwt_file' or 'jwt_token' in connection extra, but none of them provided.",
+        ):
+            TableauHook(tableau_conn_id="tableau_test_jwt_auth_no_token").get_conn()
+
+    @patch("tableauserverclient.JWTAuth")
+    def test_jwt_auth_with_two_tokens_provided(self, mock_tableau_jwt_auth, create_connection_without_db):
+        """
+        Test get conn using JWT authentication while providing both a string token and a path
+
+        The connection setup is done within this test to handle the creation of a temporary file
+        for the JWT token, keeping the shared setup_connections function focused solely on connection logic
+        """
+        fake_jwt_token = "fake_jwt_token_from_file"
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as jwt_file:
+            jwt_file.write(fake_jwt_token)
+            jwt_file_path = jwt_file.name
+        create_connection_without_db(
+            models.Connection(
+                conn_id="tableau_test_jwt_file_auth_two_tokens",
+                conn_type="tableau",
+                host="tableau",
+                extra=json.dumps(
+                    {"auth": "jwt", "jwt_file": jwt_file_path, "jwt_token": "fake_jwt_token", "site_id": ""}
+                ),
+            )
+        )
+        with pytest.raises(
+            ValueError,
+            match=r"When auth set to 'jwt' then expected exactly one parameter 'jwt_file' or 'jwt_token' in connection extra, but provided both.",
+        ):
+            TableauHook(tableau_conn_id="tableau_test_jwt_file_auth_two_tokens").get_conn()
+        mock_tableau_jwt_auth.assert_not_called()
+
+    @patch("tableauserverclient.JWTAuth")
+    @patch("tableauserverclient.Server")
+    def test_jwt_auth_from_file(self, mock_server, mock_tableau_jwt_auth, create_connection_without_db):
+        """
+        Test get conn using JWT token read from file
+
+        The connection setup is done within this test to handle the creation of a temporary file
+        for the JWT token, keeping the shared setup_connections function focused solely on connection logic
+        """
+        fake_jwt_token = "fake_jwt_token_from_file"
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as jwt_file:
+            jwt_file.write(fake_jwt_token)
+            jwt_file_path = jwt_file.name
+        create_connection_without_db(
+            models.Connection(
+                conn_id="tableau_test_jwt_file_auth",
+                conn_type="tableau",
+                host="tableau",
+                extra=json.dumps({"auth": "jwt", "jwt_file": jwt_file_path, "site_id": ""}),
+            )
+        )
+
+        with TableauHook(tableau_conn_id="tableau_test_jwt_file_auth") as tableau_hook:
+            mock_server.assert_called_once_with(tableau_hook.conn.host)
+            mock_tableau_jwt_auth.assert_called_once_with(
+                jwt=fake_jwt_token,
+                site_id="",
+            )
+            mock_server.return_value.auth.sign_in.assert_called_once_with(mock_tableau_jwt_auth.return_value)
+        mock_server.return_value.auth.sign_out.assert_called_once_with()
+
+    @patch("tableauserverclient.TableauAuth")
+    def test_both_auth(self, mock_tableau_auth):
+        """
+        Test whether an error is thrown if both auth types are set
+        """
+        with pytest.raises(
+            AirflowException,
+            match=r"Username/password authentication and JWT authentication cannot be used simultaneously. Please specify only one authentication method.",
+        ):
+            TableauHook(tableau_conn_id="tableau_test_both_auth").get_conn()
+        mock_tableau_auth.assert_not_called()
+
+    @patch("tableauserverclient.TableauAuth")
+    @patch("tableauserverclient.Server")
     def test_get_conn_ssl_cert_path(self, mock_server, mock_tableau_auth):
         """
         Test get conn with SSL parameters, verify as path
@@ -114,8 +280,8 @@ class TestTableauHook:
             mock_server.return_value.auth.sign_in.assert_called_once_with(mock_tableau_auth.return_value)
         mock_server.return_value.auth.sign_out.assert_called_once_with()
 
-    @patch("airflow.providers.tableau.hooks.tableau.TableauAuth")
-    @patch("airflow.providers.tableau.hooks.tableau.Server")
+    @patch("tableauserverclient.TableauAuth")
+    @patch("tableauserverclient.Server")
     def test_get_conn_ssl_default(self, mock_server, mock_tableau_auth):
         """
         Test get conn with default SSL parameters
@@ -134,8 +300,8 @@ class TestTableauHook:
             )
         mock_server.return_value.auth.sign_out.assert_called_once_with()
 
-    @patch("airflow.providers.tableau.hooks.tableau.TableauAuth")
-    @patch("airflow.providers.tableau.hooks.tableau.Server")
+    @patch("tableauserverclient.TableauAuth")
+    @patch("tableauserverclient.Server")
     def test_get_conn_ssl_disabled(self, mock_server, mock_tableau_auth):
         """
         Test get conn with default SSL disabled parameters
@@ -153,8 +319,8 @@ class TestTableauHook:
             mock_server.return_value.auth.sign_in.assert_called_once_with(mock_tableau_auth.return_value)
         mock_server.return_value.auth.sign_out.assert_called_once_with()
 
-    @patch("airflow.providers.tableau.hooks.tableau.TableauAuth")
-    @patch("airflow.providers.tableau.hooks.tableau.Server")
+    @patch("tableauserverclient.TableauAuth")
+    @patch("tableauserverclient.Server")
     def test_get_conn_ssl_bool_param(self, mock_server, mock_tableau_auth):
         """
         Test get conn with SSL Verify parameter as bool
@@ -172,9 +338,29 @@ class TestTableauHook:
             mock_server.return_value.auth.sign_in.assert_called_once_with(mock_tableau_auth.return_value)
         mock_server.return_value.auth.sign_out.assert_called_once_with()
 
-    @patch("airflow.providers.tableau.hooks.tableau.TableauAuth")
-    @patch("airflow.providers.tableau.hooks.tableau.Server")
-    @patch("airflow.providers.tableau.hooks.tableau.Pager", return_value=[1, 2, 3])
+    @patch("tableauserverclient.TableauAuth")
+    @patch("tableauserverclient.Server")
+    def test_get_conn_uses_schema_when_configured(self, mock_server, mock_tableau_auth):
+        """
+        Test that Server is constructed with the schema prepended to the host when schema is configured.
+        """
+        with TableauHook(tableau_conn_id="tableau_test_with_schema") as tableau_hook:
+            mock_server.assert_called_once_with(f"{tableau_hook.conn.schema}://{tableau_hook.conn.host}")
+        mock_server.return_value.auth.sign_out.assert_called_once_with()
+
+    @patch("tableauserverclient.TableauAuth")
+    @patch("tableauserverclient.Server")
+    def test_get_conn_uses_host_only_without_schema(self, mock_server, mock_tableau_auth):
+        """
+        Test that Server is constructed with the host only when no schema is configured (backward compatibility).
+        """
+        with TableauHook(tableau_conn_id="tableau_test_password") as tableau_hook:
+            mock_server.assert_called_once_with(tableau_hook.conn.host)
+        mock_server.return_value.auth.sign_out.assert_called_once_with()
+
+    @patch("tableauserverclient.TableauAuth")
+    @patch("tableauserverclient.Server")
+    @patch("tableauserverclient.Pager", return_value=[1, 2, 3])
     def test_get_all(self, mock_pager, mock_server, mock_tableau_auth):
         """
         Test get all
@@ -186,14 +372,14 @@ class TestTableauHook:
         mock_pager.assert_called_once_with(mock_server.return_value.jobs.get)
 
     @pytest.mark.parametrize(
-        "finish_code, expected_status",
+        ("finish_code", "expected_status"),
         [
             pytest.param(0, TableauJobFinishCode.SUCCESS, id="SUCCESS"),
             pytest.param(1, TableauJobFinishCode.ERROR, id="ERROR"),
             pytest.param(2, TableauJobFinishCode.CANCELED, id="CANCELED"),
         ],
     )
-    @patch("airflow.providers.tableau.hooks.tableau.Server")
+    @patch("tableauserverclient.Server")
     def test_get_job_status(self, mock_tableau_server, finish_code, expected_status):
         """
         Test get job status
@@ -204,8 +390,9 @@ class TestTableauHook:
             jobs_status = tableau_hook.get_job_status(job_id="j1")
             assert jobs_status == expected_status
 
-    @patch("airflow.providers.tableau.hooks.tableau.Server")
-    def test_wait_for_state(self, mock_tableau_server):
+    @patch("time.sleep", return_value=None)
+    @patch("tableauserverclient.Server")
+    def test_wait_for_state(self, mock_tableau_server, sleep_mock):
         """
         Test wait_for_state
         """
@@ -273,3 +460,116 @@ class TestTableauHook:
             assert tableau_hook.wait_for_state(
                 job_id="j1", target_state=TableauJobFinishCode.PENDING, check_interval=1
             )
+
+    @patch("tableauserverclient.Server")
+    def test_wait_for_state_timeout(self, mock_tableau_server):
+        """A job stuck in PENDING raises TimeoutError once the timeout elapses."""
+        clock = {"t": 0.0}
+        with TableauHook(tableau_conn_id="tableau_test_password") as tableau_hook:
+            tableau_hook.get_job_status = MagicMock(
+                name="get_job_status",
+                return_value=TableauJobFinishCode.PENDING,
+            )
+            with (
+                patch("time.monotonic", side_effect=lambda: clock["t"]),
+                patch("time.sleep", side_effect=lambda seconds: clock.__setitem__("t", clock["t"] + seconds)),
+            ):
+                with pytest.raises(TimeoutError, match="still PENDING after 30 seconds"):
+                    tableau_hook.wait_for_state(
+                        job_id="j1",
+                        target_state=TableauJobFinishCode.SUCCESS,
+                        check_interval=10,
+                        timeout=30,
+                    )
+
+    @pytest.mark.parametrize(
+        ("job_status", "expected"),
+        [
+            pytest.param(
+                MagicMock(
+                    name="get_job_status",
+                    side_effect=[TableauJobFinishCode.PENDING, TableauJobFinishCode.SUCCESS],
+                ),
+                True,
+                id="finished-at-deadline",
+            ),
+            pytest.param(
+                MagicMock(name="get_job_status", return_value=TableauJobFinishCode.PENDING),
+                "raises",
+                id="still-pending",
+            ),
+        ],
+    )
+    @patch("tableauserverclient.Server")
+    def test_wait_for_state_uses_last_poll_result_on_timeout(self, mock_tableau_server, job_status, expected):
+        """A job that finishes on the poll taken at the deadline succeeds; one still PENDING times out."""
+        clock = {"t": 0.0}
+        with TableauHook(tableau_conn_id="tableau_test_password") as tableau_hook:
+            tableau_hook.get_job_status = job_status
+            with (
+                patch("time.monotonic", side_effect=lambda: clock["t"]),
+                patch("time.sleep", side_effect=lambda seconds: clock.__setitem__("t", clock["t"] + seconds)),
+            ):
+                if expected == "raises":
+                    with pytest.raises(TimeoutError):
+                        tableau_hook.wait_for_state(
+                            job_id="j1",
+                            target_state=TableauJobFinishCode.SUCCESS,
+                            check_interval=5,
+                            timeout=5,
+                        )
+                else:
+                    assert tableau_hook.wait_for_state(
+                        job_id="j1",
+                        target_state=TableauJobFinishCode.SUCCESS,
+                        check_interval=5,
+                        timeout=5,
+                    )
+
+    @patch("time.sleep", return_value=None)
+    @patch("tableauserverclient.Server")
+    def test_wait_for_state_timeout_success_before_elapsed(self, mock_tableau_server, sleep_mock):
+        """timeout does not interfere when the job finishes before it elapses."""
+        with TableauHook(tableau_conn_id="tableau_test_password") as tableau_hook:
+            tableau_hook.get_job_status = MagicMock(
+                name="get_job_status",
+                side_effect=[TableauJobFinishCode.PENDING, TableauJobFinishCode.SUCCESS],
+            )
+            assert tableau_hook.wait_for_state(
+                job_id="j1",
+                target_state=TableauJobFinishCode.SUCCESS,
+                check_interval=1,
+                timeout=300,
+            )
+
+    @pytest.mark.parametrize(
+        ("max_check_interval", "expected_intervals"),
+        [
+            pytest.param(None, [10, 15, 22.5], id="uncapped"),
+            pytest.param(12, [10, 12, 12], id="capped"),
+        ],
+    )
+    @patch("time.sleep", return_value=None)
+    @patch("tableauserverclient.Server")
+    def test_wait_for_state_exponential_backoff(
+        self, mock_tableau_server, sleep_mock, max_check_interval, expected_intervals
+    ):
+        """Exponential backoff grows the wait between checks by 50% each time, honoring the cap."""
+        with TableauHook(tableau_conn_id="tableau_test_password") as tableau_hook:
+            tableau_hook.get_job_status = MagicMock(
+                name="get_job_status",
+                side_effect=[
+                    TableauJobFinishCode.PENDING,
+                    TableauJobFinishCode.PENDING,
+                    TableauJobFinishCode.PENDING,
+                    TableauJobFinishCode.SUCCESS,
+                ],
+            )
+            assert tableau_hook.wait_for_state(
+                job_id="j1",
+                target_state=TableauJobFinishCode.SUCCESS,
+                check_interval=10,
+                exponential_backoff=True,
+                max_check_interval=max_check_interval,
+            )
+            assert sleep_mock.call_args_list == [call(interval) for interval in expected_intervals]

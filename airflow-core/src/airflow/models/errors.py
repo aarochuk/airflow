@@ -17,18 +17,37 @@
 # under the License.
 from __future__ import annotations
 
-from sqlalchemy import Column, Integer, String, Text
+from datetime import datetime
+from pathlib import Path
 
+from sqlalchemy import Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from airflow.dag_processing.bundles.manager import DagBundlesManager
 from airflow.models.base import Base, StringID
 from airflow.utils.sqlalchemy import UtcDateTime
+
+IMPORT_ERROR_FILENAME_MAX_LENGTH = 1024
 
 
 class ParseImportError(Base):
     """Stores all Import Errors which are recorded when parsing DAGs and displayed on the Webserver."""
 
     __tablename__ = "import_error"
-    id = Column(Integer, primary_key=True)
-    timestamp = Column(UtcDateTime)
-    filename = Column(String(1024))  # todo AIP-66: make this bundle and relative fileloc
-    bundle_name = Column(StringID())
-    stacktrace = Column(Text)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    timestamp: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    filename: Mapped[str | None] = mapped_column(String(IMPORT_ERROR_FILENAME_MAX_LENGTH), nullable=True)
+    source_reference: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    bundle_name: Mapped[str | None] = mapped_column(StringID(), nullable=True)
+    stacktrace: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    def full_file_path(self) -> str:
+        """Return the full file path of the dag."""
+        ref = self.source_reference or self.filename
+        if self.bundle_name is None or ref is None:
+            raise ValueError("bundle_name and (source_reference or filename) must not be None")
+        ref_path = Path(ref)
+        if ref_path.is_absolute():
+            return ref
+        bundle = DagBundlesManager().get_bundle(self.bundle_name)
+        return str(bundle.path / ref_path)

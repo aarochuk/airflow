@@ -17,41 +17,34 @@
 # under the License.
 from __future__ import annotations
 
-from datetime import timedelta
-
 import pendulum
 import pytest
 
-from airflow.decorators import (
-    dag,
+from airflow.api_fastapi.core_api.services.ui.task_group import (
+    get_task_group_children_getter,
+    task_group_to_dict,
+    task_group_to_dict_grid,
+)
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import (
+    DAG,
+    BaseOperator,
+    TaskGroup,
     setup,
     task as task_decorator,
     task_group as task_group_decorator,
     teardown,
 )
-from airflow.exceptions import TaskAlreadyInTaskGroup
-from airflow.models.baseoperator import BaseOperator
-from airflow.models.dag import DAG
-from airflow.models.xcom_arg import XComArg
-from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.serialization.definitions.taskgroup import SerializedTaskGroup
 from airflow.utils.dag_edges import dag_edges
-from airflow.utils.task_group import TaskGroup, task_group_to_dict, task_group_to_dict_legacy
 
-from tests_common.test_utils.compat import BashOperator, PythonOperator
+from tests_common.test_utils.config import conf_vars
+from tests_common.test_utils.dag import create_scheduler_dag
 from unit.models import DEFAULT_DATE
 
-
-def make_task(name, type_="classic"):
-    if type_ == "classic":
-        return BashOperator(task_id=name, bash_command="echo 1")
-
-    else:
-
-        @task_decorator
-        def my_task():
-            pass
-
-        return my_task.override(task_id=name)()
+pytestmark = [pytest.mark.db_test, pytest.mark.need_serialized_dag]
 
 
 EXPECTED_JSON_LEGACY = {
@@ -68,6 +61,16 @@ EXPECTED_JSON_LEGACY = {
     },
     "children": [
         {
+            "id": "task1",
+            "value": {
+                "label": "task1",
+                "labelStyle": "fill:#000;",
+                "style": "fill:#e8f7e4;",
+                "rx": 5,
+                "ry": 5,
+            },
+        },
+        {
             "id": "group234",
             "value": {
                 "label": "group234",
@@ -80,6 +83,16 @@ EXPECTED_JSON_LEGACY = {
                 "isMapped": False,
             },
             "children": [
+                {
+                    "id": "group234.task2",
+                    "value": {
+                        "label": "task2",
+                        "labelStyle": "fill:#000;",
+                        "style": "fill:#e8f7e4;",
+                        "rx": 5,
+                        "ry": 5,
+                    },
+                },
                 {
                     "id": "group234.group34",
                     "value": {
@@ -125,16 +138,6 @@ EXPECTED_JSON_LEGACY = {
                     ],
                 },
                 {
-                    "id": "group234.task2",
-                    "value": {
-                        "label": "task2",
-                        "labelStyle": "fill:#000;",
-                        "style": "fill:#e8f7e4;",
-                        "rx": 5,
-                        "ry": 5,
-                    },
-                },
-                {
                     "id": "group234.upstream_join_id",
                     "value": {
                         "label": "",
@@ -144,16 +147,6 @@ EXPECTED_JSON_LEGACY = {
                     },
                 },
             ],
-        },
-        {
-            "id": "task1",
-            "value": {
-                "label": "task1",
-                "labelStyle": "fill:#000;",
-                "style": "fill:#e8f7e4;",
-                "rx": 5,
-                "ry": 5,
-            },
         },
         {
             "id": "task5",
@@ -168,55 +161,69 @@ EXPECTED_JSON_LEGACY = {
     ],
 }
 
+TASK_COLORS = {"ui_color": "#e8f7e4", "ui_fgcolor": "#000"}
+GROUP_COLORS = {"ui_color": "CornflowerBlue", "ui_fgcolor": "#000"}
+
 EXPECTED_JSON = {
-    "id": None,
-    "label": None,
-    "tooltip": "",
-    "is_mapped": False,
     "children": [
+        {"id": "task1", "label": "task1", "operator": "EmptyOperator", "type": "task", **TASK_COLORS},
         {
-            "id": "group234",
-            "label": "group234",
-            "tooltip": "",
-            "is_mapped": False,
             "children": [
                 {
-                    "id": "group234.group34",
-                    "label": "group34",
-                    "tooltip": "",
-                    "is_mapped": False,
                     "children": [
                         {
                             "id": "group234.group34.task3",
                             "label": "task3",
                             "operator": "EmptyOperator",
                             "type": "task",
+                            **TASK_COLORS,
                         },
                         {
                             "id": "group234.group34.task4",
                             "label": "task4",
                             "operator": "EmptyOperator",
                             "type": "task",
+                            **TASK_COLORS,
                         },
                         {"id": "group234.group34.downstream_join_id", "label": "", "type": "join"},
                     ],
+                    "id": "group234.group34",
+                    "is_mapped": False,
+                    "label": "group34",
+                    "tooltip": "",
                     "type": "task",
+                    **GROUP_COLORS,
                 },
-                {"id": "group234.task2", "label": "task2", "operator": "EmptyOperator", "type": "task"},
+                {
+                    "id": "group234.task2",
+                    "label": "task2",
+                    "operator": "EmptyOperator",
+                    "type": "task",
+                    **TASK_COLORS,
+                },
                 {"id": "group234.upstream_join_id", "label": "", "type": "join"},
             ],
+            "id": "group234",
+            "is_mapped": False,
+            "label": "group234",
+            "tooltip": "",
             "type": "task",
+            **GROUP_COLORS,
         },
-        {"id": "task1", "label": "task1", "operator": "EmptyOperator", "type": "task"},
-        {"id": "task5", "label": "task5", "operator": "EmptyOperator", "type": "task"},
+        {"id": "task5", "label": "task5", "operator": "EmptyOperator", "type": "task", **TASK_COLORS},
     ],
+    "id": None,
+    "is_mapped": False,
+    "label": "",
+    "tooltip": "",
     "type": "task",
+    **GROUP_COLORS,
 }
 
 
-def test_build_task_group_context_manager():
+def test_task_group_to_dict_serialized_dag(dag_maker):
     logical_date = pendulum.parse("20200101")
-    with DAG("test_build_task_group_context_manager", schedule=None, start_date=logical_date) as dag:
+    with dag_maker("test_task_group_to_dict", schedule=None, start_date=logical_date) as dag:
         task1 = EmptyOperator(task_id="task1")
         with TaskGroup("group234") as group234:
             _ = EmptyOperator(task_id="task2")
@@ -229,32 +236,12 @@ def test_build_task_group_context_manager():
         task1 >> group234
         group34 >> task5
 
-    assert task1.get_direct_relative_ids(upstream=False) == {
-        "group234.group34.task4",
-        "group234.group34.task3",
-        "group234.task2",
-    }
-    assert task5.get_direct_relative_ids(upstream=True) == {
-        "group234.group34.task4",
-        "group234.group34.task3",
-    }
-
-    assert dag.task_group.group_id is None
-    assert dag.task_group.is_root
-    assert set(dag.task_group.children.keys()) == {"task1", "group234", "task5"}
-    assert group34.group_id == "group234.group34"
-
-    assert task_group_to_dict_legacy(dag.task_group) == EXPECTED_JSON_LEGACY
     assert task_group_to_dict(dag.task_group) == EXPECTED_JSON
 
 
-def test_build_task_group():
-    """
-    This is an alternative syntax to use TaskGroup. It should result in the same TaskGroup
-    as using context manager.
-    """
+def test_task_group_to_dict_alternative_syntax():
     logical_date = pendulum.parse("20200101")
-    dag = DAG("test_build_task_group", schedule=None, start_date=logical_date)
+    dag = DAG("test_task_group_to_dict_alt", schedule=None, start_date=logical_date)
     task1 = EmptyOperator(task_id="task1", dag=dag)
     group234 = TaskGroup("group234", dag=dag)
     _ = EmptyOperator(task_id="task2", dag=dag, task_group=group234)
@@ -266,99 +253,148 @@ def test_build_task_group():
     task1 >> group234
     group34 >> task5
 
-    assert task_group_to_dict_legacy(dag.task_group) == EXPECTED_JSON_LEGACY
-    assert task_group_to_dict(dag.task_group) == EXPECTED_JSON
+    serialized_dag = create_scheduler_dag(dag)
+
+    assert task_group_to_dict(serialized_dag.task_group) == EXPECTED_JSON
 
 
-def extract_node_id(node, include_label=False, from_legacy=False):
+@conf_vars({("api", "grid_view_sorting_order"): "hierarchical_alphabetical"})
+def test_task_group_to_dict_hierarchical_alphabetical_sort():
+    """``hierarchical_alphabetical`` orders serialized children: groups first, then tasks, each alphabetical."""
+    # The getter caches the resolved sort order, so force a re-read under the patched config.
+    get_task_group_children_getter.cache_clear()
+    try:
+        logical_date = pendulum.parse("20200101")
+        dag = DAG("test_tg_hier_alpha", schedule=None, start_date=logical_date)
+        # Added in a non-alphabetical order, mixing tasks and groups.
+        EmptyOperator(task_id="zeta", dag=dag)
+        group_b = TaskGroup("group_b", dag=dag)
+        EmptyOperator(task_id="b1", dag=dag, task_group=group_b)
+        group_a = TaskGroup("group_a", dag=dag)
+        EmptyOperator(task_id="a1", dag=dag, task_group=group_a)
+        EmptyOperator(task_id="alpha", dag=dag)
+
+        serialized_dag = create_scheduler_dag(dag)
+        node = task_group_to_dict(serialized_dag.task_group)
+
+        assert [child["id"] for child in node["children"]] == ["group_a", "group_b", "alpha", "zeta"]
+    finally:
+        # Don't leak the patched sort order to other tests.
+        get_task_group_children_getter.cache_clear()
+
+
+def test_task_group_to_dict_builds_group_dict_once(monkeypatch):
+    """Rendering the whole tree threads one group_dict; it is not rebuilt per nested group."""
+    with DAG("test_group_dict_once", schedule=None, start_date=DEFAULT_DATE) as dag:
+        with TaskGroup("outer"):
+            with TaskGroup("inner"):
+                EmptyOperator(task_id="a")
+                EmptyOperator(task_id="b")
+        with TaskGroup("sibling"):
+            EmptyOperator(task_id="c")
+
+    serialized = create_scheduler_dag(dag)
+
+    calls = 0
+    original = SerializedTaskGroup.get_task_group_dict
+
+    def counting(self):
+        nonlocal calls
+        calls += 1
+        return original(self)
+
+    monkeypatch.setattr(SerializedTaskGroup, "get_task_group_dict", counting)
+
+    # A full render must build the group map exactly once, not once per group.
+    task_group_to_dict(serialized.task_group)
+
+    assert calls == 1
+
+
+def test_task_group_to_dict_grid_includes_task_group_doc_md(dag_maker):
+    logical_date = pendulum.parse("20200101")
+    with dag_maker("test_task_group_to_dict_doc_md", schedule=None, start_date=logical_date) as dag:
+        with TaskGroup("group234", doc_md="### TaskGroup Documentation"):
+            EmptyOperator(task_id="task1", doc_md="### Task Documentation")
+
+    serialized_dag = create_scheduler_dag(dag)
+    group = serialized_dag.task_group_dict["group234"]
+
+    graph_node = task_group_to_dict(group)
+    assert "doc_md" not in graph_node
+    assert "doc_md" not in graph_node["children"][0]
+
+    grid_node = task_group_to_dict_grid(group)
+    assert grid_node["doc_md"] == "### TaskGroup Documentation"
+    assert "doc_md" not in grid_node["children"][0]
+
+
+def extract_node_id(node, include_label=False):
     ret = {"id": node["id"]}
     if include_label:
-        if from_legacy:
-            ret["label"] = node["value"]["label"]
-        else:
-            ret["label"] = node["label"]
+        ret["label"] = node["label"]
     if "children" in node:
         children = []
         for child in node["children"]:
-            children.append(extract_node_id(child, include_label=include_label, from_legacy=from_legacy))
+            children.append(extract_node_id(child, include_label=include_label))
 
         ret["children"] = children
 
     return ret
 
 
-def test_build_task_group_with_prefix():
-    """
-    Tests that prefix_group_id turns on/off prefixing of task_id with group_id.
-    """
+def test_task_group_to_dict_with_prefix(dag_maker):
     logical_date = pendulum.parse("20200101")
-    with DAG("test_build_task_group_with_prefix", schedule=None, start_date=logical_date) as dag:
+    with dag_maker("test_task_group_to_dict_prefix", start_date=logical_date) as dag:
         task1 = EmptyOperator(task_id="task1")
         with TaskGroup("group234", prefix_group_id=False) as group234:
-            task2 = EmptyOperator(task_id="task2")
+            EmptyOperator(task_id="task2")
 
             with TaskGroup("group34") as group34:
-                task3 = EmptyOperator(task_id="task3")
+                EmptyOperator(task_id="task3")
 
-                with TaskGroup("group4", prefix_group_id=False) as group4:
-                    task4 = EmptyOperator(task_id="task4")
+                with TaskGroup("group4", prefix_group_id=False):
+                    EmptyOperator(task_id="task4")
 
         task5 = EmptyOperator(task_id="task5")
         task1 >> group234
         group34 >> task5
 
-    assert task2.task_id == "task2"
-    assert group34.group_id == "group34"
-    assert task3.task_id == "group34.task3"
-    assert group4.group_id == "group34.group4"
-    assert task4.task_id == "task4"
-    assert task5.task_id == "task5"
-    assert group234.get_child_by_label("task2") == task2
-    assert group234.get_child_by_label("group34") == group34
-    assert group4.get_child_by_label("task4") == task4
-
     expected_node_id = {
-        "id": None,
-        "label": None,
         "children": [
+            {"id": "task1", "label": "task1"},
             {
                 "id": "group234",
                 "label": "group234",
                 "children": [
                     {
-                        "id": "group34",
-                        "label": "group34",
                         "children": [
                             {
+                                "children": [{"id": "task4", "label": "task4"}],
                                 "id": "group34.group4",
                                 "label": "group4",
-                                "children": [{"id": "task4", "label": "task4"}],
                             },
                             {"id": "group34.task3", "label": "task3"},
                             {"id": "group34.downstream_join_id", "label": ""},
                         ],
+                        "id": "group34",
+                        "label": "group34",
                     },
                     {"id": "task2", "label": "task2"},
                     {"id": "group234.upstream_join_id", "label": ""},
                 ],
             },
-            {"id": "task1", "label": "task1"},
             {"id": "task5", "label": "task5"},
         ],
+        "id": None,
+        "label": "",
     }
 
-    assert (
-        extract_node_id(task_group_to_dict_legacy(dag.task_group), include_label=True, from_legacy=True)
-        == expected_node_id
-    )
     assert extract_node_id(task_group_to_dict(dag.task_group), include_label=True) == expected_node_id
 
 
-def test_build_task_group_with_task_decorator():
-    """
-    Test that TaskGroup can be used with the @task decorator.
-    """
-    from airflow.decorators import task
+def test_task_group_to_dict_with_task_decorator(dag_maker):
+    from airflow.sdk import task
 
     @task
     def task_1():
@@ -381,25 +417,22 @@ def test_build_task_group_with_task_decorator():
         print("task_5")
 
     logical_date = pendulum.parse("20200101")
-    with DAG("test_build_task_group_with_task_decorator", schedule=None, start_date=logical_date) as dag:
+    with dag_maker("test_build_task_group_with_task_decorator", start_date=logical_date) as dag:
         tsk_1 = task_1()
 
         with TaskGroup("group234") as group234:
             tsk_2 = task_2()
             tsk_3 = task_3()
-            tsk_4 = task_4(tsk_2, tsk_3)
+            task_4(tsk_2, tsk_3)
 
         tsk_5 = task_5()
 
         tsk_1 >> group234 >> tsk_5
 
-    assert tsk_1.operator in tsk_2.operator.upstream_list
-    assert tsk_1.operator in tsk_3.operator.upstream_list
-    assert tsk_5.operator in tsk_4.operator.downstream_list
-
     expected_node_id = {
         "id": None,
         "children": [
+            {"id": "task_1"},
             {
                 "id": "group234",
                 "children": [
@@ -410,12 +443,10 @@ def test_build_task_group_with_task_decorator():
                     {"id": "group234.downstream_join_id"},
                 ],
             },
-            {"id": "task_1"},
             {"id": "task_5"},
         ],
     }
 
-    assert extract_node_id(task_group_to_dict_legacy(dag.task_group), from_legacy=True) == expected_node_id
     assert extract_node_id(task_group_to_dict(dag.task_group)) == expected_node_id
 
     edges = dag_edges(dag)
@@ -430,12 +461,9 @@ def test_build_task_group_with_task_decorator():
     ]
 
 
-def test_sub_dag_task_group():
-    """
-    Tests dag.partial_subset() updates task_group correctly.
-    """
+def test_task_group_to_dict_sub_dag(dag_maker):
     logical_date = pendulum.parse("20200101")
-    with DAG("test_test_task_group_sub_dag", schedule=None, start_date=logical_date) as dag:
+    with dag_maker("test_test_task_group_sub_dag", schedule=None, start_date=logical_date) as dag:
         task1 = EmptyOperator(task_id="task1")
         with TaskGroup("group234") as group234:
             _ = EmptyOperator(task_id="task2")
@@ -455,11 +483,12 @@ def test_sub_dag_task_group():
         group234 >> group6
         group234 >> task7
 
-    subdag = dag.partial_subset(task_ids="task5", include_upstream=True, include_downstream=False)
+    subset = dag.partial_subset(task_ids="task5", include_upstream=True, include_downstream=False)
 
     expected_node_id = {
         "id": None,
         "children": [
+            {"id": "task1"},
             {
                 "id": "group234",
                 "children": [
@@ -474,15 +503,13 @@ def test_sub_dag_task_group():
                     {"id": "group234.upstream_join_id"},
                 ],
             },
-            {"id": "task1"},
             {"id": "task5"},
         ],
     }
 
-    assert extract_node_id(task_group_to_dict_legacy(subdag.task_group), from_legacy=True) == expected_node_id
-    assert extract_node_id(task_group_to_dict(subdag.task_group)) == expected_node_id
+    assert extract_node_id(task_group_to_dict(subset.task_group)) == expected_node_id
 
-    edges = dag_edges(subdag)
+    edges = dag_edges(subset)
     assert sorted((e["source_id"], e["target_id"]) for e in edges) == [
         ("group234.group34.downstream_join_id", "task5"),
         ("group234.group34.task3", "group234.group34.downstream_join_id"),
@@ -492,26 +519,10 @@ def test_sub_dag_task_group():
         ("task1", "group234.upstream_join_id"),
     ]
 
-    subdag_task_groups = subdag.task_group.get_task_group_dict()
-    assert subdag_task_groups.keys() == {None, "group234", "group234.group34"}
 
-    included_group_ids = {"group234", "group234.group34"}
-    included_task_ids = {"group234.group34.task3", "group234.group34.task4", "task1", "task5"}
-
-    for task_group in subdag_task_groups.values():
-        assert task_group.upstream_group_ids.issubset(included_group_ids)
-        assert task_group.downstream_group_ids.issubset(included_group_ids)
-        assert task_group.upstream_task_ids.issubset(included_task_ids)
-        assert task_group.downstream_task_ids.issubset(included_task_ids)
-
-    for task in subdag.task_group:
-        assert task.upstream_task_ids.issubset(included_task_ids)
-        assert task.downstream_task_ids.issubset(included_task_ids)
-
-
-def test_dag_edges():
+def test_task_group_to_dict_and_dag_edges(dag_maker):
     logical_date = pendulum.parse("20200101")
-    with DAG("test_dag_edges", schedule=None, start_date=logical_date) as dag:
+    with dag_maker("test_dag_edges", schedule=None, start_date=logical_date) as dag:
         task1 = EmptyOperator(task_id="task1")
         with TaskGroup("group_a") as group_a:
             with TaskGroup("group_b") as group_b:
@@ -547,13 +558,15 @@ def test_dag_edges():
 
         group_d << group_c
 
-    nodes_legacy = task_group_to_dict_legacy(dag.task_group)
-    nodes = task_group_to_dict_legacy(dag.task_group)
+    nodes = task_group_to_dict(dag.task_group)
     edges = dag_edges(dag)
 
+    # group_d depends on group_c (`group_d << group_c`), so it must sort after group_c
+    # rather than before task1, which has no dependency on it at all.
     expected_node_id = {
         "id": None,
         "children": [
+            {"id": "task1"},
             {
                 "id": "group_a",
                 "children": [
@@ -589,14 +602,12 @@ def test_dag_edges():
                     {"id": "group_d.upstream_join_id"},
                 ],
             },
-            {"id": "task1"},
             {"id": "task10"},
             {"id": "task9"},
         ],
     }
 
-    assert extract_node_id(nodes_legacy) == expected_node_id
-    assert extract_node_id(nodes, from_legacy=False) == expected_node_id
+    assert extract_node_id(nodes) == expected_node_id
 
     assert sorted((e["source_id"], e["target_id"]) for e in edges) == [
         ("group_a.downstream_join_id", "group_c.upstream_join_id"),
@@ -622,9 +633,9 @@ def test_dag_edges():
     ]
 
 
-def test_dag_edges_setup_teardown():
+def test_dag_edges_setup_teardown(dag_maker):
     logical_date = pendulum.parse("20200101")
-    with DAG("test_dag_edges", schedule=None, start_date=logical_date) as dag:
+    with dag_maker("test_dag_edges", schedule=None, start_date=logical_date) as dag:
         setup1 = EmptyOperator(task_id="setup1").as_setup()
         teardown1 = EmptyOperator(task_id="teardown1").as_teardown()
 
@@ -650,14 +661,13 @@ def test_dag_edges_setup_teardown():
     ]
 
 
-def test_dag_edges_setup_teardown_nested():
-    from airflow.decorators import task, task_group
-    from airflow.models.dag import DAG
+def test_dag_edges_setup_teardown_nested(dag_maker):
     from airflow.providers.standard.operators.empty import EmptyOperator
+    from airflow.sdk import task, task_group
 
     logical_date = pendulum.parse("20200101")
 
-    with DAG(dag_id="s_t_dag", schedule=None, start_date=logical_date) as dag:
+    with dag_maker(dag_id="s_t_dag", schedule=None, start_date=logical_date) as dag:
 
         @task
         def test_task():
@@ -697,61 +707,10 @@ def test_dag_edges_setup_teardown_nested():
     ]
 
 
-def test_duplicate_group_id():
-    from airflow.exceptions import DuplicateTaskIdFound
-
-    logical_date = pendulum.parse("20200101")
-
-    with DAG("test_duplicate_group_id", schedule=None, start_date=logical_date):
-        _ = EmptyOperator(task_id="task1")
-        with pytest.raises(DuplicateTaskIdFound, match=r".* 'task1' .*"), TaskGroup("task1"):
-            pass
-
-    with DAG("test_duplicate_group_id", schedule=None, start_date=logical_date):
-        _ = EmptyOperator(task_id="task1")
-        with TaskGroup("group1", prefix_group_id=False):
-            with pytest.raises(DuplicateTaskIdFound, match=r".* 'group1' .*"), TaskGroup("group1"):
-                pass
-
-    with DAG("test_duplicate_group_id", schedule=None, start_date=logical_date):
-        with TaskGroup("group1", prefix_group_id=False):
-            with pytest.raises(DuplicateTaskIdFound, match=r".* 'group1' .*"):
-                _ = EmptyOperator(task_id="group1")
-
-    with DAG("test_duplicate_group_id", schedule=None, start_date=logical_date):
-        _ = EmptyOperator(task_id="task1")
-        with TaskGroup("group1"):
-            with pytest.raises(DuplicateTaskIdFound, match=r".* 'group1.downstream_join_id' .*"):
-                _ = EmptyOperator(task_id="downstream_join_id")
-
-    with DAG("test_duplicate_group_id", schedule=None, start_date=logical_date):
-        _ = EmptyOperator(task_id="task1")
-        with TaskGroup("group1"):
-            with pytest.raises(DuplicateTaskIdFound, match=r".* 'group1.upstream_join_id' .*"):
-                _ = EmptyOperator(task_id="upstream_join_id")
-
-
-def test_task_without_dag():
-    """
-    Test that if a task doesn't have a DAG when it's being set as the relative of another task which
-    has a DAG, the task should be added to the root TaskGroup of the other task's DAG.
-    """
-    dag = DAG(dag_id="test_task_without_dag", schedule=None, start_date=pendulum.parse("20200101"))
-    op1 = EmptyOperator(task_id="op1", dag=dag)
-    op2 = EmptyOperator(task_id="op2")
-    op3 = EmptyOperator(task_id="op3")
-    op1 >> op2
-    op3 >> op2
-
-    assert op1.dag == op2.dag == op3.dag
-    assert dag.task_group.children.keys() == {"op1", "op2", "op3"}
-    assert dag.task_group.children.keys() == dag.task_dict.keys()
-
-
 # taskgroup decorator tests
 
 
-def test_build_task_group_deco_context_manager():
+def test_build_task_group_deco_context_manager(dag_maker):
     """
     Tests Following :
     1. Nested TaskGroup creation using taskgroup decorator should create same TaskGroup which can be
@@ -759,7 +718,7 @@ def test_build_task_group_deco_context_manager():
     2. TaskGroup consisting Tasks created using task decorator.
     3. Node Ids of dags created with taskgroup decorator.
     """
-    from airflow.decorators import task
+    from airflow.sdk import task
 
     # Creating Tasks
     @task
@@ -806,7 +765,7 @@ def test_build_task_group_deco_context_manager():
         return section_2(op1)
 
     logical_date = pendulum.parse("20201109")
-    with DAG(
+    with dag_maker(
         dag_id="example_nested_task_group_decorator",
         schedule=None,
         start_date=logical_date,
@@ -830,12 +789,17 @@ def test_build_task_group_deco_context_manager():
     assert dag.task_dict["section_1.section_2.task_4"].downstream_task_ids == {"task_end"}
 
     # Node IDs test
+    # task_start feeds section_1.task_1 directly (a task-level dep crossing into the
+    # group), so section_1 must sort after task_start, not before it.
     node_ids = {
         "id": None,
         "children": [
+            {"id": "task_start"},
             {
                 "id": "section_1",
                 "children": [
+                    {"id": "section_1.task_1"},
+                    {"id": "section_1.task_2"},
                     {
                         "id": "section_1.section_2",
                         "children": [
@@ -843,116 +807,18 @@ def test_build_task_group_deco_context_manager():
                             {"id": "section_1.section_2.task_4"},
                         ],
                     },
-                    {"id": "section_1.task_1"},
-                    {"id": "section_1.task_2"},
                 ],
             },
             {"id": "task_end"},
-            {"id": "task_start"},
         ],
     }
 
-    assert extract_node_id(task_group_to_dict_legacy(dag.task_group), from_legacy=True) == node_ids
     assert extract_node_id(task_group_to_dict(dag.task_group)) == node_ids
 
 
-def test_build_task_group_depended_by_task():
-    """A decorator-based task group should be able to be used as a relative to operators."""
-    from airflow.decorators import dag as dag_decorator, task
-
-    @dag_decorator(schedule=None, start_date=pendulum.now())
-    def build_task_group_depended_by_task():
-        @task
-        def task_start():
-            return "[Task_start]"
-
-        @task
-        def task_end():
-            return "[Task_end]"
-
-        @task
-        def task_thing(value):
-            return f"[Task_thing {value}]"
-
-        @task_group_decorator
-        def section_1():
-            task_thing(1)
-            task_thing(2)
-
-        task_start() >> section_1() >> task_end()
-
-    dag = build_task_group_depended_by_task()
-    task_thing_1 = dag.task_dict["section_1.task_thing"]
-    task_thing_2 = dag.task_dict["section_1.task_thing__1"]
-
-    # Tasks in the task group don't depend on each other; they both become
-    # downstreams to task_start, and upstreams to task_end.
-    assert task_thing_1.upstream_task_ids == task_thing_2.upstream_task_ids == {"task_start"}
-    assert task_thing_1.downstream_task_ids == task_thing_2.downstream_task_ids == {"task_end"}
-
-
-def test_build_task_group_with_operators():
-    """Tests DAG with Tasks created with *Operators and TaskGroup created with taskgroup decorator"""
-    from airflow.decorators import task
-
-    def task_start():
-        """Dummy Task which is First Task of Dag"""
-        return "[Task_start]"
-
-    def task_end():
-        """Dummy Task which is Last Task of Dag"""
-        print("[ Task_End  ]")
-
-    # Creating Tasks
-    @task
-    def task_1(value):
-        """Dummy Task1"""
-        return f"[ Task1 {value} ]"
-
-    @task
-    def task_2(value):
-        """Dummy Task2"""
-        return f"[ Task2 {value} ]"
-
-    @task
-    def task_3(value):
-        """Dummy Task3"""
-        print(f"[ Task3 {value} ]")
-
-    # Creating TaskGroups
-    @task_group_decorator(group_id="section_1")
-    def section_a(value):
-        """TaskGroup for grouping related Tasks"""
-        return task_3(task_2(task_1(value)))
-
-    logical_date = pendulum.parse("20201109")
-    with DAG(
-        dag_id="example_task_group_decorator_mix",
-        schedule=None,
-        start_date=logical_date,
-        tags=["example"],
-    ) as dag:
-        t_start = PythonOperator(task_id="task_start", python_callable=task_start, dag=dag)
-        sec_1 = section_a(t_start.output)
-        t_end = PythonOperator(task_id="task_end", python_callable=task_end, dag=dag)
-        sec_1.set_downstream(t_end)
-
-    # Testing Tasks in DAG
-    assert set(dag.task_group.children.keys()) == {"section_1", "task_start", "task_end"}
-    assert set(dag.task_group.children["section_1"].children.keys()) == {
-        "section_1.task_2",
-        "section_1.task_3",
-        "section_1.task_1",
-    }
-
-    # Testing Tasks downstream
-    assert dag.task_dict["task_start"].downstream_task_ids == {"section_1.task_1"}
-    assert dag.task_dict["section_1.task_3"].downstream_task_ids == {"task_end"}
-
-
-def test_task_group_context_mix():
+def test_task_group_context_mix(dag_maker):
     """Test cases to check nested TaskGroup context manager with taskgroup decorator"""
-    from airflow.decorators import task
+    from airflow.sdk import task
 
     def task_start():
         """Dummy Task which is First Task of Dag"""
@@ -985,13 +851,13 @@ def test_task_group_context_mix():
         return task_3(task_2(task_1(value)))
 
     logical_date = pendulum.parse("20201109")
-    with DAG(
+    with dag_maker(
         dag_id="example_task_group_decorator_mix",
         schedule=None,
         start_date=logical_date,
         tags=["example"],
     ) as dag:
-        t_start = PythonOperator(task_id="task_start", python_callable=task_start, dag=dag)
+        t_start = PythonOperator(task_id="task_start", python_callable=task_start)
 
         with TaskGroup("section_1", tooltip="section_1") as section_1:
             sec_2 = section_2(t_start.output)
@@ -1002,12 +868,13 @@ def test_task_group_context_mix():
             sec_2.set_downstream(task_s1)
             task_s1 >> [task_s2, task_s3]
 
-        t_end = PythonOperator(task_id="task_end", python_callable=task_end, dag=dag)
+        t_end = PythonOperator(task_id="task_end", python_callable=task_end)
         t_start >> section_1 >> t_end
 
     node_ids = {
         "id": None,
         "children": [
+            {"id": "task_start"},
             {
                 "id": "section_1",
                 "children": [
@@ -1027,36 +894,15 @@ def test_task_group_context_mix():
                 ],
             },
             {"id": "task_end"},
-            {"id": "task_start"},
         ],
     }
 
-    assert extract_node_id(task_group_to_dict_legacy(dag.task_group), from_legacy=True) == node_ids
     assert extract_node_id(task_group_to_dict(dag.task_group)) == node_ids
 
 
-def test_default_args():
-    """Testing TaskGroup with default_args"""
-    logical_date = pendulum.parse("20201109")
-    with DAG(
-        dag_id="example_task_group_default_args",
-        schedule=None,
-        start_date=logical_date,
-        default_args={"owner": "dag"},
-    ):
-        with TaskGroup("group1", default_args={"owner": "group"}):
-            task_1 = EmptyOperator(task_id="task_1")
-            task_2 = EmptyOperator(task_id="task_2", owner="task")
-            task_3 = EmptyOperator(task_id="task_3", default_args={"owner": "task"})
-
-            assert task_1.owner == "group"
-            assert task_2.owner == "task"
-            assert task_3.owner == "task"
-
-
-def test_duplicate_task_group_id():
+def test_duplicate_task_group_id(dag_maker):
     """Testing automatic suffix assignment for duplicate group_id"""
-    from airflow.decorators import task
+    from airflow.sdk import task
 
     @task(task_id="start_task")
     def task_start():
@@ -1099,7 +945,7 @@ def test_duplicate_task_group_id():
         task_end()
 
     logical_date = pendulum.parse("20201109")
-    with DAG(
+    with dag_maker(
         dag_id="example_duplicate_task_group_id",
         schedule=None,
         start_date=logical_date,
@@ -1124,13 +970,11 @@ def test_duplicate_task_group_id():
         ],
     }
 
-    assert extract_node_id(task_group_to_dict_legacy(dag.task_group), from_legacy=True) == node_ids
     assert extract_node_id(task_group_to_dict(dag.task_group)) == node_ids
 
 
-def test_call_taskgroup_twice():
-    """Test for using same taskgroup decorated function twice"""
-    from airflow.decorators import task
+def test_call_taskgroup_twice(dag_maker):
+    from airflow.sdk import task
 
     @task(task_id="start_task")
     def task_start():
@@ -1156,7 +1000,7 @@ def test_call_taskgroup_twice():
         task_end()
 
     logical_date = pendulum.parse("20201109")
-    with DAG(
+    with dag_maker(
         dag_id="example_multi_call_task_groups",
         schedule=None,
         start_date=logical_date,
@@ -1187,74 +1031,7 @@ def test_call_taskgroup_twice():
         ],
     }
 
-    assert extract_node_id(task_group_to_dict_legacy(dag.task_group), from_legacy=True) == node_ids
     assert extract_node_id(task_group_to_dict(dag.task_group)) == node_ids
-
-
-def test_pass_taskgroup_output_to_task():
-    """Test that the output of a task group can be passed to a task."""
-    from airflow.decorators import task
-
-    @task
-    def one():
-        return 1
-
-    @task_group_decorator
-    def addition_task_group(num):
-        @task
-        def add_one(i):
-            return i + 1
-
-        return add_one(num)
-
-    @task
-    def increment(num):
-        return num + 1
-
-    @dag(schedule=None, start_date=pendulum.DateTime(2022, 1, 1), default_args={"owner": "airflow"})
-    def wrap():
-        total_1 = one()
-        assert isinstance(total_1, XComArg)
-        total_2 = addition_task_group(total_1)
-        assert isinstance(total_2, XComArg)
-        total_3 = increment(total_2)
-        assert isinstance(total_3, XComArg)
-
-    wrap()
-
-
-def test_decorator_unknown_args():
-    """Test that unknown args passed to the decorator cause an error at parse time"""
-    with pytest.raises(TypeError):
-
-        @task_group_decorator(b=2)
-        def tg(): ...
-
-
-def test_decorator_multiple_use_task():
-    from airflow.decorators import task
-
-    @dag("test-dag", schedule=None, start_date=DEFAULT_DATE)
-    def _test_dag():
-        @task
-        def t():
-            pass
-
-        @task_group_decorator
-        def tg():
-            for _ in range(3):
-                t()
-
-        t() >> tg() >> t()
-
-    test_dag = _test_dag()
-    assert test_dag.task_ids == [
-        "t",  # Start end.
-        "tg.t",
-        "tg.t__1",
-        "tg.t__2",
-        "t__1",  # End node.
-    ]
 
 
 def test_topological_sort1():
@@ -1395,6 +1172,21 @@ def test_hierarchical_alphabetical_sort():
     ]
 
 
+def _make_padded_reverse_chain(chain_length: int, independent_count: int) -> DAG:
+    with DAG(
+        f"padded_reverse_chain_{chain_length}_{independent_count}",
+        schedule=None,
+        start_date=DEFAULT_DATE,
+    ) as dag:
+        tasks = [EmptyOperator(task_id=f"r{chain_length - 1 - i}") for i in range(chain_length)]
+        by_id = {task.task_id: task for task in tasks}
+        for i in range(chain_length - 1):
+            by_id[f"r{i}"] >> by_id[f"r{i + 1}"]
+        for i in range(independent_count):
+            EmptyOperator(task_id=f"i{i}")
+    return dag
+
+
 def test_topological_group_dep():
     logical_date = pendulum.parse("20200101")
     with DAG("test_dag_edges", schedule=None, start_date=logical_date) as dag:
@@ -1430,198 +1222,271 @@ def test_topological_group_dep():
     ]
 
 
-def test_add_to_sub_group():
-    with DAG("test_dag", schedule=None, start_date=pendulum.parse("20200101")):
-        tg = TaskGroup("section")
-        task = EmptyOperator(task_id="task")
-        with pytest.raises(TaskAlreadyInTaskGroup) as ctx:
-            tg.add(task)
+def test_topological_sort_serialized_layered():
+    """SerializedTaskGroup.topological_sort emits a valid order after DAG round-trip.
 
-    assert str(ctx.value) == "cannot add 'task' to 'section' (already in the DAG's root group)"
+    Exercises the projected-sweep path on the serialization variant (which is otherwise
+    untested), using a layered shape that forces multi-pass behavior.
+    """
+    with DAG("test_topo_sort_serialized", schedule=None, start_date=DEFAULT_DATE) as dag:
+        layers: list[list[BaseOperator]] = []
+        for layer_idx in range(4):
+            cur = [EmptyOperator(task_id=f"L{layer_idx}_t{i}") for i in range(3)]
+            if layers:
+                for upstream in layers[-1]:
+                    upstream >> cur
+            layers.append(cur)
 
+    serialized = create_scheduler_dag(dag)
+    order = [node.node_id for node in serialized.task_group.topological_sort()]
+    position = {nid: i for i, nid in enumerate(order)}
 
-def test_add_to_another_group():
-    with DAG("test_dag", schedule=None, start_date=pendulum.parse("20200101")):
-        tg = TaskGroup("section_1")
-        with TaskGroup("section_2"):
-            task = EmptyOperator(task_id="task")
-        with pytest.raises(TaskAlreadyInTaskGroup) as ctx:
-            tg.add(task)
-
-    assert str(ctx.value) == "cannot add 'section_2.task' to 'section_1' (already in group 'section_2')"
-
-
-def test_task_group_edge_modifier_chain():
-    from airflow.sdk import chain
-    from airflow.utils.edgemodifier import Label
-
-    with DAG(dag_id="test", schedule=None, start_date=pendulum.DateTime(2022, 5, 20)) as dag:
-        start = EmptyOperator(task_id="sleep_3_seconds")
-
-        with TaskGroup(group_id="group1") as tg:
-            t1 = EmptyOperator(task_id="dummy1")
-            t2 = EmptyOperator(task_id="dummy2")
-
-        t3 = EmptyOperator(task_id="echo_done")
-
-    # The case we are testing for is when a Label is inside a list -- meaning that we do tg.set_upstream
-    # instead of label.set_downstream
-    chain(start, [Label("branch three")], tg, t3)
-
-    assert start.downstream_task_ids == {t1.node_id, t2.node_id}
-    assert t3.upstream_task_ids == {t1.node_id, t2.node_id}
-    assert tg.upstream_task_ids == set()
-    assert tg.downstream_task_ids == {t3.node_id}
-    # Check that we can perform a topological_sort
-    dag.topological_sort()
+    assert set(position) == {t.task_id for layer in layers for t in layer}
+    for layer_idx in range(len(layers) - 1):
+        for upstream in layers[layer_idx]:
+            for downstream in layers[layer_idx + 1]:
+                assert position[upstream.task_id] < position[downstream.task_id], (
+                    f"{upstream.task_id!r} must precede {downstream.task_id!r}, got {order!r}"
+                )
 
 
-def test_mapped_task_group_id_prefix_task_id():
-    from tests_common.test_utils.mock_operators import MockOperator
+def test_topological_group_dep_list_syntax():
+    """List-based deps (`[b0, b1] >> a`) must produce the same topological order as individual deps.
 
-    with DAG(dag_id="d", schedule=None, start_date=DEFAULT_DATE) as dag:
-        t1 = MockOperator.partial(task_id="t1").expand(arg1=[])
-        with TaskGroup("g"):
-            t2 = MockOperator.partial(task_id="t2").expand(arg1=[])
+    Declaring a group dependency via a list (`groups >> a`) only populates
+    `upstream_group_ids`, not `upstream_task_ids`, so `a` must not sort as if it had no
+    upstream at all.
+    """
+    with DAG("test_dag_list_dep", schedule=None, start_date=DEFAULT_DATE) as dag:
+        with TaskGroup("a") as tg_a:
+            EmptyOperator(task_id="task")
 
-    assert t1.task_id == "t1"
-    assert t2.task_id == "g.t2"
+        groups = []
+        for x in range(3):
+            with TaskGroup(f"b_{x}") as tg_b:
+                EmptyOperator(task_id="task")
+            groups.append(tg_b)
 
-    dag.get_task("t1") == t1
-    dag.get_task("g.t2") == t2
+        groups >> tg_a  # list-based dep — previously produced the wrong order
 
-
-def test_iter_tasks():
-    with DAG("test_dag", schedule=None, start_date=pendulum.parse("20200101")) as dag:
-        with TaskGroup("section_1") as tg1:
-            EmptyOperator(task_id="task1")
-
-        with TaskGroup("section_2") as tg2:
-            task2 = EmptyOperator(task_id="task2")
-            task3 = EmptyOperator(task_id="task3")
-            mapped_bash_operator = BashOperator.partial(task_id="bash_task").expand(
-                bash_command=[
-                    "echo hello 1",
-                    "echo hello 2",
-                    "echo hello 3",
-                ]
-            )
-            task2 >> task3 >> mapped_bash_operator
-
-    tg1 >> tg2
-    root_group = dag.task_group
-    assert [t.task_id for t in root_group.iter_tasks()] == [
-        "section_1.task1",
-        "section_2.task2",
-        "section_2.task3",
-        "section_2.bash_task",
-    ]
-    assert [t.task_id for t in tg1.iter_tasks()] == [
-        "section_1.task1",
-    ]
-    assert [t.task_id for t in tg2.iter_tasks()] == [
-        "section_2.task2",
-        "section_2.task3",
-        "section_2.bash_task",
-    ]
+    order = [node.node_id for node in dag.task_group.topological_sort()]
+    pos = {node_id: i for i, node_id in enumerate(order)}
+    assert all(pos[f"b_{x}"] < pos["a"] for x in range(3)), (
+        f"Expected all b_x before a in topological order, got: {order!r}"
+    )
 
 
-def test_override_dag_default_args():
-    with DAG(
-        dag_id="test_dag",
-        schedule=None,
-        start_date=pendulum.parse("20200101"),
-        default_args={
-            "retries": 1,
-            "owner": "x",
-        },
-    ):
-        with TaskGroup(
-            group_id="task_group",
-            default_args={
-                "owner": "y",
-                "execution_timeout": timedelta(seconds=10),
+def test_topological_sort_serialized_list_dep_between_groups():
+    """Same as test_topological_group_dep_list_syntax, exercised on the serialized variant."""
+    with DAG("test_dag_list_dep_serialized", schedule=None, start_date=DEFAULT_DATE) as dag:
+        with TaskGroup("a"):
+            EmptyOperator(task_id="task")
+
+        groups = []
+        for x in range(3):
+            with TaskGroup(f"b_{x}") as tg_b:
+                EmptyOperator(task_id="task")
+            groups.append(tg_b)
+
+        groups >> dag.task_group.children["a"]
+
+    serialized = create_scheduler_dag(dag)
+    order = [node.node_id for node in serialized.task_group.topological_sort()]
+    pos = {node_id: i for i, node_id in enumerate(order)}
+    assert all(pos[f"b_{x}"] < pos["a"] for x in range(3)), (
+        f"Expected all b_x before a in topological order, got: {order!r}"
+    )
+
+
+def test_topological_sort_serialized_task_level_cross_group_dep():
+    """Task-level deps between groups are respected for ordering after serialization.
+
+    A task-level dependency that crosses into another group's entry task (bypassing any
+    group-to-group edge) must still order the downstream group after the upstream one.
+    """
+    with DAG("test_cross_group_task_dep", schedule=None, start_date=DEFAULT_DATE) as dag:
+        with TaskGroup("stage_b"):
+            b_start = EmptyOperator(task_id="b_start")
+            b_end = EmptyOperator(task_id="b_end")
+            b_start >> b_end
+
+        with TaskGroup("stage_a"):
+            a_start = EmptyOperator(task_id="a_start")
+            a_end = EmptyOperator(task_id="a_end")
+            a_start >> a_end
+
+        b_end >> a_start
+
+    serialized = create_scheduler_dag(dag)
+    order = [node.node_id for node in serialized.task_group.topological_sort()]
+    pos = {node_id: i for i, node_id in enumerate(order)}
+
+    assert pos["stage_b"] < pos["stage_a"]
+
+
+def test_topological_sort_serialized_padded_reverse_chain_uses_pass_numbering(monkeypatch):
+    dag = _make_padded_reverse_chain(chain_length=80, independent_count=80)
+    serialized = create_scheduler_dag(dag)
+    serialized.task_group.children = {
+        **{f"r{i}": serialized.task_group.children[f"r{i}"] for i in range(79, -1, -1)},
+        **{f"i{i}": serialized.task_group.children[f"i{i}"] for i in range(80)},
+    }
+
+    called = {"value": False}
+    serialized_task_group_cls = type(serialized.task_group)
+    original = serialized_task_group_cls._sort_via_pass_numbering
+
+    def spy(self, nodes, projected):
+        called["value"] = True
+        return original(self, nodes, projected)
+
+    monkeypatch.setattr(serialized_task_group_cls, "_sort_via_pass_numbering", spy)
+
+    order = [node.node_id for node in serialized.task_group.topological_sort()]
+    position = {node_id: i for i, node_id in enumerate(order)}
+
+    assert called["value"]
+    assert set(position) == {*(f"r{i}" for i in range(80)), *(f"i{i}" for i in range(80))}
+    for i in range(79):
+        assert position[f"r{i}"] < position[f"r{i + 1}"]
+
+
+# Deserialization orders a group's children by label, so these Dags declare children in label order
+# to give the Task SDK sort the same input as the serialized one.
+
+
+def _make_sibling_groups_cycle():
+    with DAG("sibling_groups_cycle", schedule=None, start_date=DEFAULT_DATE) as dag:
+        end = EmptyOperator(task_id="end")
+        with TaskGroup("group1"):
+            a1 = EmptyOperator(task_id="a1")
+            a2 = EmptyOperator(task_id="a2")
+        with TaskGroup("group2"):
+            b1 = EmptyOperator(task_id="b1")
+            b2 = EmptyOperator(task_id="b2")
+        start = EmptyOperator(task_id="start")
+        start >> [a1, b2]
+        a1 >> b1
+        b2 >> a2
+        [a2, b1] >> end
+    return dag
+
+
+def _make_group_bridged_by_outside_task():
+    with DAG("group_bridged_by_outside_task", schedule=None, start_date=DEFAULT_DATE) as dag:
+        bridge = EmptyOperator(task_id="bridge")
+        with TaskGroup("group"):
+            a = EmptyOperator(task_id="a")
+            b = EmptyOperator(task_id="b")
+        a >> bridge >> b
+    return dag
+
+
+def _make_bridged_group_among_siblings():
+    with DAG("bridged_group_among_siblings", schedule=None, start_date=DEFAULT_DATE) as dag:
+        after = EmptyOperator(task_id="after")
+        bridge = EmptyOperator(task_id="bridge")
+        with TaskGroup("group"):
+            a = EmptyOperator(task_id="a")
+            b = EmptyOperator(task_id="b")
+        for i in range(3):
+            EmptyOperator(task_id=f"x{i}")
+        a >> bridge >> b >> after
+    return dag
+
+
+def _make_nested_bridged_group():
+    with DAG("nested_bridged_group", schedule=None, start_date=DEFAULT_DATE) as dag:
+        with TaskGroup("outer"):
+            after = EmptyOperator(task_id="after")
+            bridge = EmptyOperator(task_id="bridge")
+            with TaskGroup("inner"):
+                a = EmptyOperator(task_id="a")
+                b = EmptyOperator(task_id="b")
+        a >> bridge >> b >> after
+    return dag
+
+
+def _make_three_group_ring():
+    with DAG("three_group_ring", schedule=None, start_date=DEFAULT_DATE) as dag:
+        groups = {}
+        for group_id in ("g0", "g1", "g2"):
+            with TaskGroup(group_id):
+                groups[group_id] = (EmptyOperator(task_id="first"), EmptyOperator(task_id="second"))
+        groups["g1"][0] >> groups["g0"][1]
+        groups["g2"][0] >> groups["g1"][1]
+        groups["g0"][0] >> groups["g2"][1]
+    return dag
+
+
+def _get_topological_orders(group_dict):
+    return {
+        group_id: [node.node_id for node in group.topological_sort(group_dict=group_dict)]
+        for group_id, group in group_dict.items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("make_dag", "expected"),
+    [
+        pytest.param(
+            _make_sibling_groups_cycle,
+            {
+                None: ["start", "group1", "group2", "end"],
+                "group1": ["group1.a1", "group1.a2"],
+                "group2": ["group2.b1", "group2.b2"],
             },
-        ):
-            task = EmptyOperator(task_id="task")
-
-    assert task.retries == 1
-    assert task.owner == "y"
-    assert task.execution_timeout == timedelta(seconds=10)
-
-
-def test_override_dag_default_args_in_nested_tg():
-    with DAG(
-        dag_id="test_dag",
-        schedule=None,
-        start_date=pendulum.parse("20200101"),
-        default_args={
-            "retries": 1,
-            "owner": "x",
-        },
-    ):
-        with TaskGroup(
-            group_id="task_group",
-            default_args={
-                "owner": "y",
-                "execution_timeout": timedelta(seconds=10),
+            id="sibling-groups",
+        ),
+        pytest.param(
+            _make_group_bridged_by_outside_task,
+            {None: ["bridge", "group"], "group": ["group.a", "group.b"]},
+            id="group-bridged-by-outside-task",
+        ),
+        # Only two of six siblings depend on a later sibling, which keeps the sweep.
+        pytest.param(
+            _make_bridged_group_among_siblings,
+            {
+                None: ["bridge", "group", "x0", "x1", "x2", "after"],
+                "group": ["group.a", "group.b"],
             },
-        ):
-            with TaskGroup(group_id="nested_task_group"):
-                task = EmptyOperator(task_id="task")
-
-    assert task.retries == 1
-    assert task.owner == "y"
-    assert task.execution_timeout == timedelta(seconds=10)
-
-
-def test_override_dag_default_args_in_multi_level_nested_tg():
-    with DAG(
-        dag_id="test_dag",
-        schedule=None,
-        start_date=pendulum.parse("20200101"),
-        default_args={
-            "retries": 1,
-            "owner": "x",
-        },
-    ):
-        with TaskGroup(
-            group_id="task_group",
-            default_args={
-                "owner": "y",
-                "execution_timeout": timedelta(seconds=10),
+            id="bridged-group-among-siblings",
+        ),
+        # Two of outer's three children depend on a later sibling, which selects pass numbering.
+        pytest.param(
+            _make_nested_bridged_group,
+            {
+                None: ["outer"],
+                "outer": ["outer.bridge", "outer.inner", "outer.after"],
+                "outer.inner": ["outer.inner.a", "outer.inner.b"],
             },
-        ):
-            with TaskGroup(
-                group_id="first_nested_task_group",
-                default_args={
-                    "owner": "z",
-                },
-            ):
-                with TaskGroup(group_id="second_nested_task_group"):
-                    with TaskGroup(group_id="third_nested_task_group"):
-                        task = EmptyOperator(task_id="task")
+            id="nested-bridged-group",
+        ),
+        # Two of the three siblings depend on a later sibling, which selects pass numbering.
+        pytest.param(
+            _make_three_group_ring,
+            {
+                None: ["g0", "g1", "g2"],
+                "g0": ["g0.first", "g0.second"],
+                "g1": ["g1.first", "g1.second"],
+                "g2": ["g2.first", "g2.second"],
+            },
+            id="three-group-ring",
+        ),
+    ],
+)
+def test_topological_sort_task_group_cycle(make_dag, expected):
+    """Siblings that depend on each other only at the group level are ordered instead of raising."""
+    dag = make_dag()
+    dag.check_cycle()
+    serialized = create_scheduler_dag(dag)
 
-    assert task.retries == 1
-    assert task.owner == "z"
-    assert task.execution_timeout == timedelta(seconds=10)
-
-
-def test_task_group_arrow_with_setups_teardowns():
-    with DAG(dag_id="hi", schedule=None, start_date=pendulum.datetime(2022, 1, 1)):
-        with TaskGroup(group_id="tg1") as tg1:
-            s1 = BaseOperator(task_id="s1")
-            w1 = BaseOperator(task_id="w1")
-            t1 = BaseOperator(task_id="t1")
-            s1 >> w1 >> t1.as_teardown(setups=s1)
-        w2 = BaseOperator(task_id="w2")
-        tg1 >> w2
-    assert t1.downstream_task_ids == set()
-    assert w1.downstream_task_ids == {"tg1.t1", "w2"}
+    assert _get_topological_orders(serialized.task_group.get_task_group_dict()) == expected
+    assert _get_topological_orders(dag.task_group.get_task_group_dict()) == expected
 
 
 def test_task_group_arrow_with_setup_group():
-    with DAG(dag_id="setup_group_teardown_group", schedule=None, start_date=pendulum.now()):
+    with DAG(dag_id="setup_group_teardown_group") as dag:
         with TaskGroup("group_1") as g1:
 
             @setup
@@ -1657,24 +1522,14 @@ def test_task_group_arrow_with_setup_group():
     assert set(t1.operator.downstream_task_ids) == set()
     assert set(t2.operator.downstream_task_ids) == set()
 
-    def get_nodes(group, from_legacy=False):
-        if from_legacy:
-            d = task_group_to_dict_legacy(group)
-        else:
-            d = task_group_to_dict(group)
+    def get_nodes(group):
+        serialized_dag = create_scheduler_dag(dag)
+        group = serialized_dag.task_group_dict[g1.group_id]
+        d = task_group_to_dict(group)
         new_d = {}
         new_d["id"] = d["id"]
         new_d["children"] = [{"id": x["id"]} for x in d["children"]]
         return new_d
-
-    assert get_nodes(g1, from_legacy=True) == {
-        "id": "group_1",
-        "children": [
-            {"id": "group_1.setup_1"},
-            {"id": "group_1.setup_2"},
-            {"id": "group_1.downstream_join_id"},
-        ],
-    }
 
     assert get_nodes(g1) == {
         "id": "group_1",
@@ -1686,63 +1541,9 @@ def test_task_group_arrow_with_setup_group():
     }
 
 
-def test_task_group_arrow_with_setup_group_deeper_setup():
-    """
-    When recursing upstream for a non-teardown leaf, we should ignore setups that
-    are direct upstream of a teardown.
-    """
-    with DAG(dag_id="setup_group_teardown_group_2", schedule=None, start_date=pendulum.now()):
-        with TaskGroup("group_1") as g1:
-
-            @setup
-            def setup_1(): ...
-
-            @setup
-            def setup_2(): ...
-
-            @teardown
-            def teardown_0(): ...
-
-            s1 = setup_1()
-            s2 = setup_2()
-            t0 = teardown_0()
-            s2 >> t0
-
-        with TaskGroup("group_2") as g2:
-
-            @teardown
-            def teardown_1(): ...
-
-            @teardown
-            def teardown_2(): ...
-
-            t1 = teardown_1()
-            t2 = teardown_2()
-
-        @task_decorator
-        def work(): ...
-
-        w1 = work()
-        g1 >> w1 >> g2
-        t1.as_teardown(setups=s1)
-        t2.as_teardown(setups=s2)
-    assert set(s1.operator.downstream_task_ids) == {"work", "group_2.teardown_1"}
-    assert set(s2.operator.downstream_task_ids) == {"group_1.teardown_0", "group_2.teardown_2"}
-    assert set(w1.operator.downstream_task_ids) == {"group_2.teardown_1", "group_2.teardown_2"}
-    assert set(t1.operator.downstream_task_ids) == set()
-    assert set(t2.operator.downstream_task_ids) == set()
-
-
-def test_task_group_with_invalid_arg_type_raises_error():
-    error_msg = r"'ui_color' must be <class 'str'> \(got 123 that is a <class 'int'>\)\."
-    with DAG(dag_id="dag_with_tg_invalid_arg_type", schedule=None):
-        with pytest.raises(TypeError, match=error_msg):
-            _ = TaskGroup("group_1", ui_color=123)
-
-
-def test_task_group_display_name_used_as_label():
+def test_task_group_display_name_used_as_label(dag_maker):
     """Test that the group_display_name for TaskGroup is used as the label for display on the UI."""
-    with DAG(dag_id="display_name", schedule=None, start_date=pendulum.datetime(2022, 1, 1)) as dag:
+    with dag_maker(dag_id="display_name", schedule=None, start_date=pendulum.datetime(2022, 1, 1)) as dag:
         with TaskGroup(group_id="tg", group_display_name="my_custom_name") as tg:
             task1 = BaseOperator(task_id="task1")
             task2 = BaseOperator(task_id="task2")
@@ -1752,7 +1553,7 @@ def test_task_group_display_name_used_as_label():
     assert tg.label == "my_custom_name"
     expected_node_id = {
         "id": None,
-        "label": None,
+        "label": "",
         "children": [
             {
                 "id": "tg",

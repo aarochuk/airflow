@@ -16,29 +16,43 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Badge } from "@chakra-ui/react";
 import { Fragment } from "react";
+
+import { Box, Badge } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 import { TbLogicOr } from "react-icons/tb";
+
+import type { NextRunAssetEventResponse } from "openapi/requests/types.gen";
 
 import { AndGateNode } from "./AndGateNode";
 import { AssetNode } from "./AssetNode";
 import { OrGateNode } from "./OrGateNode";
-import type { ExpressionType, NextRunEvent } from "./types";
+import type { ExpressionType } from "./types";
 
 export const AssetExpression = ({
   events,
   expression,
 }: {
-  readonly events?: Array<NextRunEvent>;
-  readonly expression: ExpressionType | null;
+  readonly events?: Array<NextRunAssetEventResponse>;
+  readonly expression: ExpressionType | undefined;
 }) => {
-  if (expression === null) {
+  const { t: translate } = useTranslation();
+
+  if (expression === undefined) {
     return undefined;
+  }
+
+  // A bare asset or alias at the top level (no all/any wrapper) — render it directly.
+  if ("asset" in expression) {
+    return <AssetNode asset={expression} event={events?.find((ev) => ev.id === expression.asset.id)} />;
+  }
+  if ("alias" in expression) {
+    return <AssetNode asset={expression} />;
   }
 
   return (
     <>
-      {expression.any ? (
+      {"any" in expression ? (
         <OrGateNode>
           {expression.any.map((item, index) => (
             // eslint-disable-next-line react/no-array-index-key
@@ -51,17 +65,17 @@ export const AssetExpression = ({
               ) : (
                 <AssetExpression events={events} expression={item} />
               )}
-              {expression.any && index === expression.any.length - 1 ? undefined : (
+              {index === expression.any.length - 1 ? undefined : (
                 <Badge alignItems="center" borderRadius="full" fontSize="sm" px={3} py={1}>
                   <TbLogicOr size={18} />
-                  OR
+                  {translate("expression.or")}
                 </Badge>
               )}
             </Fragment>
           ))}
         </OrGateNode>
       ) : undefined}
-      {expression.all ? (
+      {"all" in expression ? (
         <AndGateNode>
           {expression.all.map((item, index) => (
             // eslint-disable-next-line react/no-array-index-key

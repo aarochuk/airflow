@@ -31,10 +31,11 @@ import json
 import logging
 import os
 import warnings
+from collections.abc import Callable
 from copy import deepcopy
 from functools import cached_property, wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union
 
 import boto3
 import botocore
@@ -43,26 +44,31 @@ import jinja2
 import requests
 import tenacity
 from asgiref.sync import sync_to_async
+from boto3.resources.base import ServiceResource
+from botocore.client import BaseClient
 from botocore.config import Config
 from botocore.waiter import Waiter, WaiterModel
 from dateutil.tz import tzlocal
 from slugify import slugify
 
-from airflow.configuration import conf
-from airflow.exceptions import (
-    AirflowException,
-    AirflowNotFoundException,
-    AirflowProviderDeprecationWarning,
-)
-from airflow.hooks.base import BaseHook
+from airflow.exceptions import AirflowProviderDeprecationWarning
 from airflow.providers.amazon.aws.utils.connection_wrapper import AwsConnectionWrapper
 from airflow.providers.amazon.aws.utils.identifiers import generate_uuid
 from airflow.providers.amazon.aws.utils.suppress import return_on_error
-from airflow.providers_manager import ProvidersManager
+from airflow.providers.common.compat.sdk import AirflowException, AirflowNotFoundException, BaseHook, conf
 from airflow.utils.helpers import exactly_one
 from airflow.utils.log.logging_mixin import LoggingMixin
 
-BaseAwsConnection = TypeVar("BaseAwsConnection", bound=Union[boto3.client, boto3.resource])
+# We need to set typeignore, sadly without it Sphinx build and mypy don't agree.
+# ideally the code should be:
+# BaseAwsConnection = TypeVar("BaseAwsConnection", bound=BaseClient | ServiceResource)
+# but if we do that Sphinx complains about:
+# TypeError: unsupported operand type(s) for |: 'BaseClient' and 'ServiceResource'
+# If we change to Union syntax then mypy is not happy with UP007 Use `X | Y` for type annotations
+# The only way to workaround it for now is to keep the union syntax with ignore for mypy
+# We should try to resolve this later.
+BaseAwsConnection = TypeVar("BaseAwsConnection", bound=Union[BaseClient, ServiceResource])  # noqa: UP007
+
 
 if TYPE_CHECKING:
     from aiobotocore.session import AioSession
@@ -71,11 +77,20 @@ if TYPE_CHECKING:
 
     from airflow.models.connection import Connection
     from airflow.sdk.execution_time.secrets_masker import mask_secret
+    from airflow.sdk.providers_manager_runtime import ProvidersManagerTaskRuntime as ProvidersManager
 else:
     try:
-        from airflow.sdk.execution_time.secrets_masker import mask_secret
+        from airflow.sdk.providers_manager_runtime import ProvidersManagerTaskRuntime as ProvidersManager
     except ImportError:
-        from airflow.utils.log.secrets_masker import mask_secret
+        from airflow.providers_manager import ProvidersManager
+
+    try:
+        from airflow.sdk.log import mask_secret
+    except ImportError:
+        try:
+            from airflow.sdk.execution_time.secrets_masker import mask_secret
+        except ImportError:
+            from airflow.utils.log.secrets_masker import mask_secret
 
 _loader = botocore.loaders.Loader()
 """
@@ -191,15 +206,13 @@ class BaseSessionFactory(LoggingMixin):
                 session = self.get_async_session()
                 self._apply_session_kwargs(session)
                 return session
-            else:
-                return boto3.session.Session(region_name=self.region_name)
-        elif not self.role_arn:
+            return boto3.session.Session(region_name=self.region_name)
+        if not self.role_arn:
             if deferrable:
                 session = self.get_async_session()
                 self._apply_session_kwargs(session)
                 return session
-            else:
-                return self.basic_session
+            return self.basic_session
 
         # Values stored in ``AwsConnectionWrapper.session_kwargs`` are intended to be used only
         # to create the initial boto3 session.
@@ -391,8 +404,10 @@ class BaseSessionFactory(LoggingMixin):
             )
             self.log.debug("idp_response.content= %s", idp_response.content)
             self.log.debug("xpath= %s", xpath)
-        # Extract SAML Assertion from the returned HTML / XML
-        xml = etree.fromstring(idp_response.content)
+        # Remote IdP content: pin entity resolution and network access off so a future
+        # libxml2/lxml default change cannot silently reintroduce external-entity exposure.
+        parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
+        xml = etree.fromstring(idp_response.content, parser=parser)
         saml_assertion = xml.xpath(xpath)
         if isinstance(saml_assertion, list):
             if len(saml_assertion) == 1:
@@ -404,8 +419,15 @@ class BaseSessionFactory(LoggingMixin):
     def _get_web_identity_credential_fetcher(
         self,
     ) -> botocore.credentials.AssumeRoleWithWebIdentityCredentialFetcher:
-        base_session = self.basic_session._session or botocore.session.get_session()
-        client_creator = base_session.create_client
+        session_config = self.config
+        endpoint_url = self.conn.get_service_endpoint_url("sts", sts_connection_assume=True)
+
+        def client_creator(service_name, **kwargs):
+            config = kwargs.pop("config", None)
+            if session_config:
+                config = session_config.merge(config) if config else session_config
+            return self.basic_session.client(service_name, config=config, endpoint_url=endpoint_url, **kwargs)
+
         federation = str(self.extra_config.get("assume_role_with_web_identity_federation"))
 
         web_identity_token_loader = {
@@ -571,7 +593,7 @@ class AwsGenericHook(BaseHook, Generic[BaseAwsConnection]):
     @return_on_error("00000000-0000-0000-0000-000000000000")
     def _generate_dag_key() -> str:
         """
-        Generate a DAG key.
+        Generate a Dag key.
 
         The Object Identifier (OID) namespace is used to salt the dag_id value.
         That salted value is used to generate a SHA-1 hash which, by definition,
@@ -590,12 +612,25 @@ class AwsGenericHook(BaseHook, Generic[BaseAwsConnection]):
 
         return airflow_version
 
+    @staticmethod
+    def _is_multi_team() -> bool:
+        """Return True if the current task is running under multi-team Airflow."""
+        return bool(os.environ.get("AIRFLOW_CTX_TEAM_NAME"))
+
+    @staticmethod
+    @return_on_error("00000000-0000-0000-0000-000000000000")
+    def _generate_team_name_key() -> str:
+        """Generate a hashed key from the team name, using the same approach as :meth:`_generate_dag_key`."""
+        return generate_uuid(os.environ.get("AIRFLOW_CTX_TEAM_NAME"))
+
     def _generate_user_agent_extra_field(self, existing_user_agent_extra: str) -> str:
         user_agent_extra_values = [
             f"Airflow/{self._get_airflow_version()}",
             f"AmPP/{self._get_provider_version()}",
             f"Caller/{self._get_caller()}",
             f"DagRunKey/{self._generate_dag_key()}",
+            f"MultiTeam/{self._is_multi_team()}",
+            f"TeamNameKey/{self._generate_team_name_key()}",
             existing_user_agent_extra or "",
         ]
         return " ".join(user_agent_extra_values).strip()
@@ -611,9 +646,18 @@ class AwsGenericHook(BaseHook, Generic[BaseAwsConnection]):
                 self.log.warning(
                     "Unable to find AWS Connection ID '%s', switching to empty.", self.aws_conn_id
                 )
-
+            # In the TaskSDK's BaseHook, it only retrieves the connection via task-sdk. Since the AWS system testing infrastructure
+            # doesn't use task-sdk, this leads to an error which we handle below.
+            except ImportError as e:
+                if "SUPERVISOR_COMMS" in str(e):
+                    self.log.exception(e)
+                else:
+                    raise
         return AwsConnectionWrapper(
-            conn=connection, region_name=self._region_name, botocore_config=self._config, verify=self._verify
+            conn=connection,
+            region_name=self._region_name,
+            botocore_config=self._config,
+            verify=self._verify,
         )
 
     def _resolve_service_name(self, is_resource_type: bool = False) -> str:
@@ -624,7 +668,7 @@ class AwsGenericHook(BaseHook, Generic[BaseAwsConnection]):
                 if is_resource_type:
                     raise LookupError("Requested `resource_type`, but `client_type` was set instead.")
                 return self.client_type
-            elif self.resource_type:
+            if self.resource_type:
                 if not is_resource_type:
                     raise LookupError("Requested `client_type`, but `resource_type` was set instead.")
                 return self.resource_type
@@ -692,10 +736,10 @@ class AwsGenericHook(BaseHook, Generic[BaseAwsConnection]):
         # because the user_agent_extra field is generated at runtime.
         user_agent_config = Config(
             user_agent_extra=self._generate_user_agent_extra_field(
-                existing_user_agent_extra=config.user_agent_extra  # type: ignore[union-attr]
+                existing_user_agent_extra=config.user_agent_extra
             )
         )
-        return config.merge(user_agent_config)  # type: ignore[union-attr]
+        return config.merge(user_agent_config)
 
     def get_client_type(
         self,
@@ -768,7 +812,7 @@ class AwsGenericHook(BaseHook, Generic[BaseAwsConnection]):
     async def get_async_conn(self):
         """Get an aiobotocore client to use for async operations."""
         # We have to wrap the call `self.get_client_type` in another call `_get_async_conn`,
-        # because one of it's arguments `self.region_name` is a `@property` decorated function
+        # because one of its arguments `self.region_name` is a `@property` decorated function
         # calling the cached property `self.conn_config` at the end.
         return await sync_to_async(self._get_async_conn)()
 
@@ -840,15 +884,14 @@ class AwsGenericHook(BaseHook, Generic[BaseAwsConnection]):
         """
         if "/" in role:
             return role
-        else:
-            session = self.get_session(region_name=region_name)
-            _client = session.client(
-                service_name="iam",
-                endpoint_url=self.conn_config.get_service_endpoint_url("iam"),
-                config=self.config,
-                verify=self.verify,
-            )
-            return _client.get_role(RoleName=role)["Role"]["Arn"]
+        session = self.get_session(region_name=region_name)
+        _client = session.client(
+            service_name="iam",
+            endpoint_url=self.conn_config.get_service_endpoint_url("iam"),
+            config=self.config,
+            verify=self.verify,
+        )
+        return _client.get_role(RoleName=role)["Role"]["Arn"]
 
     @staticmethod
     def retry(should_retry: Callable[[Exception], bool]):
@@ -889,8 +932,8 @@ class AwsGenericHook(BaseHook, Generic[BaseAwsConnection]):
                 "password": "AWS Secret Access Key",
             },
             "placeholders": {
-                "login": "AKIAIOSFODNN7EXAMPLE",
-                "password": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "login": "YOUR_AWS_ACCESS_KEY_ID",
+                "password": "YOUR_AWS_SECRET_ACCESS_KEY",
                 "extra": json.dumps(
                     {
                         "region_name": "us-east-1",
@@ -899,7 +942,7 @@ class AwsGenericHook(BaseHook, Generic[BaseAwsConnection]):
                         "role_arn": "arn:aws:iam::123456789098:role/role-name",
                         "assume_role_method": "assume_role",
                         "assume_role_kwargs": {"RoleSessionName": "airflow"},
-                        "aws_session_token": "AQoDYXdzEJr...EXAMPLETOKEN",
+                        "aws_session_token": "YOUR_AWS_SESSION_TOKEN",
                         "endpoint_url": "http://localhost:4566",
                     },
                     indent=2,
@@ -1025,7 +1068,7 @@ class AwsGenericHook(BaseHook, Generic[BaseAwsConnection]):
             return WaiterModel(model_config).waiter_names
 
 
-class AwsBaseHook(AwsGenericHook[Union[boto3.client, boto3.resource]]):
+class AwsBaseHook(AwsGenericHook[Union[boto3.client, boto3.resource]]):  # noqa: UP007
     """
     Base class for interact with AWS.
 

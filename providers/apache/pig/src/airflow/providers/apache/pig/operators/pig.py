@@ -21,11 +21,11 @@ import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from airflow.models import BaseOperator
 from airflow.providers.apache.pig.hooks.pig import PigCliHook
+from airflow.providers.common.compat.sdk import BaseOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class PigOperator(BaseOperator):
@@ -43,7 +43,7 @@ class PigOperator(BaseOperator):
     :param pig_properties: pig properties, additional pig properties passed as list
     """
 
-    template_fields: Sequence[str] = ("pig", "pig_opts", "pig_properties")
+    template_fields: Sequence[str] = ("pig", "pig_opts", "pig_properties", "pig_cli_conn_id")
     template_ext: Sequence[str] = (
         ".pig",
         ".piglatin",

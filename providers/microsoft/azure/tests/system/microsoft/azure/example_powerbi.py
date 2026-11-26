@@ -36,7 +36,7 @@ with models.DAG(
         task_id="workspaces",
         conn_id="powerbi",
         url="myorg/admin/workspaces/modified",
-        result_processor=lambda context, response: list(map(lambda workspace: workspace["id"], response)),  # type: ignore[typeddict-item, index]
+        result_processor=lambda context, response: list(map(lambda workspace: workspace["id"], response)),  # type: ignore[index]
     )
     # [END howto_operator_powerbi_workspaces]
 
@@ -106,5 +106,5 @@ with models.DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

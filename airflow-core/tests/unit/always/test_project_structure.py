@@ -24,6 +24,7 @@ import pathlib
 
 import pytest
 
+from tests_common.test_utils.file_loading import get_imports_from_file
 from tests_common.test_utils.paths import (
     AIRFLOW_CORE_SOURCES_PATH,
     AIRFLOW_PROVIDERS_ROOT_PATH,
@@ -57,122 +58,34 @@ class TestProjectStructure:
         """
         Assert every module in /providers/ has a corresponding test_ file in providers/providers.
         """
-        # The test below had a but for quite a while and we missed a lot of modules to have tess
-        # We should make sure that one goes to 0
-        # TODO(potiuk) - check if that test actually tests something
+        # A long-standing bug in the test below allowed modules without tests to go undetected.
+        # This list tracks those modules and should shrink to zero as tests are added.
         OVERLOOKED_TESTS = [
-            "providers/amazon/tests/unit/amazon/aws/auth_manager/security_manager/test_aws_security_manager_override.py",
             "providers/amazon/tests/unit/amazon/aws/executors/batch/test_batch_executor_config.py",
-            "providers/amazon/tests/unit/amazon/aws/executors/batch/test_boto_schema.py",
-            "providers/amazon/tests/unit/amazon/aws/executors/batch/test_utils.py",
-            "providers/amazon/tests/unit/amazon/aws/executors/ecs/test_boto_schema.py",
             "providers/amazon/tests/unit/amazon/aws/executors/ecs/test_ecs_executor_config.py",
-            "providers/amazon/tests/unit/amazon/aws/executors/ecs/test_utils.py",
-            "providers/amazon/tests/unit/amazon/aws/executors/utils/test_base_config_keys.py",
+            "providers/amazon/tests/unit/amazon/aws/executors/aws_lambda/test_utils.py",
+            "providers/amazon/tests/unit/amazon/aws/executors/aws_lambda/docker/test_app.py",
             "providers/amazon/tests/unit/amazon/aws/operators/test_emr.py",
             "providers/amazon/tests/unit/amazon/aws/operators/test_sagemaker.py",
             "providers/amazon/tests/unit/amazon/aws/sensors/test_emr.py",
             "providers/amazon/tests/unit/amazon/aws/sensors/test_sagemaker.py",
-            "providers/amazon/tests/unit/amazon/aws/test_exceptions.py",
-            "providers/amazon/tests/unit/amazon/aws/triggers/test_sagemaker_unified_studio.py",
-            "providers/amazon/tests/unit/amazon/aws/triggers/test_step_function.py",
-            "providers/amazon/tests/unit/amazon/aws/utils/test_rds.py",
-            "providers/amazon/tests/unit/amazon/aws/utils/test_sagemaker.py",
-            "providers/amazon/tests/unit/amazon/aws/waiters/test_base_waiter.py",
-            "providers/amazon/tests/unit/amazon/test_version_compat.py",
-            "providers/apache/hdfs/tests/unit/apache/hdfs/hooks/test_hdfs.py",
-            "providers/apache/hdfs/tests/unit/apache/hdfs/log/test_hdfs_task_handler.py",
-            "providers/apache/hdfs/tests/unit/apache/hdfs/sensors/test_hdfs.py",
-            "providers/apache/hive/tests/unit/apache/hive/plugins/test_hive.py",
             "providers/celery/tests/unit/celery/executors/test_celery_executor_utils.py",
-            "providers/celery/tests/unit/celery/executors/test_default_celery.py",
-            "providers/celery/tests/unit/celery/test_version_compat.py",
-            "providers/cloudant/tests/unit/cloudant/test_cloudant_fake.py",
-            "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/executors/test_kubernetes_executor_types.py",
             "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/executors/test_kubernetes_executor_utils.py",
-            "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/operators/test_kubernetes_pod.py",
             "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/test_exceptions.py",
-            "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/test_k8s_model.py",
-            "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/test_kube_client.py",
-            "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/test_kube_config.py",
             "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/test_python_kubernetes_script.py",
-            "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/test_secret.py",
-            "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/test_version_compat.py",
-            "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/triggers/test_kubernetes_pod.py",
             "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/utils/test_delete_from.py",
-            "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/utils/test_k8s_hashlib_wrapper.py",
-            "providers/cncf/kubernetes/tests/unit/cncf/kubernetes/utils/test_xcom_sidecar.py",
-            "providers/common/compat/tests/unit/common/compat/lineage/test_entities.py",
-            "providers/common/compat/tests/unit/common/compat/standard/test_operators.py",
-            "providers/common/compat/tests/unit/common/compat/standard/test_triggers.py",
             "providers/common/compat/tests/unit/common/compat/standard/test_utils.py",
-            "providers/common/compat/tests/unit/common/compat/test_version_compat.py",
-            "providers/common/io/tests/unit/common/io/test_version_compat.py",
-            "providers/common/messaging/tests/unit/common/messaging/providers/test_base_provider.py",
-            "providers/common/messaging/tests/unit/common/messaging/providers/test_sqs.py",
-            "providers/databricks/tests/unit/databricks/test_version_compat.py",
-            "providers/dbt/cloud/tests/unit/dbt/cloud/test_version_compat.py",
-            "providers/edge/tests/unit/edge/models/test_edge_job.py",
-            "providers/edge/tests/unit/edge/models/test_edge_logs.py",
-            "providers/edge/tests/unit/edge/models/test_edge_worker.py",
-            "providers/edge/tests/unit/edge/test_version_compat.py",
-            "providers/edge/tests/unit/edge/worker_api/routes/test__v2_compat.py",
-            "providers/edge/tests/unit/edge/worker_api/routes/test__v2_routes.py",
-            "providers/edge/tests/unit/edge/worker_api/routes/test_jobs.py",
-            "providers/edge/tests/unit/edge/worker_api/test_app.py",
-            "providers/edge/tests/unit/edge/worker_api/test_auth.py",
-            "providers/edge/tests/unit/edge/worker_api/test_datamodels.py",
-            "providers/elasticsearch/tests/unit/elasticsearch/test_version_compat.py",
-            "providers/fab/tests/unit/fab/auth_manager/api_fastapi/datamodels/test_login.py",
             "providers/fab/tests/unit/fab/migrations/test_env.py",
-            "providers/fab/tests/unit/fab/www/api_connexion/test_exceptions.py",
-            "providers/fab/tests/unit/fab/www/api_connexion/test_parameters.py",
-            "providers/fab/tests/unit/fab/www/api_connexion/test_security.py",
-            "providers/fab/tests/unit/fab/www/api_connexion/test_types.py",
             "providers/fab/tests/unit/fab/www/extensions/test_init_appbuilder.py",
             "providers/fab/tests/unit/fab/www/extensions/test_init_jinja_globals.py",
             "providers/fab/tests/unit/fab/www/extensions/test_init_manifest_files.py",
             "providers/fab/tests/unit/fab/www/extensions/test_init_security.py",
-            "providers/fab/tests/unit/fab/www/extensions/test_init_session.py",
             "providers/fab/tests/unit/fab/www/extensions/test_init_views.py",
             "providers/fab/tests/unit/fab/www/security/test_permissions.py",
             "providers/fab/tests/unit/fab/www/test_airflow_flask_app.py",
-            "providers/fab/tests/unit/fab/www/test_app.py",
-            "providers/fab/tests/unit/fab/www/test_constants.py",
             "providers/fab/tests/unit/fab/www/test_security_appless.py",
             "providers/fab/tests/unit/fab/www/test_security_manager.py",
             "providers/fab/tests/unit/fab/www/test_session.py",
-            "providers/fab/tests/unit/fab/www/test_utils.py",
-            "providers/fab/tests/unit/fab/www/test_views.py",
-            "providers/google/tests/unit/google/cloud/fs/test_gcs.py",
-            "providers/google/tests/unit/google/cloud/links/test_automl.py",
-            "providers/google/tests/unit/google/cloud/links/test_base.py",
-            "providers/google/tests/unit/google/cloud/links/test_bigquery.py",
-            "providers/google/tests/unit/google/cloud/links/test_bigquery_dts.py",
-            "providers/google/tests/unit/google/cloud/links/test_bigtable.py",
-            "providers/google/tests/unit/google/cloud/links/test_cloud_build.py",
-            "providers/google/tests/unit/google/cloud/links/test_cloud_functions.py",
-            "providers/google/tests/unit/google/cloud/links/test_cloud_memorystore.py",
-            "providers/google/tests/unit/google/cloud/links/test_cloud_sql.py",
-            "providers/google/tests/unit/google/cloud/links/test_cloud_storage_transfer.py",
-            "providers/google/tests/unit/google/cloud/links/test_cloud_tasks.py",
-            "providers/google/tests/unit/google/cloud/links/test_compute.py",
-            "providers/google/tests/unit/google/cloud/links/test_data_loss_prevention.py",
-            "providers/google/tests/unit/google/cloud/links/test_datacatalog.py",
-            "providers/google/tests/unit/google/cloud/links/test_dataflow.py",
-            "providers/google/tests/unit/google/cloud/links/test_dataform.py",
-            "providers/google/tests/unit/google/cloud/links/test_datafusion.py",
-            "providers/google/tests/unit/google/cloud/links/test_dataprep.py",
-            "providers/google/tests/unit/google/cloud/links/test_dataproc.py",
-            "providers/google/tests/unit/google/cloud/links/test_datastore.py",
-            "providers/google/tests/unit/google/cloud/links/test_kubernetes_engine.py",
-            "providers/google/tests/unit/google/cloud/links/test_life_sciences.py",
-            "providers/google/tests/unit/google/cloud/links/test_mlengine.py",
-            "providers/google/tests/unit/google/cloud/links/test_pubsub.py",
-            "providers/google/tests/unit/google/cloud/links/test_spanner.py",
-            "providers/google/tests/unit/google/cloud/links/test_stackdriver.py",
-            "providers/google/tests/unit/google/cloud/links/test_vertex_ai.py",
-            "providers/google/tests/unit/google/cloud/links/test_workflows.py",
             "providers/google/tests/unit/google/cloud/operators/vertex_ai/test_auto_ml.py",
             "providers/google/tests/unit/google/cloud/operators/vertex_ai/test_batch_prediction_job.py",
             "providers/google/tests/unit/google/cloud/operators/vertex_ai/test_custom_job.py",
@@ -183,33 +96,29 @@ class TestProjectStructure:
             "providers/google/tests/unit/google/cloud/operators/vertex_ai/test_pipeline_job.py",
             "providers/google/tests/unit/google/cloud/sensors/vertex_ai/test_feature_store.py",
             "providers/google/tests/unit/google/cloud/transfers/test_bigquery_to_sql.py",
-            "providers/google/tests/unit/google/cloud/transfers/test_presto_to_gcs.py",
-            "providers/google/tests/unit/google/cloud/utils/test_bigquery.py",
-            "providers/google/tests/unit/google/cloud/utils/test_bigquery_get_data.py",
-            "providers/google/tests/unit/google/cloud/utils/test_dataform.py",
-            "providers/google/tests/unit/google/common/links/test_storage.py",
-            "providers/google/tests/unit/google/common/test_consts.py",
-            "providers/google/tests/unit/google/common/hooks/test_operation_helpers.py",
-            "providers/google/tests/unit/google/test_go_module_utils.py",
-            "providers/google/tests/unit/google/test_version_compat.py",
-            "providers/http/tests/unit/http/test_exceptions.py",
             "providers/microsoft/azure/tests/unit/microsoft/azure/operators/test_adls.py",
-            "providers/microsoft/azure/tests/unit/microsoft/azure/test_version_compat.py",
-            "providers/openlineage/tests/unit/openlineage/test_version_compat.py",
-            "providers/opensearch/tests/unit/opensearch/test_version_compat.py",
-            "providers/presto/tests/unit/presto/test_version_compat.py",
-            "providers/redis/tests/unit/redis/test_version_compat.py",
-            "providers/snowflake/tests/unit/snowflake/test_version_compat.py",
-            "providers/snowflake/tests/unit/snowflake/triggers/test_snowflake_trigger.py",
-            "providers/standard/tests/unit/standard/operators/test_branch.py",
-            "providers/standard/tests/unit/standard/operators/test_empty.py",
-            "providers/standard/tests/unit/standard/operators/test_latest_only.py",
-            "providers/standard/tests/unit/standard/operators/test_trigger_dagrun.py",
-            "providers/standard/tests/unit/standard/sensors/test_external_task.py",
-            "providers/standard/tests/unit/standard/sensors/test_filesystem.py",
-            "providers/standard/tests/unit/standard/test_version_compat.py",
-            "providers/standard/tests/unit/standard/utils/test_sensor_helper.py",
-            "providers/trino/tests/unit/trino/test_version_compat.py",
+        ]
+        # Deliberately untested: link modules whose tests would only assert constants.
+        # Remove an entry once its module gains logic worth testing.
+        EXEMPTED_TESTS = [
+            "providers/google/tests/unit/google/cloud/links/test_alloy_db.py",
+            "providers/google/tests/unit/google/cloud/links/test_bigquery_dts.py",
+            "providers/google/tests/unit/google/cloud/links/test_bigtable.py",
+            "providers/google/tests/unit/google/cloud/links/test_cloud_build.py",
+            "providers/google/tests/unit/google/cloud/links/test_cloud_functions.py",
+            "providers/google/tests/unit/google/cloud/links/test_cloud_memorystore.py",
+            "providers/google/tests/unit/google/cloud/links/test_cloud_sql.py",
+            "providers/google/tests/unit/google/cloud/links/test_compute.py",
+            "providers/google/tests/unit/google/cloud/links/test_data_loss_prevention.py",
+            "providers/google/tests/unit/google/cloud/links/test_dataflow.py",
+            "providers/google/tests/unit/google/cloud/links/test_dataform.py",
+            "providers/google/tests/unit/google/cloud/links/test_datafusion.py",
+            "providers/google/tests/unit/google/cloud/links/test_dataprep.py",
+            "providers/google/tests/unit/google/cloud/links/test_datastore.py",
+            "providers/google/tests/unit/google/cloud/links/test_managed_kafka.py",
+            "providers/google/tests/unit/google/cloud/links/test_pubsub.py",
+            "providers/google/tests/unit/google/cloud/links/test_spanner.py",
+            "providers/google/tests/unit/google/cloud/links/test_workflows.py",
         ]
         modules_files: list[pathlib.Path] = list(
             AIRFLOW_PROVIDERS_ROOT_PATH.glob("**/src/airflow/providers/**/*.py")
@@ -241,6 +150,8 @@ class TestProjectStructure:
         current_test_files = set(f for f in current_test_files if not f.name == "__init__.py")
         # Exclude node_modules
         current_test_files = set(f for f in current_test_files if "node_modules" not in f.parts)
+        # Exclude version_compat.py
+        modules_files = filter(lambda f: f.name != "version_compat.py", modules_files)
 
         modules_files_set = set(modules_files)
         expected_test_files = set(
@@ -253,9 +164,19 @@ class TestProjectStructure:
                 for f in modules_files_set
             ]
         )
-        expected_test_files = set(expected_test_files) - set(
-            [pathlib.Path(test_file) for test_file in OVERLOOKED_TESTS]
+        overlooked_test_files = {pathlib.Path(test_file) for test_file in OVERLOOKED_TESTS}
+        exempted_test_files = {pathlib.Path(test_file) for test_file in EXEMPTED_TESTS}
+        stale_overlooked_tests = overlooked_test_files - expected_test_files
+        assert not stale_overlooked_tests, (
+            "Detected stale provider test exemptions without corresponding provider modules - "
+            f"please remove them from OVERLOOKED_TESTS: {sorted(stale_overlooked_tests)}"
         )
+        stale_exempted_tests = exempted_test_files - expected_test_files
+        assert not stale_exempted_tests, (
+            "Detected stale provider test exemptions without corresponding provider modules - "
+            f"please remove them from EXEMPTED_TESTS: {sorted(stale_exempted_tests)}"
+        )
+        expected_test_files -= overlooked_test_files | exempted_test_files
 
         missing_tests_files = [
             file.as_posix()
@@ -264,26 +185,16 @@ class TestProjectStructure:
 
         assert missing_tests_files == [], "Detect missing tests in providers module - please add tests"
 
-        added_test_files = current_test_files.intersection(OVERLOOKED_TESTS)
+        added_test_files = current_test_files.intersection(overlooked_test_files)
         assert set() == added_test_files, (
             "Detect added tests in providers module - please remove the tests "
             "from OVERLOOKED_TESTS list above"
         )
-
-
-def get_imports_from_file(filepath: str):
-    with open(filepath) as py_file:
-        content = py_file.read()
-    doc_node = ast.parse(content, filepath)
-    import_names: set[str] = set()
-    for current_node in ast.walk(doc_node):
-        if not isinstance(current_node, (ast.Import, ast.ImportFrom)):
-            continue
-        for alias in current_node.names:
-            name = alias.name
-            fullname = f"{current_node.module}.{name}" if isinstance(current_node, ast.ImportFrom) else name
-            import_names.add(fullname)
-    return import_names
+        added_exempted_test_files = current_test_files.intersection(exempted_test_files)
+        assert set() == added_exempted_test_files, (
+            "Detect added tests in providers module - please remove the tests "
+            f"from EXEMPTED_TESTS list above: {sorted(added_exempted_test_files)}"
+        )
 
 
 def filepath_to_module(path: pathlib.Path, src_folder: pathlib.Path):
@@ -449,16 +360,29 @@ class TestGoogleProviderProjectStructure(ExampleCoverageTest, AssetsCoverageTest
         "airflow.providers.google.cloud.operators.automl.AutoMLDeleteModelOperator",
         "airflow.providers.google.cloud.operators.automl.AutoMLListDatasetOperator",
         "airflow.providers.google.cloud.operators.automl.AutoMLDeleteDatasetOperator",
+        "airflow.providers.google.cloud.operators.vertex_ai.auto_ml.CreateAutoMLVideoTrainingJobOperator",
         "airflow.providers.google.cloud.operators.bigquery.BigQueryCreateEmptyTableOperator",
         "airflow.providers.google.cloud.operators.bigquery.BigQueryCreateExternalTableOperator",
         "airflow.providers.google.cloud.operators.datapipeline.CreateDataPipelineOperator",
         "airflow.providers.google.cloud.operators.datapipeline.RunDataPipelineOperator",
-        "airflow.providers.google.cloud.operators.mlengine.MLEngineCreateModelOperator",
         "airflow.providers.google.cloud.operators.vertex_ai.generative_model.TextGenerationModelPredictOperator",
         "airflow.providers.google.marketing_platform.operators.GoogleDisplayVideo360CreateQueryOperator",
+        "airflow.providers.google.marketing_platform.operators.GoogleDisplayVideo360DeleteReportOperator",
         "airflow.providers.google.marketing_platform.operators.GoogleDisplayVideo360RunQueryOperator",
         "airflow.providers.google.marketing_platform.operators.GoogleDisplayVideo360DownloadReportV2Operator",
+        "airflow.providers.google.marketing_platform.operators.GoogleDisplayVideo360UploadLineItemsOperator",
+        "airflow.providers.google.marketing_platform.operators.GoogleDisplayVideo360DownloadLineItemsOperator",
         "airflow.providers.google.marketing_platform.sensors.GoogleDisplayVideo360RunQuerySensor",
+        "airflow.providers.google.cloud.operators.stackdriver.StackdriverListAlertPoliciesOperator",
+        "airflow.providers.google.cloud.operators.stackdriver.StackdriverEnableAlertPoliciesOperator",
+        "airflow.providers.google.cloud.operators.stackdriver.StackdriverDisableAlertPoliciesOperator",
+        "airflow.providers.google.cloud.operators.stackdriver.StackdriverUpsertAlertOperator",
+        "airflow.providers.google.cloud.operators.stackdriver.StackdriverDeleteAlertOperator",
+        "airflow.providers.google.cloud.operators.stackdriver.StackdriverListNotificationChannelsOperator",
+        "airflow.providers.google.cloud.operators.stackdriver.StackdriverEnableNotificationChannelsOperator",
+        "airflow.providers.google.cloud.operators.stackdriver.StackdriverDisableNotificationChannelsOperator",
+        "airflow.providers.google.cloud.operators.stackdriver.StackdriverUpsertNotificationChannelOperator",
+        "airflow.providers.google.cloud.operators.stackdriver.StackdriverDeleteNotificationChannelOperator",
     }
 
     BASE_CLASSES = {
@@ -471,7 +395,11 @@ class TestGoogleProviderProjectStructure(ExampleCoverageTest, AssetsCoverageTest
         "airflow.providers.google.cloud.operators.dataproc._DataprocStartStopClusterBaseOperator",
         "airflow.providers.google.cloud.operators.dataplex.DataplexCatalogBaseOperator",
         "airflow.providers.google.cloud.operators.managed_kafka.ManagedKafkaBaseOperator",
+        # Compatibility fallback for GKEPodExecOperator, not a standalone Google operator.
+        "airflow.providers.google.cloud.operators.kubernetes_engine.KubernetesPodExecOperator",
         "airflow.providers.google.cloud.operators.vertex_ai.custom_job.CustomTrainingJobBaseOperator",
+        "airflow.providers.google.cloud.operators.vertex_ai.ray.RayBaseOperator",
+        "airflow.providers.google.cloud.operators.ray.RayJobBaseOperator",
         "airflow.providers.google.cloud.operators.cloud_base.GoogleCloudBaseOperator",
         "airflow.providers.google.marketing_platform.operators.search_ads._GoogleSearchAdsBaseOperator",
     }
@@ -516,11 +444,6 @@ class TestGoogleProviderProjectStructure(ExampleCoverageTest, AssetsCoverageTest
         "airflow.providers.google.cloud.operators.cloud_storage_transfer_service."
         "CloudDataTransferServiceResumeOperationOperator",
         "airflow.providers.google.cloud.operators.compute.ComputeEngineBaseOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteEntryGroupOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteEntryOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteTagOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteTagTemplateFieldOperator",
-        "airflow.providers.google.cloud.operators.datacatalog.CloudDataCatalogDeleteTagTemplateOperator",
         "airflow.providers.google.cloud.operators.datafusion.CloudDataFusionDeleteInstanceOperator",
         "airflow.providers.google.cloud.operators.datafusion.CloudDataFusionDeletePipelineOperator",
         "airflow.providers.google.cloud.operators.dataproc.DataprocDeleteBatchOperator",
@@ -549,8 +472,8 @@ class TestGoogleProviderProjectStructure(ExampleCoverageTest, AssetsCoverageTest
         "airflow.providers.google.cloud.operators.pubsub.PubSubDeleteTopicOperator",
         "airflow.providers.google.cloud.operators.spanner.SpannerDeleteDatabaseInstanceOperator",
         "airflow.providers.google.cloud.operators.spanner.SpannerDeleteInstanceOperator",
-        "airflow.providers.google.cloud.operators.stackdriver.StackdriverDeleteAlertOperator",
-        "airflow.providers.google.cloud.operators.stackdriver.StackdriverDeleteNotificationChannelOperator",
+        "airflow.providers.google.cloud.operators.cloud_monitoring.CloudMonitoringDeleteAlertOperator",
+        "airflow.providers.google.cloud.operators.cloud_monitoring.CloudMonitoringDeleteNotificationChannelOperator",
         "airflow.providers.google.cloud.operators.tasks.CloudTasksQueueDeleteOperator",
         "airflow.providers.google.cloud.operators.tasks.CloudTasksTaskDeleteOperator",
         "airflow.providers.google.cloud.operators.translate.CloudTranslateTextOperator",
@@ -577,6 +500,9 @@ class TestAmazonProviderProjectStructure(ExampleCoverageTest):
 
     BASE_CLASSES = {
         "airflow.providers.amazon.aws.operators.base_aws.AwsBaseOperator",
+        # Compatibility fallback for EksPodExecOperator, not a standalone Amazon operator.
+        "airflow.providers.amazon.aws.operators.eks.KubernetesPodExecOperator",
+        "airflow.providers.amazon.aws.operators.glue_crawler._GlueCrawlerBaseOperator",
         "airflow.providers.amazon.aws.operators.rds.RdsBaseOperator",
         "airflow.providers.amazon.aws.operators.sagemaker.SageMakerBaseOperator",
         "airflow.providers.amazon.aws.sensors.base_aws.AwsBaseSensor",
@@ -596,8 +522,6 @@ class TestAmazonProviderProjectStructure(ExampleCoverageTest):
     }
 
     MISSING_EXAMPLES_FOR_CLASSES = {
-        # S3 Exasol transfer difficult to test, see: https://github.com/apache/airflow/issues/22632
-        "airflow.providers.amazon.aws.transfers.exasol_to_s3.ExasolToS3Operator",
         # These operations take a lot of time, there are commented out in the system tests for this reason
         "airflow.providers.amazon.aws.operators.dms.DmsStartReplicationOperator",
         "airflow.providers.amazon.aws.operators.dms.DmsStopReplicationOperator",
@@ -606,6 +530,7 @@ class TestAmazonProviderProjectStructure(ExampleCoverageTest):
     }
 
     DEPRECATED_CLASSES = {
+        "airflow.providers.amazon.aws.operators.glue_crawler.GlueCrawlerOperator",
         "airflow.providers.amazon.aws.operators.lambda_function.AwsLambdaInvokeFunctionOperator",
     }
 

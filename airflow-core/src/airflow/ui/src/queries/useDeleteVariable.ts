@@ -17,20 +17,28 @@
  * under the License.
  */
 import { useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 
 import { useVariableServiceDeleteVariable, useVariableServiceGetVariablesKey } from "openapi/queries";
-import { toaster } from "src/components/ui";
 
-const onError = () => {
-  toaster.create({
-    description: "Delete variable request failed.",
-    title: "Failed to delete the variable",
-    type: "error",
-  });
-};
+import { toaster } from "src/system-components";
+
+import { createErrorToaster } from "src/utils";
 
 export const useDeleteVariable = ({ onSuccessConfirm }: { onSuccessConfirm: () => void }) => {
   const queryClient = useQueryClient();
+  const { t: translate } = useTranslation(["common", "admin"]);
+
+  const onError = (error: unknown) => {
+    createErrorToaster(
+      error,
+      {
+        params: { resourceName: translate("admin:variables.variable_one") },
+        titleKey: "toaster.delete.error",
+      },
+      translate,
+    );
+  };
 
   const onSuccess = async () => {
     await queryClient.invalidateQueries({
@@ -38,8 +46,12 @@ export const useDeleteVariable = ({ onSuccessConfirm }: { onSuccessConfirm: () =
     });
 
     toaster.create({
-      description: "The variable key deletion request was successful.",
-      title: "Variable Deleted Successfully",
+      description: translate("toaster.delete.success.description", {
+        resourceName: translate("admin:variables.variable_one"),
+      }),
+      title: translate("toaster.delete.success.title", {
+        resourceName: translate("admin:variables.variable_one"),
+      }),
       type: "success",
     });
 

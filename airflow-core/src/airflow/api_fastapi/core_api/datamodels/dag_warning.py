@@ -17,23 +17,27 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 
+from pydantic import AliasPath, Field
+
 from airflow.api_fastapi.core_api.base import BaseModel
-from airflow.models.dagwarning import DagWarningType
+from airflow.models.dagwarning import DagWarningTypeValue
 
 
 class DAGWarningResponse(BaseModel):
-    """DAG Warning serializer for responses."""
+    """Dag Warning serializer for responses."""
 
     dag_id: str
-    warning_type: DagWarningType
+    warning_type: DagWarningTypeValue
     message: str
     timestamp: datetime
+    dag_display_name: str = Field(validation_alias=AliasPath("dag_model", "dag_display_name"))
 
 
 class DAGWarningCollectionResponse(BaseModel):
-    """DAG warning collection serializer for responses."""
+    """Dag warning collection serializer for responses."""
 
-    dag_warnings: list[DAGWarningResponse]
+    dag_warnings: Iterable[DAGWarningResponse]
     total_entries: int

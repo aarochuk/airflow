@@ -18,10 +18,10 @@
 from __future__ import annotations
 
 from functools import cached_property
-from typing import Any, Union
+from typing import Any, cast
 
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
-from azure.datalake.store import core, lib, multithread
+from azure.datalake.store import core, multithread
 from azure.identity import ClientSecretCredential, DefaultAzureCredential
 from azure.storage.filedatalake import (
     DataLakeDirectoryClient,
@@ -32,16 +32,14 @@ from azure.storage.filedatalake import (
     FileSystemProperties,
 )
 
-from airflow.exceptions import AirflowException
-from airflow.hooks.base import BaseHook
+from airflow.providers.common.compat.sdk import AirflowException, BaseHook
 from airflow.providers.microsoft.azure.utils import (
-    AzureIdentityCredentialAdapter,
     add_managed_identity_connection_widgets,
     get_field,
     get_sync_default_azure_credential,
 )
 
-Credentials = Union[ClientSecretCredential, AzureIdentityCredentialAdapter, DefaultAzureCredential]
+Credentials = ClientSecretCredential | DefaultAzureCredential
 
 
 class AzureDataLakeHook(BaseHook):
@@ -59,7 +57,7 @@ class AzureDataLakeHook(BaseHook):
     ``{"tenant": "<TENANT>", "account_name": "ACCOUNT_NAME"}``.
 
     :param azure_data_lake_conn_id: Reference to
-        :ref:`Azure Data Lake connection<howto/connection:adl>`.
+        :ref:`Azure Data Lake connection<howto/connection:azure_data_lake>`.
     """
 
     conn_name_attr = "azure_data_lake_conn_id"
@@ -123,11 +121,15 @@ class AzureDataLakeHook(BaseHook):
             credential: Credentials
             tenant = self._get_field(extras, "tenant")
             if tenant:
-                credential = lib.auth(tenant_id=tenant, client_secret=conn.password, client_id=conn.login)
+                credential = ClientSecretCredential(
+                    tenant_id=tenant,
+                    client_id=cast("str", conn.login),
+                    client_secret=cast("str", conn.password),
+                )
             else:
                 managed_identity_client_id = self._get_field(extras, "managed_identity_client_id")
                 workload_identity_tenant_id = self._get_field(extras, "workload_identity_tenant_id")
-                credential = AzureIdentityCredentialAdapter(
+                credential = get_sync_default_azure_credential(
                     managed_identity_client_id=managed_identity_client_id,
                     workload_identity_tenant_id=workload_identity_tenant_id,
                 )
@@ -239,8 +241,7 @@ class AzureDataLakeHook(BaseHook):
         """
         if "*" in path:
             return self.get_conn().glob(path)
-        else:
-            return self.get_conn().walk(path)
+        return self.get_conn().walk(path)
 
     def remove(self, path: str, recursive: bool = False, ignore_not_found: bool = True) -> None:
         """
@@ -280,7 +281,7 @@ class AzureDataLakeStorageV2Hook(BaseHook):
     conn_name_attr = "adls_conn_id"
     default_conn_name = "adls_default"
     conn_type = "adls"
-    hook_name = "Azure Date Lake Storage V2"
+    hook_name = "Azure Data Lake Storage V2"
 
     @classmethod
     @add_managed_identity_connection_widgets
@@ -339,7 +340,7 @@ class AzureDataLakeStorageV2Hook(BaseHook):
         """Return the DataLakeServiceClient object (cached)."""
         return self.get_conn()
 
-    def get_conn(self) -> DataLakeServiceClient:  # type: ignore[override]
+    def get_conn(self) -> DataLakeServiceClient:
         """Return the DataLakeServiceClient object."""
         conn = self.get_connection(self.conn_id)
         extra = conn.extra_dejson or {}
@@ -356,12 +357,13 @@ class AzureDataLakeStorageV2Hook(BaseHook):
             app_id = conn.login
             app_secret = conn.password
             proxies = extra.get("proxies", {})
-
+            app_id = cast("str", app_id)
+            app_secret = cast("str", app_secret)
             credential = ClientSecretCredential(
                 tenant_id=tenant, client_id=app_id, client_secret=app_secret, proxies=proxies
             )
         elif conn.password:
-            credential = conn.password
+            credential = conn.password  # type: ignore[assignment]
         else:
             managed_identity_client_id = self._get_field(extra, "managed_identity_client_id")
             workload_identity_tenant_id = self._get_field(extra, "workload_identity_tenant_id")
@@ -425,7 +427,7 @@ class AzureDataLakeStorageV2Hook(BaseHook):
         :param file_system_name: Name of the file system or instance of FileSystemProperties.
         :param directory_name: Name of the directory which needs to be created in the file system.
         """
-        result = self.get_file_system(file_system_name).create_directory(directory_name, kwargs)
+        result = self.get_file_system(file_system_name).create_directory(directory_name, **kwargs)
         return result
 
     def get_directory_client(
@@ -480,7 +482,7 @@ class AzureDataLakeStorageV2Hook(BaseHook):
         """
         file_client = self.create_file(file_system_name, file_name)
         with open(file_path, "rb") as data:
-            file_client.upload_data(data, overwrite=overwrite, kwargs=kwargs)
+            file_client.upload_data(data, overwrite=overwrite, **kwargs)
 
     def upload_file_to_directory(
         self,
@@ -501,9 +503,9 @@ class AzureDataLakeStorageV2Hook(BaseHook):
         :param overwrite: Boolean flag to overwrite an existing file or not.
         """
         directory_client = self.get_directory_client(file_system_name, directory_name=directory_name)
-        file_client = directory_client.create_file(file_name, kwargs=kwargs)
+        file_client = directory_client.create_file(file_name, **kwargs)
         with open(file_path, "rb") as data:
-            file_client.upload_data(data, overwrite=overwrite, kwargs=kwargs)
+            file_client.upload_data(data, overwrite=overwrite, **kwargs)
 
     def list_files_directory(
         self, file_system_name: FileSystemProperties | str, directory_name: str

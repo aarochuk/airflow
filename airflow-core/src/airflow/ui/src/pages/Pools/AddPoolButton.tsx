@@ -16,15 +16,18 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Heading, useDisclosure } from "@chakra-ui/react";
-import { FiPlusCircle } from "react-icons/fi";
+import { Button, useDisclosure } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
+import { MdAdd } from "react-icons/md";
 
-import { Button, Dialog, Toaster } from "src/components/ui";
+import { Modal, Toaster } from "src/system-components";
+
 import { useAddPool } from "src/queries/useAddPool";
 
 import PoolForm, { type PoolBody } from "./PoolForm";
 
 const AddPoolButton = () => {
+  const { t: translate } = useTranslation("admin");
   const { onClose, onOpen, open } = useDisclosure();
   const { addPool, error, isPending, setError } = useAddPool({
     onSuccessConfirm: onClose,
@@ -35,6 +38,7 @@ const AddPoolButton = () => {
     include_deferred: false,
     name: "",
     slots: 0,
+    team_name: "",
   };
 
   const handleClose = () => {
@@ -45,29 +49,19 @@ const AddPoolButton = () => {
   return (
     <>
       <Toaster />
-      <Button colorPalette="blue" onClick={onOpen}>
-        <FiPlusCircle /> Add Pool
+      <Button onClick={onOpen}>
+        <MdAdd /> {translate("pools.add")}
       </Button>
 
-      <Dialog.Root onOpenChange={handleClose} open={open} size="xl">
-        <Dialog.Content backdrop>
-          <Dialog.Header>
-            <Heading size="xl">Add Pool</Heading>
-          </Dialog.Header>
-
-          <Dialog.CloseTrigger />
-
-          <Dialog.Body>
-            <PoolForm
-              error={error}
-              initialPool={initialPoolValue}
-              isPending={isPending}
-              manageMutate={addPool}
-              setError={setError}
-            />
-          </Dialog.Body>
-        </Dialog.Content>
-      </Dialog.Root>
+      <Modal onOpenChange={handleClose} open={open} title={translate("pools.add")}>
+        <PoolForm
+          error={error}
+          initialPool={initialPoolValue}
+          isPending={isPending}
+          manageMutate={addPool}
+          setError={setError}
+        />
+      </Modal>
     </>
   );
 };

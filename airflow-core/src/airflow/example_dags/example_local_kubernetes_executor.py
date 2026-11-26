@@ -25,9 +25,8 @@ import logging
 from datetime import datetime
 
 from airflow.configuration import conf
-from airflow.decorators import task
 from airflow.example_dags.libs.helper import print_stuff
-from airflow.models.dag import DAG
+from airflow.sdk import DAG, task
 
 log = logging.getLogger(__name__)
 
@@ -39,15 +38,13 @@ try:
 except ImportError:
     log.warning("Could not import DAGs in example_local_kubernetes_executor.py", exc_info=True)
     log.warning("Install Kubernetes dependencies with: pip install apache-airflow[cncf.kubernetes]")
-    k8s = None
-
-if k8s:
+else:
     with DAG(
         dag_id="example_local_kubernetes_executor",
         schedule=None,
         start_date=datetime(2021, 1, 1),
         catchup=False,
-        tags=["example3"],
+        tags=["example", "example3"],
     ) as dag:
         # You can use annotations on your kubernetes pods!
         start_task_executor_config = {

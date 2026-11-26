@@ -35,25 +35,36 @@ from airflow.providers.google.cloud.operators.cloud_run import (
     CloudRunUpdateJobOperator,
 )
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT", "default")
 DAG_ID = "cloud_run"
 
-region = "us-central1"
+region = "europe-west1"
 job_name_prefix = "cloudrun-system-test-job"
-job1_name = f"{job_name_prefix}1-{ENV_ID}"
-job2_name = f"{job_name_prefix}2-{ENV_ID}"
-job3_name = f"{job_name_prefix}3-{ENV_ID}"
+job1_name = f"{job_name_prefix}1-{ENV_ID}".replace("_", "-")
+job2_name = f"{job_name_prefix}2-{ENV_ID}".replace("_", "-")
+job3_name = f"{job_name_prefix}3-{ENV_ID}".replace("_", "-")
+job4_name = f"{job_name_prefix}4-{ENV_ID}".replace("_", "-")
+job5_name = f"{job_name_prefix}5-{ENV_ID}".replace("_", "-")
 
 create1_task_name = "create-job1"
 create2_task_name = "create-job2"
 create3_task_name = "create-job3"
+create4_task_name = "create-job4"
+create5_task_name = "create-job5"
 
 execute1_task_name = "execute-job1"
 execute2_task_name = "execute-job2"
 execute3_task_name = "execute-job3"
+execute4_task_name = "execute-job4"
+execute5_task_name = "execute-job5"
 
 update_job1_task_name = "update-job1"
 
@@ -68,56 +79,61 @@ clean2_task_name = "clean-job2"
 
 
 def _assert_executed_jobs_xcom(ti):
-    job1_dicts = ti.xcom_pull(task_ids=[execute1_task_name], key="return_value")
-    assert job1_name in job1_dicts[0]["name"]
+    job1_dict = ti.xcom_pull(execute1_task_name)
+    assert job1_name in job1_dict["name"]
 
-    job2_dicts = ti.xcom_pull(task_ids=[execute2_task_name], key="return_value")
-    assert job2_name in job2_dicts[0]["name"]
+    job2_dict = ti.xcom_pull(execute2_task_name)
+    assert job2_name in job2_dict["name"]
 
-    job3_dicts = ti.xcom_pull(task_ids=[execute3_task_name], key="return_value")
-    assert job3_name in job3_dicts[0]["name"]
+    job3_dict = ti.xcom_pull(execute3_task_name)
+    assert job3_name in job3_dict["name"]
+
+    job4_dict = ti.xcom_pull(execute4_task_name)
+    assert job4_name in job4_dict["name"]
+
+    job5_dict = ti.xcom_pull(execute5_task_name)
+    assert job5_name in job5_dict["name"]
 
 
 def _assert_created_jobs_xcom(ti):
-    job1_dicts = ti.xcom_pull(task_ids=[create1_task_name], key="return_value")
-    assert job1_name in job1_dicts[0]["name"]
+    job1_dict = ti.xcom_pull(create1_task_name)
+    assert job1_name in job1_dict["name"]
 
-    job2_dicts = ti.xcom_pull(task_ids=[create2_task_name], key="return_value")
-    assert job2_name in job2_dicts[0]["name"]
+    job2_dict = ti.xcom_pull(create2_task_name)
+    assert job2_name in job2_dict["name"]
 
-    job3_dicts = ti.xcom_pull(task_ids=[create3_task_name], key="return_value")
-    assert job3_name in job3_dicts[0]["name"]
+    job3_dict = ti.xcom_pull(create3_task_name)
+    assert job3_name in job3_dict["name"]
+
+    job4_dict = ti.xcom_pull(create4_task_name)
+    assert job4_name in job4_dict["name"]
+
+    job5_dict = ti.xcom_pull(create5_task_name)
+    assert job5_name in job5_dict["name"]
 
 
 def _assert_updated_job(ti):
-    job_dicts = ti.xcom_pull(task_ids=[update_job1_task_name], key="return_value")
-    job_dict = job_dicts[0]
+    job_dict = ti.xcom_pull(update_job1_task_name)
     assert job_dict["labels"]["somelabel"] == "label1"
 
 
 def _assert_jobs(ti):
-    job_dicts = ti.xcom_pull(task_ids=[list_jobs_task_name], key="return_value")
+    job_list = ti.xcom_pull(list_jobs_task_name)
 
-    job1_exists = False
-    job2_exists = False
-
-    for job_dict in job_dicts[0]:
-        if job1_exists and job2_exists:
-            break
-
-        if job1_name in job_dict["name"]:
-            job1_exists = True
-
-        if job2_name in job_dict["name"]:
-            job2_exists = True
+    job1_exists = any(job1_name in job["name"] for job in job_list)
+    job2_exists = any(job2_name in job["name"] for job in job_list)
+    job4_exists = any(job4_name in job["name"] for job in job_list)
+    job5_exists = any(job5_name in job["name"] for job in job_list)
 
     assert job1_exists
     assert job2_exists
+    assert job4_exists
+    assert job5_exists
 
 
 def _assert_one_job(ti):
-    job_dicts = ti.xcom_pull(task_ids=[list_jobs_limit_task_name], key="return_value")
-    assert len(job_dicts[0]) == 1
+    job_list = ti.xcom_pull(list_jobs_limit_task_name)
+    assert len(job_list) == 1
 
 
 # [START howto_cloud_run_job_instance_creation]
@@ -218,6 +234,7 @@ with DAG(
         region=region,
         job_name=job1_name,
         job=_create_job_instance(),
+        use_regional_endpoint=False,
         dag=dag,
     )
     # [END howto_operator_cloud_run_create_job]
@@ -228,6 +245,7 @@ with DAG(
         region=region,
         job_name=job2_name,
         job=_create_job_dict(),
+        use_regional_endpoint=False,
         dag=dag,
     )
 
@@ -237,6 +255,25 @@ with DAG(
         region=region,
         job_name=job3_name,
         job=Job.to_dict(_create_job_instance()),
+        use_regional_endpoint=False,
+        dag=dag,
+    )
+
+    create4 = CloudRunCreateJobOperator(
+        task_id=create4_task_name,
+        project_id=PROJECT_ID,
+        region=region,
+        job_name=job4_name,
+        job=_create_job_dict(),
+        dag=dag,
+    )
+
+    create5 = CloudRunCreateJobOperator(
+        task_id=create5_task_name,
+        project_id=PROJECT_ID,
+        region=region,
+        job_name=job5_name,
+        job=_create_job_dict(),
         dag=dag,
     )
 
@@ -290,6 +327,26 @@ with DAG(
         deferrable=False,
     )
     # [END howto_operator_cloud_run_execute_job_with_overrides]
+
+    execute4 = CloudRunExecuteJobOperator(
+        task_id=execute4_task_name,
+        project_id=PROJECT_ID,
+        region=region,
+        job_name=job4_name,
+        dag=dag,
+        deferrable=False,
+        transport="rest",
+    )
+
+    execute5 = CloudRunExecuteJobOperator(
+        task_id=execute5_task_name,
+        project_id=PROJECT_ID,
+        region=region,
+        job_name=job5_name,
+        dag=dag,
+        deferrable=True,
+        transport="rest",
+    )
 
     assert_executed_jobs = PythonOperator(
         task_id="assert-executed-jobs", python_callable=_assert_executed_jobs_xcom, dag=dag
@@ -353,10 +410,28 @@ with DAG(
         trigger_rule=TriggerRule.ALL_DONE,
     )
 
+    delete_job4 = CloudRunDeleteJobOperator(
+        task_id="delete-job4",
+        project_id=PROJECT_ID,
+        region=region,
+        job_name=job4_name,
+        dag=dag,
+        trigger_rule=TriggerRule.ALL_DONE,
+    )
+
+    delete_job5 = CloudRunDeleteJobOperator(
+        task_id="delete-job5",
+        project_id=PROJECT_ID,
+        region=region,
+        job_name=job5_name,
+        dag=dag,
+        trigger_rule=TriggerRule.ALL_DONE,
+    )
+
     (
-        (create1, create2, create3)
+        (create1, create2, create3, create4, create5)
         >> assert_created_jobs
-        >> (execute1, execute2, execute3)
+        >> (execute1, execute2, execute3, execute4, execute5)
         >> assert_executed_jobs
         >> list_jobs_limit
         >> assert_jobs_limit
@@ -364,7 +439,7 @@ with DAG(
         >> assert_jobs
         >> update_job1
         >> assert_job_updated
-        >> (delete_job1, delete_job2, delete_job3)
+        >> (delete_job1, delete_job2, delete_job3, delete_job4, delete_job5)
     )
 
     from tests_common.test_utils.watcher import watcher
@@ -375,5 +450,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

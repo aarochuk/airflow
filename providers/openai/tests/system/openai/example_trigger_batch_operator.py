@@ -18,7 +18,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from airflow.decorators import dag, task
+try:
+    from airflow.sdk import dag, task
+except ImportError:
+    # Airflow 2 path
+    from airflow.decorators import dag, task  # type: ignore[attr-defined,no-redef]
 
 OPENAI_CONN_ID = "openai_default"
 
@@ -58,7 +62,7 @@ def openai_batch_chat_completions():
             url: Literal["/v1/chat/completions"]
             body: RequestBody
 
-        model = "gpt-4o-mini"
+        model = "gpt-6-luna"
         max_tokens = 1000
         hook = OpenAIHook(conn_id=OPENAI_CONN_ID)
         with tempfile.NamedTemporaryFile(mode="w", delete=False) as file:
@@ -113,5 +117,5 @@ openai_batch_chat_completions()
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

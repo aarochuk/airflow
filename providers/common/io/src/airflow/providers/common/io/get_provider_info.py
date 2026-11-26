@@ -25,29 +25,15 @@ def get_provider_info():
     return {
         "package-name": "apache-airflow-providers-common-io",
         "name": "Common IO",
-        "description": "``Common IO Provider``\n",
-        "state": "ready",
-        "source-date-epoch": 1743477801,
-        "versions": [
-            "1.5.2",
-            "1.5.1",
-            "1.5.0",
-            "1.4.2",
-            "1.4.1",
-            "1.4.0",
-            "1.3.2",
-            "1.3.1",
-            "1.3.0",
-            "1.2.0",
-            "1.1.0",
-            "1.0.1",
-            "1.0.0",
-        ],
+        "description": "Common IO Provider\n",
         "integrations": [
             {
                 "integration-name": "Common IO",
                 "external-doc-url": "https://filesystem-spec.readthedocs.io/en/latest/index.html",
-                "how-to-guide": ["/docs/apache-airflow-providers-common-io/operators.rst"],
+                "how-to-guide": [
+                    "/docs/apache-airflow-providers-common-io/operators.rst",
+                    "/docs/apache-airflow-providers-common-io/transfer.rst",
+                ],
                 "tags": ["software"],
             }
         ],
@@ -57,7 +43,6 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.common.io.operators.file_transfer"],
             }
         ],
-        "xcom": ["airflow.providers.common.io.xcom.backend"],
         "asset-uris": [
             {
                 "schemes": ["file"],
@@ -79,7 +64,7 @@ def get_provider_info():
                 "description": "Common IO configuration section",
                 "options": {
                     "xcom_objectstorage_path": {
-                        "description": "Path to a location on object storage where XComs can be stored in url format.\n",
+                        "description": "Path to a location on object storage where XComs can be stored in url format.\nMust include a URL scheme when ``xcom_objectstorage_threshold`` is 0 or higher;\nuse ``file:///path/to/xcom`` for local storage.\n",
                         "version_added": "1.3.0",
                         "type": "string",
                         "example": "s3://conn_id@bucket/path",
@@ -99,13 +84,28 @@ def get_provider_info():
                         "example": "gz",
                         "default": "",
                     },
+                    "state_store_objectstorage_path": {
+                        "description": "Base path on object storage for the task/asset state store backend, in URL format.\nWhen set, StateStoreObjectStorageBackend will persist task and asset state under this\nprefix, organized as <dag_id>/<run_id>/[region=<region_id>/]<task_id>/<region_index>/<key>\nfor tasks and assets/<asset_identifier>/<key> for assets.\nMust include a URL scheme; use ``file:///path/to/task-state`` for local storage.\n",
+                        "version_added": "1.8.0",
+                        "type": "string",
+                        "example": "s3://conn_id@bucket/task-state/",
+                        "default": "",
+                    },
+                    "state_store_objectstorage_threshold": {
+                        "description": "Threshold in bytes for offloading serialized state store values to object storage. 0 means\nalways offload to object storage. Any positive number means values will be offloaded\nonly when their serialized size is at least that many bytes. Must be non-negative.\n",
+                        "version_added": "1.8.0",
+                        "type": "integer",
+                        "example": "1000000",
+                        "default": "0",
+                    },
+                    "state_store_objectstorage_compression": {
+                        "description": "Compression algorithm to use when writing task/asset state store values to object storage.\nSupported algorithms are a.o.: ``gzip``, ``bz2``, ``lzma``, and ``xz``. If not specified,\nno compression will be used. The same algorithm must be available on all workers.\n",
+                        "version_added": "1.8.0",
+                        "type": "string",
+                        "example": "gzip",
+                        "default": "",
+                    },
                 },
             }
         },
-        "dependencies": ["apache-airflow>=2.9.0"],
-        "optional-dependencies": {
-            "common.compat": ["apache-airflow-providers-common-compat"],
-            "openlineage": ["apache-airflow-providers-openlineage"],
-        },
-        "devel-dependencies": [],
     }

@@ -21,20 +21,23 @@ from datetime import datetime, timedelta
 from unittest import mock
 
 import pytest
+from cachetools import TTLCache
 from flask.sessions import SecureCookieSessionInterface
-from flask_appbuilder import SQLA
+from sqlalchemy import delete, func, select
 
-from airflow import settings
+from airflow.api_fastapi.app import get_auth_manager
+from airflow.providers.fab.auth_manager.fab_auth_manager import FabAuthManager
+from airflow.providers.fab.auth_manager.security_manager.override import FabAirflowSecurityManagerOverride
 from airflow.providers.fab.www import app as application
 from airflow.providers.fab.www.security import permissions
 
 from tests_common.test_utils.config import conf_vars
-from unit.fab.auth_manager.api_endpoints.api_connexion_utils import (
+from unit.fab.auth_manager.test_utils import (
     create_user,
     delete_role,
     delete_user,
 )
-from unit.fab.utils import check_content_in_response, client_with_login
+from unit.fab.utils import check_content_in_response, check_content_not_in_response, client_with_login
 
 pytestmark = pytest.mark.db_test
 
@@ -62,46 +65,53 @@ PERMISSIONS_TESTS_PARAMS = [
 ]
 
 
+def delete_roles(app):
+    for role_name in ["role_edit_one_dag"]:
+        delete_role(app, role_name)
+
+
+@pytest.fixture
+def app():
+    with conf_vars(
+        {
+            (
+                "core",
+                "auth_manager",
+            ): "airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager",
+        }
+    ):
+        app = application.create_app(enable_plugins=False)
+        app.config["WTF_CSRF_ENABLED"] = False
+        try:
+            yield app
+        finally:
+            # flask_sqlalchemy creates a per-app engine in init_app(); a
+            # function-scoped app fixture without disposal would leak that
+            # engine's connection pool every test.
+            with app.app_context():
+                for fab_engine in app.extensions["sqlalchemy"].engines.values():
+                    fab_engine.dispose()
+
+
+@pytest.fixture
+def client(app):
+    return app.test_client()
+
+
 class TestSecurity:
-    @classmethod
-    def setup_class(cls):
-        settings.configure_orm()
-        cls.session = settings.Session
+    @pytest.fixture(autouse=True)
+    def app_context(self, app):
+        with app.app_context():
+            delete_roles(app)
+            yield
+            delete_user(app, "no_access")
+            delete_user(app, "has_access")
+            delete_user(app, "test_new_user")
 
-    def setup_method(self):
-        # We cannot reuse the app in tests (on class level) as in Flask 2.2 this causes
-        # an exception because app context teardown is removed and if even single request is run via app
-        # it cannot be re-intialized again by passing it as constructor to SQLA
-        # This makes the tests slightly slower (but they work with Flask 2.1 and 2.2
-        with conf_vars(
-            {
-                (
-                    "core",
-                    "auth_manager",
-                ): "airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager",
-            }
-        ):
-            self.app = application.create_app(enable_plugins=False)
-        self.appbuilder = self.app.appbuilder
-        self.app.config["WTF_CSRF_ENABLED"] = False
-        self.security_manager = self.appbuilder.sm
-        self.delete_roles()
-        self.db = SQLA(self.app)
-
-        self.client = self.app.test_client()  # type:ignore
-
-    def teardown_method(self):
-        delete_user(self.app, "no_access")
-        delete_user(self.app, "has_access")
-
-    def delete_roles(self):
-        for role_name in ["role_edit_one_dag"]:
-            delete_role(self.app, role_name)
-
-    @pytest.mark.parametrize("url, _, expected_text", PERMISSIONS_TESTS_PARAMS)
-    def test_user_model_view_without_access(self, url, expected_text, _):
+    @pytest.mark.parametrize(("url", "_", "expected_text"), PERMISSIONS_TESTS_PARAMS)
+    def test_user_model_view_without_access(self, url, expected_text, _, app, client):
         user_without_access = create_user(
-            self.app,
+            app,
             username="no_access",
             role_name="role_no_access",
             permissions=[
@@ -109,7 +119,7 @@ class TestSecurity:
             ],
         )
         client = client_with_login(
-            self.app,
+            app,
             username="no_access",
             password="no_access",
         )
@@ -117,32 +127,104 @@ class TestSecurity:
         assert response.status_code == 302
         assert response.location.startswith("/login/")
 
-    @pytest.mark.parametrize("url, permission, expected_text", PERMISSIONS_TESTS_PARAMS)
-    def test_user_model_view_with_access(self, url, permission, expected_text):
+    @pytest.mark.parametrize(("url", "permission", "expected_text"), PERMISSIONS_TESTS_PARAMS)
+    def test_user_model_view_with_access(self, url, permission, expected_text, app, client):
         user_with_access = create_user(
-            self.app,
+            app,
             username="has_access",
             role_name="role_has_access",
             permissions=[(permissions.ACTION_CAN_READ, permissions.RESOURCE_WEBSITE), permission],
         )
 
         client = client_with_login(
-            self.app,
+            app,
             username="has_access",
             password="has_access",
         )
         response = client.get(url.replace("{user.id}", str(user_with_access.id)), follow_redirects=True)
         check_content_in_response(expected_text, response)
 
-    def test_user_model_view_without_delete_access(self):
+    def test_user_edit_view_shows_reset_password_action_with_access(self, app, client):
+        # Visibility of the action link is gated on "read" access to Users (the same
+        # rule the Show User view relies on); "read" on Passwords is what's required to
+        # actually perform the reset once the link is followed.
+        user_with_access = create_user(
+            app,
+            username="has_access",
+            role_name="role_has_access",
+            permissions=[
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_WEBSITE),
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_USER),
+                (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_USER),
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_PASSWORD),
+            ],
+        )
+        client = client_with_login(
+            app,
+            username="has_access",
+            password="has_access",
+        )
+        response = client.get(f"/users/edit/{user_with_access.id}", follow_redirects=True)
+        check_content_in_response("Reset Password", response)
+
+        response = client.post(f"/users/action/resetpasswords/{user_with_access.id}", follow_redirects=False)
+        assert response.status_code == 302
+        assert "/resetpassword/form" in response.location
+
+    def test_user_edit_view_hides_reset_password_action_without_access(self, app, client):
+        # No "read" access to Users means the action link is not visible, even though
+        # the user can still reach the edit page via "edit" access to Users.
+        user_with_access = create_user(
+            app,
+            username="has_access",
+            role_name="role_has_access",
+            permissions=[
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_WEBSITE),
+                (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_USER),
+            ],
+        )
+        client = client_with_login(
+            app,
+            username="has_access",
+            password="has_access",
+        )
+        response = client.get(f"/users/edit/{user_with_access.id}", follow_redirects=True)
+        check_content_not_in_response("Reset Password", response)
+
+    def test_user_edit_view_shows_reset_password_action_without_passwords_read_access(self, app, client):
+        # The link's visibility follows "read" on Users, not "read" on Passwords, so a user
+        # without the latter still sees the link, while following it is refused.
+        user_with_access = create_user(
+            app,
+            username="has_access",
+            role_name="role_has_access",
+            permissions=[
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_WEBSITE),
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_USER),
+                (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_USER),
+            ],
+        )
+        client = client_with_login(
+            app,
+            username="has_access",
+            password="has_access",
+        )
+        response = client.get(f"/users/edit/{user_with_access.id}", follow_redirects=True)
+        check_content_in_response("Reset Password", response)
+
+        response = client.post(f"/users/action/resetpasswords/{user_with_access.id}", follow_redirects=False)
+        assert response.status_code == 302
+        assert "resetpassword" not in response.location
+
+    def test_user_model_view_without_delete_access(self, app, client):
         user_to_delete = create_user(
-            self.app,
+            app,
             username="user_to_delete",
             role_name="user_to_delete",
         )
 
         create_user(
-            self.app,
+            app,
             username="no_access",
             role_name="role_no_access",
             permissions=[
@@ -151,7 +233,7 @@ class TestSecurity:
         )
 
         client = client_with_login(
-            self.app,
+            app,
             username="no_access",
             password="no_access",
         )
@@ -159,17 +241,17 @@ class TestSecurity:
         response = client.post(f"/users/delete/{user_to_delete.id}", follow_redirects=False)
         assert response.status_code == 302
         assert response.location.startswith("/login/")
-        assert bool(self.security_manager.get_user_by_id(user_to_delete.id)) is True
+        assert bool(get_auth_manager().security_manager.get_user_by_id(user_to_delete.id)) is True
 
-    def test_user_model_view_with_delete_access(self):
+    def test_user_model_view_with_delete_access(self, app, client):
         user_to_delete = create_user(
-            self.app,
+            app,
             username="user_to_delete",
             role_name="user_to_delete",
         )
 
         create_user(
-            self.app,
+            app,
             username="has_access",
             role_name="role_has_access",
             permissions=[
@@ -179,72 +261,134 @@ class TestSecurity:
         )
 
         client = client_with_login(
-            self.app,
+            app,
             username="has_access",
             password="has_access",
         )
 
         client.post(f"/users/delete/{user_to_delete.id}", follow_redirects=False)
-        assert bool(self.security_manager.get_user_by_id(user_to_delete.id)) is False
+        assert bool(get_auth_manager().security_manager.get_user_by_id(user_to_delete.id)) is False
+
+    def test_user_creation_without_role_shows_validation_error(self, app, client):
+        """Regression test for https://github.com/apache/airflow/issues/59963"""
+        create_user(
+            app,
+            username="has_access",
+            role_name="role_has_access",
+            permissions=[
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_WEBSITE),
+                (permissions.ACTION_CAN_CREATE, permissions.RESOURCE_USER),
+            ],
+        )
+
+        client = client_with_login(
+            app,
+            username="has_access",
+            password="has_access",
+        )
+
+        response = client.post(
+            "/users/add",
+            data={
+                "first_name": "Test",
+                "last_name": "User",
+                "username": "test_new_user",
+                "email": "test_new_user@example.com",
+                "password": "test_password",
+                "conf_password": "test_password",
+                "active": "y",
+            },
+            follow_redirects=True,
+        )
+
+        assert response.status_code == 200
+        check_content_in_response("This field is required", response)
+
+    @pytest.mark.parametrize(
+        ("action", "error"),
+        [
+            pytest.param("edit", "is not active", id="deactivate"),
+            pytest.param("delete", "not found", id="delete"),
+        ],
+    )
+    @mock.patch.object(FabAuthManager, "cache", new_callable=lambda: TTLCache(maxsize=8, ttl=60))
+    def test_user_change_ends_tokens_cached_before_it(self, cache, action, error, app):
+        create_user(
+            app,
+            username="has_access",
+            role_name="role_has_access",
+            permissions=[
+                (permissions.ACTION_CAN_READ, permissions.RESOURCE_WEBSITE),
+                (permissions.ACTION_CAN_EDIT, permissions.RESOURCE_USER),
+                (permissions.ACTION_CAN_DELETE, permissions.RESOURCE_USER),
+            ],
+        )
+        user = create_user(app, username="test_new_user", role_name="role_test_new_user")
+        auth_manager = get_auth_manager()
+        token = auth_manager.serialize_user(user)
+        auth_manager.deserialize_user(token)
+        assert user.id in cache
+        client = client_with_login(app, username="has_access", password="has_access")
+
+        if action == "edit":
+            # The unchecked "active" box is left out of the form, which deactivates the user.
+            client.post(
+                f"/users/edit/{user.id}",
+                data={
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "username": user.username,
+                    "email": user.email,
+                    "roles": str(user.roles[0].id),
+                },
+            )
+        else:
+            client.post(f"/users/delete/{user.id}")
+
+        with pytest.raises(ValueError, match=error):
+            auth_manager.deserialize_user(token)
 
 
 class TestResetUserSessions:
-    @classmethod
-    def setup_class(cls):
-        settings.configure_orm()
-
-    def setup_method(self):
-        # We cannot reuse the app in tests (on class level) as in Flask 2.2 this causes
-        # an exception because app context teardown is removed and if even single request is run via app
-        # it cannot be re-intialized again by passing it as constructor to SQLA
-        # This makes the tests slightly slower (but they work with Flask 2.1 and 2.2
-        with conf_vars(
-            {
-                (
-                    "core",
-                    "auth_manager",
-                ): "airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager",
-            }
-        ):
-            self.app = application.create_app(enable_plugins=False)
-        self.appbuilder = self.app.appbuilder
-        self.app.config["WTF_CSRF_ENABLED"] = False
-        self.security_manager = self.appbuilder.sm
-        self.interface = self.app.session_interface
+    @pytest.fixture(autouse=True)
+    def app_context(self, app):
+        self.app = app
+        self.session = app.appbuilder.session
+        self.security_manager = app.appbuilder.sm
+        self.interface = app.session_interface
         self.model = self.interface.sql_session_model
         self.serializer = self.interface.serializer
-        self.db = self.interface.db
-        self.db.session.query(self.model).delete()
-        self.db.session.commit()
-        self.db.session.flush()
-        self.user_1 = create_user(
-            self.app,
-            username="user_to_delete_1",
-            role_name="user_to_delete",
-        )
-        self.user_2 = create_user(
-            self.app,
-            username="user_to_delete_2",
-            role_name="user_to_delete",
-        )
-        self.db.session.commit()
-        self.db.session.flush()
+        with app.app_context():
+            self.session.execute(delete(self.model))
+            self.session.commit()
+            self.session.flush()
+            self.user_1 = create_user(
+                app,
+                username="user_to_delete_1",
+                role_name="user_to_delete",
+            )
+            self.user_2 = create_user(
+                app,
+                username="user_to_delete_2",
+                role_name="user_to_delete",
+            )
+            self.session.commit()
+            self.session.flush()
+            yield
+            delete_user(app, "user_to_delete_1")
+            delete_user(app, "user_to_delete_2")
 
-    def teardown_method(self):
-        delete_user(self.app, "user_to_delete_1")
-        delete_user(self.app, "user_to_delete_2")
-
-    def create_user_db_session(self, session_id: str, time_delta: timedelta, user_id: int):
-        self.db.session.add(
+    def create_user_db_session(self, session_id: str, time_delta: timedelta, user_id: str | int):
+        self.session.add(
             self.model(
                 session_id=session_id,
-                data=self.serializer.dumps({"_user_id": user_id}),
+                data=self.serializer.encode({"_user_id": user_id}),
                 expiry=datetime.now() + time_delta,
             )
         )
 
     @pytest.mark.parametrize(
-        "time_delta, user_sessions_deleted",
+        ("time_delta", "user_sessions_deleted"),
         [
             pytest.param(timedelta(days=-1), True, id="Both expired"),
             pytest.param(timedelta(hours=1), True, id="Both fresh"),
@@ -252,26 +396,61 @@ class TestResetUserSessions:
         ],
     )
     def test_reset_user_sessions_delete(self, time_delta: timedelta, user_sessions_deleted: bool):
-        self.create_user_db_session("session_id_1", time_delta, self.user_1.id)
-        self.create_user_db_session("session_id_2", time_delta, self.user_2.id)
-        self.db.session.commit()
-        self.db.session.flush()
-        assert self.db.session.query(self.model).count() == 2
+        self.create_user_db_session("session_id_1", time_delta, self.user_1.get_id())
+        self.create_user_db_session("session_id_2", time_delta, self.user_2.get_id())
+        self.session.commit()
+        self.session.flush()
+        assert self.session.scalar(select(func.count()).select_from(self.model)) == 2
         assert self.get_session_by_id("session_id_1") is not None
         assert self.get_session_by_id("session_id_2") is not None
 
-        self.security_manager.reset_password(self.user_1.id, "new_password")
-        self.db.session.commit()
-        self.db.session.flush()
+        with self.app.app_context():
+            self.security_manager.reset_password(self.user_1.id, "new_password")
+        self.session.commit()
+        self.session.flush()
         if user_sessions_deleted:
-            assert self.db.session.query(self.model).count() == 1
+            assert self.session.scalar(select(func.count()).select_from(self.model)) == 1
             assert self.get_session_by_id("session_id_1") is None
         else:
-            assert self.db.session.query(self.model).count() == 2
+            assert self.session.scalar(select(func.count()).select_from(self.model)) == 2
             assert self.get_session_by_id("session_id_1") is not None
 
+    def test_reset_user_sessions_delete_legacy_integer_user_id(self):
+        """Sessions written before ``get_id()`` returned a string stored an int."""
+        self.create_user_db_session("session_id_1", timedelta(days=1), self.user_1.id)
+        self.create_user_db_session("session_id_2", timedelta(days=1), self.user_2.id)
+        self.session.commit()
+        self.session.flush()
+
+        with self.app.app_context():
+            self.security_manager.reset_password(self.user_1.id, "new_password")
+        self.session.commit()
+        self.session.flush()
+
+        assert self.get_session_by_id("session_id_1") is None
+        assert self.get_session_by_id("session_id_2") is not None
+
+    def test_reset_user_sessions_ignores_sessions_without_user_id(self):
+        """A session row with no ``_user_id`` must not raise and must not be deleted."""
+        self.session.add(
+            self.model(
+                session_id="session_id_anon",
+                data=self.serializer.encode({}),
+                expiry=datetime.now() + timedelta(days=1),
+            )
+        )
+        self.session.commit()
+        self.session.flush()
+
+        with self.app.app_context():
+            self.security_manager.reset_password(self.user_1.id, "new_password")
+        self.session.commit()
+        self.session.flush()
+
+        assert self.get_session_by_id("session_id_anon") is not None
+
     def get_session_by_id(self, session_id: str):
-        return self.db.session.query(self.model).filter(self.model.session_id == session_id).scalar()
+        return self.session.scalar(select(self.model).where(self.model.session_id == session_id))
 
     @mock.patch("airflow.providers.fab.auth_manager.security_manager.override.flash")
     @mock.patch(
@@ -281,64 +460,51 @@ class TestResetUserSessions:
         "airflow.providers.fab.auth_manager.security_manager.override.MAX_NUM_DATABASE_USER_SESSIONS", 1
     )
     def test_refuse_delete(self, _mock_has_context, flash_mock):
-        self.create_user_db_session("session_id_1", timedelta(days=1), self.user_1.id)
-        self.create_user_db_session("session_id_2", timedelta(days=1), self.user_2.id)
-        self.db.session.commit()
-        self.db.session.flush()
-        assert self.db.session.query(self.model).count() == 2
+        self.create_user_db_session("session_id_1", timedelta(days=1), self.user_1.get_id())
+        self.create_user_db_session("session_id_2", timedelta(days=1), self.user_2.get_id())
+        self.session.commit()
+        self.session.flush()
+        assert self.session.scalar(select(func.count()).select_from(self.model)) == 2
         assert self.get_session_by_id("session_id_1") is not None
         assert self.get_session_by_id("session_id_2") is not None
-        self.security_manager.reset_password(self.user_1.id, "new_password")
+        with self.app.app_context():
+            self.security_manager.reset_password(self.user_1.id, "new_password")
         assert flash_mock.called
         assert (
             "The old sessions for user user_to_delete_1 have <b>NOT</b> been deleted!"
             in flash_mock.call_args[0][0]
         )
-        assert self.db.session.query(self.model).count() == 2
+        assert self.session.scalar(select(func.count()).select_from(self.model)) == 2
         assert self.get_session_by_id("session_id_1") is not None
         assert self.get_session_by_id("session_id_2") is not None
 
-    @mock.patch("airflow.providers.fab.auth_manager.security_manager.override.flash")
-    @mock.patch(
-        "airflow.providers.fab.auth_manager.security_manager.override.has_request_context", return_value=True
-    )
-    def test_warn_securecookie(self, _mock_has_context, flash_mock):
+    @mock.patch.object(FabAirflowSecurityManagerOverride, "_cli_safe_flash", autospec=True)
+    def test_no_warning_with_securecookie(self, cli_safe_flash):
+        """Sessions from before the reset end on their next request, whatever the session backend."""
         self.app.session_interface = SecureCookieSessionInterface()
-        self.security_manager.reset_password(self.user_1.id, "new_password")
-        assert flash_mock.called
-        assert (
-            "Since you are using `securecookie` session backend mechanism, we cannot"
-            in flash_mock.call_args[0][0]
-        )
+        with self.app.app_context():
+            assert self.security_manager.reset_password(self.user_1.id, "new_password")
+        cli_safe_flash.assert_not_called()
 
     @mock.patch("airflow.providers.fab.auth_manager.security_manager.override.log")
     @mock.patch(
         "airflow.providers.fab.auth_manager.security_manager.override.MAX_NUM_DATABASE_USER_SESSIONS", 1
     )
     def test_refuse_delete_cli(self, log_mock):
-        self.create_user_db_session("session_id_1", timedelta(days=1), self.user_1.id)
-        self.create_user_db_session("session_id_2", timedelta(days=1), self.user_2.id)
-        self.db.session.commit()
-        self.db.session.flush()
-        assert self.db.session.query(self.model).count() == 2
+        self.create_user_db_session("session_id_1", timedelta(days=1), self.user_1.get_id())
+        self.create_user_db_session("session_id_2", timedelta(days=1), self.user_2.get_id())
+        self.session.commit()
+        self.session.flush()
+        assert self.session.scalar(select(func.count()).select_from(self.model)) == 2
         assert self.get_session_by_id("session_id_1") is not None
         assert self.get_session_by_id("session_id_2") is not None
-        self.security_manager.reset_password(self.user_1.id, "new_password")
+        with self.app.app_context():
+            self.security_manager.reset_password(self.user_1.id, "new_password")
         assert log_mock.warning.called
         assert (
             "The old sessions for user user_to_delete_1 have *NOT* been deleted!\n"
             in log_mock.warning.call_args[0][0]
         )
-        assert self.db.session.query(self.model).count() == 2
+        assert self.session.scalar(select(func.count()).select_from(self.model)) == 2
         assert self.get_session_by_id("session_id_1") is not None
         assert self.get_session_by_id("session_id_2") is not None
-
-    @mock.patch("airflow.providers.fab.auth_manager.security_manager.override.log")
-    def test_warn_securecookie_cli(self, log_mock):
-        self.app.session_interface = SecureCookieSessionInterface()
-        self.security_manager.reset_password(self.user_1.id, "new_password")
-        assert log_mock.warning.called
-        assert (
-            "Since you are using `securecookie` session backend mechanism, we cannot"
-            in log_mock.warning.call_args[0][0]
-        )

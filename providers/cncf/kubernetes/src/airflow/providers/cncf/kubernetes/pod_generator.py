@@ -31,10 +31,10 @@ import os
 import re
 import warnings
 from functools import reduce
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from dateutil import parser
-from kubernetes.client import V1EmptyDirVolumeSource, V1Volume, V1VolumeMount, models as k8s
+from kubernetes.client import Configuration, models as k8s
 from kubernetes.client.api_client import ApiClient
 
 from airflow.exceptions import (
@@ -46,6 +46,7 @@ from airflow.providers.cncf.kubernetes.kubernetes_helper_functions import (
     POD_NAME_MAX_LENGTH,
     add_unique_suffix,
 )
+from airflow.providers.cncf.kubernetes.version_compat import AIRFLOW_V_3_0_PLUS
 from airflow.utils import yaml
 from airflow.utils.hashlib_wrapper import md5
 from airflow.version import version as airflow_version
@@ -53,9 +54,47 @@ from airflow.version import version as airflow_version
 if TYPE_CHECKING:
     import datetime
 
+    from airflow.executors import workloads
+    from airflow.models.taskinstance import TaskInstance
+
 log = logging.getLogger(__name__)
 
 MAX_LABEL_LEN = 63
+
+
+def workload_to_command_args(workload: workloads.ExecuteTask) -> list[str]:
+    """
+    Convert a workload object to Task SDK command arguments.
+
+    :param workload: The ExecuteTask workload to convert
+    :return: List of command arguments for the Task SDK
+    """
+    ser_input = workload.model_dump_json()
+    return [
+        "python",
+        "-m",
+        "airflow.sdk.execution_time.execute_workload",
+        "--json-string",
+        ser_input,
+    ]
+
+
+def generate_pod_command_args(task_instance: TaskInstance) -> list[str]:
+    """
+    Generate command arguments for a ``TaskInstance`` to be used in a Kubernetes pod.
+
+    This function handles backwards compatibility between Airflow 2.x and 3.x:
+    - In Airflow 2.x: Uses the existing ``command_as_list()`` method
+    - In Airflow 3.x: Uses the Task SDK workload approach with serialized workload
+    """
+    if AIRFLOW_V_3_0_PLUS:
+        # In Airflow 3+, use the Task SDK workload approach
+        from airflow.executors import workloads
+
+        workload = workloads.ExecuteTask.make(task_instance)
+        return workload_to_command_args(workload)
+    # In Airflow 2.x, use the existing method
+    return task_instance.command_as_list()
 
 
 def make_safe_label_value(string: str) -> str:
@@ -136,13 +175,13 @@ class PodGenerator:
         if pod_template_file:
             self.ud_pod = self.deserialize_model_file(pod_template_file)
         else:
-            self.ud_pod = pod
+            self.ud_pod = cast("k8s.V1Pod", pod)
 
         # Attach sidecar
         self.extract_xcom = extract_xcom
 
     @staticmethod
-    def from_obj(obj) -> dict | k8s.V1Pod | None:
+    def from_obj(obj) -> k8s.V1Pod | None:
         """Convert to pod from obj."""
         if obj is None:
             return None
@@ -162,10 +201,9 @@ class PodGenerator:
 
         if isinstance(k8s_object, k8s.V1Pod):
             return k8s_object
-        else:
-            raise TypeError(
-                "Cannot convert a non-kubernetes.client.models.V1Pod object into a KubernetesExecutorConfig"
-            )
+        raise TypeError(
+            "Cannot convert a non-kubernetes.client.models.V1Pod object into a KubernetesExecutorConfig"
+        )
 
     @staticmethod
     def reconcile_pods(base_pod: k8s.V1Pod, client_pod: k8s.V1Pod | None) -> k8s.V1Pod:
@@ -203,7 +241,7 @@ class PodGenerator:
             return base_meta
         if not base_meta and client_meta:
             return client_meta
-        elif client_meta and base_meta:
+        if client_meta and base_meta:
             client_meta.labels = merge_objects(base_meta.labels, client_meta.labels)
             client_meta.annotations = merge_objects(base_meta.annotations, client_meta.annotations)
             extend_object_field(base_meta, client_meta, "managed_fields")
@@ -229,11 +267,15 @@ class PodGenerator:
             return base_spec
         if not base_spec and client_spec:
             return client_spec
-        elif client_spec and base_spec:
+        if client_spec and base_spec:
             client_spec.containers = PodGenerator.reconcile_containers(
                 base_spec.containers, client_spec.containers
             )
             merged_spec = extend_object_field(base_spec, client_spec, "init_containers")
+            if base_spec.init_containers and client_spec.init_containers:
+                merged_spec.init_containers = PodGenerator.reconcile_init_containers(
+                    base_spec.init_containers, client_spec.init_containers
+                )
             merged_spec = extend_object_field(base_spec, merged_spec, "volumes")
             return merge_objects(base_spec, merged_spec)
 
@@ -272,6 +314,49 @@ class PodGenerator:
             *PodGenerator.reconcile_containers(base_containers[1:], client_containers[1:]),
         ]
 
+    @staticmethod
+    def reconcile_init_containers(
+        base_containers: list[k8s.V1Container] | None,
+        client_containers: list[k8s.V1Container] | None,
+    ) -> list[k8s.V1Container]:
+        """
+        Merge Kubernetes init containers by name.
+
+        Containers with the same name are merged; others are appended.
+
+        :param base_containers: base init containers
+        :param client_containers: client init containers that override base
+        :return: the merged init containers
+        """
+        if not base_containers:
+            return client_containers or []
+        if not client_containers:
+            return base_containers
+
+        client_map = {c.name: c for c in client_containers}
+        merged = []
+        matched_names = set()
+
+        for base_container in base_containers:
+            if base_container.name in client_map:
+                client_container = client_map[base_container.name]
+                client_container = extend_object_field(base_container, client_container, "volume_mounts")
+                client_container = extend_object_field(base_container, client_container, "env")
+                client_container = extend_object_field(base_container, client_container, "env_from")
+                client_container = extend_object_field(base_container, client_container, "ports")
+                client_container = extend_object_field(base_container, client_container, "volume_devices")
+                client_container = merge_objects(base_container, client_container)
+                merged.append(client_container)
+                matched_names.add(base_container.name)
+            else:
+                merged.append(base_container)
+
+        for client_container in client_containers:
+            if client_container.name not in matched_names:
+                merged.append(client_container)
+
+        return merged
+
     @classmethod
     def construct_pod(
         cls,
@@ -288,7 +373,6 @@ class PodGenerator:
         scheduler_job_id: str,
         run_id: str | None = None,
         map_index: int = -1,
-        content_json_for_volume: str = "",
         *,
         with_mutation_hook: bool = False,
     ) -> k8s.V1Pod:
@@ -356,47 +440,14 @@ class PodGenerator:
             containers=[main_container],
         )
 
-        if content_json_for_volume:
-            import shlex
-
-            input_file_path = "/tmp/execute/input.json"
-            execute_volume = V1Volume(
-                name="execute-volume",
-                empty_dir=V1EmptyDirVolumeSource(),
-            )
-
-            execute_volume_mount = V1VolumeMount(
-                name="execute-volume",
-                mount_path="/tmp/execute",
-                read_only=False,
-            )
-
-            escaped_json = shlex.quote(content_json_for_volume)
-            init_container = k8s.V1Container(
-                name="init-container",
-                image="busybox",
-                command=["/bin/sh", "-c", f"echo {escaped_json} > {input_file_path}"],
-                volume_mounts=[execute_volume_mount],
-            )
-
-            main_container.volume_mounts = [execute_volume_mount]
-            main_container.command = args[:-1]
-            main_container.args = args[-1:]
-
-            podspec = k8s.V1PodSpec(
-                containers=[main_container],
-                volumes=[execute_volume],
-                init_containers=[init_container],
-            )
-
         dynamic_pod.spec = podspec
 
         # Reconcile the pods starting with the first chronologically,
         # Pod from the pod_template_File -> Pod from the K8s executor -> Pod from executor_config arg
-        pod_list = [base_worker_pod, dynamic_pod, pod_override_object]
+        pod_list = [dynamic_pod, pod_override_object]
 
         try:
-            pod = reduce(PodGenerator.reconcile_pods, pod_list)
+            pod = reduce(PodGenerator.reconcile_pods, pod_list, base_worker_pod)
         except Exception as e:
             raise PodReconciliationError from e
 
@@ -517,11 +568,16 @@ class PodGenerator:
         ``_ApiClient__deserialize_model`` from the kubernetes client.
         This issue is tracked here; https://github.com/kubernetes-client/python/issues/977.
 
+        A fresh ``Configuration`` is passed so that neither the pod nor any nested model captures the
+        process-global in-cluster ``Configuration``. In-cluster, that global carries a
+        ``refresh_api_key_hook`` local closure which ``pickle`` cannot serialize, and which would
+        otherwise break pickling a ``pod_override`` onto the KubernetesExecutor multiprocessing queue.
+
         :param pod_dict: Serialized dict of k8s.V1Pod object
         :return: De-serialized k8s.V1Pod
         """
-        api_client = ApiClient()
-        return api_client._ApiClient__deserialize_model(pod_dict, k8s.V1Pod)
+        api_client = ApiClient(configuration=Configuration())
+        return api_client._ApiClient__deserialize_model(pod_dict or {}, k8s.V1Pod)  # type: ignore[attr-defined]
 
 
 def merge_objects(base_obj, client_obj):
@@ -547,7 +603,7 @@ def merge_objects(base_obj, client_obj):
 
     for base_key in base_obj.to_dict():
         base_val = getattr(base_obj, base_key, None)
-        if not getattr(client_obj, base_key, None) and base_val:
+        if not getattr(client_obj, base_key, None) and base_val is not None:
             if not isinstance(client_obj_cp, dict):
                 setattr(client_obj_cp, base_key, base_val)
             else:

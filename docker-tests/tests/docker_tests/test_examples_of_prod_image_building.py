@@ -26,11 +26,8 @@ import pytest
 import requests
 from python_on_whales import docker
 
-# isort:off (needed to workaround isort bug)
 from docker_tests.command_utils import run_command
 from docker_tests.constants import AIRFLOW_ROOT_PATH
-
-# isort:on (needed to workaround isort bug)
 
 DOCKER_EXAMPLES_DIR = AIRFLOW_ROOT_PATH / "docker-stack-docs" / "docker-examples"
 QUARANTINED_DOCKER_EXAMPLES: dict[str, str] = {
@@ -42,7 +39,9 @@ QUARANTINED_DOCKER_EXAMPLES: dict[str, str] = {
 
 @cache
 def get_latest_airflow_image():
-    response = requests.get("https://pypi.org/pypi/apache-airflow/json")
+    response = requests.get(
+        "https://pypi.org/pypi/apache-airflow/json", headers={"User-Agent": "Python requests"}
+    )
     response.raise_for_status()
     latest_released_version = response.json()["info"]["version"]
     return f"apache/airflow:{latest_released_version}"
@@ -54,6 +53,8 @@ def get_latest_airflow_image():
 )
 @pytest.mark.parametrize("script_file", glob.glob(f"{DOCKER_EXAMPLES_DIR}/**/*.sh", recursive=True))
 def test_shell_script_example(script_file):
+    # The examples build on the floating base image tag unless BASE_IMAGE is set - set it to the pinned
+    # image (`breeze` builds use it) to build them on the base the CI passed on.
     run_command(["bash", script_file])
 
 
@@ -70,13 +71,22 @@ def docker_examples(directory: Path, xfails: dict[str, str] | None = None):
 
 
 @pytest.mark.parametrize(
-    "dockerfile, relative_path",
+    ("dockerfile", "relative_path"),
     docker_examples(DOCKER_EXAMPLES_DIR, xfails=QUARANTINED_DOCKER_EXAMPLES),
 )
 def test_dockerfile_example(dockerfile, relative_path, tmp_path):
     image_name = relative_path.lower().replace("/", "-")
     content = Path(dockerfile).read_text()
-    test_image = os.environ.get("TEST_IMAGE", get_latest_airflow_image())
+    test_image = os.environ.get("TEST_IMAGE")
+    if test_image:
+        # Source-built images carry constraints from the same checkout as their providers.
+        content = content.replace(
+            "https://raw.githubusercontent.com/apache/airflow/"
+            "constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_MAJOR_MINOR}.txt",
+            "${HOME}/constraints.txt",
+        )
+    else:
+        test_image = get_latest_airflow_image()
 
     test_image_file = tmp_path / image_name
     test_image_file.write_text(re.sub(r"FROM apache/airflow:.*", rf"FROM {test_image}", content))
@@ -90,3 +100,15 @@ def test_dockerfile_example(dockerfile, relative_path, tmp_path):
         assert image
     finally:
         docker.image.remove(image_name, force=True)
+
+
+def test_source_image_uses_its_own_constraints(monkeypatch, mocker, tmp_path):
+    monkeypatch.setenv("TEST_IMAGE", "airflow-ci:test")
+    build = mocker.patch.object(docker, "build", autospec=True)
+    mocker.patch.object(docker.image, "remove", autospec=True)
+    relative_path = "extending/slim-with-providers/Dockerfile"
+
+    test_dockerfile_example(DOCKER_EXAMPLES_DIR / relative_path, relative_path, tmp_path)
+
+    content = build.call_args.kwargs["file"].read_text()
+    assert '--constraint "${HOME}/constraints.txt"' in content

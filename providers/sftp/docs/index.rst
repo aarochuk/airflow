@@ -1,4 +1,3 @@
-
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -28,6 +27,13 @@
     Home <self>
     Changelog <changelog>
     Security <security>
+
+.. toctree::
+    :hidden:
+    :maxdepth: 1
+    :caption: Guides
+
+    Filesystems <filesystems/index>
 
 .. toctree::
     :hidden:
@@ -70,7 +76,7 @@ apache-airflow-providers-sftp package
 `SSH File Transfer Protocol (SFTP) <https://tools.ietf.org/wg/secsh/draft-ietf-secsh-filexfer/>`__
 
 
-Release: 5.1.1
+Release: 7.0.0
 
 Provider package
 ----------------
@@ -81,26 +87,28 @@ All classes for this package are included in the ``airflow.providers.sftp`` pyth
 Installation
 ------------
 
-You can install this package on top of an existing Airflow 2 installation via
+You can install this package on top of an existing Airflow installation via
 ``pip install apache-airflow-providers-sftp``.
 For the minimum Airflow version supported, see ``Requirements`` below.
 
 Requirements
 ------------
 
-The minimum Apache Airflow version supported by this provider distribution is ``2.9.0``.
+The minimum Apache Airflow version supported by this provider distribution is ``2.11.0``.
 
-================================  ==================
-PIP package                       Version required
-================================  ==================
-``apache-airflow``                ``>=2.9.0``
-``apache-airflow-providers-ssh``  ``>=2.1.0``
-``paramiko``                      ``>=2.9.0``
-``asyncssh``                      ``>=2.12.0``
-================================  ==================
+==========================================  ======================================
+PIP package                                 Version required
+==========================================  ======================================
+``apache-airflow``                          ``>=2.11.0``
+``apache-airflow-providers-ssh``            ``>=7.0.0``
+``apache-airflow-providers-common-compat``  ``>=1.12.0``
+``paramiko``                                ``>=4.0.0``
+``asyncssh``                                ``>=2.12.0; python_version < "3.14"``
+``asyncssh``                                ``>=2.22.0; python_version >= "3.14"``
+==========================================  ======================================
 
-Cross provider package dependencies
------------------------------------
+Optional cross provider package dependencies
+--------------------------------------------
 
 Those are dependencies that might be needed in order to use all the features of the package.
 You need to install the specified provider distributions in order to use them.
@@ -109,16 +117,32 @@ You can install such cross-provider dependencies when installing from PyPI. For 
 
 .. code-block:: bash
 
-    pip install apache-airflow-providers-sftp[common.compat]
+    pip install apache-airflow-providers-sftp[openlineage]
 
 
-==================================================================================================================  =================
-Dependent package                                                                                                   Extra
-==================================================================================================================  =================
-`apache-airflow-providers-common-compat <https://airflow.apache.org/docs/apache-airflow-providers-common-compat>`_  ``common.compat``
-`apache-airflow-providers-openlineage <https://airflow.apache.org/docs/apache-airflow-providers-openlineage>`_      ``openlineage``
-`apache-airflow-providers-ssh <https://airflow.apache.org/docs/apache-airflow-providers-ssh>`_                      ``ssh``
-==================================================================================================================  =================
+==============================================================================================================  ===============
+Dependent package                                                                                               Extra
+==============================================================================================================  ===============
+`apache-airflow-providers-openlineage <https://airflow.apache.org/docs/apache-airflow-providers-openlineage>`_  ``openlineage``
+==============================================================================================================  ===============
+
+Optional dependencies
+---------------------
+
+These extras install optional third-party libraries that enable additional features of the provider.
+Install them when installing from PyPI. For example:
+
+.. code-block:: bash
+
+    pip install apache-airflow-providers-sftp[openlineage]
+
+
+===============  ========================================
+Extra            Dependencies
+===============  ========================================
+``openlineage``  ``apache-airflow-providers-openlineage``
+``sshfs``        ``sshfs>=2023.1.0``
+===============  ========================================
 
 Downloading official packages
 -----------------------------
@@ -126,5 +150,5 @@ Downloading official packages
 You can download officially released packages and verify their checksums and signatures from the
 `Official Apache Download site <https://downloads.apache.org/airflow/providers/>`_
 
-* `The apache-airflow-providers-sftp 5.1.1 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sftp-5.1.1.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sftp-5.1.1.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sftp-5.1.1.tar.gz.sha512>`__)
-* `The apache-airflow-providers-sftp 5.1.1 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sftp-5.1.1-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sftp-5.1.1-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sftp-5.1.1-py3-none-any.whl.sha512>`__)
+* `The apache-airflow-providers-sftp 7.0.0 sdist package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sftp-7.0.0.tar.gz>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sftp-7.0.0.tar.gz.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sftp-7.0.0.tar.gz.sha512>`__)
+* `The apache-airflow-providers-sftp 7.0.0 wheel package <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sftp-7.0.0-py3-none-any.whl>`_ (`asc <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sftp-7.0.0-py3-none-any.whl.asc>`__, `sha512 <https://downloads.apache.org/airflow/providers/apache_airflow_providers_sftp-7.0.0-py3-none-any.whl.sha512>`__)

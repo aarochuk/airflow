@@ -22,8 +22,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from kylinpy.exceptions import KylinCubeError
 
-from airflow.exceptions import AirflowException
 from airflow.providers.apache.kylin.hooks.kylin import KylinHook
+from airflow.providers.common.compat.sdk import AirflowException
 
 pytestmark = pytest.mark.db_test
 
@@ -60,8 +60,7 @@ class TestKylinHook:
                 ]
                 if command in invoke_command_list:
                     return {"code": "000", "data": {}}
-                else:
-                    raise KylinCubeError(f"Unsupported invoke command for datasource: {command}")
+                raise KylinCubeError(f"Unsupported invoke command for datasource: {command}")
 
         cube_source.return_value = MockCubeSource()
         response_data = {"code": "000", "data": {}}

@@ -23,11 +23,22 @@ from unittest import mock
 from unittest.mock import patch
 
 import pytest
+import requests
 from requests import HTTPError
+from requests.exceptions import JSONDecodeError
 from tenacity import RetryError
 
 from airflow.providers.google.cloud.hooks.dataprep import GoogleDataprepHook
 
+try:
+    import importlib.util
+
+    if not importlib.util.find_spec("airflow.sdk.bases.hook"):
+        raise ImportError
+
+    BASEHOOK_PATCH_PATH = "airflow.sdk.bases.hook.BaseHook"
+except ImportError:
+    BASEHOOK_PATCH_PATH = "airflow.hooks.base.BaseHook"
 JOB_ID = 1234567
 RECIPE_ID = 1234567
 TOKEN = "1111"
@@ -49,7 +60,7 @@ URL_WRITE_SETTINGS = URL_BASE + "/v4/writeSettings"
 
 class TestGoogleDataprepHook:
     def setup_method(self):
-        with mock.patch("airflow.hooks.base.BaseHook.get_connection") as conn:
+        with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_connection") as conn:
             conn.return_value.extra_dejson = EXTRA
             self.hook = GoogleDataprepHook(dataprep_conn_id="dataprep_default")
         self._imported_dataset_id = 12345
@@ -261,7 +272,7 @@ class TestGoogleDataprepHook:
         side_effect=[mock.MagicMock(), HTTPError()],
     )
     def test_get_job_group_status_retry_after_success(self, mock_get_request):
-        self.hook.run_job_group.retry.sleep = mock.Mock()
+        self.hook.get_job_group_status.retry.sleep = mock.Mock()
         self.hook.get_job_group_status(job_group_id=JOB_ID)
         assert mock_get_request.call_count == 1
 
@@ -276,7 +287,7 @@ class TestGoogleDataprepHook:
         ],
     )
     def test_get_job_group_status_four_errors(self, mock_get_request):
-        self.hook.run_job_group.retry.sleep = mock.Mock()
+        self.hook.get_job_group_status.retry.sleep = mock.Mock()
         self.hook.get_job_group_status(job_group_id=JOB_ID)
         assert mock_get_request.call_count == 5
 
@@ -602,7 +613,7 @@ class TestGoogleDataprepFlowPathHooks:
                 "description": "Test description",
             }
         )
-        with mock.patch("airflow.hooks.base.BaseHook.get_connection") as conn:
+        with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_connection") as conn:
             conn.return_value.extra_dejson = EXTRA
             self.hook = GoogleDataprepHook(dataprep_conn_id="dataprep_default")
 
@@ -843,3 +854,32 @@ class TestGoogleDataprepFlowPathHooks:
             )
         assert "HTTPError" in str(ctx.value)
         assert mock_get_request.call_count == 5
+
+
+class TestGoogleDataprepHookRaiseForStatus:
+    def setup_method(self):
+        with mock.patch(f"{BASEHOOK_PATCH_PATH}.get_connection") as conn:
+            conn.return_value.extra_dejson = EXTRA
+            self.hook = GoogleDataprepHook(dataprep_conn_id="dataprep_default")
+
+    @pytest.mark.parametrize(
+        ("json_kwargs", "text"),
+        [
+            pytest.param(
+                {"side_effect": JSONDecodeError("Expecting value", "", 0)},
+                "<html>502 Bad Gateway</html>",
+                id="body-is-not-json",
+            ),
+            pytest.param({"return_value": ["boom"]}, '["boom"]', id="body-is-not-an-object"),
+        ],
+    )
+    @mock.patch.object(GoogleDataprepHook, "log", new_callable=mock.PropertyMock)
+    def test_raises_http_error_and_logs_raw_body(self, mock_log, json_kwargs, text):
+        response = mock.create_autospec(requests.Response, instance=True)
+        response.raise_for_status.side_effect = HTTPError()
+        response.json.configure_mock(**json_kwargs)
+        response.text = text
+
+        with pytest.raises(HTTPError):
+            self.hook._raise_for_status(response)
+        mock_log.return_value.error.assert_called_once_with(text)

@@ -21,34 +21,54 @@ import { Input, type InputProps } from "@chakra-ui/react";
 import { paramPlaceholder, useParamStore } from "src/queries/useParamStore";
 
 import type { FlexibleFormElementProps } from ".";
+import { DateTimeInput } from "../DateTimeInput";
 
-export const FieldDateTime = ({ name, ...rest }: FlexibleFormElementProps & InputProps) => {
-  const { paramsDict, setParamsDict } = useParamStore();
+export const FieldDateTime = ({
+  name,
+  namespace = "default",
+  onUpdate,
+  type,
+  ...rest
+}: FlexibleFormElementProps & InputProps) => {
+  const { disabled, paramsDict, setParamsDict } = useParamStore(namespace);
   const param = paramsDict[name] ?? paramPlaceholder;
+  const isTime = type === "time";
   const handleChange = (value: string) => {
+    // "undefined" values are removed from params, so we set it to null to avoid falling back to DAG defaults.
     if (paramsDict[name]) {
-      if (rest.type === "datetime-local") {
-        // "undefined" values are removed from params, so we set it to null to avoid falling back to DAG defaults.
-        // eslint-disable-next-line unicorn/no-null
-        paramsDict[name].value = value === "" ? null : `${value}:00+00:00`; // Need to suffix to make it UTC like
-      } else {
-        // "undefined" values are removed from params, so we set it to null to avoid falling back to DAG defaults.
-        // eslint-disable-next-line unicorn/no-null
-        paramsDict[name].value = value === "" ? null : value;
-      }
+      paramsDict[name].value = value === "" ? null : value;
     }
 
     setParamsDict(paramsDict);
+    onUpdate(value);
   };
+
+  if (type === "datetime-local") {
+    return (
+      <DateTimeInput
+        disabled={disabled}
+        id={`element_${name}`}
+        name={`element_${name}`}
+        onChange={(event) => handleChange(event.target.value)}
+        size="sm"
+        value={typeof param.value === "string" ? param.value : ""}
+      />
+    );
+  }
 
   return (
     <Input
+      disabled={disabled}
       id={`element_${name}`}
       name={`element_${name}`}
       onChange={(event) => handleChange(event.target.value)}
+      required={rest.required}
       size="sm"
-      type={rest.type}
-      value={JSON.stringify(param.value ?? "").slice(0, 16)}
+      step={isTime ? 1 : undefined}
+      type={type}
+      // A non-string value (e.g. an object leaking in from a malformed param) must degrade to an
+      // empty input rather than throw and take the whole form down.
+      value={typeof param.value === "string" ? param.value.slice(0, 16) : ""}
     />
   );
 };

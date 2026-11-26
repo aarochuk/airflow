@@ -31,6 +31,8 @@ from alembic import op
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
 
+from airflow.configuration import conf
+
 # revision identifiers, used by Alembic.
 revision = "d59cbbef95eb"
 down_revision = "05234396c6fc"
@@ -112,28 +114,27 @@ DETERMINISTIC
 BEGIN
     DECLARE unix_time_ms BIGINT;
     DECLARE time_hex CHAR(12);
-    DECLARE rand_hex CHAR(24);
-    DECLARE uuid CHAR(36);
+    DECLARE rand_hex CHAR(20);   -- 10 bytes => 20 hex chars
 
-    -- Convert the passed timestamp to milliseconds since epoch
-    SET unix_time_ms = UNIX_TIMESTAMP(p_timestamp) * 1000;
+    -- milliseconds since epoch (truncation is fine for ms precision)
+    SET unix_time_ms = FLOOR(UNIX_TIMESTAMP(p_timestamp) * 1000);
     SET time_hex = LPAD(HEX(unix_time_ms), 12, '0');
-    SET rand_hex = CONCAT(
-        LPAD(HEX(FLOOR(RAND() * POW(2,32))), 8, '0'),
-        LPAD(HEX(FLOOR(RAND() * POW(2,32))), 8, '0')
-    );
-    SET rand_hex = CONCAT(SUBSTRING(rand_hex, 1, 4), '7', SUBSTRING(rand_hex, 6));
-    SET rand_hex = CONCAT(SUBSTRING(rand_hex, 1, 12), '8', SUBSTRING(rand_hex, 14));
 
-    SET uuid = LOWER(CONCAT(
+    -- 10 random bytes (CSPRNG), 20 hex chars
+    SET rand_hex = HEX(RANDOM_BYTES(10));
+
+    -- set version nibble to 7 (first of next 4 hex)
+    SET rand_hex = CONCAT('7', SUBSTRING(rand_hex, 2));
+    -- set variant (first hex of next 4) to 8..b; using '8' keeps the top bits 10
+    SET rand_hex = CONCAT(SUBSTRING(rand_hex, 1, 4), '8', SUBSTRING(rand_hex, 6));
+
+    RETURN LOWER(CONCAT(
         SUBSTRING(time_hex, 1, 8), '-',
         SUBSTRING(time_hex, 9, 4), '-',
         SUBSTRING(rand_hex, 1, 4), '-',
         SUBSTRING(rand_hex, 5, 4), '-',
-        SUBSTRING(rand_hex, 9)
+        SUBSTRING(rand_hex, 9, 12)
     ));
-
-    RETURN uuid;
 END;
 """
 
@@ -163,8 +164,7 @@ def _get_type_id_column(dialect_name: str) -> sa.types.TypeEngine:
     if dialect_name == "postgresql":
         return postgresql.UUID(as_uuid=False)
     # For other databases, use String(36) to match UUID format
-    else:
-        return sa.String(36)
+    return sa.String(36)
 
 
 def create_foreign_keys():
@@ -195,6 +195,7 @@ def create_foreign_keys():
 
 def upgrade():
     """Add UUID primary key to task instance table."""
+    batch_size = conf.getint("database", "migration_batch_size", fallback=1000)
     conn = op.get_bind()
     dialect_name = conn.dialect.name
 
@@ -203,12 +204,33 @@ def upgrade():
     if dialect_name == "postgresql":
         op.execute(pg_uuid7_fn)
 
-        # TODO: Add batching to handle updates in smaller chunks for large tables to avoid locking
         # Migrate existing rows with UUID v7 using a timestamp-based generation
-        op.execute(
-            "UPDATE task_instance SET id = uuid_generate_v7(coalesce(queued_dttm, start_date, clock_timestamp()))"
-        )
-
+        batch_num = 0
+        while True:
+            batch_num += 1
+            print(f"processing batch {batch_num}")
+            result = conn.execute(
+                text(
+                    """
+                    WITH cte AS (
+                        SELECT ctid
+                        FROM task_instance
+                        WHERE id IS NULL
+                        LIMIT :batch_size
+                    )
+                    UPDATE task_instance
+                    SET id = uuid_generate_v7(coalesce(queued_dttm, start_date, clock_timestamp()))
+                    FROM cte
+                    WHERE task_instance.ctid = cte.ctid
+                    """
+                ).bindparams(batch_size=batch_size)
+            )
+            row_count = 0
+            if result:
+                row_count = result.rowcount
+            if row_count == 0:
+                break
+            print(f"Migrated {row_count} task_instance rows in this batch...")
         op.execute(pg_uuid7_fn_drop)
 
         # Drop existing primary key constraint to task_instance table
@@ -218,11 +240,13 @@ def upgrade():
         op.execute(mysql_uuid7_fn)
 
         # Migrate existing rows with UUID v7
-        op.execute("""
+        op.execute(
+            """
             UPDATE task_instance
             SET id = uuid_generate_v7(coalesce(queued_dttm, start_date, NOW(3)))
             WHERE id IS NULL
-        """)
+        """
+        )
 
         # Drop this function as it is no longer needed
         op.execute(mysql_uuid7_fn_drop)
@@ -233,20 +257,20 @@ def upgrade():
     elif dialect_name == "sqlite":
         from uuid6 import uuid7
 
-        stmt = text("SELECT COUNT(*) FROM task_instance WHERE id IS NULL")
         conn = op.get_bind()
-        task_instances = conn.execute(stmt).scalar()
-        uuid_values = [str(uuid7()) for _ in range(task_instances)]
 
-        # Ensure `uuid_values` is a list or iterable with the UUIDs for the update.
-        stmt = text("""
-            UPDATE task_instance
-            SET id = :uuid
-            WHERE id IS NULL
-        """)
+        stmt = text("SELECT rowid FROM task_instance WHERE id IS NULL")
+        rows = conn.execute(stmt).fetchall()
 
-        for uuid_value in uuid_values:
-            conn.execute(stmt.bindparams(uuid=uuid_value))
+        update_stmt = text("UPDATE task_instance SET id = :uuid WHERE rowid = :rowid")
+
+        for row in rows:
+            conn.execute(
+                update_stmt.bindparams(
+                    uuid=str(uuid7()),
+                    rowid=row.rowid,
+                )
+            )
 
         with op.batch_alter_table("task_instance") as batch_op:
             batch_op.drop_constraint("task_instance_pkey", type_="primary")

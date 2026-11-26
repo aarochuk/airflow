@@ -25,9 +25,449 @@
 ``apache-airflow-providers-apache-spark``
 
 
-
 Changelog
 ---------
+
+6.3.5
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix SparkConnectHook unsupported-path error message (#74847)``
+* ``Template conn_id and config_kwargs in @task.pyspark (#75764)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] Upgrade important CI environment (#76278)``
+
+6.3.4
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix Spark submit standalone status polling to use correct REST endpoint (#71949)``
+
+Misc
+~~~~
+
+* ``Use one ResumableJobMixin fallback from common.compat in providers (#74673)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+6.3.3
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``'SparkSubmitHook': Mask '_mask_cmd' secrets in linear time (#71711)``
+
+Misc
+~~~~
+
+* ``Drop support for Python 3.10 (#74157)``
+
+Doc-only
+~~~~~~~~
+
+* ``Update provider READMEs for the Python 3.11 baseline (#74158)``
+* ``Document durable Spark execution across cluster managers (#72325)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] Upgrade important CI environment (#73629)``
+   * ``Revert "[main] Upgrade important CI environment (#73308)" (#73621)``
+   * ``[main] Upgrade important CI environment (#73308)``
+   * ``Remove real sleeps from slow provider unit tests (#73478)``
+   * ``Prepare providers release 2026-09-09 (#72834)``
+
+6.3.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Make SparkSubmitOperator durable execution inert below Airflow 3.3 (#71534)``
+* ``Make 'durable' reach 'default_args' and warn when set below Airflow 3.3 (#71531)``
+
+Doc-only
+~~~~~~~~
+
+* ``Document how clearing tasks works with task state store on durable operators (#71358)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+   * ``Pin providers in constraints to the versions published in PyPI (#71324)``
+
+
+6.3.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Anchor spark-submit log trail on actual exception instead of lines (#70513)``
+* ``Spark: Fix missing space in YARN waitAppCompletion error message (#71055)``
+
+Misc
+~~~~
+
+* ``Decouple SparkSubmitOperator resumable deployment backends (#68679)``
+* ``Drop unused post_submit_commands copy from SparkSubmitOperator init (#70323)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Use common.compat.sdk for timezone imports in providers (#70492)``
+
+6.3.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Surface YARN diagnostics for spark on yarn clusters (#70183)``
+
+Misc
+~~~~
+
+* ``Include spark submit canonical logs in failure exceptions (#70178)``
+* ``Better log when spark k8s driver remains in Unknown Phase (#70176)``
+
+Doc-only
+~~~~~~~~
+
+* ``Link task state store docs in durable execution across providers (#69851)``
+* ``Document each provider's optional extras in its docs index (#69478)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+   * ``Prepare ad-hoc provider documentation 2026-06-26``
+   * ``Prepare ad-hoc provider documentation 2026-06-26 (#69022)``
+
+
+6.2.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add a standard toggle for resumability to ResumableJobMixin (#68623)``
+* ``Add crash recovery ability to SparkSubmitOperator against Kubernetes (#68067)``
+* ``Crash recovery for YARN cluster mode in SparkSubmitOperator built on AIP-103 (#67473)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Align spark provider with the task state store terminology (#68430)``
+   * ``fix: fix missing rename in test_spark_submit (#68565)``
+   * ``Rename task_store/asset_store to task_state_store/asset_state_store (#68438)``
+
+6.1.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add 'ResumableJobMixin' with 'SparkSubmitOperator' as a case study for surviving worker failures (standalone) (#67118)``
+* ``Track Spark job status for YARN cluster mode via RM REST API to free JVM (#65991)``
+* ``Use K8s API to track Spark on K8s instead of JVM based spark-submit (#67715)``
+* ``Enhance 'ResumableJobMixin.get_job_status' with context for better job status tracking (#68009)``
+
+Misc
+~~~~
+
+* ``Rename resumablemixin file to match class name (#68137)``
+
+Doc-only
+~~~~~~~~
+
+* ``Auto-sync provider README.rst Requirements with pyproject.toml (#67669)``
+* ``Document REST scheme and port connection fields for Spark (#67682)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Rename task_state/asset_state to task_state_store/asset_state_store across the codebase (#67833)``
+
+
+6.0.2
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix SparkPipelinesHook for Spark Connect (sc://) connections (#66498)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+   * ``Fix stale system test documentation links (#65071)``
+
+6.0.1
+.....
+
+Misc
+~~~~
+
+* ``Add post_submit_commands to SparkSubmitHook for sidecar lifecycle management (#64391)``
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+6.0.0
+.....
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+.. warning::
+  - The ``pyspark`` package is no longer included by default, so only the spark-connect connection will works by default.
+    If you want to keep using other spark connection types you must install the airflow spark provider
+    with the  ``pyspark`` extra
+
+    example: ``apache-airflow-providers-apache-spark[pyspark]==X.Y.Z``
+
+    Because the package ``pyspark`` is more than 400mb and is not necessary if only using spark-connect to trigger a job
+
+  - The minimum pyspark and spark-connect version is now 4.0.0
+
+* ``[breaking] Make pyspark-client as default and  pyspark package optional (#60031)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix unclear error when pyspark is not installed for JDBC script (#64174)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+   * ``Standardize connection docs labels across providers (#63455)``
+
+5.6.0
+.....
+
+Features
+~~~~~~~~
+
+* ``spark-pipelines operator (#61681)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.5.1
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``fix: resolve connection master URL construction for various protocols in SparkSubmitHook (#61528)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+   * ``Migrate apache/spark connection UI metadata to YAML (#62381)``
+
+5.5.0
+.....
+
+Features
+~~~~~~~~
+
+* ``PysparkOperator and not only a decorator (#60041)``
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+* ``Source conf from 'airflow.sdk.configuration.conf' for apache providers (#59966)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.4.2
+.....
+
+Misc
+~~~~
+
+* ``Cleanup of variables in settings.py (#59875)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``TaskInstance unused method cleanup (#59835)``
+
+5.4.1
+.....
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.4.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Updates to release process of providers (#58316)``
+
+5.3.4
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable ruff PLW2101,PLW2901,PLW3301 rule (#57700)``
+   * ``Enable PT006 rule to 13 files in providers (apache) (#57998)``
+   * ``Enable ruff PLW0129 rule (#57516)``
+   * ``Enable PT011 rule to provider tests (#57528)``
+
+5.3.3
+.....
+
+Misc
+~~~~
+
+* ``Use ValueError instead of RuntimeError when resolving SparkSubmitHook connection (#56631)``
+* ``Migrate Apache providers & Elasticsearch to ''common.compat'' (#57016)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare release for Sep 2025 2nd wave of providers (#55688)``
+   * ``Prepare release for Sep 2025 1st wave of providers (#55203)``
+   * ``Fix Airflow 2 reference in README/index of providers (#55240)``
+   * ``Remove airflow.models.DAG (#54383)``
+   * ``Make term Dag consistent in providers docs (#55101)``
+   * ``Replace API server's direct Connection access workaround in BaseHook (#54083)``
+   * ``Switch pre-commit to prek (#54258)``
+   * ``make bundle_name not nullable (#47592)``
+   * ``Enable PT011 rule to provider tests (#56578)``
+   * ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+5.3.2
+.....
+
+Misc
+~~~~
+
+* ``Deprecate decorators from Core (#53629)``
+* ``Add Python 3.13 support for Airflow. (#46891)``
+* ``Cleanup type ignores (#53301)``
+* ``Remove type ignore across codebase after mypy upgrade (#53243)``
+* ``Remove upper-binding for "python-requires" (#52980)``
+* ``Temporarily switch to use >=,< pattern instead of '~=' (#52967)``
+* ``Replace BaseHook to Task SDK for apache/pyspark (#52842)``
+* ``Replace 'BaseHook' to Task SDK for 'apache/spark' (#52683)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Make dag_version_id in TI non-nullable (#50825)``
+
+5.3.1
+.....
+
+Misc
+~~~~
+
+* ``Move 'BaseHook' implementation to task SDK (#51873)``
+* ``add: version_compat (#52448)``
+* ``Drop support for Python 3.9 (#52072)``
+* ``Replace 'models.BaseOperator' to Task SDK one for Standard Provider (#52292)``
+
+Doc-only
+~~~~~~~~
+
+* ``Cleanup unused args example_pyspark.py (#52492)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Separate out creation of default Connections for tests and non-tests (#52129)``
+   * ``Removed pytestmark db_test from the spark provider (#52081)``
+   * ``Introducing fixture to create 'Connections' without DB in provider tests (#51930)``
+
+5.3.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.10+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Features
+~~~~~~~~
+
+* ``add root parent information to OpenLineage events (#49237)``
+
+Misc
+~~~~
+
+* ``Bump Pyspark to even higher version (#50308)``
+* ``Lower bind pyspark and pydruid to relatively new versions (#50205)``
+* ``Remove AIRFLOW_2_10_PLUS conditions (#49877)``
+* ``Bump min Airflow version in providers to 2.10 (#49843)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Update description of provider.yaml dependencies (#50231)``
+   * ``Avoid committing history for providers (#49907)``
+
+5.2.1
+.....
+
+Misc
+~~~~
+
+* ``remove superfluous else block (#49199)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+5.2.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add openlineage as Extra dep for Spark provider (#48972)``
+
+Misc
+~~~~
+
+* ``Make '@task' import from airflow.sdk (#48896)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Remove unnecessary entries in get_provider_info and update the schema (#48849)``
+   * ``Remove fab from preinstalled providers (#48457)``
+   * ``Improve documentation building iteration (#48760)``
+   * ``Prepare docs for Apr 1st wave of providers (#48828)``
+   * ``Simplify tooling by switching completely to uv (#48223)``
+   * ``Upgrade ruff to latest version (#48553)``
 
 5.1.1
 .....
@@ -108,8 +548,6 @@ Misc
 .. Below changes are excluded from the changelog. Move them to
    appropriate section above if needed. Do not delete the lines(!):
    * ``Use Python 3.9 as target version for Ruff & Black rules (#44298)``
-
-.. Review and move the new changes to one of the sections above:
    * ``Update path of example dags in docs (#45069)``
 
 4.11.3

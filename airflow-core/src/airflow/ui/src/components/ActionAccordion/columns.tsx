@@ -16,30 +16,96 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Link } from "@chakra-ui/react";
-import type { ColumnDef } from "@tanstack/react-table";
-import { Link as RouterLink } from "react-router-dom";
+import type { Table } from "@tanstack/react-table";
+import type { TFunction } from "i18next";
 
 import type { TaskInstanceResponse } from "openapi/requests/types.gen";
-import { StateBadge } from "src/components/StateBadge";
-import { Tooltip } from "src/components/ui";
-import { getTaskInstanceLink } from "src/utils/links";
-import { trimText } from "src/utils/trimTextFn";
 
-export const columns: Array<ColumnDef<TaskInstanceResponse>> = [
+import { Checkbox } from "src/system-components";
+
+import type { DataTableFeatures } from "src/components/DataTable/features";
+import type { MetaColumn } from "src/components/DataTable/types";
+import { StateBadge } from "src/components/StateBadge";
+
+// Keyed by coordinate rather than row id: a retry of the same execution comes back with a new
+// id, and an exclusion the user ticked should survive that.
+export const taskInstanceKey = (ti: TaskInstanceResponse): string =>
+  `${ti.dag_id}:${ti.dag_run_id}:${ti.task_id}:${ti.map_index}:${ti.region_id}:${ti.region_index}`;
+
+// When provided, rows render a leading checkbox so the user can exclude individual
+// task instances from the action. Excluded keys are tracked by the caller.
+export type RowSelection = {
+  excludedKeys: Set<string>;
+  onToggle: (key: string, included: boolean) => void;
+};
+
+// Header "select all" checkbox that toggles every task instance in its table at once.
+const renderSelectAllHeader = (
+  selection: RowSelection,
+  table: Table<DataTableFeatures, TaskInstanceResponse>,
+) => {
+  const keys = table.getRowModel().rows.map((row) => taskInstanceKey(row.original));
+  const excludedCount = keys.filter((key) => selection.excludedKeys.has(key)).length;
+  const allExcluded = keys.length > 0 && excludedCount === keys.length;
+  const someExcluded = excludedCount > 0 && excludedCount < keys.length;
+
+  return (
+    <Checkbox
+      borderWidth={1}
+      checked={someExcluded ? "indeterminate" : !allExcluded}
+      onCheckedChange={(event) => {
+        const included = Boolean(event.checked);
+
+        keys.forEach((key) => selection.onToggle(key, included));
+      }}
+    />
+  );
+};
+
+type ColumnOptions = {
+  readonly hasLoopIteration?: boolean;
+  readonly hasMultipleDags?: boolean;
+};
+
+export const getColumns = (
+  translate: TFunction,
+  selection?: RowSelection,
+  { hasLoopIteration = false, hasMultipleDags = false }: ColumnOptions = {},
+): Array<MetaColumn<TaskInstanceResponse>> => [
+  ...(selection
+    ? [
+        {
+          accessorKey: "select",
+          cell: ({ row: { original } }: { row: { original: TaskInstanceResponse } }) => {
+            const key = taskInstanceKey(original);
+
+            return (
+              <Checkbox
+                borderWidth={1}
+                checked={!selection.excludedKeys.has(key)}
+                onCheckedChange={(event) => selection.onToggle(key, Boolean(event.checked))}
+              />
+            );
+          },
+          enableSorting: false,
+          header: ({ table }: { table: Table<DataTableFeatures, TaskInstanceResponse> }) =>
+            renderSelectAllHeader(selection, table),
+          meta: { skeletonWidth: 10 },
+        } satisfies MetaColumn<TaskInstanceResponse>,
+      ]
+    : []),
+  // A clear can reach tasks in other Dags, and same-named tasks there would be indistinguishable.
+  ...(hasMultipleDags
+    ? [
+        {
+          accessorKey: "dag_id",
+          header: translate("dagId"),
+        } satisfies MetaColumn<TaskInstanceResponse>,
+      ]
+    : []),
   {
-    accessorKey: "task_display_name",
-    cell: ({ row: { original } }) => (
-      <Tooltip content={original.task_display_name}>
-        <Link asChild color="fg.info" fontWeight="bold" maxWidth="200px" overflow="hidden">
-          <RouterLink to={getTaskInstanceLink(original)}>
-            {trimText(original.task_display_name, 25).trimmedText}
-          </RouterLink>
-        </Link>
-      </Tooltip>
-    ),
-    enableSorting: false,
-    header: "Task ID",
+    accessorKey: "task_id",
+    header: translate("taskId"),
   },
   {
     accessorKey: "state",
@@ -47,19 +113,30 @@ export const columns: Array<ColumnDef<TaskInstanceResponse>> = [
       row: {
         original: { state },
       },
-    }) => <StateBadge state={state}>{state}</StateBadge>,
-    enableSorting: false,
-    header: () => "State",
+    }) => (
+      <StateBadge state={state}>
+        {state ? translate(`common:states.${state}`) : translate("common:states.no_status")}
+      </StateBadge>
+    ),
+    header: translate("state"),
   },
   {
-    accessorKey: "rendered_map_index",
-    enableSorting: false,
-    header: "Map Index",
+    accessorKey: "map_index",
+    header: translate("mapIndex"),
   },
-
+  ...(hasLoopIteration
+    ? [
+        {
+          accessorKey: "loop_iteration",
+          cell: ({ row: { original } }: { row: { original: TaskInstanceResponse } }) =>
+            original.loop_iteration?.iteration,
+          enableSorting: false,
+          header: translate("taskInstance.iteration"),
+        } satisfies MetaColumn<TaskInstanceResponse>,
+      ]
+    : []),
   {
     accessorKey: "dag_run_id",
-    enableSorting: false,
-    header: "Run Id",
+    header: translate("runId"),
   },
 ];

@@ -26,38 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-pagerduty",
         "name": "Pagerduty",
         "description": "`Pagerduty <https://www.pagerduty.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477866,
-        "versions": [
-            "4.0.3",
-            "4.0.2",
-            "4.0.1",
-            "4.0.0",
-            "3.8.1",
-            "3.8.0",
-            "3.7.2",
-            "3.7.1",
-            "3.7.0",
-            "3.6.2",
-            "3.6.1",
-            "3.6.0",
-            "3.5.1",
-            "3.5.0",
-            "3.4.0",
-            "3.3.1",
-            "3.3.0",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.1.3",
-            "2.1.2",
-            "2.1.1",
-            "2.1.0",
-            "2.0.1",
-            "2.0.0",
-            "1.0.1",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Pagerduty",
@@ -69,11 +37,27 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.pagerduty.hooks.pagerduty.PagerdutyHook",
+                "hook-name": "Pagerduty",
                 "connection-type": "pagerduty",
+                "conn-fields": {
+                    "routing_key": {
+                        "label": "Routing Key",
+                        "schema": {"type": ["string", "null"], "format": "password"},
+                    }
+                },
+                "ui-field-behaviour": {
+                    "hidden-fields": ["port", "login", "schema", "host", "extra"],
+                    "relabeling": {"password": "Pagerduty API token"},
+                },
             },
             {
                 "hook-class-name": "airflow.providers.pagerduty.hooks.pagerduty_events.PagerdutyEventsHook",
+                "hook-name": "Pagerduty Events",
                 "connection-type": "pagerduty_events",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["port", "login", "schema", "host", "extra"],
+                    "relabeling": {"password": "Pagerduty Integration key"},
+                },
             },
         ],
         "hooks": [
@@ -86,10 +70,4 @@ def get_provider_info():
             }
         ],
         "notifications": ["airflow.providers.pagerduty.notifications.pagerduty.PagerdutyNotifier"],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-common-compat>=1.6.0",
-            "pdpyras>=4.2.0",
-        ],
-        "devel-dependencies": [],
     }

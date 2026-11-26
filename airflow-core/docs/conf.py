@@ -24,15 +24,8 @@ import logging
 import os
 import pathlib
 import re
-from pathlib import Path
 from typing import Any
 
-from packaging.version import Version, parse as parse_version
-
-import airflow
-from airflow.api_fastapi.auth.managers.simple.openapi import __file__ as sam_openapi_file
-from airflow.api_fastapi.core_api.openapi import __file__ as main_openapi_file
-from airflow.configuration import retrieve_configuration_description
 from docs.utils.conf_constants import (
     AIRFLOW_CORE_DOC_STATIC_PATH,
     AIRFLOW_CORE_DOCKER_COMPOSE_PATH,
@@ -43,12 +36,14 @@ from docs.utils.conf_constants import (
     AUTOAPI_OPTIONS,
     BASIC_AUTOAPI_IGNORE_PATTERNS,
     BASIC_SPHINX_EXTENSIONS,
-    REDOC_SCRIPT_URL,
     SMARTQUOTES_EXCLUDES,
     SPELLING_WORDLIST_PATH,
     SPHINX_DESIGN_STATIC_PATH,
-    SPHINX_REDOC_EXTENSIONS,
+    SPHINX_SWAGGER_EXTENSION,
     SUPPRESS_WARNINGS,
+    SWAGGER_BUNDLE_URI,
+    SWAGGER_CSS_URI,
+    SWAGGER_PRESENT_URI,
     filter_autoapi_ignore_entries,
     get_autodoc_mock_imports,
     get_configs_and_deprecations,
@@ -61,13 +56,15 @@ from docs.utils.conf_constants import (
     get_rst_filepath_from_path,
     skip_util_classes_extension,
 )
+from packaging.version import Version, parse as parse_version
+
+import airflow
+from airflow.configuration import retrieve_configuration_description
 
 PACKAGE_NAME = "apache-airflow"
 PACKAGE_VERSION = airflow.__version__
 SYSTEM_TESTS_DIR: pathlib.Path | None
 SYSTEM_TESTS_DIR = AIRFLOW_REPO_ROOT_PATH / "airflow-core" / "tests" / "system" / "core"
-
-conf_py_path = f"/docs/{PACKAGE_NAME}/"
 
 os.environ["AIRFLOW_PACKAGE_NAME"] = PACKAGE_NAME
 
@@ -93,11 +90,12 @@ smartquotes_excludes = SMARTQUOTES_EXCLUDES
 # ones.
 extensions = BASIC_SPHINX_EXTENSIONS
 
-# -- Options for sphinxcontrib.redoc -------------------------------------------
-# See: https://sphinxcontrib-redoc.readthedocs.io/en/stable/
+extensions.append(SPHINX_SWAGGER_EXTENSION)
 
-extensions.extend(SPHINX_REDOC_EXTENSIONS)
-redoc_script_url = REDOC_SCRIPT_URL
+swagger_present_uri = SWAGGER_PRESENT_URI
+swagger_bundle_uri = SWAGGER_BUNDLE_URI
+swagger_css_uri = SWAGGER_CSS_URI
+swagger_mirror_external_resources = True  # Ensure we embed external resources prevent tracking
 
 extensions.extend(
     [
@@ -106,6 +104,7 @@ extensions.extend(
         "sphinx.ext.graphviz",
         "sphinxcontrib.httpdomain",
         "extra_files_with_substitutions",
+        "generate_erd",
     ]
 )
 
@@ -122,7 +121,6 @@ ALLOWED_TOP_LEVEL_FILES = ("exceptions.py",)
 
 PACKAGES_THAT_WE_SHOULD_ADD_TO_API_DOCS = {
     "hooks",
-    "decorators",
     "example_dags",
     "executors",
     "operators",
@@ -142,15 +140,7 @@ UTIL_MODULES_THAT_SHOULD_BE_INCLUDED_IN_API_DOCS: set[str] = {
 
 MODELS_THAT_SHOULD_BE_INCLUDED_IN_API_DOCS: set[str] = {
     "baseoperator.py",
-    "connection.py",
-    "dag.py",
-    "dagrun.py",
-    "dagbag.py",
     "param.py",
-    "taskinstance.py",
-    "taskinstancekey.py",
-    "variable.py",
-    "xcom.py",
 }
 
 
@@ -200,7 +190,7 @@ keep_warnings = True
 # a list of builtin themes.
 html_theme = "sphinx_airflow_theme"
 
-html_title = "Airflow Documentation"
+html_title = f"Airflow {PACKAGE_VERSION} Documentation"
 
 # A shorter title for the navigation bar.  Default is the same as html_title.
 html_short_title = ""
@@ -223,6 +213,7 @@ manual_substitutions_in_generated_html = [
     "installation/installing-from-sources.html",
     "administration-and-deployment/logging-monitoring/advanced-logging-configuration.html",
     "howto/docker-compose/index.html",
+    "security/sbom.html",
 ]
 
 html_css_files = ["custom.css"]
@@ -238,6 +229,7 @@ html_show_copyright = False
 # html theme options
 html_theme_options: dict[str, Any] = get_html_theme_options()
 
+conf_py_path = "/airflow-core/docs/"
 # A dictionary of values to pass into the template engine's context for all pages.
 html_context = get_html_context(conf_py_path)
 
@@ -253,15 +245,37 @@ airflow_version: Version = parse_version(
 config_descriptions = retrieve_configuration_description(include_providers=False)
 configs, deprecated_options = get_configs_and_deprecations(airflow_version, config_descriptions)
 
+# TODO: remove it when we start releasing task-sdk separately from airflow-core
+airflow_version_split = PACKAGE_VERSION.split(".")
+TASK_SDK_VERSION = f"1.{airflow_version_split[1]}.{airflow_version_split[2]}"
+
 jinja_contexts = {
     "config_ctx": {"configs": configs, "deprecated_options": deprecated_options},
     "quick_start_ctx": {"doc_root_url": f"https://airflow.apache.org/docs/apache-airflow/{PACKAGE_VERSION}/"},
     "official_download_page": {
         "base_url": f"https://downloads.apache.org/airflow/{PACKAGE_VERSION}",
+        "base_url_task_sdk": f"https://downloads.apache.org/airflow/task-sdk/{TASK_SDK_VERSION}",
         "closer_lua_url": f"https://www.apache.org/dyn/closer.lua/airflow/{PACKAGE_VERSION}",
+        "closer_lua_url_task_sdk": f"https://www.apache.org/dyn/closer.lua/airflow/task-sdk/{TASK_SDK_VERSION}",
         "airflow_version": PACKAGE_VERSION,
+        "task_sdk_version": TASK_SDK_VERSION,
     },
 }
+
+# Use for generate rst_epilog and other post-generation substitutions
+global_substitutions = {
+    "version": PACKAGE_VERSION,
+    "airflow-version": airflow.__version__,
+    "experimental": "This is an :ref:`experimental feature <experimental>`.",
+}
+
+# Pagefind search configuration
+pagefind_exclude_patterns = [
+    "_api/**",  # Exclude auto-generated API documentation
+    "_modules/**",  # Exclude source code modules
+    "release_notes.html",  # Exclude changelog aggregation page
+    "genindex.html",  # Exclude generated index
+]
 
 # -- Options for sphinx.ext.autodoc --------------------------------------------
 # See: https://www.sphinx-doc.org/en/master/usage/extensions/autodoc.html
@@ -336,35 +350,21 @@ redirects_file = "redirects.txt"
 
 # -- Options for sphinxcontrib-spelling ----------------------------------------
 spelling_word_list_filename = [SPELLING_WORDLIST_PATH.as_posix()]
-spelling_exclude_patterns = ["project.rst", "changelog.rst"]
+# ``stable-rest-api-ref.rst`` renders the OpenAPI spec via the ``swagger-plugin``
+# directive. Its content is machine-generated (camelCase URL path segments,
+# operationIds, JSON-Schema keywords such as ``oneOf``), not prose, so spell-checking
+# it only produces false positives that re-break the build on every new endpoint.
+spelling_exclude_patterns = ["project.rst", "changelog.rst", "stable-rest-api-ref.rst"]
 
 spelling_ignore_contributor_names = False
 spelling_ignore_importable_modules = True
 
 graphviz_output_format = "svg"
 
-main_openapi_path = Path(main_openapi_file).parent.joinpath("v1-generated.yaml")
-sam_openapi_path = Path(sam_openapi_file).parent.joinpath("v1-generated.yaml")
-redoc = [
-    {
-        "name": "Simple auth manager token API",
-        "page": "core-concepts/auth-manager/simple/sam-token-api-ref",
-        "spec": sam_openapi_path.as_posix(),
-        "opts": {
-            "hide-hostname": True,
-        },
-    },
-    {
-        "name": "Airflow REST API",
-        "page": "stable-rest-api-ref",
-        "spec": main_openapi_path.as_posix(),
-        "opts": {
-            "hide-hostname": True,
-            "no-auto-auth": True,
-        },
-    },
-]
-
 
 def setup(sphinx):
     sphinx.connect("autoapi-skip-member", skip_util_classes_extension)
+
+
+# Fix for broken permalink icon in Sphinx 7.x+
+html_permalinks_icon = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>'

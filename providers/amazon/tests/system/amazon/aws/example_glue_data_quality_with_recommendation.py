@@ -18,9 +18,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from airflow import DAG
-from airflow.decorators import task, task_group
-from airflow.models.baseoperator import chain
 from airflow.providers.amazon.aws.hooks.glue import GlueDataQualityHook
 from airflow.providers.amazon.aws.operators.athena import AthenaOperator
 from airflow.providers.amazon.aws.operators.glue import (
@@ -36,7 +33,22 @@ from airflow.providers.amazon.aws.sensors.glue import (
     GlueDataQualityRuleRecommendationRunSensor,
     GlueDataQualityRuleSetEvaluationRunSensor,
 )
-from airflow.utils.trigger_rule import TriggerRule
+
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import DAG, chain, task, task_group
+else:
+    # Airflow 2 path
+    from airflow.decorators import task, task_group  # type: ignore[attr-defined,no-redef]
+    from airflow.models.baseoperator import chain  # type: ignore[attr-defined,no-redef]
+    from airflow.models.dag import DAG  # type: ignore[attr-defined,no-redef,assignment]
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.amazon.aws.utils import SystemTestContextBuilder
 
@@ -84,12 +96,22 @@ def glue_data_quality_recommendation_workflow():
         },
         role=test_context[ROLE_ARN_KEY],
         rule_set_names=[rule_set_name],
+        # The ruleset is generated dynamically by Glue's recommendation engine and is
+        # non-deterministic, so recommended rules may not always pass against the sample
+        # data. This system test only needs to exercise the operators/sensors end-to-end,
+        # not assert that every recommended rule passes, so do not fail on rule failures.
+        verify_result_status=False,
     )
     start_evaluation_run.wait_for_completion = False
 
     await_evaluation_run_sensor = GlueDataQualityRuleSetEvaluationRunSensor(
         task_id="await_evaluation_run_sensor",
         evaluation_run_id=start_evaluation_run.output,
+        # The ruleset is generated dynamically by Glue's recommendation engine and is
+        # non-deterministic, so recommended rules may not always pass against the sample
+        # data. This system test only needs to exercise the operators/sensors end-to-end,
+        # not assert that every recommended rule passes, so do not fail on rule failures.
+        verify_result_status=False,
     )
 
     chain(
@@ -107,7 +129,6 @@ with DAG(
     dag_id=DAG_ID,
     schedule="@once",
     start_date=datetime(2021, 1, 1),
-    tags=["example"],
     catchup=False,
 ) as dag:
     test_context = sys_test_context_task()
@@ -205,5 +226,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

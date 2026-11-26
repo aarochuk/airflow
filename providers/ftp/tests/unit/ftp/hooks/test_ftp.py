@@ -17,6 +17,7 @@
 # under the License.
 from __future__ import annotations
 
+from ftplib import FTP_TLS, error_perm
 from io import StringIO
 from unittest import mock
 
@@ -39,6 +40,12 @@ class TestFTPHook:
 
     def teardown_method(self):
         fh.FTPHook.get_conn = self.get_conn_orig
+
+    @pytest.fixture
+    def ftp_default(self, create_connection_without_db):
+        from airflow.models import Connection
+
+        create_connection_without_db(Connection(conn_id="ftp_default", conn_type="ftp", host="localhost"))
 
     def test_close_conn(self):
         ftp_hook = fh.FTPHook()
@@ -104,12 +111,13 @@ class TestFTPHook:
 
         self.conn_mock.sendcmd.assert_called_once_with("MDTM " + path)
 
-    def test_get_size(self):
-        self.conn_mock.size.return_value = 1942
+    @pytest.mark.parametrize("size", [1942, 0, None], ids=["file", "empty-file", "no-size-reply"])
+    def test_get_size(self, size):
+        self.conn_mock.size.return_value = size
 
         path = "/path/file"
         with fh.FTPHook() as ftp_hook:
-            ftp_hook.get_size(path)
+            assert ftp_hook.get_size(path) == size
 
         self.conn_mock.size.assert_called_once_with(path)
 
@@ -126,12 +134,52 @@ class TestFTPHook:
             ftp_hook.retrieve_file(self.path, _buffer, callback=func)
         self.conn_mock.retrbinary.assert_called_once_with("RETR /some/path", func, 8192)
 
+    def test_retrieve_file_closes_handle_on_error(self):
+        self.conn_mock.retrbinary.side_effect = OSError("transfer failed")
+        handle = mock.MagicMock(name="output_handle")
+        with mock.patch("builtins.open", return_value=handle):
+            with fh.FTPHook() as ftp_hook:
+                with pytest.raises(OSError, match="transfer failed"):
+                    ftp_hook.retrieve_file(self.path, "/local/path")
+        handle.close.assert_called_once_with()
+
+    def test_store_file_closes_handle_on_error(self):
+        self.conn_mock.storbinary.side_effect = OSError("transfer failed")
+        handle = mock.MagicMock(name="input_handle")
+        with mock.patch("builtins.open", return_value=handle):
+            with fh.FTPHook() as ftp_hook:
+                with pytest.raises(OSError, match="transfer failed"):
+                    ftp_hook.store_file(self.path, "/local/path")
+        handle.close.assert_called_once_with()
+
+    @pytest.mark.usefixtures("ftp_default")
     def test_connection_success(self):
         with fh.FTPHook() as ftp_hook:
             status, msg = ftp_hook.test_connection()
             assert status is True
             assert msg == "Connection successfully tested"
+        self.conn_mock.pwd.assert_called_once_with()
 
+    @pytest.mark.usefixtures("ftp_default")
+    def test_connection_failure_when_server_rejects_command(self):
+        self.conn_mock.pwd.side_effect = error_perm("530 Log in with USER and PASS first.")
+        with fh.FTPHook() as ftp_hook:
+            status, msg = ftp_hook.test_connection()
+            assert status is False
+            assert msg == "530 Log in with USER and PASS first."
+
+    def test_connection_failure_without_host(self, create_connection_without_db):
+        from airflow.models import Connection
+
+        create_connection_without_db(Connection(conn_id="ftp_no_host", conn_type="ftp"))
+
+        status, msg = fh.FTPHook(ftp_conn_id="ftp_no_host").test_connection()
+
+        assert status is False
+        assert msg == "Connection has no host to connect to"
+        self.conn_mock.pwd.assert_not_called()
+
+    @pytest.mark.usefixtures("ftp_default")
     def test_connection_failure(self):
         self.conn_mock = mock.MagicMock(name="conn_mock", side_effect=Exception("Test"))
         fh.FTPHook.get_conn = self.conn_mock
@@ -141,21 +189,32 @@ class TestFTPHook:
             assert msg == "Test"
 
 
-@pytest.mark.db_test
 class TestIntegrationFTPHook:
-    def setup_method(self):
+    @pytest.fixture(autouse=True)
+    def setup_connections(self, create_connection_without_db):
         from airflow.models import Connection
-        from airflow.utils import db
 
-        db.merge_conn(
+        create_connection_without_db(
             Connection(conn_id="ftp_passive", conn_type="ftp", host="localhost", extra='{"passive": true}')
         )
 
-        db.merge_conn(
+        create_connection_without_db(
             Connection(conn_id="ftp_active", conn_type="ftp", host="localhost", extra='{"passive": false}')
         )
 
-        db.merge_conn(
+        create_connection_without_db(
+            Connection(
+                conn_id="ftp_active_str", conn_type="ftp", host="localhost", extra='{"passive": "false"}'
+            )
+        )
+
+        create_connection_without_db(
+            Connection(
+                conn_id="ftp_passive_str", conn_type="ftp", host="localhost", extra='{"passive": "true"}'
+            )
+        )
+
+        create_connection_without_db(
             Connection(
                 conn_id="ftp_custom_port",
                 conn_type="ftp",
@@ -165,7 +224,7 @@ class TestIntegrationFTPHook:
             )
         )
 
-        db.merge_conn(
+        create_connection_without_db(
             Connection(
                 conn_id="ftp_custom_port_and_login",
                 conn_type="ftp",
@@ -174,6 +233,15 @@ class TestIntegrationFTPHook:
                 login="user",
                 password="pass123",
                 extra='{"passive": true}',
+            )
+        )
+
+        create_connection_without_db(
+            Connection(
+                conn_id="ftp_encoding",
+                conn_type="ftp",
+                host="localhost",
+                extra='{"encoding": "cp1251"}',
             )
         )
 
@@ -193,6 +261,16 @@ class TestIntegrationFTPHook:
         from airflow.providers.ftp.hooks.ftp import FTPHook
 
         self._test_mode(FTPHook, "ftp_active", False)
+
+    @pytest.mark.parametrize(
+        ("connection_id", "expected_mode"),
+        [("ftp_active_str", False), ("ftp_passive_str", True)],
+    )
+    @mock.patch("ftplib.FTP")
+    def test_ftp_mode_from_string_extra(self, mock_ftp, connection_id, expected_mode):
+        from airflow.providers.ftp.hooks.ftp import FTPHook
+
+        self._test_mode(FTPHook, connection_id, expected_mode)
 
     @mock.patch("ftplib.FTP")
     def test_ftp_custom_port(self, mock_ftp):
@@ -214,6 +292,32 @@ class TestIntegrationFTPHook:
         conn.login.assert_called_once_with("user", "pass123")
         conn.set_pasv.assert_called_once_with(True)
 
+    @pytest.mark.parametrize("connection_id", ["ftp_passive", "ftp_encoding"])
+    @pytest.mark.parametrize("failed_step", ["set_pasv", "prot_p"])
+    @pytest.mark.parametrize("cleanup_fails", [False, True])
+    @mock.patch("ftplib.FTP_TLS", autospec=True)
+    def test_ftps_discards_failed_setup(self, mock_ftp, connection_id, failed_step, cleanup_fails):
+        failed = mock_ftp.return_value
+        healthy = mock.create_autospec(FTP_TLS, instance=True)
+        mock_ftp.side_effect = [failed, healthy]
+        setup_error = OSError("setup failed")
+        getattr(failed, failed_step).side_effect = setup_error
+        if cleanup_fails:
+            failed.close.side_effect = OSError("cleanup failed")
+        hook = fh.FTPSHook(connection_id)
+
+        with pytest.raises(OSError, match="setup failed") as error:
+            hook.get_conn()
+
+        assert error.value is setup_error
+        assert hook.conn is None
+        failed.close.assert_called_once_with()
+        assert hook.get_conn() is healthy
+        healthy.set_pasv.assert_called_once_with(True)
+        healthy.prot_p.assert_called_once_with()
+        assert hook.get_conn() is healthy
+        assert mock_ftp.call_count == 2
+
     @mock.patch("ftplib.FTP_TLS")
     def test_ftps_passive_mode(self, mock_ftp):
         from airflow.providers.ftp.hooks.ftp import FTPSHook
@@ -225,3 +329,37 @@ class TestIntegrationFTPHook:
         from airflow.providers.ftp.hooks.ftp import FTPSHook
 
         self._test_mode(FTPSHook, "ftp_active", False)
+
+    @pytest.mark.parametrize(
+        ("connection_id", "expected_mode"),
+        [("ftp_active_str", False), ("ftp_passive_str", True)],
+    )
+    @mock.patch("ftplib.FTP_TLS")
+    def test_ftps_mode_from_string_extra(self, mock_ftp, connection_id, expected_mode):
+        from airflow.providers.ftp.hooks.ftp import FTPSHook
+
+        self._test_mode(FTPSHook, connection_id, expected_mode)
+
+    @mock.patch("ftplib.FTP")
+    def test_ftp_encoding_extra(self, mock_ftp):
+        from airflow.providers.ftp.hooks.ftp import FTPHook
+
+        hook = FTPHook("ftp_encoding")
+        hook.get_conn()
+        assert mock_ftp.mock_calls[0] == mock.call(encoding="cp1251")
+
+    @mock.patch("ftplib.FTP_TLS")
+    def test_ftps_encoding_extra(self, mock_ftp_tls):
+        from airflow.providers.ftp.hooks.ftp import FTPSHook
+
+        hook = FTPSHook("ftp_encoding")
+        hook.get_conn()
+        assert any(call.kwargs.get("encoding") == "cp1251" for call in mock_ftp_tls.mock_calls)
+
+    @mock.patch("ftplib.FTP_TLS")
+    def test_ftps_enables_protected_data_channel(self, mock_ftp_tls):
+        from airflow.providers.ftp.hooks.ftp import FTPSHook
+
+        hook = FTPSHook("ftp_passive")
+        conn = hook.get_conn()
+        conn.prot_p.assert_called_once_with()

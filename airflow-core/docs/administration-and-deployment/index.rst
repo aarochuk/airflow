@@ -18,7 +18,7 @@
 Administration and Deployment
 =====================================
 
-This section contains information about deploying dags into production and the administration of airflow deployments.
+This section contains information about deploying Dags into production and the administration of Airflow deployments.
 
 .. toctree::
     :maxdepth: 2
@@ -29,6 +29,7 @@ This section contains information about deploying dags into production and the a
     lineage
     listeners
     dag-bundles
+    dag-importers
     dag-serialization
     modules_management
     scheduler
@@ -38,3 +39,5 @@ This section contains information about deploying dags into production and the a
     priority-weight
     web-stack
     plugins
+    task-and-asset-state-store
+    task-and-asset-state-store-cleanup

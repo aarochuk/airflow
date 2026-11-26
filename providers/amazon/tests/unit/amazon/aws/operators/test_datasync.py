@@ -22,21 +22,29 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from airflow.exceptions import AirflowException
 from airflow.models import DAG, DagRun, TaskInstance
+from airflow.providers.amazon.aws.exceptions import (
+    DataSyncLocationNotFoundError,
+    DataSyncMultipleLocationsError,
+    DataSyncMultipleTasksError,
+    DataSyncTaskCreationError,
+    DataSyncTaskExecutionFailedError,
+    DataSyncTaskNotFoundError,
+)
 from airflow.providers.amazon.aws.hooks.datasync import DataSyncHook
 from airflow.providers.amazon.aws.links.datasync import DataSyncTaskLink
 from airflow.providers.amazon.aws.operators.datasync import DataSyncOperator
-from airflow.utils import timezone
 from airflow.utils.state import DagRunState
-from airflow.utils.timezone import datetime
 from airflow.utils.types import DagRunType
 
+from tests_common.test_utils.compat import timezone
+from tests_common.test_utils.dag import sync_dag_to_db
+from tests_common.test_utils.taskinstance import create_task_instance, get_template_context
 from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
 from unit.amazon.aws.utils.test_template_fields import validate_template_fields
 
 TEST_DAG_ID = "unit_tests"
-DEFAULT_DATE = datetime(2018, 1, 1)
+DEFAULT_DATE = timezone.datetime(2018, 1, 1)
 
 SOURCE_HOST_NAME = "airflow.host"
 SOURCE_SUBDIR = "airflow_subdir"
@@ -205,17 +213,20 @@ class TestDataSyncOperatorCreate(DataSyncTestCaseBase):
         # ### Check mocks:
         mock_get_conn.assert_not_called()
 
-    def test_init_fails(self, mock_get_conn):
+    def test_execute_fails(self, mock_get_conn):
         # ### Set up mocks:
         mock_get_conn.return_value = self.client
         # ### Begin tests:
 
-        with pytest.raises(AirflowException):
-            self.set_up_operator(source_location_uri=None)
-        with pytest.raises(AirflowException):
-            self.set_up_operator(destination_location_uri=None)
-        with pytest.raises(AirflowException):
-            self.set_up_operator(source_location_uri=None, destination_location_uri=None)
+        self.set_up_operator(task_id="task_1", source_location_uri=None)
+        with pytest.raises(ValueError, match="Either specify task_arn"):
+            self.datasync.execute(None)
+        self.set_up_operator(task_id="task_2", destination_location_uri=None)
+        with pytest.raises(ValueError, match="Either specify task_arn"):
+            self.datasync.execute(None)
+        self.set_up_operator(task_id="task_3", source_location_uri=None, destination_location_uri=None)
+        with pytest.raises(ValueError, match="Either specify task_arn"):
+            self.datasync.execute(None)
         # ### Check mocks:
         mock_get_conn.assert_not_called()
 
@@ -316,7 +327,7 @@ class TestDataSyncOperatorCreate(DataSyncTestCaseBase):
         self.client.create_location_smb(**MOCK_DATA["create_source_location_kwargs"])
 
         self.set_up_operator(task_id="datasync_task1")
-        with pytest.raises(AirflowException):
+        with pytest.raises(DataSyncMultipleLocationsError):
             self.datasync.execute(None)
 
         # Delete all tasks:
@@ -326,6 +337,64 @@ class TestDataSyncOperatorCreate(DataSyncTestCaseBase):
 
         self.set_up_operator(task_id="datasync_task2", allow_random_location_choice=True)
         self.datasync.execute(None)
+        # ### Check mocks:
+        mock_get_conn.assert_called()
+
+    def test_no_task_identified_or_created(self, mock_get_conn):
+        # ### Set up mocks:
+        mock_get_conn.return_value = self.client
+        # ### Begin tests:
+
+        # Delete all tasks so none can be matched.
+        tasks = self.client.list_tasks()
+        for task in tasks["Tasks"]:
+            self.client.delete_task(TaskArn=task["TaskArn"])
+
+        # Without create_task_kwargs there is nothing to run or create.
+        self.datasync = DataSyncOperator(
+            task_id="datasync_no_task",
+            dag=self.dag,
+            source_location_uri=SOURCE_LOCATION_URI,
+            destination_location_uri=DESTINATION_LOCATION_URI,
+            wait_interval_seconds=0,
+        )
+        with pytest.raises(DataSyncTaskNotFoundError):
+            self.datasync.execute(None)
+        # ### Check mocks:
+        mock_get_conn.assert_called()
+
+    def test_create_task_no_source_location(self, mock_get_conn):
+        # ### Set up mocks:
+        mock_get_conn.return_value = self.client
+        # ### Begin tests:
+
+        self.datasync = DataSyncOperator(
+            task_id="datasync_no_source_location",
+            dag=self.dag,
+            source_location_uri="smb://nowhere/subdir",
+            destination_location_uri=DESTINATION_LOCATION_URI,
+            create_task_kwargs={"Options": {"VerifyMode": "NONE"}},
+            wait_interval_seconds=0,
+        )
+        with pytest.raises(DataSyncLocationNotFoundError):
+            self.datasync.execute(None)
+        # ### Check mocks:
+        mock_get_conn.assert_called()
+
+    @mock.patch.object(DataSyncHook, "create_task", return_value=None)
+    def test_create_task_without_task_arn(self, mock_create_task, mock_get_conn):
+        # ### Set up mocks:
+        mock_get_conn.return_value = self.client
+        # ### Begin tests:
+
+        # Delete all tasks so the operator falls through to creation.
+        tasks = self.client.list_tasks()
+        for task in tasks["Tasks"]:
+            self.client.delete_task(TaskArn=task["TaskArn"])
+
+        self.set_up_operator()
+        with pytest.raises(DataSyncTaskCreationError):
+            self.datasync.execute(None)
         # ### Check mocks:
         mock_get_conn.assert_called()
 
@@ -347,7 +416,9 @@ class TestDataSyncOperatorCreate(DataSyncTestCaseBase):
         mock_get_conn.assert_called()
 
     @pytest.mark.db_test
-    def test_return_value(self, mock_get_conn, session, clean_dags_and_dagruns):
+    def test_return_value(
+        self, mock_get_conn, session, clean_dags_dagruns_and_dagbundles, testing_dag_bundle
+    ):
         """Test we return the right value -- that will get put in to XCom by the execution engine"""
         # ### Set up mocks:
         mock_get_conn.return_value = self.client
@@ -355,6 +426,10 @@ class TestDataSyncOperatorCreate(DataSyncTestCaseBase):
 
         self.set_up_operator()
         if AIRFLOW_V_3_0_PLUS:
+            from airflow.models.dag_version import DagVersion
+
+            sync_dag_to_db(self.dag)
+            dag_version = DagVersion.get_latest_version(self.dag.dag_id)
             dag_run = DagRun(
                 dag_id=self.dag.dag_id,
                 logical_date=timezone.utcnow(),
@@ -362,6 +437,7 @@ class TestDataSyncOperatorCreate(DataSyncTestCaseBase):
                 run_type=DagRunType.MANUAL,
                 state=DagRunState.RUNNING,
             )
+            ti = create_task_instance(task=self.datasync, run_id="test", dag_version_id=dag_version.id)
         else:
             dag_run = DagRun(
                 dag_id=self.dag.dag_id,
@@ -370,11 +446,11 @@ class TestDataSyncOperatorCreate(DataSyncTestCaseBase):
                 run_type=DagRunType.MANUAL,
                 state=DagRunState.RUNNING,
             )
-        ti = TaskInstance(task=self.datasync)
+            ti = TaskInstance(task=self.datasync)
         ti.dag_run = dag_run
         session.add(ti)
         session.commit()
-        assert self.datasync.execute(ti.get_template_context()) is not None
+        assert self.datasync.execute(get_template_context(ti, self.datasync)) is not None
         # ### Check mocks:
         mock_get_conn.assert_called()
 
@@ -422,17 +498,20 @@ class TestDataSyncOperatorGetTasks(DataSyncTestCaseBase):
         # ### Check mocks:
         mock_get_conn.assert_not_called()
 
-    def test_init_fails(self, mock_get_conn):
+    def test_execute_fails(self, mock_get_conn):
         # ### Set up mocks:
         mock_get_conn.return_value = self.client
         # ### Begin tests:
 
-        with pytest.raises(AirflowException):
-            self.set_up_operator(source_location_uri=None)
-        with pytest.raises(AirflowException):
-            self.set_up_operator(destination_location_uri=None)
-        with pytest.raises(AirflowException):
-            self.set_up_operator(source_location_uri=None, destination_location_uri=None)
+        self.set_up_operator(task_id="task_1", source_location_uri=None)
+        with pytest.raises(ValueError, match="Either specify task_arn"):
+            self.datasync.execute(None)
+        self.set_up_operator(task_id="task_2", destination_location_uri=None)
+        with pytest.raises(ValueError, match="Either specify task_arn"):
+            self.datasync.execute(None)
+        self.set_up_operator(task_id="task_3", source_location_uri=None, destination_location_uri=None)
+        with pytest.raises(ValueError, match="Either specify task_arn"):
+            self.datasync.execute(None)
         # ### Check mocks:
         mock_get_conn.assert_not_called()
 
@@ -529,7 +608,7 @@ class TestDataSyncOperatorGetTasks(DataSyncTestCaseBase):
         assert len(locations["Locations"]) == 2
 
         # Execute the task
-        with pytest.raises(AirflowException):
+        with pytest.raises(DataSyncMultipleTasksError):
             self.datasync.execute(None)
 
         # Assert 0 additional task and 0 additional locations
@@ -561,7 +640,9 @@ class TestDataSyncOperatorGetTasks(DataSyncTestCaseBase):
         mock_get_conn.assert_called()
 
     @pytest.mark.db_test
-    def test_return_value(self, mock_get_conn, session, clean_dags_and_dagruns):
+    def test_return_value(
+        self, mock_get_conn, session, clean_dags_dagruns_and_dagbundles, testing_dag_bundle
+    ):
         """Test we return the right value -- that will get put in to XCom by the execution engine"""
         # ### Set up mocks:
         mock_get_conn.return_value = self.client
@@ -569,6 +650,11 @@ class TestDataSyncOperatorGetTasks(DataSyncTestCaseBase):
 
         self.set_up_operator()
         if AIRFLOW_V_3_0_PLUS:
+            from airflow.models.dag_version import DagVersion
+
+            sync_dag_to_db(self.dag)
+            dag_version = DagVersion.get_latest_version(self.dag.dag_id)
+            ti = create_task_instance(task=self.datasync, run_id="test", dag_version_id=dag_version.id)
             dag_run = DagRun(
                 dag_id=self.dag.dag_id,
                 logical_date=timezone.utcnow(),
@@ -584,11 +670,11 @@ class TestDataSyncOperatorGetTasks(DataSyncTestCaseBase):
                 run_type=DagRunType.MANUAL,
                 state=DagRunState.RUNNING,
             )
-        ti = TaskInstance(task=self.datasync)
+            ti = TaskInstance(task=self.datasync)
         ti.dag_run = dag_run
         session.add(ti)
         session.commit()
-        result = self.datasync.execute(ti.get_template_context())
+        result = self.datasync.execute(get_template_context(ti, self.datasync))
         assert result["TaskArn"] == self.task_arn
         # ### Check mocks:
         mock_get_conn.assert_called()
@@ -625,13 +711,14 @@ class TestDataSyncOperatorUpdate(DataSyncTestCaseBase):
         # ### Check mocks:
         mock_get_conn.assert_not_called()
 
-    def test_init_fails(self, mock_get_conn):
+    def test_execute_fails(self, mock_get_conn):
         # ### Set up mocks:
         mock_get_conn.return_value = self.client
         # ### Begin tests:
 
-        with pytest.raises(AirflowException):
-            self.set_up_operator(task_arn=None)
+        self.set_up_operator(task_arn=None)
+        with pytest.raises(ValueError, match="Either specify task_arn"):
+            self.datasync.execute(None)
         # ### Check mocks:
         mock_get_conn.assert_not_called()
 
@@ -677,7 +764,9 @@ class TestDataSyncOperatorUpdate(DataSyncTestCaseBase):
         mock_get_conn.assert_called()
 
     @pytest.mark.db_test
-    def test_return_value(self, mock_get_conn, session, clean_dags_and_dagruns):
+    def test_return_value(
+        self, mock_get_conn, session, clean_dags_dagruns_and_dagbundles, testing_dag_bundle
+    ):
         """Test we return the right value -- that will get put in to XCom by the execution engine"""
         # ### Set up mocks:
         mock_get_conn.return_value = self.client
@@ -685,6 +774,11 @@ class TestDataSyncOperatorUpdate(DataSyncTestCaseBase):
 
         self.set_up_operator()
         if AIRFLOW_V_3_0_PLUS:
+            from airflow.models.dag_version import DagVersion
+
+            sync_dag_to_db(self.dag)
+            dag_version = DagVersion.get_latest_version(self.dag.dag_id)
+            ti = create_task_instance(task=self.datasync, run_id="test", dag_version_id=dag_version.id)
             dag_run = DagRun(
                 dag_id=self.dag.dag_id,
                 logical_date=timezone.utcnow(),
@@ -700,11 +794,11 @@ class TestDataSyncOperatorUpdate(DataSyncTestCaseBase):
                 run_type=DagRunType.MANUAL,
                 state=DagRunState.RUNNING,
             )
-        ti = TaskInstance(task=self.datasync)
+            ti = TaskInstance(task=self.datasync)
         ti.dag_run = dag_run
         session.add(ti)
         session.commit()
-        result = self.datasync.execute(ti.get_template_context())
+        result = self.datasync.execute(get_template_context(ti, self.datasync))
         assert result["TaskArn"] == self.task_arn
         # ### Check mocks:
         mock_get_conn.assert_called()
@@ -739,13 +833,14 @@ class TestDataSyncOperator(DataSyncTestCaseBase):
         # ### Check mocks:
         mock_get_conn.assert_not_called()
 
-    def test_init_fails(self, mock_get_conn):
+    def test_execute_fails(self, mock_get_conn):
         # ### Set up mocks:
         mock_get_conn.return_value = self.client
         # ### Begin tests:
 
-        with pytest.raises(AirflowException):
-            self.set_up_operator(task_arn=None)
+        self.set_up_operator(task_arn=None)
+        with pytest.raises(ValueError, match="Either specify task_arn"):
+            self.datasync.execute(None)
         # ### Check mocks:
         mock_get_conn.assert_not_called()
 
@@ -833,7 +928,7 @@ class TestDataSyncOperator(DataSyncTestCaseBase):
         self.set_up_operator()
 
         # Execute the task
-        with pytest.raises(AirflowException):
+        with pytest.raises(DataSyncTaskExecutionFailedError):
             self.datasync.execute(None)
         # ### Check mocks:
         mock_get_conn.assert_called()
@@ -886,7 +981,9 @@ class TestDataSyncOperator(DataSyncTestCaseBase):
         mock_get_conn.assert_called()
 
     @pytest.mark.db_test
-    def test_return_value(self, mock_get_conn, session, clean_dags_and_dagruns):
+    def test_return_value(
+        self, mock_get_conn, session, clean_dags_dagruns_and_dagbundles, testing_dag_bundle
+    ):
         """Test we return the right value -- that will get put in to XCom by the execution engine"""
         # ### Set up mocks:
         mock_get_conn.return_value = self.client
@@ -894,6 +991,11 @@ class TestDataSyncOperator(DataSyncTestCaseBase):
 
         self.set_up_operator()
         if AIRFLOW_V_3_0_PLUS:
+            from airflow.models.dag_version import DagVersion
+
+            sync_dag_to_db(self.dag)
+            dag_version = DagVersion.get_latest_version(self.dag.dag_id)
+            ti = create_task_instance(task=self.datasync, run_id="test", dag_version_id=dag_version.id)
             dag_run = DagRun(
                 dag_id=self.dag.dag_id,
                 logical_date=timezone.utcnow(),
@@ -909,11 +1011,11 @@ class TestDataSyncOperator(DataSyncTestCaseBase):
                 run_type=DagRunType.MANUAL,
                 state=DagRunState.RUNNING,
             )
-        ti = TaskInstance(task=self.datasync)
+            ti = TaskInstance(task=self.datasync)
         ti.dag_run = dag_run
         session.add(ti)
         session.commit()
-        assert self.datasync.execute(ti.get_template_context()) is not None
+        assert self.datasync.execute(get_template_context(ti, self.datasync)) is not None
         # ### Check mocks:
         mock_get_conn.assert_called()
 
@@ -944,13 +1046,14 @@ class TestDataSyncOperatorDelete(DataSyncTestCaseBase):
         # ### Check mocks:
         mock_get_conn.assert_not_called()
 
-    def test_init_fails(self, mock_get_conn):
+    def test_execute_fails(self, mock_get_conn):
         # ### Set up mocks:
         mock_get_conn.return_value = self.client
         # ### Begin tests:
 
-        with pytest.raises(AirflowException):
-            self.set_up_operator(task_arn=None)
+        self.set_up_operator(task_arn=None)
+        with pytest.raises(ValueError, match="Either specify task_arn"):
+            self.datasync.execute(None)
         # ### Check mocks:
         mock_get_conn.assert_not_called()
 
@@ -998,7 +1101,9 @@ class TestDataSyncOperatorDelete(DataSyncTestCaseBase):
         mock_get_conn.assert_called()
 
     @pytest.mark.db_test
-    def test_return_value(self, mock_get_conn, session, clean_dags_and_dagruns):
+    def test_return_value(
+        self, mock_get_conn, session, clean_dags_dagruns_and_dagbundles, testing_dag_bundle
+    ):
         """Test we return the right value -- that will get put in to XCom by the execution engine"""
         # ### Set up mocks:
         mock_get_conn.return_value = self.client
@@ -1006,6 +1111,11 @@ class TestDataSyncOperatorDelete(DataSyncTestCaseBase):
 
         self.set_up_operator()
         if AIRFLOW_V_3_0_PLUS:
+            from airflow.models.dag_version import DagVersion
+
+            sync_dag_to_db(self.dag)
+            dag_version = DagVersion.get_latest_version(self.dag.dag_id)
+            ti = create_task_instance(task=self.datasync, run_id="test", dag_version_id=dag_version.id)
             dag_run = DagRun(
                 dag_id=self.dag.dag_id,
                 logical_date=timezone.utcnow(),
@@ -1021,11 +1131,11 @@ class TestDataSyncOperatorDelete(DataSyncTestCaseBase):
                 run_type=DagRunType.MANUAL,
                 state=DagRunState.RUNNING,
             )
-        ti = TaskInstance(task=self.datasync)
+            ti = TaskInstance(task=self.datasync)
         ti.dag_run = dag_run
         session.add(ti)
         session.commit()
-        result = self.datasync.execute(ti.get_template_context())
+        result = self.datasync.execute(get_template_context(ti, self.datasync))
         assert result["TaskArn"] == self.task_arn
         # ### Check mocks:
         mock_get_conn.assert_called()

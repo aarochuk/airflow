@@ -23,8 +23,10 @@ from unittest import mock
 import pytest
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.routing import Mount
+from sqlalchemy import select
 
 from airflow.models.variable import Variable
+from airflow.process_context import force_server_context
 
 from tests_common.test_utils.db import clear_db_variables
 
@@ -40,15 +42,15 @@ def setup_method():
 
 @pytest.fixture
 def access_denied(client):
-    from airflow.api_fastapi.execution_api.deps import JWTBearerDep
     from airflow.api_fastapi.execution_api.routes.variables import has_variable_access
+    from airflow.api_fastapi.execution_api.security import CurrentTIToken
 
     last_route = client.app.routes[-1]
     assert isinstance(last_route, Mount)
     assert isinstance(last_route.app, FastAPI)
     exec_app = last_route.app
 
-    async def _(request: Request, variable_key: str, token=JWTBearerDep):
+    async def _(request: Request, variable_key: str, token=CurrentTIToken):
         await has_variable_access(request, variable_key, token)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -65,17 +67,24 @@ def access_denied(client):
 
 
 class TestGetVariable:
-    def test_variable_get_from_db(self, client, session):
-        Variable.set(key="var1", value="value", session=session)
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("var1", "value"),
+            ("var2/with_slash", "slash_value"),
+        ],
+    )
+    def test_variable_get_from_db(self, client, session, key, value):
+        Variable.set(key=key, value=value, session=session)
         session.commit()
 
-        response = client.get("/execution/variables/var1")
+        response = client.get(f"/execution/variables/{key}")
 
         assert response.status_code == 200
-        assert response.json() == {"key": "var1", "value": "value"}
+        assert response.json() == {"key": key, "value": value}
 
         # Remove connection
-        Variable.delete(key="var1", session=session)
+        Variable.delete(key=key, session=session)
         session.commit()
 
     @mock.patch.dict(
@@ -88,13 +97,38 @@ class TestGetVariable:
         assert response.status_code == 200
         assert response.json() == {"key": "key1", "value": "VALUE"}
 
-    def test_variable_get_not_found(self, client):
-        response = client.get("/execution/variables/non_existent_var")
+    @mock.patch.dict("os.environ", {"AIRFLOW_VAR_KEY1": "VALUE"})
+    @mock.patch.dict(
+        "sys.modules",
+        {"airflow.sdk.execution_time.task_runner": mock.Mock(spec=["SUPERVISOR_COMMS"])},
+    )
+    @mock.patch(
+        "airflow.sdk.Variable.get",
+        side_effect=AssertionError(
+            "Execution API should not route through Task SDK Variable.get in server context"
+        ),
+    )
+    def test_variable_get_uses_server_path_when_supervisor_comms_exists(self, mock_sdk_get, client):
+        with force_server_context():
+            response = client.get("/execution/variables/key1")
+
+        assert response.status_code == 200
+        assert response.json() == {"key": "key1", "value": "VALUE"}
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "non_existent_var",
+            "non/existent/slash/var",
+        ],
+    )
+    def test_variable_get_not_found(self, client, key):
+        response = client.get(f"/execution/variables/{key}")
 
         assert response.status_code == 404
         assert response.json() == {
             "detail": {
-                "message": "Variable with key 'non_existent_var' not found",
+                "message": f"Variable with key '{key}' not found",
                 "reason": "not_found",
             }
         }
@@ -117,14 +151,18 @@ class TestGetVariable:
 
 class TestPutVariable:
     @pytest.mark.parametrize(
-        "payload",
+        ("key", "payload"),
         [
-            pytest.param({"value": "{}", "description": "description"}, id="valid-payload"),
-            pytest.param({"value": "{}"}, id="missing-description"),
+            pytest.param("var_create", {"value": "{}", "description": "description"}, id="valid-payload"),
+            pytest.param("var_create", {"value": "{}"}, id="missing-description"),
+            pytest.param(
+                "var_create/with_slash",
+                {"value": "slash_value", "description": "Variable with slash"},
+                id="slash-key",
+            ),
         ],
     )
-    def test_should_create_variable(self, client, payload, session):
-        key = "var_create"
+    def test_should_create_variable(self, client, key, payload, session):
         response = client.put(
             f"/execution/variables/{key}",
             json=payload,
@@ -132,32 +170,54 @@ class TestPutVariable:
         assert response.status_code == 201, response.json()
         assert response.json()["message"] == "Variable successfully set"
 
-        var_from_db = session.query(Variable).where(Variable.key == "var_create").first()
+        var_from_db = session.scalars(select(Variable).where(Variable.key == key)).first()
         assert var_from_db is not None
         assert var_from_db.key == key
         assert var_from_db.val == payload["value"]
         if "description" in payload:
             assert var_from_db.description == payload["description"]
 
+    @mock.patch.dict(
+        "sys.modules",
+        {"airflow.sdk.execution_time.task_runner": mock.Mock(spec=["SUPERVISOR_COMMS"])},
+    )
+    @mock.patch(
+        "airflow.sdk.Variable.set",
+        side_effect=AssertionError(
+            "Execution API should not route through Task SDK Variable.set in server context"
+        ),
+    )
+    def test_variable_put_uses_server_path_when_supervisor_comms_exists(self, mock_sdk_set, client, session):
+        with force_server_context():
+            response = client.put("/execution/variables/var_server_only", json={"value": "server_value"})
+
+        assert response.status_code == 201
+        assert response.json()["message"] == "Variable successfully set"
+        var_from_db = session.scalars(select(Variable).where(Variable.key == "var_server_only")).first()
+        assert var_from_db is not None
+        assert var_from_db.val == "server_value"
+
     @pytest.mark.parametrize(
-        "key, status_code, payload",
+        ("key", "payload", "error_type"),
         [
-            pytest.param("", 404, {"value": "{}", "description": "description"}, id="missing-key"),
-            pytest.param("var_create", 422, {"description": "description"}, id="missing-value"),
+            pytest.param(
+                "", {"value": "{}", "description": "description"}, "string_too_short", id="missing-key"
+            ),
+            pytest.param("var_create", {"description": "description"}, "missing", id="missing-value"),
         ],
     )
-    def test_variable_missing_mandatory_fields(self, client, key, status_code, payload, session):
+    def test_variable_missing_mandatory_fields(self, client, key, payload, error_type, session):
         response = client.put(
             f"/execution/variables/{key}",
             json=payload,
         )
-        assert response.status_code == status_code
-        if response.status_code == 422:
-            assert response.json()["detail"][0]["type"] == "missing"
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["type"] == error_type
+        if error_type == "missing":
             assert response.json()["detail"][0]["msg"] == "Field required"
 
     @pytest.mark.parametrize(
-        "key, payload",
+        ("key", "payload"),
         [
             pytest.param("key", {"key": "key", "value": "{}", "description": "description"}, id="adding-key"),
             pytest.param(
@@ -179,8 +239,14 @@ class TestPutVariable:
         assert response.json()["detail"][0]["type"] == "extra_forbidden"
         assert response.json()["detail"][0]["msg"] == "Extra inputs are not permitted"
 
-    def test_overwriting_existing_variable(self, client, session):
-        key = "var_create"
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "var_create",
+            "var_create/with_slash",
+        ],
+    )
+    def test_overwriting_existing_variable(self, client, session, key):
         Variable.set(key=key, value="value", session=session)
         session.commit()
 
@@ -192,7 +258,7 @@ class TestPutVariable:
         assert response.status_code == 201
         assert response.json()["message"] == "Variable successfully set"
         # variable should have been updated to the new value
-        var_from_db = session.query(Variable).where(Variable.key == key).first()
+        var_from_db = session.scalars(select(Variable).where(Variable.key == key)).first()
         assert var_from_db is not None
         assert var_from_db.key == key
         assert var_from_db.val == payload["value"]
@@ -215,3 +281,127 @@ class TestPutVariable:
             }
         }
         assert any(msg.startswith("Checking write access for task instance") for msg in caplog.messages)
+
+
+class TestGetVariableKeys:
+    @pytest.mark.parametrize(
+        ("prefix", "expected_keys"),
+        [
+            pytest.param(
+                None,
+                {"prod_db_url", "prod_api_key", "dev_debug", "prodXdb", "50%off", "50abc"},
+                id="no-prefix",
+            ),
+            pytest.param("prod_", {"prod_db_url", "prod_api_key"}, id="underscore-is-literal"),
+            pytest.param("50%", {"50%off"}, id="percent-is-literal"),
+            pytest.param("staging_", set(), id="no-match"),
+        ],
+    )
+    def test_get_variable_keys(self, client, session, prefix, expected_keys):
+        Variable.set(key="prod_db_url", value="postgres://...", session=session)
+        Variable.set(key="prod_api_key", value="secret", session=session)
+        Variable.set(key="dev_debug", value="true", session=session)
+        Variable.set(key="prodXdb", value="x", session=session)
+        Variable.set(key="50%off", value="x", session=session)
+        Variable.set(key="50abc", value="x", session=session)
+        session.commit()
+
+        params = {"prefix": prefix} if prefix is not None else {}
+        response = client.get("/execution/variables/keys", params=params)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert set(body["keys"]) == expected_keys
+        assert body["total_entries"] == len(expected_keys)
+
+    def test_get_variable_keys_empty_db(self, client):
+        response = client.get("/execution/variables/keys")
+
+        assert response.status_code == 200
+        assert response.json() == {"keys": [], "total_entries": 0}
+
+    def test_get_variable_keys_paginates_with_limit_and_offset(self, client, session):
+        for i in range(5):
+            Variable.set(key=f"k{i}", value=str(i), session=session)
+        session.commit()
+
+        first = client.get("/execution/variables/keys", params={"limit": 2, "offset": 0})
+        second = client.get("/execution/variables/keys", params={"limit": 2, "offset": 2})
+        third = client.get("/execution/variables/keys", params={"limit": 2, "offset": 4})
+
+        # Order is stable (sorted by key) so pagination is deterministic.
+        assert first.json() == {"keys": ["k0", "k1"], "total_entries": 5}
+        assert second.json() == {"keys": ["k2", "k3"], "total_entries": 5}
+        assert third.json() == {"keys": ["k4"], "total_entries": 5}
+
+    @pytest.mark.parametrize(
+        ("params", "expected_status"),
+        [
+            pytest.param({"limit": 0}, 422, id="limit-below-min"),
+            pytest.param({"limit": 10_001}, 422, id="limit-above-max"),
+            pytest.param({"offset": -1}, 422, id="offset-negative"),
+        ],
+    )
+    def test_get_variable_keys_validates_pagination_bounds(self, client, params, expected_status):
+        response = client.get("/execution/variables/keys", params=params)
+        assert response.status_code == expected_status
+
+
+class TestDeleteVariable:
+    @pytest.mark.parametrize(
+        ("keys_to_create", "key_to_delete"),
+        [
+            (["key1", "key2"], "key1"),
+            (["key3/with_slash", "key4"], "key3/with_slash"),
+        ],
+    )
+    def test_should_delete_variable(self, client, session, keys_to_create, key_to_delete):
+        for i, key in enumerate(keys_to_create, 1):
+            Variable.set(key=key, value=str(i))
+
+        vars = session.scalars(select(Variable)).all()
+        assert len(vars) == len(keys_to_create)
+
+        response = client.delete(f"/execution/variables/{key_to_delete}")
+
+        assert response.status_code == 204
+
+        vars = session.scalars(select(Variable)).all()
+        assert len(vars) == len(keys_to_create) - 1
+
+    def test_should_not_delete_variable(self, client, session):
+        Variable.set(key="key", value="value")
+
+        vars = session.scalars(select(Variable)).all()
+        assert len(vars) == 1
+
+        response = client.delete("/execution/variables/non_existent_key")
+
+        assert response.status_code == 204
+
+        vars = session.scalars(select(Variable)).all()
+        assert len(vars) == 1
+
+    def test_variable_delete_uses_server_path_when_supervisor_comms_exists(self, client, session):
+        # Patched below, not by decorator: this setup must run before ``SUPERVISOR_COMMS`` is visible.
+        Variable.set(key="var_server_delete", value="to_delete", session=session)
+        session.commit()
+
+        with (
+            force_server_context(),
+            mock.patch.dict(
+                "sys.modules",
+                {"airflow.sdk.execution_time.task_runner": mock.Mock(spec=["SUPERVISOR_COMMS"])},
+            ),
+            mock.patch(
+                "airflow.sdk.Variable.delete",
+                side_effect=AssertionError(
+                    "Execution API should not route through Task SDK Variable.delete in server context"
+                ),
+            ),
+        ):
+            response = client.delete("/execution/variables/var_server_delete")
+
+        assert response.status_code == 204
+        session.expire_all()
+        assert session.scalar(select(Variable).where(Variable.key == "var_server_delete")) is None

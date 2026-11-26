@@ -17,14 +17,14 @@
 # under the License.
 from __future__ import annotations
 
-import posixpath
 from functools import wraps
+from pathlib import PurePosixPath, PureWindowsPath
 from shutil import copyfileobj
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import smbclient
 
-from airflow.hooks.base import BaseHook
+from airflow.providers.common.compat.sdk import AirflowOptionalProviderFeatureException, BaseHook
 
 if TYPE_CHECKING:
     import smbprotocol.connection
@@ -41,6 +41,10 @@ class SambaHook(BaseHook):
     :param share:
         An optional share name. If this is unset then the "schema" field of
         the connection is used in its place.
+    :param share_type:
+        An optional share type name. If this is unset then it will assume a posix share type.
+    :param auth_protocol:
+        An optional authentication protocol. If this is unset then it defaults to negotiate.
     """
 
     conn_name_attr = "samba_conn_id"
@@ -48,26 +52,67 @@ class SambaHook(BaseHook):
     conn_type = "samba"
     hook_name = "Samba"
 
-    def __init__(self, samba_conn_id: str = default_conn_name, share: str | None = None) -> None:
+    VALID_AUTH_PROTOCOLS = {"negotiate", "ntlm", "kerberos"}
+
+    def __init__(
+        self,
+        samba_conn_id: str = default_conn_name,
+        share: str | None = None,
+        share_type: Literal["posix", "windows"] | None = None,
+        auth_protocol: Literal["negotiate", "ntlm", "kerberos"] | None = None,
+    ) -> None:
         super().__init__()
         conn = self.get_connection(samba_conn_id)
+        extra = conn.extra_dejson
 
-        if not conn.login:
+        legacy_auth = extra.get("auth")
+        legacy_auth_protocol = (
+            legacy_auth
+            if isinstance(legacy_auth, str) and legacy_auth in self.VALID_AUTH_PROTOCOLS
+            else "negotiate"
+        )
+        self._auth_protocol: str = auth_protocol or extra.get("auth_protocol", legacy_auth_protocol)
+        if self._auth_protocol not in self.VALID_AUTH_PROTOCOLS:
+            raise ValueError(
+                f"Invalid auth_protocol '{self._auth_protocol}'. "
+                f"Must be one of {sorted(self.VALID_AUTH_PROTOCOLS)}."
+            )
+
+        uses_kerberos = self._auth_protocol == "kerberos"
+
+        if uses_kerberos:
+            try:
+                import krb5  # noqa: F401
+            except ImportError:
+                raise AirflowOptionalProviderFeatureException(
+                    "Kerberos authentication requires the 'krb5' package. "
+                    "Install it with: pip install 'apache-airflow-providers-samba[kerberos]'"
+                )
+
+        if not conn.login and not uses_kerberos:
             self.log.info("Login not provided")
 
-        if not conn.password:
+        if not conn.password and not uses_kerberos:
             self.log.info("Password not provided")
+
+        self._share_type = share_type or extra.get("share_type", "posix")
+        if self._share_type not in {"posix", "windows"}:
+            self._share_type = "posix"
+            self.log.warning(
+                "Invalid share_type specified. It must be either 'posix' or 'windows'. Falling back to 'posix'"
+            )
 
         connection_cache: dict[str, smbprotocol.connection.Connection] = {}
 
         self._host = conn.host
         self._share = share or conn.schema
         self._connection_cache = connection_cache
-        self._conn_kwargs = {
+        self._conn_kwargs: dict[str, Any] = {
             "username": conn.login,
             "password": conn.password,
             "port": conn.port or 445,
             "connection_cache": connection_cache,
+            "auth_protocol": self._auth_protocol,
         }
 
     def __enter__(self):
@@ -84,8 +129,18 @@ class SambaHook(BaseHook):
             connection.disconnect()
         self._connection_cache.clear()
 
+    @staticmethod
+    def _join_posix_path(host: str, share: str, path: str) -> str:
+        return str(PurePosixPath("//" + host, share, path.lstrip("/")))
+
+    @staticmethod
+    def _join_windows_path(host: str, share: str, path: str) -> str:
+        return "\\{}".format(PureWindowsPath(f"\\{host}\\{share}", path.lstrip(r"\/")))
+
     def _join_path(self, path):
-        return f"//{posixpath.join(self._host, self._share, path.lstrip('/'))}"
+        if self._share_type == "windows":
+            return self._join_windows_path(self._host, self._share, path)
+        return self._join_posix_path(self._host, self._share, path)
 
     @wraps(smbclient.link)
     def link(self, src, dst, follow_symlinks=True):
@@ -104,15 +159,17 @@ class SambaHook(BaseHook):
     def lstat(self, path):
         return smbclient.lstat(self._join_path(path), **self._conn_kwargs)
 
-    @wraps(smbclient.makedirs)
     def makedirs(self, path, exist_ok=False):
+        self._makedirs(path, exist_ok)
+
+    @wraps(smbclient.makedirs)
+    def _makedirs(self, path, exist_ok):
         return smbclient.makedirs(self._join_path(path), exist_ok=exist_ok, **self._conn_kwargs)
 
     @wraps(smbclient.mkdir)
     def mkdir(self, path):
         return smbclient.mkdir(self._join_path(path), **self._conn_kwargs)
 
-    @wraps(smbclient.open_file)
     def open_file(
         self,
         path,
@@ -124,6 +181,33 @@ class SambaHook(BaseHook):
         share_access=None,
         desired_access=None,
         file_attributes=None,
+        file_type="file",
+    ):
+        return self._open_file(
+            path,
+            mode,
+            buffering,
+            encoding,
+            errors,
+            newline,
+            share_access,
+            desired_access,
+            file_attributes,
+            file_type,
+        )
+
+    @wraps(smbclient.open_file)
+    def _open_file(
+        self,
+        path,
+        mode,
+        buffering,
+        encoding,
+        errors,
+        newline,
+        share_access,
+        desired_access,
+        file_attributes,
         file_type="file",
     ):
         return smbclient.open_file(
@@ -264,6 +348,30 @@ class SambaHook(BaseHook):
     def get_ui_field_behaviour(cls) -> dict[str, Any]:
         """Return custom field behaviour."""
         return {
-            "hidden_fields": ["extra"],
+            "hidden_fields": [],
             "relabeling": {"schema": "Share"},
+        }
+
+    @classmethod
+    def get_connection_form_widgets(cls) -> dict[str, Any]:
+        """Return connection widgets to add to connection form."""
+        from flask_babel import lazy_gettext
+        from wtforms import SelectField, StringField
+
+        return {
+            "share_type": StringField(
+                label=lazy_gettext("Share Type"),
+                description="The share OS type (`posix` or `windows`). Used to determine the formatting of file and folder paths.",
+                default="posix",
+            ),
+            "auth_protocol": SelectField(
+                label=lazy_gettext("Auth Protocol"),
+                description=(
+                    "Authentication protocol: `negotiate` (auto-select, default), "
+                    "`ntlm`, or `kerberos`. When using `kerberos`, the system's "
+                    "Kerberos ticket cache is used and username/password are optional."
+                ),
+                choices=["negotiate", "ntlm", "kerberos"],
+                default="negotiate",
+            ),
         }

@@ -18,31 +18,36 @@ from __future__ import annotations
 
 import functools
 import logging
+from collections.abc import Callable
 from inspect import signature
-from typing import Callable, TypeVar, overload
+from typing import TYPE_CHECKING, TypeVar, overload
 
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.orm.exc import StaleDataError
 
 from airflow.configuration import conf
+
+if TYPE_CHECKING:
+    from airflow._shared.logging.types import Logger
 
 F = TypeVar("F", bound=Callable)
 
 MAX_DB_RETRIES = conf.getint("database", "max_db_retries", fallback=3)
 
 
-def run_with_db_retries(max_retries: int = MAX_DB_RETRIES, logger: logging.Logger | None = None, **kwargs):
+def run_with_db_retries(max_retries: int = MAX_DB_RETRIES, logger: Logger | None = None, **kwargs):
     """Return Tenacity Retrying object with project specific default."""
     import tenacity
 
     # Default kwargs
     retry_kwargs = dict(
-        retry=tenacity.retry_if_exception_type(exception_types=(DBAPIError)),
+        retry=tenacity.retry_if_exception_type(exception_types=(DBAPIError, StaleDataError)),
         wait=tenacity.wait_random_exponential(multiplier=0.5, max=5),
         stop=tenacity.stop_after_attempt(max_retries),
         reraise=True,
         **kwargs,
     )
-    if logger and isinstance(logger, logging.Logger):
+    if logger is not None:
         retry_kwargs["before_sleep"] = tenacity.before_sleep_log(logger, logging.DEBUG, True)
 
     return tenacity.Retrying(**retry_kwargs)
@@ -100,7 +105,7 @@ def retry_db_transaction(_func: Callable | None = None, *, retries: int = MAX_DB
                     )
                     try:
                         return func(*args, **kwargs)
-                    except DBAPIError:
+                    except (DBAPIError, StaleDataError):
                         session.rollback()
                         raise
 
@@ -109,5 +114,4 @@ def retry_db_transaction(_func: Callable | None = None, *, retries: int = MAX_DB
     # Allow using decorator with and without arguments
     if _func is None:
         return retry_decorator
-    else:
-        return retry_decorator(_func)
+    return retry_decorator(_func)

@@ -20,6 +20,436 @@
 Changelog
 ---------
 
+.. warning::
+    The Assistants and Threads methods of ``OpenAIHook`` are removed. OpenAI shut down the
+    Assistants API on 2026-08-26, so these methods, deprecated since 1.8.0, could only fail.
+    Calling one now raises ``AttributeError``. Use the Responses and Conversations methods instead
+    (see OpenAI's `migration guide <https://developers.openai.com/api/docs/assistants/migration>`__):
+
+    * ``create_assistant``, ``get_assistant``, ``get_assistants``, ``modify_assistant`` and
+      ``delete_assistant``: there is no stored assistant object any more. Pass ``model``,
+      ``instructions`` and ``tools`` to ``create_response`` on each call.
+    * ``create_thread``: use ``create_conversation``.
+    * ``modify_thread``: use ``update_conversation``.
+    * ``delete_thread``: use ``delete_conversation``.
+    * ``create_message``: to add a message without running the model, use
+      ``hook.conn.conversations.items.create(conversation_id, items=[{"role": ..., "content": ...}])``.
+      To add a message and get the model's reply in one call (the old ``create_message`` followed by
+      ``create_run``), pass it as ``input`` to ``create_response`` together with
+      ``conversation=<conversation id>``.
+    * ``get_messages``: use ``hook.conn.conversations.items.list(conversation_id)``.
+    * ``modify_message``: no replacement. Conversation items can be created, read and deleted,
+      but not modified.
+    * ``create_run`` and ``create_run_and_poll``: use ``create_response``, which returns once the
+      response is complete. For long-running work pass ``background=True`` and poll
+      ``get_response``.
+    * ``get_run``: use ``get_response``.
+    * ``get_runs``: no replacement. The Responses API cannot list responses; read a conversation's
+      history with ``hook.conn.conversations.items.list(conversation_id)``.
+    * ``modify_run``: no replacement. A response cannot be modified after it is created.
+
+2.2.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add async aget_conn and acreate_embeddings to OpenAIHook (#74149)``
+
+Misc
+~~~~
+
+* ``Require common.compat 1.21.0 for asynchronous OpenAI hook helpers (#74933)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+2.1.0
+.....
+
+.. warning::
+    A deferred ``OpenAITriggerBatchOperator`` that times out now raises ``OpenAIBatchTimeout``
+    instead of ``OpenAIBatchJobException``, which is what 1.8.2 and earlier raised for the same
+    condition. ``OpenAIBatchTimeout`` is not a subclass of ``OpenAIBatchJobException``, so an
+    ``on_failure_callback``, ``except`` clause, or retry rule keyed on
+    ``OpenAIBatchJobException`` no longer matches a deferred timeout. Catch or check for
+    ``OpenAIBatchTimeout`` as well to keep handling timeouts.
+
+    A cancelled batch now raises ``OpenAIBatchCancelled``, a subclass of
+    ``OpenAIBatchJobException``, so existing code that catches ``OpenAIBatchJobException`` keeps
+    matching cancellations unchanged.
+
+.. note::
+    A deferred ``OpenAITriggerBatchOperator`` that times out now requests cancellation of the
+    batch, matching the non-deferrable path. Previously a deferred timeout only failed the
+    task and left the batch running (and billing) on OpenAI's side. Cancellation on OpenAI's
+    side is asynchronous, so the batch reports ``cancelling`` for a while before it settles as
+    ``cancelled``.
+
+Features
+~~~~~~~~
+
+* ``Support Pydantic structured outputs in 'OpenAIResponseOperator' (#69812)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Distinguish OpenAI batch timeout and cancellation in deferrable tasks (#72149)``
+
+Misc
+~~~~
+
+* ``Drop support for Python 3.10 (#74157)``
+
+Doc-only
+~~~~~~~~
+
+* ``Update provider READMEs for the Python 3.11 baseline (#74158)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``[main] Upgrade important CI environment (#73629)``
+
+2.0.0
+.....
+
+.. warning::
+    ``OpenAIHook.create_embeddings`` -- and therefore the XCom pushed by
+    ``OpenAIEmbeddingOperator`` -- now returns one embedding per input when it is
+    given a list: ``list[list[float]]`` instead of the single ``list[float]`` that
+    up to 1.8.2 was taken from the first element only. Every embedding past the
+    first was silently discarded. A task that passes a single string is unchanged,
+    but a downstream task that consumed the XCom of a batched call now receives a
+    list of vectors rather than one vector, with no error to signal it. Take
+    ``result[0]`` to keep the old value, or index the list per input.
+
+.. note::
+    ``OpenAIResponseOperator.response_kwargs`` is now a template field. If an
+    existing Dag passes a ``response_kwargs`` dict containing a literal
+    ``{{ ... }}`` string, Jinja will now render it, and the outcome depends on
+    whether the referenced variable is defined: an undefined variable makes
+    the task **fail** at render time (Airflow's default ``template_undefined``
+    is ``StrictUndefined``), while a defined variable is substituted
+    **silently**, sending a different prompt or tool schema to the paid API
+    than before, with no error to signal the change.
+
+    To keep a ``{{ ... }}`` value literal, wrap it in a ``{% raw %}`` block,
+    for example ``{% raw %}{{ not_a_variable }}{% endraw %}``.
+
+    Rendered ``response_kwargs`` — including the full ``instructions`` text and
+    any tool schema — are written to ``rendered_task_instance_fields`` in the
+    metadata DB on every run, regardless of the operator's ``do_xcom_push``
+    setting.
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+* ``Return all embeddings for batched OpenAI inputs (#71989)``
+
+Features
+~~~~~~~~
+
+* ``Template every connection id accepted by provider operators (#73286)``
+* ``Add 'OpenAIAgentSessionOperator' for OpenAI Managed Agents (#73447)``
+* ``Record OpenAI Responses token usage and response id in XCom (#72151)``
+* ``Make OpenAI batch options reachable from OpenAITriggerBatchOperator (#72051)``
+* ``Make OpenAI Responses token ceilings templated and surface truncation (#72150)``
+
+Doc-only
+~~~~~~~~
+
+* ``Document the Responses API options OpenAIResponseOperator can pass through (#72049)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Revert "[main] Upgrade important CI environment (#73308)" (#73621)``
+   * ``[main] Upgrade important CI environment (#73308)``
+   * ``Adopt flit 4 as the provider distribution build backend (#71186)``
+
+1.8.2
+.....
+
+.. note::
+    ``OpenAITriggerBatchOperator`` now fails the task when a deferred batch ends in a
+    non-success state. Previously only ``status="error"`` raised, so a batch that was
+    **cancelled** while the task was deferred completed **successfully** with no results,
+    and an unrecognized or missing trigger event either succeeded silently or crashed with
+    ``TypeError: 'NoneType' object is not subscriptable``.
+
+    This aligns the deferrable path with the non-deferrable one, which has raised for
+    ``CANCELLED``/``CANCELLING`` since ``OpenAIHook.wait_for_batch`` was fixed.
+
+    Dags whose batches are cancelled will now fail where they previously reported success.
+    That is the intended correction — the earlier green runs produced no batch output — but
+    if you were relying on cancellation being treated as success, handle it explicitly, for
+    example with a trigger rule or by catching ``OpenAIBatchJobException`` downstream.
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Use monotonic clock for OpenAIBatchTrigger polling timeout (#69534)``
+* ``Validate trigger events in Openai deferrable tasks (#69506)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix broken OpenAI batch trigger test blocking main (#70938)``
+
+
+1.8.1
+.....
+
+.. note::
+    The ``[datalib]`` extra of the ``openai`` SDK is no longer part of this
+    provider's base install. That extra existed to support the SDK's legacy
+    ``openai tools fine_tunes.prepare_data`` CLI (removed in openai 1.x) and
+    transitively pulled in ``numpy``, ``pandas``, and ``pandas-stubs`` for every
+    provider user. None of these packages are imported by the provider's
+    source, tests, or example Dags, so the extra was pure transitive bloat.
+
+    Users whose Dag code relied on ``numpy`` or ``pandas`` being installed as a
+    side-effect of installing this provider should declare those packages
+    explicitly, or install the SDK extra directly:
+
+    .. code-block:: bash
+
+        pip install 'openai[datalib]'
+
+Misc
+~~~~
+
+* ``Remove unused [datalib] extra from OpenAI provider base install (#69408)``
+
+Doc-only
+~~~~~~~~
+
+* ``Fix broken class references and truncated wording in OpenAI provider docs (#69710)``
+* ``Add feature-comparison table and toolset links to common.ai provider docs (#69649)``
+* ``Add quickstart to OpenAI provider (#69590)``
+* ``Document when to use common.ai vs vendor-specific AI providers (#69551)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+
+.. Bug fix
+
+``OpenAIBatchTrigger`` now measures its polling timeout with
+:func:`time.monotonic` instead of :func:`time.time`, so a batch task's
+timeout is no longer affected by wall-clock adjustments (NTP corrections,
+DST, VM pause/resume) that happen while the trigger is deferred.
+
+To make that possible the trigger's preferred constructor argument changed
+from ``end_time`` (an absolute wall-clock deadline) to ``timeout`` (a
+duration in seconds). ``OpenAITriggerBatchOperator`` has been updated to
+pass ``timeout``. ``OpenAIBatchTrigger`` still accepts the legacy
+``end_time`` argument so that triggers serialized by the previous version
+of the operator continue to run after an upgrade; direct users of the
+trigger should switch to ``timeout``.
+
+1.8.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Deprecate OpenAI Assistants and Threads hook methods (#69071)``
+* ``Add OpenAI Responses and Conversations support (#69070)``
+* ``Add Workload Identity authentication to OpenAI provider (#69069)``
+
+Misc
+~~~~
+
+* ``Update OpenAI provider to OpenAI Python SDK 2.x (#69068)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix inconsistency between generated provider docs and pyproject.toml (#68991)``
+
+1.7.5
+.....
+
+Misc
+~~~~
+
+* ``Add explicit [tool.flit.sdist] sections to flit-based pyproject.tomls (#65861)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Fix stale system test documentation links (#65071)``
+
+
+1.7.4
+.....
+
+Misc
+~~~~
+
+* ``Load hook metadata from YAML without importing Hook class (#63826)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.7.3
+.....
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix OpenAI provider get_provider_info (#63404)``
+* ``Fix CI regression of "Improve OpenAI provider metadata" (#63403)``
+
+Misc
+~~~~
+
+* ``Add Python 3.14 Support (#63520)``
+* ``Improve OpenAI provider metadata and documentation (#61054)``
+* ``Migrate OpenAI connection UI metadata to YAML (#62669)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Add *.iml to .gitignore in all distributions (#63636)``
+   * ``Prepare providers release 2026-03-09 (#63198)``
+   * ``Add Apache Airflow Provider Registry (#62261)``
+   * ``Prepare documentation for next release of providers (2026-02-24) (#62495)``
+   * ``Add 'lifecycle' field to provider.yaml schema and all providers per AIP-95 (#62190)``
+
+1.7.2
+.....
+
+Misc
+~~~~
+
+* ``New year means updated Copyright notices (#60344)``
+* ``Migrate openai provider to use airflow.sdk.configuration.conf (#59996)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.7.1
+.....
+
+Misc
+~~~~
+
+* ``Add backcompat for exceptions in providers (#58727)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.7.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.11+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump minimum Airflow version in providers to Airflow 2.11.0 (#58612)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.6.4
+.....
+
+Misc
+~~~~
+
+* ``Convert all airflow distributions to be compliant with ASF requirements (#58138)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Delete all unnecessary LICENSE Files (#58191)``
+   * ``Enable PT006 rule to openai Provider test (#57920)``
+
+1.6.3
+.....
+
+Misc
+~~~~
+
+* ``Migrate openai provider to ''common.compat'' (#57020)``
+
+Doc-only
+~~~~~~~~
+
+* ``Remove placeholder Release Date in changelog and index files (#56056)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Enable PT011 rule to prvoider tests (#56021)``
+   * ``Prepare release for Sep 2025 2nd wave of providers (#55688)``
+   * ``Prepare release for Sep 2025 1st wave of providers (#55203)``
+   * ``Fix Airflow 2 reference in README/index of providers (#55240)``
+   * ``Switch pre-commit to prek (#54258)``
+
+1.6.2
+.....
+
+Misc
+~~~~
+
+* ``Add Python 3.13 support for Airflow. (#46891)``
+* ``Cleanup type ignores in openai provider where possible (#53285)``
+* ``Remove type ignore across codebase after mypy upgrade (#53243)``
+* ``Remove upper-binding for "python-requires" (#52980)``
+* ``Temporarily switch to use >=,< pattern instead of '~=' (#52967)``
+* ``Move all BaseHook usages to version_compat in openai (#52819)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Deprecate decorators from Core (#53629)``
+
+1.6.1
+.....
+
+Misc
+~~~~
+
+* ``Move 'BaseHook' implementation to task SDK (#51873)``
+* ``Disable UP038 ruff rule and revert mandatory 'X | Y' in insintance checks (#52644)``
+* ``Provider Migration: Replace 'BaseOperator' to Task SDK for 'OpenAI' (#52561)``
+* ``Drop support for Python 3.9 (#52072)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+
+1.6.0
+.....
+
+.. note::
+    This release of provider is only available for Airflow 2.10+ as explained in the
+    Apache Airflow providers support policy <https://github.com/apache/airflow/blob/main/PROVIDERS.rst#minimum-supported-version-of-airflow-for-community-managed-providers>_.
+
+Misc
+~~~~
+
+* ``Bump min Airflow version in providers to 2.10 (#49843)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Update description of provider.yaml dependencies (#50231)``
+   * ``Avoid committing history for providers (#49907)``
+
+1.5.4
+.....
+
+Misc
+~~~~
+
+* ``remove superfluous else block (#49199)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Prepare docs for Apr 2nd wave of providers (#49051)``
+   * ``Remove unnecessary entries in get_provider_info and update the schema (#48849)``
+   * ``Remove fab from preinstalled providers (#48457)``
+   * ``Improve documentation building iteration (#48760)``
+   * ``Prepare docs for Apr 1st wave of providers (#48828)``
+   * ``Simplify tooling by switching completely to uv (#48223)``
+
 1.5.3
 .....
 

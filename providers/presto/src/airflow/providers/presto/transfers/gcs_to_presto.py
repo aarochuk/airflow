@@ -25,16 +25,12 @@ from collections.abc import Iterable, Sequence
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
 from airflow.providers.presto.hooks.presto import PrestoHook
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class GCSToPrestoOperator(BaseOperator):
@@ -66,6 +62,8 @@ class GCSToPrestoOperator(BaseOperator):
         "source_bucket",
         "source_object",
         "presto_table",
+        "presto_conn_id",
+        "gcp_conn_id",
     )
 
     def __init__(

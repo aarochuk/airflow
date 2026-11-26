@@ -22,12 +22,11 @@ from typing import TYPE_CHECKING
 
 from kubernetes import client
 
-from airflow.exceptions import AirflowException
 from airflow.providers.cncf.kubernetes.hooks.kubernetes import KubernetesHook
-from airflow.sensors.base import BaseSensorOperator
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class FlinkKubernetesSensor(BaseSensorOperator):
@@ -62,6 +61,7 @@ class FlinkKubernetesSensor(BaseSensorOperator):
         api_group: str = "flink.apache.org",
         api_version: str = "v1beta1",
         plural: str = "flinkdeployments",
+        taskmanager_pods_namespace: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -73,6 +73,7 @@ class FlinkKubernetesSensor(BaseSensorOperator):
         self.api_group = api_group
         self.api_version = api_version
         self.plural = plural
+        self.taskmanager_pods_namespace = taskmanager_pods_namespace
 
     def _log_driver(self, application_state: str, response: dict) -> None:
         log_method = self.log.error if application_state in self.FAILURE_STATES else self.log.info
@@ -88,7 +89,9 @@ class FlinkKubernetesSensor(BaseSensorOperator):
 
         task_manager_labels = status_info["taskManager"]["labelSelector"]
         all_pods = self.hook.get_namespaced_pod_list(
-            namespace="default", watch=False, label_selector=task_manager_labels
+            namespace=self.taskmanager_pods_namespace or self.namespace or "default",
+            watch=False,
+            label_selector=task_manager_labels,
         )
 
         namespace = response["metadata"]["namespace"]
@@ -128,9 +131,8 @@ class FlinkKubernetesSensor(BaseSensorOperator):
         if application_state in self.FAILURE_STATES:
             message = f"Flink application failed with state: {application_state}"
             raise AirflowException(message)
-        elif application_state in self.SUCCESS_STATES:
+        if application_state in self.SUCCESS_STATES:
             self.log.info("Flink application ended successfully")
             return True
-        else:
-            self.log.info("Flink application is still in state: %s", application_state)
-            return False
+        self.log.info("Flink application is still in state: %s", application_state)
+        return False

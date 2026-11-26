@@ -20,15 +20,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.segment.hooks.segment import SegmentHook
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class SegmentTrackEventOperator(BaseOperator):
@@ -43,7 +39,7 @@ class SegmentTrackEventOperator(BaseOperator):
         Defaults to False
     """
 
-    template_fields: Sequence[str] = ("user_id", "event", "properties")
+    template_fields: Sequence[str] = ("user_id", "event", "properties", "segment_conn_id")
     ui_color = "#ffd700"
 
     def __init__(

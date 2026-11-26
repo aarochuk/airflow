@@ -20,16 +20,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from airflow.models import BaseOperator
+from airflow.providers.common.compat.sdk import BaseOperator
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 from airflow.providers.trino.hooks.trino import TrinoHook
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class TrinoToMySqlOperator(BaseOperator):
@@ -50,7 +46,13 @@ class TrinoToMySqlOperator(BaseOperator):
         the task twice won't double load data). (templated)
     """
 
-    template_fields: Sequence[str] = ("sql", "mysql_table", "mysql_preoperator")
+    template_fields: Sequence[str] = (
+        "sql",
+        "mysql_table",
+        "mysql_preoperator",
+        "trino_conn_id",
+        "mysql_conn_id",
+    )
     template_ext: Sequence[str] = (".sql",)
     template_fields_renderers = {
         "sql": "sql",

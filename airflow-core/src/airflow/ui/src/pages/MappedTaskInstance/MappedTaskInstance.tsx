@@ -17,72 +17,57 @@
  * under the License.
  */
 import { ReactFlowProvider } from "@xyflow/react";
-import { MdOutlineTask } from "react-icons/md";
+import { useTranslation } from "react-i18next";
+import { MdDetails, MdOutlineTask } from "react-icons/md";
 import { useParams } from "react-router-dom";
 
-import {
-  useDagRunServiceGetDagRun,
-  useDagServiceGetDagDetails,
-  useGridServiceGridData,
-} from "openapi/queries";
+import { useDagRunServiceGetDagRun } from "openapi/queries";
+
 import { DetailsLayout } from "src/layouts/Details/DetailsLayout";
-import { isStatePending, useAutoRefresh } from "src/utils";
+
+import { useGridTiSummariesStream } from "src/queries/useGridTISummaries.ts";
+import { formatNumber, useDocumentTitle } from "src/utils";
 
 import { Header } from "./Header";
 
-const tabs = [{ icon: <MdOutlineTask />, label: "Task Instances", value: "" }];
-
 export const MappedTaskInstance = () => {
   const { dagId = "", runId = "", taskId = "" } = useParams();
-  const refetchInterval = useAutoRefresh({ dagId });
+  const { i18n, t: translate } = useTranslation("dag");
 
-  const {
-    data: dag,
-    error: dagError,
-    isLoading: isDagLoading,
-  } = useDagServiceGetDagDetails({
+  useDocumentTitle(taskId);
+
+  // Pass the run state so the summaries stream keeps auto-refreshing while the run is running;
+  // without it the Header and Details tab would freeze on the first fetch.
+  const { data: dagRun } = useDagRunServiceGetDagRun({ dagId, dagRunId: runId }, undefined, {
+    enabled: Boolean(runId),
+  });
+  const { summariesByRunId } = useGridTiSummariesStream({
     dagId,
+    runIds: runId ? [runId] : [],
+    states: dagRun ? [dagRun.state] : undefined,
+  });
+  const gridTISummaries = summariesByRunId.get(runId);
+
+  const taskInstance = gridTISummaries?.task_instances.find((ti) => ti.task_id === taskId);
+  let taskCount: number = 0;
+
+  Object.entries(taskInstance?.child_states ?? {}).forEach(([, count]) => {
+    taskCount += count;
   });
 
-  const { data: dagRun } = useDagRunServiceGetDagRun(
+  const tabs = [
     {
-      dagId,
-      dagRunId: runId,
+      icon: <MdOutlineTask />,
+      label: `${translate("tabs.taskInstances")} [${formatNumber(taskCount, i18n.language)}]`,
+      value: "",
     },
-    undefined,
-    { enabled: runId !== "" },
-  );
-
-  // Filter grid data to get only a single dag run
-  const { data, error, isLoading } = useGridServiceGridData(
-    {
-      dagId,
-      limit: 1,
-      offset: 0,
-      runAfterGte: dagRun?.run_after,
-      runAfterLte: dagRun?.run_after,
-    },
-    undefined,
-    {
-      enabled: dagRun !== undefined,
-      refetchInterval: (query) =>
-        query.state.data?.dag_runs.some((dr) => isStatePending(dr.state)) && refetchInterval,
-    },
-  );
-
-  const taskInstance = data?.dag_runs
-    .find((dr) => dr.dag_run_id === runId)
-    ?.task_instances.find((ti) => ti.task_id === taskId);
+    { icon: <MdDetails />, label: translate("tabs.details"), value: "details" },
+  ];
 
   return (
     <ReactFlowProvider>
-      <DetailsLayout dag={dag} error={error ?? dagError} isLoading={isLoading || isDagLoading} tabs={tabs}>
-        {taskInstance === undefined ? undefined : (
-          <Header
-            isRefreshing={Boolean(isStatePending(taskInstance.state) && Boolean(refetchInterval))}
-            taskInstance={taskInstance}
-          />
-        )}
+      <DetailsLayout outletContext={taskInstance} tabs={tabs}>
+        {taskInstance === undefined ? undefined : <Header taskInstance={taskInstance} />}
       </DetailsLayout>
     </ReactFlowProvider>
   );

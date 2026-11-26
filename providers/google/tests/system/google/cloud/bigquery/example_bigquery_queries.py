@@ -39,7 +39,12 @@ from airflow.providers.google.cloud.operators.bigquery import (
     BigQueryValueCheckOperator,
 )
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
 from system.openlineage.operator import OpenLineageTestOperator
@@ -171,12 +176,13 @@ with DAG(
         table_id=TABLE_1,
         max_results=10,
         selected_fields="value,name",
+        use_legacy_sql=False,
     )
     # [END howto_operator_bigquery_get_data]
 
     get_data_result = BashOperator(
         task_id="get_data_result",
-        bash_command=f"echo {get_data.output}",
+        bash_command=f'echo "{get_data.output}"',
     )
 
     # [START howto_operator_bigquery_check]
@@ -211,6 +217,7 @@ with DAG(
         task_id="column_check",
         table=f"{DATASET_NAME}.{TABLE_1}",
         column_mapping={"value": {"null_check": {"equal_to": 0}}},
+        use_legacy_sql=False,
     )
     # [END howto_operator_bigquery_column_check]
 
@@ -219,6 +226,7 @@ with DAG(
         task_id="table_check",
         table=f"{DATASET_NAME}.{TABLE_1}",
         checks={"row_count_check": {"check_statement": "COUNT(*) = 4"}},
+        use_legacy_sql=False,
     )
     # [END howto_operator_bigquery_table_check]
 
@@ -252,5 +260,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

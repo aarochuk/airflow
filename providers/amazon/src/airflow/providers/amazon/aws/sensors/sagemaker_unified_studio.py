@@ -21,14 +21,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from airflow.exceptions import AirflowException
 from airflow.providers.amazon.aws.hooks.sagemaker_unified_studio import (
     SageMakerNotebookHook,
 )
-from airflow.sensors.base import BaseSensorOperator
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class SageMakerNotebookSensor(BaseSensorOperator):
@@ -59,12 +58,11 @@ class SageMakerNotebookSensor(BaseSensorOperator):
             log_info_message = f"Exiting Execution {self.execution_id} State: {status}"
             self.log.info(log_info_message)
             return True
-        elif status in self.in_progress_states:
+        if status in self.in_progress_states:
             return False
-        else:
-            error_message = f"Exiting Execution {self.execution_id} State: {status}"
-            self.log.info(error_message)
-            raise AirflowException(error_message)
+        error_message = f"Exiting Execution {self.execution_id} State: {status}"
+        self.log.info(error_message)
+        raise AirflowException(error_message)
 
     def execute(self, context: Context):
         # This will invoke poke method in the base sensor

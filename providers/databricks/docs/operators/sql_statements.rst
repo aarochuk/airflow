@@ -45,6 +45,13 @@ but not limited to:
 * ``catalog``
 * ``schema``
 * ``parameters``
+* ``query_tags``
+* ``include_airflow_query_tags`` - When ``True`` (default), Airflow context metadata
+  (``dag_id``, ``task_id``, ``run_id``, ``try_number``, ``map_index``) is merged into
+  ``query_tags`` automatically. Set to ``False`` to suppress these automatic tags.
+
+The ``statement`` and nested ``parameters`` values support Jinja templating. Use SQL parameter
+markers such as ``:run_date`` to bind values rendered from the Airflow context.
 
 Examples
 --------
@@ -55,3 +62,60 @@ An example usage of the ``DatabricksSQLStatementsOperator`` is as follows:
     :language: python
     :start-after: [START howto_operator_sql_statements]
     :end-before: [END howto_operator_sql_statements]
+
+The following example uses templated SQL and bound parameters:
+
+.. exampleinclude:: /../../databricks/tests/system/databricks/example_databricks_sql_statement_parameters.py
+    :language: python
+    :start-after: [START howto_operator_sql_statement_parameters]
+    :end-before: [END howto_operator_sql_statement_parameters]
+
+
+.. _howto/sensor:DatabricksSQLStatementsSensor:
+
+DatabricksSQLStatementsSensor
+===============================
+
+Use the :class:`~airflow.providers.databricks.sensor.databricks.DatabricksSQLStatementsSensor` to either submit a
+Databricks SQL Statement to Databricks using the
+`Databricks SQL Statement Execution API <https://docs.databricks.com/api/workspace/statementexecution>`_, or pass
+a Statement ID to the Sensor and await for the query to terminate execution.
+
+
+Using the Sensor
+------------------
+
+The ``DatabricksSQLStatementsSensor`` does one of two things. The Sensor can submit SQL statements to Databricks using
+the `/api/2.0/sql/statements/ <https://docs.databricks.com/api/workspace/statementexecution/executestatement>`_
+endpoint. However, the Sensor can also take the Statement ID of an already-submitted SQL Statement and handle the
+response to that execution.
+
+It supports configurable execution parameters such as warehouse selection, catalog, schema, and parameterized queries.
+The operator can either synchronously poll for query completion or run in a deferrable mode for improved efficiency.
+
+The only required parameters for using the Sensor are:
+
+* One of ``statement`` or ``statement_id`` - The SQL statement to execute. The statement can optionally be
+  parameterized, see parameters.
+* ``warehouse_id`` - Warehouse upon which to execute a statement.
+
+All other parameters are optional and described in the documentation for ``DatabricksSQLStatementsSensor`` including
+but not limited to:
+
+* ``catalog``
+* ``schema``
+* ``parameters``
+* ``query_tags``
+* ``include_airflow_query_tags`` - When ``True`` (default), Airflow context metadata
+  (``dag_id``, ``task_id``, ``run_id``, ``try_number``, ``map_index``) is merged into
+  ``query_tags`` automatically. Set to ``False`` to suppress these automatic tags.
+
+Examples
+--------
+
+An example usage of the ``DatabricksSQLStatementsSensor`` is as follows:
+
+.. exampleinclude:: /../../databricks/tests/system/databricks/example_databricks_sensors.py
+    :language: python
+    :start-after: [START howto_sensor_databricks_sql_statement]
+    :end-before: [END howto_sensor_databricks_sql_statement]

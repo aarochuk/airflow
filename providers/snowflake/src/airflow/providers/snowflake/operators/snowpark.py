@@ -17,8 +17,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
-from typing import Any, Callable
+from collections.abc import Callable, Collection, Mapping, Sequence
+from typing import Any
 
 from airflow.providers.common.compat.standard.operators import PythonOperator, get_current_context
 from airflow.providers.snowflake.hooks.snowflake import SnowflakeHook
@@ -68,6 +68,8 @@ class SnowparkOperator(PythonOperator):
     :param session_parameters: You can set session-level parameters at
         the time you connect to Snowflake
     """
+
+    template_fields: Sequence[str] = (*PythonOperator.template_fields, "snowflake_conn_id")
 
     def __init__(
         self,

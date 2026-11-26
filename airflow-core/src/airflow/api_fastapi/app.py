@@ -17,48 +17,112 @@
 from __future__ import annotations
 
 import logging
-import os
+import threading
 from contextlib import AsyncExitStack, asynccontextmanager
+from functools import cache
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
-from starlette.routing import Mount
+from fastapi.routing import Mount
+from starlette.middleware import Middleware
 
+from airflow import settings
+from airflow.api_fastapi.common.dagbag import create_dag_bag
+from airflow.api_fastapi.common.exceptions import init_error_handlers
+from airflow.api_fastapi.common.http_access_log import HttpAccessLogMiddleware
+from airflow.api_fastapi.common.http_metrics import HttpMetricsMiddleware
+from airflow.api_fastapi.common.telemetry import NATIVE_TELEMETRY_DISABLED
 from airflow.api_fastapi.core_api.app import (
     init_config,
-    init_dag_bag,
-    init_error_handlers,
     init_flask_plugins,
     init_middlewares,
-    init_plugins,
     init_views,
 )
 from airflow.api_fastapi.execution_api.app import create_task_execution_api_app
 from airflow.configuration import conf
 from airflow.exceptions import AirflowConfigException
+from airflow.observability.metrics import stats_utils
+from airflow.utils.providers_configuration_loader import providers_configuration_loaded
 
 if TYPE_CHECKING:
+    from fastapi import Request
+
     from airflow.api_fastapi.auth.managers.base_auth_manager import BaseAuthManager
 
-API_BASE_URL = conf.get("api", "base_url")
-if API_BASE_URL and not API_BASE_URL.endswith("/"):
+API_BASE_URL = conf.get("api", "base_url", fallback="")
+if not API_BASE_URL or not API_BASE_URL.endswith("/"):
     API_BASE_URL += "/"
-    os.environ["AIRFLOW__API__BASE_URL"] = API_BASE_URL
 API_ROOT_PATH = urlsplit(API_BASE_URL).path
 
 # Define the full path on which the potential auth manager fastapi is mounted
 AUTH_MANAGER_FASTAPI_APP_PREFIX = f"{API_ROOT_PATH}auth"
 
+
+def get_cookie_path() -> str:
+    """
+    Return the path to scope cookies to, derived from ``[api] base_url``.
+
+    Falls back to ``"/"`` when no ``base_url`` is configured.
+    """
+    return API_ROOT_PATH or "/"
+
+
+def request_cookie_is_secure(request: Request) -> bool:
+    """
+    Return whether a FastAPI request cookie should be tagged as HTTP secure.
+
+    :param request: FastAPI Request object
+
+    usage:
+    ```python
+    secure = request_cookie_is_secure(request)
+
+    response.set_cookie("mycookie", "myvalue", path=get_cookie_path(), secure=secure, httponly=True)
+    ```
+    """
+    return request.base_url.scheme == "https" or bool(conf.get("api", "ssl_cert", fallback=""))
+
+
+# Fast API apps mounted under these prefixes are not allowed
+RESERVED_URL_PREFIXES = ["/api/v2", "/ui", "/execution", "/auth", "/pluginsv2"]
+
 log = logging.getLogger(__name__)
 
-app: FastAPI | None = None
-auth_manager: BaseAuthManager | None = None
+
+class _AuthManagerState:
+    instance: BaseAuthManager | None = None
+    _lock = threading.Lock()
+
+
+def _initialize_api_server_stats() -> None:
+    """
+    Initialize the ``Stats`` singleton in the API server process.
+
+    Initialization is guarded so a metrics misconfiguration can never prevent the API server
+    from starting.
+    """
+    try:
+        from airflow._shared.observability.metrics import stats
+        from airflow.observability.metrics import stats_utils
+
+        stats.initialize(
+            factory=stats_utils.get_stats_factory(),
+            export_legacy_names=conf.getboolean("metrics", "legacy_names_on"),
+        )
+    except Exception:
+        log.warning(
+            "Failed to initialize API server Stats in the API server; metrics emitted through the "
+            "API server Stats singleton will not be recorded.",
+            exc_info=True,
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _initialize_api_server_stats()
     async with AsyncExitStack() as stack:
+        stack.push_async_callback(settings.dispose_async_engine)
         for route in app.routes:
             if isinstance(route, Mount) and isinstance(route.app, FastAPI):
                 await stack.enter_async_context(
@@ -68,6 +132,7 @@ async def lifespan(app: FastAPI):
         yield
 
 
+@providers_configuration_loaded
 def create_app(apps: str = "all") -> FastAPI:
     apps_list = apps.split(",") if apps else ["all"]
 
@@ -75,18 +140,35 @@ def create_app(apps: str = "all") -> FastAPI:
         title="Airflow API",
         description="Airflow API. All endpoints located under ``/api/v2`` can be used safely, are stable and backward compatible. "
         "Endpoints located under ``/ui`` are dedicated to the UI and are subject to breaking change "
-        "depending on the need of the frontend. Users should not rely on those but use the public ones instead.",
+        "depending on the need of the frontend. Users should not rely on those but use the public ones instead."
+        "\n\n"
+        "**Filtering with pattern parameters.** Many list endpoints accept ``*_pattern`` and "
+        "``*_prefix_pattern`` query parameters. Unless a parameter's own description says otherwise, "
+        "``*_pattern`` is a case-insensitive substring match (SQL ``ILIKE '%term%'``) where ``%`` matches "
+        "any sequence and ``_`` matches any single character (e.g. ``%customer_%``) — convenient, but it "
+        "cannot use B-tree indexes, so it is slow on large tables. ``*_prefix_pattern`` matches the start "
+        "of the value, is case-sensitive and index-friendly (prefer it at scale); there ``%`` and ``_`` "
+        "are literal and trailing non-alphanumeric characters are stripped so the range scan stays "
+        "index-compatible under locale-aware collations "
+        "(e.g. ``test_`` matches values starting with ``test``, and ``s3://`` matches ``s3``). In both, "
+        "``|`` means OR (e.g. ``dag1|dag2``) and ``~`` matches everything. Regular expressions are not "
+        "supported by these parameters; regex-capable endpoints expose a separate parameter.",
         lifespan=lifespan,
         root_path=API_ROOT_PATH.removesuffix("/"),
+        telemetry=NATIVE_TELEMETRY_DISABLED,
+        version="2",
+        docs_url="/docs" if conf.getboolean("api", "enable_swagger_ui") else None,
+        redoc_url="/redoc" if conf.getboolean("api", "enable_swagger_ui") else None,
     )
 
-    if "execution" in apps_list or "all" in apps_list:
-        task_exec_api_app = create_task_execution_api_app()
-        init_error_handlers(task_exec_api_app)
+    dag_bag = create_dag_bag()
+
+    if "all" in apps_list or "execution" in apps_list:
+        task_exec_api_app = create_task_execution_api_app(dag_bag=dag_bag)
         app.mount("/execution", task_exec_api_app)
 
-    if "core" in apps_list or "all" in apps_list:
-        init_dag_bag(app)
+    if "all" in apps_list or "core" in apps_list:
+        app.state.dag_bag = dag_bag
         init_plugins(app)
         init_auth_manager(app)
         init_flask_plugins(app)
@@ -94,23 +176,24 @@ def create_app(apps: str = "all") -> FastAPI:
         init_error_handlers(app)
         init_middlewares(app)
 
+    init_api_metrics(app)
+    init_access_logging(app)
+
     init_config(app)
 
     return app
 
 
+@cache
 def cached_app(config=None, testing=False, apps="all") -> FastAPI:
     """Return cached instance of Airflow API app."""
-    global app
-    if not app:
-        app = create_app(apps=apps)
-    return app
+    return create_app(apps=apps)
 
 
 def purge_cached_app() -> None:
-    """Remove the cached version of the app in global state."""
-    global app
-    app = None
+    """Remove the cached version of the app and auth_manager in global state."""
+    cached_app.cache_clear()
+    _AuthManagerState.instance = None
 
 
 def get_auth_manager_cls() -> type[BaseAuthManager]:
@@ -130,11 +213,14 @@ def get_auth_manager_cls() -> type[BaseAuthManager]:
 
 
 def create_auth_manager() -> BaseAuthManager:
-    """Create the auth manager."""
-    global auth_manager
+    """Create the auth manager, cached as a thread-safe singleton."""
     auth_manager_cls = get_auth_manager_cls()
-    auth_manager = auth_manager_cls()
-    return auth_manager
+    if _AuthManagerState.instance is not None and isinstance(_AuthManagerState.instance, auth_manager_cls):
+        return _AuthManagerState.instance
+    with _AuthManagerState._lock:
+        if _AuthManagerState.instance is None or not isinstance(_AuthManagerState.instance, auth_manager_cls):
+            _AuthManagerState.instance = auth_manager_cls()
+    return _AuthManagerState.instance
 
 
 def init_auth_manager(app: FastAPI | None = None) -> BaseAuthManager:
@@ -152,11 +238,99 @@ def init_auth_manager(app: FastAPI | None = None) -> BaseAuthManager:
 
 def get_auth_manager() -> BaseAuthManager:
     """Return the auth manager, provided it's been initialized before."""
-    global auth_manager
-
-    if auth_manager is None:
+    if _AuthManagerState.instance is None:
         raise RuntimeError(
             "Auth Manager has not been initialized yet. "
             "The `init_auth_manager` method needs to be called first."
         )
-    return auth_manager
+    return _AuthManagerState.instance
+
+
+def init_access_logging(app: FastAPI) -> None:
+    """Install the access log middleware, the only producer of access records."""
+    app.add_middleware(HttpAccessLogMiddleware)
+
+
+def init_api_metrics(app: FastAPI) -> None:
+    """Install the API metrics middleware, the only producer of API request metrics."""
+    if not stats_utils.is_metrics_enabled():
+        return
+    app.add_middleware(HttpMetricsMiddleware)
+
+
+def init_plugins(app: FastAPI) -> None:
+    """Integrate FastAPI app, middlewares and UI plugins."""
+    from airflow import plugins_manager
+    from airflow.api_fastapi.auth.middlewares.team_authorization import TeamAuthorizationMiddleware
+
+    apps, root_middlewares = plugins_manager.get_fastapi_plugins()
+    multi_team = conf.getboolean("core", "multi_team")
+
+    for subapp_dict in apps:
+        name = subapp_dict.get("name")
+        subapp = subapp_dict.get("app")
+        if subapp is None:
+            log.error("'app' key is missing for the fastapi app: %s", name)
+            continue
+        url_prefix = subapp_dict.get("url_prefix")
+        if url_prefix is None:
+            log.error("'url_prefix' key is missing for the fastapi app: %s", name)
+            continue
+        if url_prefix == "":
+            log.error("'url_prefix' key is empty string for the fastapi app: %s", name)
+            continue
+        if any(url_prefix.startswith(prefix) for prefix in RESERVED_URL_PREFIXES):
+            log.error("Plugin %s attempted to use reserved url_prefix '%s'", name, url_prefix)
+            continue
+
+        if multi_team and (team_name := subapp_dict.get("team_name")) is not None:
+            # Airflow applies no authorization to mounted plugin apps, so a team-scoped
+            # plugin's endpoints would otherwise be reachable by any authenticated user.
+            # `app.mount()` cannot attach middleware, so build the Mount directly.
+            log.debug(
+                "Adding subapplication %s under prefix %s, restricted to team %s",
+                name,
+                url_prefix,
+                team_name,
+            )
+            app.router.routes.append(
+                Mount(
+                    url_prefix,
+                    app=subapp,
+                    middleware=[Middleware(TeamAuthorizationMiddleware, team_name=team_name)],
+                )
+            )
+            continue
+
+        log.debug("Adding subapplication %s under prefix %s", name, url_prefix)
+        app.mount(url_prefix, subapp)
+
+    for middleware_dict in root_middlewares:
+        name = middleware_dict.get("name")
+        middleware = middleware_dict.get("middleware")
+        args = middleware_dict.get("args", [])
+        kwargs = middleware_dict.get("kwargs", {})
+
+        if middleware is None:
+            log.error("'middleware' key is missing for the fastapi middleware: %s", name)
+            continue
+
+        if not callable(middleware):
+            log.error("'middleware' value for %s is should be callable: %s", name, middleware)
+            continue
+
+        if multi_team and (team_name := middleware_dict.get("team_name")) is not None:
+            # Root middlewares wrap every request to the API server, including other
+            # teams' and core routes, so they cannot be scoped to one team. A team plugin
+            # that needs middleware should apply it inside its own FastAPI app.
+            log.warning(
+                "Skipping root middleware %s from team-scoped plugin (team %s): root middlewares "
+                "apply to the entire API server and cannot be restricted to a single team. "
+                "Apply it within the plugin's own fastapi_apps instead.",
+                name,
+                team_name,
+            )
+            continue
+
+        log.debug("Adding root middleware %s", name)
+        app.add_middleware(middleware, *args, **kwargs)

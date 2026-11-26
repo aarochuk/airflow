@@ -19,23 +19,43 @@
 import { Text } from "@chakra-ui/react";
 import { FiCalendar } from "react-icons/fi";
 
-import type { DAGWithLatestDagRunsResponse } from "openapi/requests/types.gen";
-import { Tooltip } from "src/components/ui";
+import { Tooltip } from "src/system-components";
+
+import type { ExpressionType } from "src/components/AssetExpression";
 
 import { AssetSchedule } from "./AssetSchedule";
 
+// Mirrors AssetTriggeredTimetable.summary on the server. It is a fixed literal sent as-is,
+// so it must be compared literally rather than through a translated string.
+const ASSET_TIMETABLE_SUMMARY = "Asset";
+
 type Props = {
-  readonly dag: DAGWithLatestDagRunsResponse;
+  readonly assetExpression: ExpressionType | null | undefined;
+  readonly dagId: string;
+  readonly timetableDescription?: string | null;
+  readonly timetablePartitioned: boolean | null;
+  readonly timetableSummary: string | null;
 };
 
-export const Schedule = ({ dag }: Props) =>
-  Boolean(dag.timetable_summary) ? (
-    Boolean(dag.asset_expression) ? (
-      <AssetSchedule dag={dag} />
+export const Schedule = ({
+  assetExpression,
+  dagId,
+  timetableDescription,
+  timetablePartitioned,
+  timetableSummary,
+}: Props) =>
+  Boolean(timetableSummary) ? (
+    Boolean(assetExpression) || timetableSummary === ASSET_TIMETABLE_SUMMARY ? (
+      <AssetSchedule
+        assetExpression={assetExpression}
+        dagId={dagId}
+        timetablePartitioned={timetablePartitioned}
+        timetableSummary={timetableSummary}
+      />
     ) : (
-      <Tooltip content={dag.timetable_description}>
+      <Tooltip content={timetableDescription} portalled>
         <Text fontSize="sm">
-          <FiCalendar style={{ display: "inline" }} /> {dag.timetable_summary}
+          <FiCalendar style={{ display: "inline" }} /> {timetableSummary}
         </Text>
       </Tooltip>
     )

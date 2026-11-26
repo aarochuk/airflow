@@ -20,32 +20,49 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sys
+import warnings
 from contextlib import suppress
 from json import JSONDecodeError
 from typing import Any
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 
-from sqlalchemy import Boolean, Column, Integer, String, Text
-from sqlalchemy.orm import declared_attr, reconstructor, synonym
+from sqlalchemy import ForeignKey, Integer, String, Text, select
+from sqlalchemy.orm import Mapped, mapped_column, reconstructor, validates
 
-from airflow.configuration import ensure_secrets_loaded
+from airflow._shared.module_loading import import_string
+from airflow._shared.secrets_backend.base import call_secrets_backend_method
+from airflow._shared.secrets_masker import mask_secret
+from airflow.crypto import get_fernet
 from airflow.exceptions import AirflowException, AirflowNotFoundException
 from airflow.models.base import ID_LEN, Base
-from airflow.models.crypto import get_fernet
-from airflow.sdk.execution_time.secrets_masker import mask_secret
-from airflow.secrets.cache import SecretCache
-from airflow.secrets.metastore import MetastoreBackend
+from airflow.models.crypto import FernetFieldsMixin
+from airflow.process_context import should_use_task_sdk_api_path
+
+# AirflowSecretsBackendAccessDenied was added to task-sdk in 1.2.2. When
+# airflow-core is installed alongside an older published task-sdk (e.g. 1.2.1 or earlier),
+# the import fails at module load time. The fallback class is never raised by
+# old task-sdk, so the except clause below simply never fires — behaviour is
+# identical to pre-1.2.2 task-sdk.
+try:
+    from airflow.sdk.exceptions import AirflowSecretsBackendAccessDenied
+except ImportError:
+
+    class AirflowSecretsBackendAccessDenied(PermissionError):  # type: ignore[no-redef]
+        """Compat stub — never raised by task-sdk <1.2.2."""
+
+
 from airflow.utils.helpers import prune_dict
 from airflow.utils.log.logging_mixin import LoggingMixin
-from airflow.utils.module_loading import import_string
+from airflow.utils.session import NEW_SESSION, provide_session
 
 log = logging.getLogger(__name__)
 # sanitize the `conn_id` pattern by allowing alphanumeric characters plus
 # the symbols #,!,-,_,.,:,\,/ and () requiring at least one match.
 #
 # You can try the regex here: https://regex101.com/r/69033B/1
-RE_SANITIZE_CONN_ID = re.compile(r"^[\w\#\!\(\)\-\.\:\/\\]{1,}$")
+RE_SANITIZE_CONN_ID = re.compile(r"^[\w#!()\-.:/\\]{1,}$")
+PORT_MIN = 0
+PORT_MAX = 65535
 # the conn ID max len should be 250
 CONN_ID_MAX_LEN: int = 250
 
@@ -96,7 +113,7 @@ def _parse_netloc_to_hostname(uri_parts):
     return hostname
 
 
-class Connection(Base, LoggingMixin):
+class Connection(Base, FernetFieldsMixin, LoggingMixin):
     """
     Placeholder to store information about different database instances connection information.
 
@@ -123,18 +140,21 @@ class Connection(Base, LoggingMixin):
 
     __tablename__ = "connection"
 
-    id = Column(Integer(), primary_key=True)
-    conn_id = Column(String(ID_LEN), unique=True, nullable=False)
-    conn_type = Column(String(500), nullable=False)
-    description = Column(Text().with_variant(Text(5000), "mysql").with_variant(String(5000), "sqlite"))
-    host = Column(String(500))
-    schema = Column(String(500))
-    login = Column(Text())
-    _password = Column("password", Text())
-    port = Column(Integer())
-    is_encrypted = Column(Boolean, unique=False, default=False)
-    is_extra_encrypted = Column(Boolean, unique=False, default=False)
-    _extra = Column("extra", Text())
+    id: Mapped[int] = mapped_column(Integer(), primary_key=True)
+    conn_id: Mapped[str] = mapped_column(String(ID_LEN), unique=True, nullable=False)
+    conn_type: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[str | None] = mapped_column(
+        Text().with_variant(Text(5000), "mysql").with_variant(String(5000), "sqlite"), nullable=True
+    )
+    host: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    schema: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    login: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    port: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    team_name: Mapped[str | None] = mapped_column(
+        String(50),
+        ForeignKey("team.name", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     def __init__(
         self,
@@ -148,13 +168,13 @@ class Connection(Base, LoggingMixin):
         port: int | None = None,
         extra: str | dict | None = None,
         uri: str | None = None,
+        team_name: str | None = None,
     ):
         super().__init__()
-        self.conn_id = sanitize_conn_id(conn_id)
         self.description = description
         if extra and not isinstance(extra, str):
             extra = json.dumps(extra)
-        if uri and (conn_type or host or login or password or schema or port or extra):
+        if uri and (conn_type or host or login or password or schema or port is not None or extra):
             raise AirflowException(
                 "You must create an object using the URI or individual values "
                 "(conn_type, host, login, password, schema, port or extra)."
@@ -163,19 +183,27 @@ class Connection(Base, LoggingMixin):
         if uri:
             self._parse_from_uri(uri)
         else:
-            self.conn_type = conn_type
+            if conn_type is not None:
+                self.conn_type = conn_type
+
             self.host = host
             self.login = login
             self.password = password
             self.schema = schema
             self.port = port
             self.extra = extra
+
+        if conn_id is not None:
+            sanitized_id = sanitize_conn_id(conn_id)
+            if sanitized_id is not None:
+                self.conn_id = sanitized_id
         if self.extra:
             self._validate_extra(self.extra, self.conn_id)
 
         if self.password:
             mask_secret(self.password)
             mask_secret(quote(self.password))
+        self.team_name = team_name
 
     @staticmethod
     def _validate_extra(extra, conn_id) -> None:
@@ -194,6 +222,35 @@ class Connection(Base, LoggingMixin):
             raise ValueError(f"Encountered non-JSON in `extra` field for connection {conn_id!r}.")
         return None
 
+    @staticmethod
+    def _validate_port(port: int | None) -> int | None:
+        if port is None:
+            return None
+        if type(port) is not int:
+            raise ValueError(f"Expected integer value for `port`, but got {port!r} instead.")
+        if not PORT_MIN <= port <= PORT_MAX:
+            raise ValueError(
+                f"Expected value for `port` in the range {PORT_MIN}-{PORT_MAX}, but got {port!r} instead."
+            )
+        return port
+
+    @classmethod
+    def _coerce_port(cls, port) -> int | None:
+        if port is None or port == "":
+            return None
+        if isinstance(port, str):
+            try:
+                port = int(port)
+            except ValueError:
+                raise ValueError(f"Expected integer value for `port`, but got {port!r} instead.") from None
+        return cls._validate_port(port)
+
+    @validates("port")
+    def _validate_port_assignment(self, _, port: int | str | None) -> int | None:
+        # Callers commonly pass the port as a string (env vars, config, custom secrets backends);
+        # accept those like ``from_json`` does rather than breaking them.
+        return self._coerce_port(port)
+
     @reconstructor
     def on_db_load(self):
         if self.password:
@@ -211,16 +268,18 @@ class Connection(Base, LoggingMixin):
     def _parse_from_uri(self, uri: str):
         schemes_count_in_uri = uri.count("://")
         if schemes_count_in_uri > 2:
-            raise AirflowException(f"Invalid connection string: {uri}.")
+            raise AirflowException("Invalid connection string.")
         host_with_protocol = schemes_count_in_uri == 2
         uri_parts = urlsplit(uri)
-        conn_type = uri_parts.scheme
-        self.conn_type = self._normalize_conn_type(conn_type)
-        rest_of_the_url = uri.replace(f"{conn_type}://", ("" if host_with_protocol else "//"))
+        self._prenormalized_conn_type = uri_parts.scheme
+        self.conn_type = self._normalize_conn_type(self._prenormalized_conn_type)
+        rest_of_the_url = uri.replace(
+            f"{self._prenormalized_conn_type}://", ("" if host_with_protocol else "//")
+        )
         if host_with_protocol:
             uri_splits = rest_of_the_url.split("://", 1)
             if "@" in uri_splits[0] or ":" in uri_splits[0]:
-                raise AirflowException(f"Invalid connection string: {uri}.")
+                raise AirflowException("Invalid connection string.")
         uri_parts = urlsplit(rest_of_the_url)
         protocol = uri_parts.scheme if host_with_protocol else None
         host = _parse_netloc_to_hostname(uri_parts)
@@ -235,6 +294,12 @@ class Connection(Base, LoggingMixin):
             if self.EXTRA_KEY in query:
                 self.extra = query[self.EXTRA_KEY]
             else:
+                for key, value in query.items():
+                    try:
+                        if value:
+                            query[key] = json.loads(value)
+                    except JSONDecodeError:
+                        self.log.debug("Failed parsing the json for key %s", key, exc_info=True)
                 self.extra = json.dumps(query)
 
     @staticmethod
@@ -254,24 +319,30 @@ class Connection(Base, LoggingMixin):
 
         Note that the URI returned by this method is **not** SQLAlchemy-compatible, if you need a SQLAlchemy-compatible URI, use the :attr:`~airflow.providers.common.sql.hooks.sql.DbApiHook.sqlalchemy_url`
         """
-        if self.conn_type and "_" in self.conn_type:
-            self.log.warning(
-                "Connection schemes (type: %s) shall not contain '_' according to RFC3986.",
-                self.conn_type,
-            )
-
         if self.conn_type:
             uri = f"{self.conn_type.lower().replace('_', '-')}://"
         else:
             uri = "//"
 
+        host_to_use: str | None
+        protocol_to_add: str | None
+
         if self.host and "://" in self.host:
             protocol, host = self.host.split("://", 1)
+            # If the protocol in host matches the connection type, don't add it again
+            if protocol == self.conn_type:
+                host_to_use = self.host
+                protocol_to_add = None
+            else:
+                # Different protocol, add it to the URI
+                host_to_use = host
+                protocol_to_add = protocol
         else:
-            protocol, host = None, self.host
+            host_to_use = self.host
+            protocol_to_add = None
 
-        if protocol:
-            uri += f"{protocol}://"
+        if protocol_to_add:
+            uri += f"{protocol_to_add}://"
 
         authority_block = ""
         if self.login is not None:
@@ -286,10 +357,10 @@ class Connection(Base, LoggingMixin):
             uri += authority_block
 
         host_block = ""
-        if host:
-            host_block += quote(host, safe="")
+        if host_to_use:
+            host_block += quote(host_to_use, safe="")
 
-        if self.port:
+        if self.port is not None:
             if host_block == "" and authority_block == "":
                 host_block += f"@:{self.port}"
             else:
@@ -301,73 +372,36 @@ class Connection(Base, LoggingMixin):
         uri += host_block
 
         if self.extra:
+            extra_dict = self.extra_dejson
+            can_flatten = True
+            for value in extra_dict.values():
+                if not isinstance(value, str):
+                    can_flatten = False
+                    break
+
             try:
-                query: str | None = urlencode(self.extra_dejson)
+                query: str | None = urlencode(extra_dict)
             except TypeError:
                 query = None
-            if query and self.extra_dejson == dict(parse_qsl(query, keep_blank_values=True)):
+
+            if can_flatten and query and extra_dict == dict(parse_qsl(query, keep_blank_values=True)):
                 uri += ("?" if self.schema else "/?") + query
             else:
                 uri += ("?" if self.schema else "/?") + urlencode({self.EXTRA_KEY: self.extra})
-
         return uri
 
-    def get_password(self) -> str | None:
-        """Return encrypted password."""
-        if self._password and self.is_encrypted:
-            fernet = get_fernet()
-            if not fernet.is_encrypted:
-                raise AirflowException(
-                    f"Can't decrypt encrypted password for login={self.login}  "
-                    f"FERNET_KEY configuration is missing"
-                )
-            return fernet.decrypt(bytes(self._password, "utf-8")).decode()
-        else:
-            return self._password
-
-    def set_password(self, value: str | None):
-        """Encrypt password and set in object attribute."""
-        if value:
-            fernet = get_fernet()
-            self._password = fernet.encrypt(bytes(value, "utf-8")).decode()
-            self.is_encrypted = fernet.is_encrypted
-
-    @declared_attr
-    def password(cls):
-        """Password. The value is decrypted/encrypted when reading/setting the value."""
-        return synonym("_password", descriptor=property(cls.get_password, cls.set_password))
-
-    def get_extra(self) -> str:
-        """Return encrypted extra-data."""
-        if self._extra and self.is_extra_encrypted:
-            fernet = get_fernet()
-            if not fernet.is_encrypted:
-                raise AirflowException(
-                    f"Can't decrypt `extra` params for login={self.login}, "
-                    f"FERNET_KEY configuration is missing"
-                )
-            extra_val = fernet.decrypt(bytes(self._extra, "utf-8")).decode()
-        else:
-            extra_val = self._extra
+    def get_extra(self) -> str | None:
+        """Return decrypted extra-data, validating its JSON shape."""
+        extra_val = super().get_extra()
         if extra_val:
             self._validate_extra(extra_val, self.conn_id)
         return extra_val
 
     def set_extra(self, value: str | None):
-        """Encrypt extra-data and save in object attribute to object."""
+        """Validate JSON shape, then delegate encrypt-and-store to the mixin."""
         if value:
             self._validate_extra(value, self.conn_id)
-            fernet = get_fernet()
-            self._extra = fernet.encrypt(bytes(value, "utf-8")).decode()
-            self.is_extra_encrypted = fernet.is_encrypted
-        else:
-            self._extra = value
-            self.is_extra_encrypted = False
-
-    @declared_attr
-    def extra(cls):
-        """Extra data. The value is decrypted/encrypted when reading/setting the value."""
-        return synonym("_extra", descriptor=property(cls.get_extra, cls.set_extra))
+        super().set_extra(value)
 
     def rotate_fernet_key(self):
         """Encrypts data with a new key. See: :ref:`security/fernet`."""
@@ -381,10 +415,46 @@ class Connection(Base, LoggingMixin):
         """Return hook based on conn_type."""
         from airflow.providers_manager import ProvidersManager
 
-        hook = ProvidersManager().hooks.get(self.conn_type, None)
+        hooks = ProvidersManager().hooks
+        hook = hooks.get(self.conn_type, None)
 
         if hook is None:
-            raise AirflowException(f'Unknown hook type "{self.conn_type}"')
+            if not self.conn_type:
+                # A URI scheme cannot contain '_' (RFC 3986), so "foo_bar://h" parses with no
+                # scheme at all and leaves conn_type empty. Name that, instead of reporting an
+                # unknown hook type of "".
+                message = (
+                    f"Connection {self.conn_id!r} has no connection type, so no hook could be "
+                    "looked up. If it was defined as a URI, note that a URI scheme cannot "
+                    "contain '_' (RFC 3986) and such a URI parses with no scheme at all: use "
+                    "'-' in the URI instead, which is decoded back to '_' on read."
+                )
+            else:
+                message = f'Unknown hook type "{self.conn_type}"'
+                # get_uri() encodes '_' as '-' because RFC 3986 forbids '_' in a scheme, and
+                # reading a connection back from a URI or from JSON decodes it again, so both
+                # characters serialize to '-' and a connection type spelled one way cannot
+                # resolve a hook registered the other way. Hooks register under the
+                # connection-type verbatim, so look the other spelling up rather than asserting
+                # which one is right, and resolve it rather than testing for membership: a
+                # registered connection type maps to None when its hook cannot be imported, and
+                # naming a spelling that still will not resolve is worse than naming none.
+                alternative = (
+                    self.conn_type.replace("-", "_")
+                    if "-" in self.conn_type
+                    else self.conn_type.replace("_", "-")
+                )
+                if alternative != self.conn_type and hooks.get(alternative) is not None:
+                    message += f", but a hook is registered for {alternative!r}. "
+                    if "-" in self.conn_type:
+                        message += "Spell this connection's type with '_' to reach it."
+                    else:
+                        message += (
+                            "Reading a connection from a URI or from JSON decodes '-' back to "
+                            "'_', so this connection cannot reach that hook; the provider has "
+                            "to declare its connection-type with '_'."
+                        )
+            raise AirflowException(message)
         try:
             hook_class = import_string(hook.hook_class_name)
         except ImportError:
@@ -450,50 +520,74 @@ class Connection(Base, LoggingMixin):
         return self.get_extra_dejson()
 
     @classmethod
-    def get_connection_from_secrets(cls, conn_id: str) -> Connection:
+    def get_connection_from_secrets(cls, conn_id: str, team_name: str | None = None) -> Connection:
         """
         Get connection by conn_id.
 
         If `MetastoreBackend` is getting used in the execution context, use Task SDK API.
 
         :param conn_id: connection id
+        :param team_name: Team name associated to the task trying to access the connection (if any)
         :return: connection
         """
+        # TODO: This is not the best way of having compat, but it's "better than erroring" for now. This still
+        # means SQLA etc is loaded, but we can't avoid that unless/until we add import shims as a big
+        # back-compat layer
+
+        # If this is set it means are in some kind of execution context (Task, Dag Parse or Triggerer perhaps)
+        # and should use the Task SDK API server path
+        if should_use_task_sdk_api_path():
+            from airflow.sdk import Connection as TaskSDKConnection
+            from airflow.sdk.exceptions import AirflowRuntimeError, ErrorType
+
+            warnings.warn(
+                "Using Connection.get_connection_from_secrets from `airflow.models` is deprecated."
+                "Please use `get` on Connection from sdk(`airflow.sdk.Connection`) instead",
+                DeprecationWarning,
+                stacklevel=1,
+            )
+            try:
+                conn = TaskSDKConnection.get(conn_id=conn_id)
+                if isinstance(conn, TaskSDKConnection):
+                    if conn.password:
+                        mask_secret(conn.password)
+                    if conn.extra:
+                        mask_secret(conn.extra)
+                return conn
+            except AirflowRuntimeError as e:
+                if e.error.error == ErrorType.CONNECTION_NOT_FOUND:
+                    raise AirflowNotFoundException(f"The conn_id `{conn_id}` isn't defined") from None
+                raise
+
+        from airflow.configuration import conf, ensure_secrets_loaded
+
+        if team_name and not conf.getboolean("core", "multi_team"):
+            raise ValueError(
+                "Multi-team mode is not configured in the Airflow environment but the task trying to access the connection belongs to a team"
+            )
+
+        from airflow.sdk import SecretCache
+
         # check cache first
         # enabled only if SecretCache.init() has been called first
         try:
-            uri = SecretCache.get_connection_uri(conn_id)
+            uri = SecretCache.get_connection_uri(conn_id, team_name=team_name)
             return Connection(conn_id=conn_id, uri=uri)
         except SecretCache.NotPresentException:
             pass  # continue business
 
         # iterate over backends if not in cache (or expired)
         for secrets_backend in ensure_secrets_loaded():
-            if isinstance(secrets_backend, MetastoreBackend):
-                # TODO: This is not the best way of having compat, but it's "better than erroring" for now. This still
-                # means SQLA etc is loaded, but we can't avoid that unless/until we add import shims as a big
-                # back-compat layer
-
-                # If this is set it means are in some kind of execution context (Task, Dag Parse or Triggerer perhaps)
-                # and should use the Task SDK API server path
-                if hasattr(sys.modules.get("airflow.sdk.execution_time.task_runner"), "SUPERVISOR_COMMS"):
-                    # TODO: AIP 72: Add deprecation here once we move this module to task sdk.
-                    from airflow.sdk import Connection as TaskSDKConnection
-                    from airflow.sdk.exceptions import AirflowRuntimeError, ErrorType
-
-                    try:
-                        return TaskSDKConnection.get(conn_id=conn_id)
-                    except AirflowRuntimeError as e:
-                        if e.error.error == ErrorType.CONNECTION_NOT_FOUND:
-                            log.debug("Unable to retrieve connection from MetastoreBackend using Task SDK")
-                            raise AirflowNotFoundException(f"The conn_id `{conn_id}` isn't defined")
-                        else:
-                            raise
             try:
-                conn = secrets_backend.get_connection(conn_id=conn_id)
+                conn = call_secrets_backend_method(
+                    secrets_backend.get_connection, team_name=team_name, conn_id=conn_id
+                )
                 if conn:
-                    SecretCache.save_connection_uri(conn_id, conn.get_uri())
+                    SecretCache.save_connection_uri(conn_id, conn.get_uri(), team_name=team_name)
                     return conn
+            except AirflowSecretsBackendAccessDenied:
+                # Authoritative deny — must NOT fall through to a less-restrictive backend.
+                raise
             except Exception:
                 log.debug(
                     "Unable to retrieve connection from secrets backend (%s). "
@@ -533,6 +627,18 @@ class Connection(Base, LoggingMixin):
 
     @classmethod
     def from_json(cls, value, conn_id=None) -> Connection:
+        if should_use_task_sdk_api_path():
+            from airflow.sdk import Connection as TaskSDKConnection
+
+            warnings.warn(
+                "Using Connection.from_json from `airflow.models` is deprecated."
+                "Please use `from_json` on Connection from sdk(airflow.sdk.Connection) instead",
+                DeprecationWarning,
+                stacklevel=1,
+            )
+
+            return TaskSDKConnection.from_json(value, conn_id=conn_id)  # type: ignore[return-value]
+
         kwargs = json.loads(value)
         extra = kwargs.pop("extra", None)
         if extra:
@@ -541,11 +647,8 @@ class Connection(Base, LoggingMixin):
         if conn_type:
             kwargs["conn_type"] = cls._normalize_conn_type(conn_type)
         port = kwargs.pop("port", None)
-        if port:
-            try:
-                kwargs["port"] = int(port)
-            except ValueError:
-                raise ValueError(f"Expected integer value for `port`, but got {port!r} instead.")
+        if port is not None:
+            kwargs["port"] = cls._coerce_port(port)
         return Connection(conn_id=conn_id, **kwargs)
 
     def as_json(self) -> str:
@@ -553,3 +656,17 @@ class Connection(Base, LoggingMixin):
         conn_repr = self.to_dict(prune_empty=True, validate=False)
         conn_repr.pop("conn_id", None)
         return json.dumps(conn_repr)
+
+    @staticmethod
+    @provide_session
+    def get_team_name(connection_id: str, *, session=NEW_SESSION) -> str | None:
+        stmt = select(Connection.team_name).where(Connection.conn_id == connection_id)
+        return session.scalar(stmt)
+
+    @staticmethod
+    @provide_session
+    def get_conn_id_to_team_name_mapping(
+        connection_ids: list[str], *, session=NEW_SESSION
+    ) -> dict[str, str | None]:
+        stmt = select(Connection.conn_id, Connection.team_name).where(Connection.conn_id.in_(connection_ids))
+        return {conn_id: team_name for conn_id, team_name in session.execute(stmt)}

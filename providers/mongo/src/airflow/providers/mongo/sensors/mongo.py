@@ -20,15 +20,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 from airflow.providers.mongo.hooks.mongo import MongoHook
-from airflow.sensors.base import BaseSensorOperator
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.sdk import Context
 
 
 class MongoSensor(BaseSensorOperator):
@@ -52,7 +48,7 @@ class MongoSensor(BaseSensorOperator):
     :param mongo_db: Target MongoDB name.
     """
 
-    template_fields: Sequence[str] = ("collection", "query")
+    template_fields: Sequence[str] = ("collection", "query", "mongo_conn_id")
 
     def __init__(
         self, *, collection: str, query: dict, mongo_conn_id: str = "mongo_default", mongo_db=None, **kwargs

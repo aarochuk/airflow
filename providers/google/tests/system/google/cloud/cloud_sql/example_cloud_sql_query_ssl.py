@@ -35,9 +35,13 @@ from typing import Any
 
 from googleapiclient import discovery
 
-from airflow import settings
-from airflow.decorators import task
-from airflow.models.connection import Connection
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import task
+else:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
 from airflow.models.dag import DAG
 from airflow.providers.google.cloud.hooks.cloud_sql import CloudSQLHook
 from airflow.providers.google.cloud.hooks.secret_manager import GoogleCloudSecretManagerHook
@@ -47,10 +51,15 @@ from airflow.providers.google.cloud.operators.cloud_sql import (
     CloudSQLDeleteInstanceOperator,
     CloudSQLExecuteQueryOperator,
 )
-from airflow.settings import Session
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 from system.google import DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
+from system.google.gcp_api_client_helpers import create_airflow_connection, delete_airflow_connection
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT") or DEFAULT_GCP_SYSTEM_TEST_PROJECT_ID
@@ -114,18 +123,17 @@ def ip_configuration() -> dict[str, Any]:
             "enablePrivatePathForGoogleCloudServices": True,
             "privateNetwork": f"projects/{PROJECT_ID}/global/networks/default",
         }
-    else:
-        # Use connection to Cloud SQL instance via Public IP from anywhere (mask 0.0.0.0/0).
-        # Consider specifying your network mask
-        # for allowing requests only from the trusted sources, not from anywhere.
-        return {
-            "ipv4Enabled": True,
-            "requireSsl": False,
-            "sslMode": "ENCRYPTED_ONLY",
-            "authorizedNetworks": [
-                {"value": "0.0.0.0/0"},
-            ],
-        }
+    # Use connection to Cloud SQL instance via Public IP from anywhere (mask 0.0.0.0/0).
+    # Consider specifying your network mask
+    # for allowing requests only from the trusted sources, not from anywhere.
+    return {
+        "ipv4Enabled": True,
+        "requireSsl": False,
+        "sslMode": "ENCRYPTED_ONLY",
+        "authorizedNetworks": [
+            {"value": "0.0.0.0/0"},
+        ],
+    }
 
 
 def cloud_sql_instance_create_body(database_provider: dict[str, Any]) -> dict[str, Any]:
@@ -253,7 +261,6 @@ os.environ["AIRFLOW_CONN_PUBLIC_MYSQL_TCP_SSL"] = (
 )
 # [END howto_operator_cloudsql_query_connections_env]
 
-
 log = logging.getLogger(__name__)
 
 with DAG(
@@ -325,20 +332,17 @@ with DAG(
         def create_connection(
             connection_id: str, instance: str, db_type: str, ip_address: str, port: str
         ) -> str | None:
-            session = settings.Session()
-            log.info("Removing connection %s if it exists", connection_id)
-            query = session.query(Connection).filter(Connection.conn_id == connection_id)
-            query.delete()
-
             connection: dict[str, Any] = deepcopy(CONNECTION_PUBLIC_TCP_SSL_KWARGS)
             connection["extra"]["instance"] = instance
             connection["host"] = ip_address
             connection["extra"]["database_type"] = db_type
             connection["port"] = port
-            conn = Connection(conn_id=connection_id, **connection)
-            session.add(conn)
-            session.commit()
-            log.info("Connection created: '%s'", connection_id)
+            connection["extra"] = json.dumps(connection["extra"])
+            create_airflow_connection(
+                connection_id=connection_id,
+                connection_conf=connection,
+                is_composer=run_in_composer(),
+            )
             return connection_id
 
         create_connection_task = create_connection(
@@ -458,11 +462,7 @@ with DAG(
 
         @task(task_id=f"delete_connection_{database_type}")
         def delete_connection(connection_id: str) -> None:
-            session = Session()
-            log.info("Removing connection %s", connection_id)
-            query = session.query(Connection).filter(Connection.conn_id == connection_id)
-            query.delete()
-            session.commit()
+            delete_airflow_connection(connection_id=connection_id, is_composer=run_in_composer())
 
         delete_connection_task = delete_connection(connection_id=conn_id)
 
@@ -500,5 +500,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

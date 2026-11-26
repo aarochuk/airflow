@@ -20,8 +20,19 @@ name: Unit tests
 on:  # yamllint disable-line rule:truthy
   workflow_call:
     inputs:
-      runs-on-as-json-default:
-        description: "The array of labels (in json form) determining default runner used for the build."
+      merge-with:
+        description: >-
+          The base branch commit and merge base to merge the pushed commit with, space-separated;
+          empty outside fork CI runs.
+        required: false
+        default: ""
+        type: string
+      runners:
+        description: "The array of labels (in json form) determining public AMD runners."
+        required: true
+        type: string
+      platform:
+        description: "Platform for the build - 'linux/amd64' or 'linux/arm64'"
         required: true
         type: string
       test-group:
@@ -37,7 +48,7 @@ on:  # yamllint disable-line rule:truthy
         required: true
         type: string
       test-scope:
-        description: "The scope of the test to run: ('DB', 'Non-DB', 'All', 'ARM collection')"
+        description: "The scope of the test to run: ('DB', 'Non-DB', 'All')"
         required: true
         type: string
       test-name:
@@ -88,6 +99,11 @@ on:  # yamllint disable-line rule:truthy
         required: false
         default: "false"
         type: string
+      upgrade-sqlalchemy:
+        description: "Whether to upgrade SQLAlchemy or not (true/false)"
+        required: false
+        default: "false"
+        type: string
       upgrade-boto:
         description: "Whether to upgrade boto or not (true/false)"
         required: false
@@ -116,18 +132,36 @@ on:  # yamllint disable-line rule:truthy
         description: "Whether to use uv"
         required: true
         type: string
+      default-branch:
+        description: "The default branch of the repository"
+        required: true
+        type: string
+      job-timeout-minutes:
+        description: >
+          How long the job may run before GitHub cancels it. A caller raises it when its job
+          carries steps expensive enough to squeeze the tests out of the default.
+        required: false
+        default: 65
+        type: number
 permissions:
   contents: read
 jobs:
   tests:
-    timeout-minutes: 120
+    # run_unit_tests.sh derives the tests' own timeout from what is left of this budget.
+    timeout-minutes: ${{ fromJSON(inputs.job-timeout-minutes) }}
+    # yamllint disable rule:line-length
     name: "\
-      ${{ inputs.test-scope }}-${{ inputs.test-group }}:\
+      ${{ case(inputs.test-scope == 'Quarantined', 'Qrnt', inputs.test-scope == 'All', '', inputs.test-scope) }}\
+      ${{ case(inputs.test-scope == 'All', '', '-') }}\
+      ${{ inputs.test-group == 'providers' && 'prov' || inputs.test-group}}:\
       ${{ inputs.test-name }}${{ inputs.test-name-separator }}${{ matrix.backend-version }}:\
       ${{ matrix.python-version}}:${{ matrix.test-types.description }}"
-    runs-on: ${{ fromJSON(inputs.runs-on-as-json-default) }}
+    runs-on: ${{ fromJSON(inputs.runners) }}
     strategy:
       fail-fast: false
+      # 20 keeps runs on GitHub-hosted runners within the ASF limit of 20 concurrent jobs. The RunsOn
+      # runners are the project's own capacity, so a run there starts the whole matrix at once.
+      max-parallel: ${{ contains(inputs.runners, 'runs-on=') && 256 || 20 }}
       matrix:
         python-version: "${{fromJSON(inputs.python-versions)}}"
         backend-version: "${{fromJSON(inputs.backend-versions)}}"
@@ -147,6 +181,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_USERNAME: ${{ github.actor }}
       INCLUDE_SUCCESS_OUTPUTS: ${{ inputs.include-success-outputs }}
+      PLATFORM: "${{ inputs.platform }}"
       # yamllint disable rule:line-length
       JOB_ID: "${{ inputs.test-group }}-${{ matrix.test-types.description }}-${{ inputs.test-scope }}-${{ inputs.test-name }}-${{inputs.backend}}-${{ matrix.backend-version }}-${{ matrix.python-version }}"
       MOUNT_SOURCES: "skip"
@@ -154,27 +189,51 @@ jobs:
       PARALLEL_TEST_TYPES: ${{ matrix.test-types.test_types }}
       PYTHON_MAJOR_MINOR_VERSION: "${{ matrix.python-version }}"
       UPGRADE_BOTO: "${{ inputs.upgrade-boto }}"
+      UPGRADE_SQLALCHEMY: "${{ inputs.upgrade-sqlalchemy }}"
       AIRFLOW_MONITOR_DELAY_TIME_IN_SECONDS: "${{inputs.monitor-delay-time-in-seconds}}"
       VERBOSE: "true"
+      DEFAULT_BRANCH: "${{ inputs.default-branch }}"
+      JOB_TIMEOUT_MINUTES: "${{ inputs.job-timeout-minutes }}"
     if: inputs.test-group == 'core' || inputs.skip-providers-tests != 'true'
     steps:
+      - name: "Record job start time"
+        shell: bash
+        run: echo "JOB_START_EPOCH=$(date +%s)" >> "${GITHUB_ENV}"
       - name: "Cleanup repo"
         shell: bash
-        run: docker run -v "${GITHUB_WORKSPACE}:/workspace" -u 0:0 bash -c "rm -rf /workspace/*"
+        run: sudo rm -rf ${GITHUB_WORKSPACE}/*
       - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: "Merge with the base branch"
+        if: inputs.merge-with != ''
+        uses: ./.github/actions/merge-with-base
+        with:
+          merge-with: ${{ inputs.merge-with }}
+      - name: "Make /mnt writeable"
+        run: ./scripts/ci/make_mnt_writeable.sh
+      - name: "Move docker to /mnt"
+        run: ./scripts/ci/move_docker_to_mnt.sh
       - name: "Prepare breeze & CI image: ${{ matrix.python-version }}"
         uses: ./.github/actions/prepare_breeze_and_image
         with:
-          platform: "linux/amd64"
+          platform: ${{ inputs.platform }}
           python: ${{ matrix.python-version }}
           use-uv: ${{ inputs.use-uv }}
+          # We do not want to clean up /mnt here - it's been already done before preparing image
+          make-mnt-writeable-and-cleanup: false
       - name: >
           Migration Tests: ${{ matrix.python-version }}:${{ env.PARALLEL_TEST_TYPES }}
         uses: ./.github/actions/migration_tests
-        if: inputs.run-migration-tests == 'true' && inputs.test-group == 'core'
+        with:
+          python-version: ${{ matrix.python-version }}
+        # Any new python version should be disabled below via `&& matrix.python-version != '3.xx'` until the first
+        # Airflow version that supports it is released - otherwise there's nothing to migrate back to.
+        if: >-
+          inputs.run-migration-tests == 'true' && inputs.test-group == 'core' &&
+          matrix.python-version != '3.14' &&
+          matrix.test-types.description == fromJSON(inputs.test-types-as-strings-in-json)[0].description
       - name: >
           ${{ inputs.test-group }}:${{ inputs.test-scope }} Tests ${{ inputs.test-name }} ${{ matrix.backend-version }}
           Py${{ matrix.python-version }}:${{ env.PARALLEL_TEST_TYPES }}

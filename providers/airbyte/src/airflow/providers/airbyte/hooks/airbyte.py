@@ -20,12 +20,15 @@ from __future__ import annotations
 import time
 from typing import Any, TypeVar
 
+# Stays on httpx (not httpx2): the client built below is handed to airbyte-api, which builds
+# and sends httpx.Request objects through it, and the two packages' classes are distinct.
+# Migrate once airbyte-api moves to httpx2; tracked at https://github.com/apache/airflow/issues/70522
+import httpx
 from airbyte_api import AirbyteAPI
 from airbyte_api.api import CancelJobRequest, GetJobRequest
 from airbyte_api.models import JobCreateRequest, JobStatusEnum, JobTypeEnum, SchemeClientCredentials, Security
 
-from airflow.exceptions import AirflowException
-from airflow.hooks.base import BaseHook
+from airflow.providers.common.compat.sdk import AirflowException, BaseHook
 
 T = TypeVar("T", bound=Any)
 
@@ -37,6 +40,10 @@ class AirbyteHook(BaseHook):
     :param airbyte_conn_id: Optional. The name of the Airflow connection to get
         connection information for Airbyte. Defaults to "airbyte_default".
     :param api_version: Optional. Airbyte API version. Defaults to "v1".
+    :param timeout: Optional. Request timeout, in seconds, for each call to the
+        Airbyte API. Overrides the ``timeout`` key in the connection's Extra field.
+        When neither is set, the underlying HTTP client's default of 5 seconds
+        applies.
     """
 
     conn_name_attr = "airbyte_conn_id"
@@ -48,35 +55,113 @@ class AirbyteHook(BaseHook):
         self,
         airbyte_conn_id: str = "airbyte_default",
         api_version: str = "v1",
+        timeout: float | None = None,
     ) -> None:
         super().__init__()
         self.api_version: str = api_version
         self.airbyte_conn_id = airbyte_conn_id
+        self.timeout = timeout
         self.conn = self.get_conn_params(self.airbyte_conn_id)
         self.airbyte_api = self.create_api_session()
 
     def get_conn_params(self, conn_id: str) -> Any:
         conn = self.get_connection(conn_id)
 
+        # Intentionally left the password out, you can modify the log to print it out if you are doing testing.
+        self.log.debug(
+            "Connection attributes are: host - %s, url - %s, description - %s",
+            conn.host,
+            conn.schema,
+            conn.description,
+        )
         conn_params: dict = {}
         conn_params["host"] = conn.host
         conn_params["client_id"] = conn.login
         conn_params["client_secret"] = conn.password
         conn_params["token_url"] = conn.schema or "v1/applications/token"
+        conn_params["proxies"] = conn.extra_dejson.get("proxies", None)
+        conn_params["timeout"] = conn.extra_dejson.get("timeout", None)
 
         return conn_params
 
     def create_api_session(self) -> AirbyteAPI:
-        """Create Airbyte API session."""
-        credentials = SchemeClientCredentials(
-            client_id=self.conn["client_id"],
-            client_secret=self.conn["client_secret"],
-            token_url=self.conn["token_url"],
+        """
+        Create Airbyte API session.
+
+        When ``client_id`` and ``client_secret`` are provided (via the
+        connection's *Login* and *Password* fields), the SDK authenticates
+        with OAuth2 Client Credentials — required for Airbyte Cloud and
+        Enterprise deployments.
+
+        When credentials are **not** provided, the session is created
+        without authentication.  This is the correct mode for Airbyte OSS
+        deployments that do not have the ``/v1/applications/token``
+        endpoint enabled.
+        """
+        client_id = self.conn["client_id"]
+        client_secret = self.conn["client_secret"]
+
+        security: Security | None = None
+        if client_id and client_secret:
+            credentials = SchemeClientCredentials(
+                client_id=client_id,
+                client_secret=client_secret,
+                token_url=self.conn["token_url"],
+            )
+            security = Security(client_credentials=credentials)
+        else:
+            self.log.info(
+                "No client_id/client_secret provided in connection '%s'. "
+                "Creating Airbyte API session without authentication "
+                "(suitable for Airbyte OSS without auth enabled).",
+                self.airbyte_conn_id,
+            )
+
+        timeout = self.timeout if self.timeout is not None else self.conn["timeout"]
+        error_message = (
+            f"Invalid Airbyte API request timeout {timeout!r}: expected a positive number of "
+            f"seconds, set via the AirbyteHook 'timeout' parameter or the 'timeout' extra of "
+            f"connection {self.airbyte_conn_id!r}"
         )
+        if timeout is not None:
+            try:
+                timeout = float(timeout)
+            except (TypeError, ValueError) as e:
+                raise ValueError(error_message) from e
+            if timeout <= 0:
+                raise ValueError(error_message)
+
+        mounts: dict[str, httpx.HTTPTransport] = {}
+        if self.conn["proxies"]:
+            self.log.debug("Creating client proxy...")
+            proxies = self.conn["proxies"]
+            if isinstance(proxies, dict):
+                for scheme, proxy_url in proxies.items():
+                    # httpx mount keys require a "://" suffix
+                    key = scheme if "://" in scheme else f"{scheme}://"
+                    mounts[key] = httpx.HTTPTransport(proxy=proxy_url)
+            else:
+                mounts = {
+                    "http://": httpx.HTTPTransport(proxy=proxies),
+                    "https://": httpx.HTTPTransport(proxy=proxies),
+                }
+
+        client = None
+        if mounts or timeout is not None:
+            # The timeout must be set on the client rather than passed as the SDK's
+            # timeout_ms: the SDK's client-credentials hook sends the OAuth token
+            # request directly through the client, bypassing per-operation timeouts.
+            # follow_redirects matches the default client the SDK creates otherwise.
+            client = httpx.Client(
+                mounts=mounts,
+                timeout=timeout if timeout is not None else 5.0,
+                follow_redirects=True,
+            )
 
         return AirbyteAPI(
             server_url=self.conn["host"],
-            security=Security(client_credentials=credentials),
+            security=security,
+            client=client,
         )
 
     @classmethod
@@ -87,7 +172,12 @@ class AirbyteHook(BaseHook):
                 "extra",
                 "port",
             ],
-            "relabeling": {"login": "Client ID", "password": "Client Secret", "schema": "Token URL"},
+            "relabeling": {
+                "host": "Server URL",
+                "login": "Client ID (optional)",
+                "password": "Client Secret (optional)",
+                "schema": "Token URL",
+            },
             "placeholders": {},
         }
 
@@ -103,6 +193,7 @@ class AirbyteHook(BaseHook):
                     job_id=job_id,
                 )
             )
+            self.log.debug("Job details are: %s", get_job_res.job_response)
             return get_job_res.job_response
         except Exception as e:
             raise AirflowException(e)
@@ -130,12 +221,14 @@ class AirbyteHook(BaseHook):
         start = time.monotonic()
         while True:
             if timeout and start + timeout < time.monotonic():
+                self.log.debug("Canceling job...")
                 self.cancel_job(job_id=(int(job_id)))
                 raise AirflowException(f"Timeout: Airbyte job {job_id} is not ready after {timeout}s")
             time.sleep(wait_seconds)
             try:
                 job = self.get_job_details(job_id=(int(job_id)))
                 state = job.status
+                self.log.debug("Job State: %s. Job Details: %s", state, job)
 
             except AirflowException as err:
                 self.log.info("Retrying. Airbyte API returned server error when waiting for job: %s", err)
@@ -147,19 +240,34 @@ class AirbyteHook(BaseHook):
                 break
             if state == JobStatusEnum.FAILED:
                 raise AirflowException(f"Job failed:\n{job}")
-            elif state == JobStatusEnum.CANCELLED:
+            if state == JobStatusEnum.CANCELLED:
                 raise AirflowException(f"Job was cancelled:\n{job}")
-            else:
-                raise AirflowException(f"Encountered unexpected state `{state}` for job_id `{job_id}`")
+            raise AirflowException(f"Encountered unexpected state `{state}` for job_id `{job_id}`")
 
     def submit_sync_connection(self, connection_id: str) -> Any:
         try:
+            self.log.debug("Creating job request..")
             res = self.airbyte_api.jobs.create_job(
                 request=JobCreateRequest(
                     connection_id=connection_id,
                     job_type=JobTypeEnum.SYNC,
                 )
             )
+            self.log.debug("Job request successful, response: %s", res.job_response)
+            return res.job_response
+        except Exception as e:
+            raise AirflowException(e)
+
+    def submit_reset_connection(self, connection_id: str) -> Any:
+        try:
+            self.log.debug("Creating job request..")
+            res = self.airbyte_api.jobs.create_job(
+                request=JobCreateRequest(
+                    connection_id=connection_id,
+                    job_type=JobTypeEnum.RESET,
+                )
+            )
+            self.log.debug("Job request successful, response: %s", res.job_response)
             return res.job_response
         except Exception as e:
             raise AirflowException(e)
@@ -184,9 +292,9 @@ class AirbyteHook(BaseHook):
         """Tests the Airbyte connection by hitting the health API."""
         try:
             health_check = self.airbyte_api.health.get_health_check()
+            self.log.debug("Health check details: %s", health_check)
             if health_check.status_code == 200:
                 return True, "Connection successfully tested"
-            else:
-                return False, str(health_check.raw_response)
+            return False, str(health_check.raw_response)
         except Exception as e:
             return False, str(e)

@@ -22,10 +22,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from airflow.exceptions import AirflowException
+from airflow.providers.amazon.aws.hooks.base_aws import AwsGenericHook
 from airflow.providers.amazon.aws.triggers.base import AwsBaseWaiterTrigger
 
 if TYPE_CHECKING:
-    from airflow.providers.amazon.aws.hooks.base_aws import AwsGenericHook
     from airflow.triggers.base import TriggerEvent
 
 
@@ -125,3 +126,67 @@ class TestAwsBaseWaiterTrigger:
         assert isinstance(res.payload, dict)
         assert res.payload["status"] == "success"
         assert res.payload["hello"] == "world"
+
+    @pytest.mark.asyncio
+    @mock.patch(
+        "airflow.providers.amazon.aws.triggers.base.async_wait",
+        side_effect=AirflowException("AWS Glue job failed.\nTerminal failure"),
+    )
+    async def test_run_error_yields_event(self, wait_mock: MagicMock):
+        self.trigger.return_key = "hello"
+        self.trigger.return_value = "world"
+
+        generator = self.trigger.run()
+        res: TriggerEvent = await generator.asend(None)
+
+        wait_mock.assert_called_once()
+        assert isinstance(res.payload, dict)
+        assert res.payload["status"] == "error"
+        assert "AWS Glue job failed." in res.payload["message"]
+        assert res.payload["hello"] == "world"
+
+    def test_event_from_exception(self):
+        self.trigger.return_key = "hello"
+        self.trigger.return_value = "world"
+
+        event = self.trigger._event_from_exception(AirflowException("AWS Glue job failed."))
+
+        assert event.payload == {
+            "status": "error",
+            "message": "AWS Glue job failed.",
+            "hello": "world",
+        }
+
+
+class TestAwsBaseWaiterTriggerSubclassValidation:
+    """``hook()`` runs in the triggerer, so a subclass that cannot build one must fail on import."""
+
+    def test_subclass_with_neither_hook_class_nor_hook_is_rejected(self):
+        with pytest.raises(AttributeError, match="aws_hook_class' should be set"):
+
+            class MissingBoth(AwsBaseWaiterTrigger):
+                pass
+
+    def test_subclass_whose_hook_class_is_not_a_hook_is_rejected(self):
+        with pytest.raises(AttributeError, match="not a subclass of AwsGenericHook"):
+
+            class NotAHook(AwsBaseWaiterTrigger):
+                aws_hook_class = str
+
+    def test_subclass_declaring_a_hook_class_is_accepted(self):
+        class Declared(AwsBaseWaiterTrigger):
+            aws_hook_class = AwsGenericHook
+
+        assert Declared.aws_hook_class is AwsGenericHook
+
+    def test_subclass_inheriting_a_hook_override_is_accepted(self):
+        """An override reached through an intermediate base still counts."""
+
+        class Intermediate(AwsBaseWaiterTrigger):
+            def hook(self) -> AwsGenericHook:
+                return AsyncMock()
+
+        class Leaf(Intermediate):
+            pass
+
+        assert Leaf.hook is Intermediate.hook

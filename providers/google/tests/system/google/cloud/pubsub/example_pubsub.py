@@ -35,7 +35,12 @@ from airflow.providers.google.cloud.operators.pubsub import (
 )
 from airflow.providers.google.cloud.sensors.pubsub import PubSubPullSensor
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT", "default")
@@ -80,6 +85,7 @@ with DAG(
         ack_messages=True,
         project_id=PROJECT_ID,
         subscription=subscription,
+        return_immediately=False,
     )
     # [END howto_operator_gcp_pubsub_pull_message_with_sensor]
 
@@ -89,11 +95,15 @@ with DAG(
 
     # [START howto_operator_gcp_pubsub_pull_message_with_operator]
 
+    # return_immediately=False makes this pull block for a bounded, server-side period, holding the
+    # worker slot; pass return_immediately=True explicitly if the task should return an empty list
+    # instead of waiting.
     pull_messages_operator = PubSubPullOperator(
         task_id="pull_messages_operator",
         ack_messages=True,
         project_id=PROJECT_ID,
         subscription=subscription,
+        return_immediately=False,
     )
     # [END howto_operator_gcp_pubsub_pull_message_with_operator]
 
@@ -155,5 +165,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

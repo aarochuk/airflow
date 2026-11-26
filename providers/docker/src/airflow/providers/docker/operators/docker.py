@@ -27,50 +27,55 @@ from collections.abc import Container, Iterable, Sequence
 from functools import cached_property
 from io import BytesIO, StringIO
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from docker.constants import DEFAULT_TIMEOUT_SECONDS
 from docker.errors import APIError
 from docker.types import LogConfig, Mount, Ulimit
 from dotenv import dotenv_values
-from typing_extensions import Literal
 
-from airflow.models import BaseOperator
 from airflow.providers.docker.exceptions import (
     DockerContainerFailedException,
     DockerContainerFailedSkipException,
 )
 from airflow.providers.docker.hooks.docker import DockerHook
+from airflow.providers.docker.version_compat import BaseOperator
 
 if TYPE_CHECKING:
-    from logging import Logger
-
     from docker import APIClient
     from docker.types import DeviceRequest
 
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
+    from airflow.sdk.types import Logger
 
 
 def stringify(line: str | bytes):
     """Make sure string is returned even if bytes are passed. Docker stream can return bytes."""
     decode_method = getattr(line, "decode", None)
     if decode_method:
-        return decode_method(encoding="utf-8", errors="surrogateescape")
-    else:
-        return line
+        return decode_method(encoding="utf-8", errors="replace")
+    return line
 
 
 def fetch_logs(log_stream, log: Logger):
-    log_lines = []
-    for log_chunk in log_stream:
-        log_chunk = stringify(log_chunk).rstrip()
-        log_lines.append(log_chunk)
-        for log_chunk_line in log_chunk.split("\n"):
-            log.info("%s", log_chunk_line)
+    log_lines: list[str] = []
+    buffer = ""
+
+    for log_chunk_raw in log_stream:
+        buffer += stringify(log_chunk_raw)
+        lines = buffer.split("\n")
+        buffer = lines.pop()  # Keep incomplete line for next iteration
+
+        for line in lines:
+            stripped_line = line.rstrip()
+            log.info("%s", stripped_line)
+            log_lines.append(stripped_line)
+
+    if buffer:
+        buffer = buffer.rstrip()
+        log.info("%s", buffer)
+        log_lines.append(buffer)
+
     return log_lines
 
 
@@ -146,8 +151,12 @@ class DockerOperator(BaseOperator):
         The path is also made available via the environment variable
         ``AIRFLOW_TMP_DIR`` inside the container.
     :param user: Default user inside the docker container.
-    :param mounts: List of volumes to mount into the container. Each item should
-        be a :py:class:`docker.types.Mount` instance.
+    :param mounts: List of volumes to mount into the container. Each item may
+        be a :py:class:`docker.types.Mount` instance, or a ``dict`` of
+        :py:class:`~docker.types.Mount` keyword arguments (e.g.
+        ``{"target": "/data", "source": "vol", "type": "volume"}``); ``dict``
+        entries are converted to ``Mount`` instances at construction time.
+        (templated)
     :param entrypoint: Overwrite the default ENTRYPOINT of the image
     :param working_dir: Working directory to
         set on the container (equivalent to the -w switch the docker client)
@@ -200,7 +209,15 @@ class DockerOperator(BaseOperator):
     #  - docs/apache-airflow-providers-docker/decorators/docker.rst
     #  - airflow/decorators/__init__.pyi  (by a separate PR)
 
-    template_fields: Sequence[str] = ("image", "command", "environment", "env_file", "container_name")
+    template_fields: Sequence[str] = (
+        "image",
+        "command",
+        "environment",
+        "env_file",
+        "container_name",
+        "mounts",
+        "docker_conn_id",
+    )
     template_fields_renderers = {"env_file": "yaml"}
     template_ext: Sequence[str] = (
         ".sh",
@@ -233,7 +250,7 @@ class DockerOperator(BaseOperator):
         mount_tmp_dir: bool = True,
         tmp_dir: str = "/tmp/airflow",
         user: str | int | None = None,
-        mounts: list[Mount] | None = None,
+        mounts: list[Mount | dict] | None = None,
         entrypoint: str | list[str] | None = None,
         working_dir: str | None = None,
         xcom_all: bool = False,
@@ -424,19 +441,18 @@ class DockerOperator(BaseOperator):
                 raise DockerContainerFailedSkipException(
                     f"Docker container returned exit code {self.skip_on_exit_code}. Skipping.", logs=log_lines
                 )
-            elif result["StatusCode"] != 0:
+            if result["StatusCode"] != 0:
                 raise DockerContainerFailedException(f"Docker container failed: {result!r}", logs=log_lines)
 
             if self.retrieve_output:
                 return self._attempt_to_retrieve_result()
-            elif self.do_xcom_push:
+            if self.do_xcom_push:
                 if not log_lines:
                     return None
                 try:
                     if self.xcom_all:
                         return log_lines
-                    else:
-                        return log_lines[-1]
+                    return log_lines[-1]
                 except StopIteration:
                     # handle the case when there is not a single line to iterate on
                     return None
@@ -471,7 +487,14 @@ class DockerOperator(BaseOperator):
             lib = getattr(self, "pickling_library", pickle)
             return lib.load(file)
 
+    def _normalize_mounts(self) -> None:
+        # A user dict is rebuilt into a Mount, but rendering flattens a Mount into a
+        # plain dict with API-cased keys (Target/Source/Type) that docker-py already
+        # accepts, so leave those (and any real Mount) alone.
+        self.mounts = [m if isinstance(m, Mount) or "Target" in m else Mount(**m) for m in self.mounts]
+
     def execute(self, context: Context) -> list[str] | str | None:
+        self._normalize_mounts()
         # Pull the docker image if `force_pull` is set or image does not exist locally
         if self.force_pull or not self.cli.images(name=self.image):
             self.log.info("::group::Pulling docker image %s", self.image)
@@ -516,6 +539,15 @@ class DockerOperator(BaseOperator):
                 self.log.info("Not attempting to kill container as it was not created")
                 return
             self.cli.stop(self.container["Id"])
+            if self.auto_remove == "force":
+                try:
+                    self.cli.remove_container(self.container["Id"], force=True)
+                except APIError as e:
+                    self.log.info(
+                        "Failed to remove docker container %s during on_kill; it may already be gone: %s",
+                        self.container["Id"],
+                        e,
+                    )
 
     @staticmethod
     def unpack_environment_variables(env_str: str) -> dict:

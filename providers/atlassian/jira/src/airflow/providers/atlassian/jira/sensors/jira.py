@@ -17,14 +17,14 @@
 # under the License.
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Any
 
 from airflow.providers.atlassian.jira.hooks.jira import JiraHook
-from airflow.sensors.base import BaseSensorOperator
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class JiraSensor(BaseSensorOperator):
@@ -36,6 +36,8 @@ class JiraSensor(BaseSensorOperator):
     :param method_params: parameters for the method method_name
     :param result_processor: function that return boolean and act as a sensor response
     """
+
+    template_fields: Sequence[str] = ("jira_conn_id",)
 
     def __init__(
         self,
@@ -52,7 +54,7 @@ class JiraSensor(BaseSensorOperator):
         if result_processor is not None:
             self.result_processor = result_processor
         self.method_name = method_name
-        self.method_params = method_params
+        self.method_params = method_params or {}
 
     def poke(self, context: Context) -> Any:
         hook = JiraHook(jira_conn_id=self.jira_conn_id)
@@ -74,7 +76,10 @@ class JiraTicketSensor(JiraSensor):
     :param result_processor: function that return boolean and act as a sensor response
     """
 
-    template_fields: Sequence[str] = ("ticket_id",)
+    template_fields: Sequence[str] = (
+        "ticket_id",
+        "jira_conn_id",
+    )
 
     def __init__(
         self,

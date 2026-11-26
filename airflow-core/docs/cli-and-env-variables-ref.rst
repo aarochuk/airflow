@@ -1,3 +1,6 @@
+:tocdepth: 4
+
+..
  .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
@@ -24,7 +27,7 @@ Command Line Interface
 ''''''''''''''''''''''
 
 Airflow has a very rich command line interface that allows for
-many types of operation on a DAG, starting services, and supporting
+many types of operation on a Dag, starting services, and supporting
 development and testing.
 
 .. note::
@@ -37,9 +40,14 @@ development and testing.
 Providers that implement executors might contribute additional commands to the CLI. Here are the commands
 contributed by the community providers:
 
+
+.. important::
+  Starting in Airflow ``3.2.0``, provider-level CLI commands are available to manage core extensions such as auth managers and executors. Implementing provider-level CLI commands can reduce CLI startup time by avoiding heavy imports when they are not required.
+  See :doc:`provider-level CLI <apache-airflow-providers:core-extensions/cli-commands>` for implementation guidance.
+
 * Celery Executor and related CLI commands: :doc:`apache-airflow-providers-celery:cli-ref`
 * Kubernetes Executor and related CLI commands: :doc:`apache-airflow-providers-cncf-kubernetes:cli-ref`
-* Edge Executor and related CLI commands: :doc:`apache-airflow-providers-edge:cli-ref`
+* Edge Executor and related CLI commands: :doc:`apache-airflow-providers-edge3:cli-ref`
 * AWS and related CLI commands: :doc:`apache-airflow-providers-amazon:cli-ref`
 * The ``users`` and ``roles`` CLI commands are described in FAB provider documentation :doc:`apache-airflow-providers-fab:cli-ref`
 
@@ -75,9 +83,8 @@ Environment Variables
 * ``broker_url`` in ``[celery]`` section
 * ``flower_basic_auth`` in ``[celery]`` section
 * ``result_backend`` in ``[celery]`` section
-* ``password`` in ``[atlas]`` section
 * ``smtp_password`` in ``[smtp]`` section
-* ``secret_key`` in ``[webserver]`` section
+* ``secret_key`` in ``[api]`` section
 
 .. envvar:: AIRFLOW__{SECTION}__{KEY}_SECRET
 
@@ -104,7 +111,7 @@ Environment Variables
 .. envvar:: AIRFLOW_HOME
 
   The root directory for the Airflow content.
-  This is the default parent directory for Airflow assets such as dags and logs.
+  This is the default parent directory for Airflow assets such as Dags and logs.
 
 .. envvar:: AIRFLOW_VAR_{KEY}
 

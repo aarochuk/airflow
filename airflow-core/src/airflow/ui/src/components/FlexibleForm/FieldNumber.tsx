@@ -16,20 +16,20 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+import { NumberInputField, NumberInputRoot } from "src/system-components";
+
 import { paramPlaceholder, useParamStore } from "src/queries/useParamStore";
 
 import type { FlexibleFormElementProps } from ".";
-import { NumberInputField, NumberInputRoot } from "../ui/NumberInput";
 
-export const FieldNumber = ({ name }: FlexibleFormElementProps) => {
-  const { paramsDict, setParamsDict } = useParamStore();
+export const FieldNumber = ({ name, namespace = "default", onUpdate }: FlexibleFormElementProps) => {
+  const { disabled, paramsDict, setParamsDict } = useParamStore(namespace);
   const param = paramsDict[name] ?? paramPlaceholder;
   const handleChange = (value: string) => {
     if (value === "") {
       // If input is cleared, set the value to null or undefined
       if (paramsDict[name]) {
         // "undefined" values are removed from params, so we set it to null to avoid falling back to DAG defaults.
-        // eslint-disable-next-line unicorn/no-null
         paramsDict[name].value = null;
       }
     } else {
@@ -40,18 +40,20 @@ export const FieldNumber = ({ name }: FlexibleFormElementProps) => {
     }
 
     setParamsDict(paramsDict);
+    onUpdate(value);
   };
 
   return (
     <NumberInputRoot
       allowMouseWheel
+      disabled={disabled}
       id={`element_${name}`}
       max={param.schema.maximum ?? undefined}
       min={param.schema.minimum ?? undefined}
       name={`element_${name}`}
       onValueChange={(event) => handleChange(event.value)}
       size="sm"
-      value={JSON.stringify(param.value ?? "")}
+      value={(param.value ?? "") as string}
     >
       <NumberInputField />
     </NumberInputRoot>

@@ -25,52 +25,12 @@ def get_provider_info():
     return {
         "package-name": "apache-airflow-providers-oracle",
         "name": "Oracle",
-        "description": "`Oracle <https://www.oracle.com/en/database/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477864,
-        "versions": [
-            "4.0.2",
-            "4.0.1",
-            "4.0.0",
-            "3.12.1",
-            "3.12.0",
-            "3.11.0",
-            "3.10.3",
-            "3.10.2",
-            "3.10.1",
-            "3.10.0",
-            "3.9.2",
-            "3.9.1",
-            "3.9.0",
-            "3.8.0",
-            "3.7.4",
-            "3.7.3",
-            "3.7.2",
-            "3.7.1",
-            "3.7.0",
-            "3.6.0",
-            "3.5.1",
-            "3.5.0",
-            "3.4.0",
-            "3.3.0",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.2.3",
-            "2.2.2",
-            "2.2.1",
-            "2.2.0",
-            "2.1.0",
-            "2.0.1",
-            "2.0.0",
-            "1.1.0",
-            "1.0.1",
-            "1.0.0",
-        ],
+        "description": "`Oracle <https://www.oracle.com/database/technologies/>`__\n",
         "integrations": [
             {
                 "integration-name": "Oracle",
                 "external-doc-url": "https://www.oracle.com/en/database/",
+                "how-to-guide": ["/docs/apache-airflow-providers-oracle/operators.rst"],
                 "logo": "/docs/integration-logos/Oracle.png",
                 "tags": ["software"],
             }
@@ -78,8 +38,30 @@ def get_provider_info():
         "operators": [
             {"integration-name": "Oracle", "python-modules": ["airflow.providers.oracle.operators.oracle"]}
         ],
+        "asset-uris": [
+            {
+                "schemes": ["oracle"],
+                "handler": "airflow.providers.oracle.assets.oracle.sanitize_uri",
+                "factory": "airflow.providers.oracle.assets.oracle.create_asset",
+                "to_openlineage_converter": "airflow.providers.oracle.assets.oracle.convert_asset_to_openlineage",
+            }
+        ],
+        "dataset-uris": [
+            {
+                "schemes": ["oracle"],
+                "handler": "airflow.providers.oracle.assets.oracle.sanitize_uri",
+                "factory": "airflow.providers.oracle.assets.oracle.create_asset",
+                "to_openlineage_converter": "airflow.providers.oracle.assets.oracle.convert_asset_to_openlineage",
+            }
+        ],
         "hooks": [
-            {"integration-name": "Oracle", "python-modules": ["airflow.providers.oracle.hooks.oracle"]}
+            {
+                "integration-name": "Oracle",
+                "python-modules": [
+                    "airflow.providers.oracle.hooks.handlers",
+                    "airflow.providers.oracle.hooks.oracle",
+                ],
+            }
         ],
         "transfers": [
             {
@@ -91,14 +73,8 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.oracle.hooks.oracle.OracleHook",
+                "hook-name": "Oracle",
                 "connection-type": "oracle",
             }
         ],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-common-sql>=1.20.0",
-            "oracledb>=2.0.0",
-        ],
-        "optional-dependencies": {"numpy": ["numpy>=1.26.0"]},
-        "devel-dependencies": ["numpy>=1.26.0"],
     }

@@ -28,10 +28,10 @@ import requests
 from requests import HTTPError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from airflow.hooks.base import BaseHook
+from airflow.providers.common.compat.sdk import BaseHook
 
 
-def _get_field(extras: dict, field_name: str):
+def _get_field(extras: dict, field_name: str) -> str | None:
     """Get field from extra, first checking short name, then for backcompat we check for prefixed name."""
     backcompat_prefix = "extra__dataprep__"
     if field_name.startswith("extra__"):
@@ -219,8 +219,22 @@ class GoogleDataprepHook(BaseHook):
         try:
             response.raise_for_status()
         except HTTPError:
-            self.log.error(response.json().get("exception"))
+            self.log.error(self._get_error_message(response))
             raise
+
+    @staticmethod
+    def _get_error_message(response: requests.models.Response) -> Any:
+        """
+        Return the error detail from the response, falling back to its raw body.
+
+        An error response does not always carry a JSON object: a proxy or gateway
+        can answer with HTML or an empty payload, and parsing that here would
+        replace the HTTPError we are about to re-raise.
+        """
+        try:
+            return response.json().get("exception")
+        except (ValueError, AttributeError):
+            return response.text
 
     @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, max=10))
     def create_imported_dataset(self, *, body_request: dict) -> dict:

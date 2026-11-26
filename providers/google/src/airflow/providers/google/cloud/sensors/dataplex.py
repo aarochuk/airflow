@@ -25,19 +25,18 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from google.api_core.retry import Retry
 
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 from google.api_core.exceptions import GoogleAPICallError
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
 from google.cloud.dataplex_v1.types import DataScanJob
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException, BaseSensorOperator
 from airflow.providers.google.cloud.hooks.dataplex import (
     AirflowDataQualityScanException,
     AirflowDataQualityScanResultTimeoutException,
     DataplexHook,
 )
-from airflow.sensors.base import BaseSensorOperator
 
 
 class TaskState:
@@ -73,7 +72,7 @@ class DataplexTaskStateSensor(BaseSensorOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ["dataplex_task_id"]
+    template_fields = ["dataplex_task_id", "gcp_conn_id"]
 
     def __init__(
         self,
@@ -157,7 +156,7 @@ class DataplexDataQualityJobStatusSensor(BaseSensorOperator):
     :return: Boolean indicating if the job run has reached the ``DataScanJob.State.SUCCEEDED``.
     """
 
-    template_fields = ["job_id"]
+    template_fields = ["job_id", "gcp_conn_id"]
 
     def __init__(
         self,
@@ -272,7 +271,7 @@ class DataplexDataProfileJobStatusSensor(BaseSensorOperator):
     :return: Boolean indicating if the job run has reached the ``DataScanJob.State.SUCCEEDED``.
     """
 
-    template_fields = ["job_id"]
+    template_fields = ["job_id", "gcp_conn_id"]
 
     def __init__(
         self,

@@ -19,10 +19,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
 from google.cloud.vision_v1 import (
@@ -36,7 +36,7 @@ from google.cloud.vision_v1 import (
 )
 from google.protobuf.json_format import MessageToDict
 
-from airflow.exceptions import AirflowException
+from airflow.providers.common.compat.sdk import AirflowException
 from airflow.providers.google.common.consts import CLIENT_INFO
 from airflow.providers.google.common.hooks.base_google import PROVIDE_PROJECT_ID, GoogleBaseHook
 
@@ -107,8 +107,7 @@ class NameDeterminer:
         # Not enough parameters to construct the name. Trying to use the name from Product / ProductSet.
         if explicit_name:
             return entity
-        else:
-            raise AirflowException(ERR_UNABLE_TO_CREATE.format(label=self.label, id_label=self.id_label))
+        raise AirflowException(ERR_UNABLE_TO_CREATE.format(label=self.label, id_label=self.id_label))
 
 
 class CloudVisionHook(GoogleBaseHook):
@@ -145,7 +144,11 @@ class CloudVisionHook(GoogleBaseHook):
         :return: Google Cloud Vision client object.
         """
         if not self._client:
-            self._client = ProductSearchClient(credentials=self.get_credentials(), client_info=CLIENT_INFO)
+            self._client = ProductSearchClient(
+                credentials=self.get_credentials(),
+                client_info=CLIENT_INFO,
+                client_options=self.get_client_options(),
+            )
         return self._client
 
     @cached_property
@@ -155,7 +158,9 @@ class CloudVisionHook(GoogleBaseHook):
 
         :return: Google Image Annotator client object.
         """
-        return ImageAnnotatorClient(credentials=self.get_credentials())
+        return ImageAnnotatorClient(
+            credentials=self.get_credentials(), client_options=self.get_client_options()
+        )
 
     @staticmethod
     def _check_for_error(response: dict) -> None:

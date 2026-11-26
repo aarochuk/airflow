@@ -16,50 +16,86 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box } from "@chakra-ui/react";
 import type { ReactNode } from "react";
-import { MdOutlineTask } from "react-icons/md";
 
-import type { GridTaskInstanceSummary } from "openapi/requests/types.gen";
+import { Box, HStack } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
+import { MdOutlineTask } from "react-icons/md";
+import { useParams } from "react-router-dom";
+
+import type { LightGridTaskInstanceSummary } from "openapi/requests/types.gen";
+
+import { ClearTaskInstanceButton } from "src/components/Clear";
 import { HeaderCard } from "src/components/HeaderCard";
 import Time from "src/components/Time";
-import { getDuration } from "src/utils";
 
-export const Header = ({
-  isRefreshing,
-  taskInstance,
-}: {
-  readonly isRefreshing?: boolean;
-  readonly taskInstance: GridTaskInstanceSummary;
-}) => {
-  const entries: Array<{ label: string; value: number | ReactNode | string }> = [];
+import { useHasGridSelection } from "src/context/gridSelection";
+import { formatNumber, useDurationFormat } from "src/utils";
 
-  if (taskInstance.child_states !== null) {
-    Object.entries(taskInstance.child_states).forEach(([state, count]) => {
-      if (count > 0) {
-        entries.push({ label: `Total ${state}`, value: count });
-      }
+export const Header = ({ taskInstance }: { readonly taskInstance: LightGridTaskInstanceSummary }) => {
+  // The grid's bulk actions replace these while task instances are selected there.
+  const hasGridSelection = useHasGridSelection();
+  const { dagId = "", runId = "" } = useParams();
+  const { i18n, t: translate } = useTranslation();
+  const { formatElapsed } = useDurationFormat();
+  const entries: Array<{ key?: string; label: string; value: number | ReactNode | string }> = [];
+  let taskCount: number = 0;
+
+  Object.entries(taskInstance.child_states ?? {}).forEach(([state, count]) => {
+    entries.push({
+      key: state,
+      label: translate("total", { state: translate(`states.${state}`) }),
+      value: (
+        <HStack gap={2}>
+          <Box
+            bg={`${state}.solid`}
+            border="1px solid"
+            borderColor="border.emphasized"
+            borderRadius="2px"
+            height="10px"
+            width="10px"
+          />
+          {formatNumber(count, i18n.language)}
+        </HStack>
+      ),
     });
-  }
+    taskCount += count;
+  });
   const stats = [
     ...entries,
-    { label: "Start", value: <Time datetime={taskInstance.start_date} /> },
-    { label: "End", value: <Time datetime={taskInstance.end_date} /> },
-    ...(Boolean(taskInstance.start_date)
-      ? [{ label: "Duration", value: `${getDuration(taskInstance.start_date, taskInstance.end_date)}s` }]
+    { label: translate("startDate"), value: <Time datetime={taskInstance.min_start_date} /> },
+    { label: translate("endDate"), value: <Time datetime={taskInstance.max_end_date} /> },
+    ...(Boolean(taskInstance.max_end_date)
+      ? [
+          {
+            label: translate("duration"),
+            value: formatElapsed(taskInstance.min_start_date, taskInstance.max_end_date),
+          },
+        ]
       : []),
   ];
 
   return (
-    <Box>
-      <HeaderCard
-        icon={<MdOutlineTask />}
-        isRefreshing={isRefreshing}
-        state={taskInstance.state}
-        stats={stats}
-        subTitle={<Time datetime={taskInstance.start_date} />}
-        title={`${taskInstance.task_id} [${taskInstance.task_count}]`}
-      />
-    </Box>
+    <HeaderCard
+      actions={
+        hasGridSelection ? undefined : (
+          <ClearTaskInstanceButton
+            allMapped
+            bg="bg"
+            dagId={dagId}
+            dagRunId={runId}
+            isHotkeyEnabled
+            taskId={taskInstance.task_id}
+            variant="outline"
+          />
+        )
+      }
+      icon={<MdOutlineTask />}
+      state={taskInstance.state}
+      stats={stats}
+      subTitle={<Time datetime={taskInstance.min_start_date} />}
+      title={`${taskInstance.task_display_name} [${formatNumber(taskCount, i18n.language)}]`}
+      type="taskInstance"
+    />
   );
 };

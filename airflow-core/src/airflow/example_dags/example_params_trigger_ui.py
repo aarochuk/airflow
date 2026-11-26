@@ -25,10 +25,7 @@ from __future__ import annotations
 import datetime
 from pathlib import Path
 
-from airflow.decorators import task
-from airflow.models.dag import DAG
-from airflow.sdk import Param
-from airflow.utils.trigger_rule import TriggerRule
+from airflow.sdk import DAG, Param, TriggerRule, task
 
 # [START params_trigger]
 with DAG(
@@ -55,16 +52,14 @@ with DAG(
 ) as dag:
 
     @task(task_id="get_names", task_display_name="Get names")
-    def get_names(**kwargs) -> list[str]:
-        params = kwargs["params"]
+    def get_names(params=None) -> list[str]:
         if "names" not in params:
             print("Uuups, no names given, was no UI used to trigger?")
             return []
         return params["names"]
 
     @task.branch(task_id="select_languages", task_display_name="Select languages")
-    def select_languages(**kwargs) -> list[str]:
-        params = kwargs["params"]
+    def select_languages(params=None) -> list[str]:
         selected_languages = []
         for lang in ["english", "german", "french"]:
             if params[lang]:

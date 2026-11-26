@@ -26,35 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-airbyte",
         "name": "Airbyte",
         "description": "`Airbyte <https://airbyte.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477757,
-        "versions": [
-            "5.0.1",
-            "5.0.0",
-            "4.0.0",
-            "3.9.0",
-            "3.8.1",
-            "3.8.0",
-            "3.7.0",
-            "3.6.0",
-            "3.5.1",
-            "3.5.0",
-            "3.4.0",
-            "3.3.2",
-            "3.3.1",
-            "3.3.0",
-            "3.2.1",
-            "3.2.0",
-            "3.1.0",
-            "3.0.0",
-            "2.1.4",
-            "2.1.3",
-            "2.1.2",
-            "2.1.1",
-            "2.1.0",
-            "2.0.0",
-            "1.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Airbyte",
@@ -79,9 +50,18 @@ def get_provider_info():
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.airbyte.hooks.airbyte.AirbyteHook",
+                "hook-name": "Airbyte",
                 "connection-type": "airbyte",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["extra", "port"],
+                    "relabeling": {
+                        "host": "Server URL",
+                        "login": "Client ID (optional)",
+                        "password": "Client Secret (optional)",
+                        "schema": "Token URL",
+                    },
+                    "placeholders": {},
+                },
             }
         ],
-        "dependencies": ["apache-airflow>=2.9.0", "airbyte-api>=0.52.0"],
-        "devel-dependencies": [],
     }

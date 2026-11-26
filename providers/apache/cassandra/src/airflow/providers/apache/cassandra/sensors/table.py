@@ -21,10 +21,10 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from airflow.providers.apache.cassandra.hooks.cassandra import CassandraHook
-from airflow.sensors.base import BaseSensorOperator
+from airflow.providers.common.compat.sdk import BaseSensorOperator
 
 if TYPE_CHECKING:
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class CassandraTableSensor(BaseSensorOperator):
@@ -49,7 +49,10 @@ class CassandraTableSensor(BaseSensorOperator):
         when connecting to Cassandra cluster
     """
 
-    template_fields: Sequence[str] = ("table",)
+    template_fields: Sequence[str] = (
+        "table",
+        "cassandra_conn_id",
+    )
 
     def __init__(
         self,

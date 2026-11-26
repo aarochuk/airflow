@@ -26,22 +26,6 @@ def get_provider_info():
         "package-name": "apache-airflow-providers-teradata",
         "name": "Teradata",
         "description": "`Teradata <https://www.teradata.com/>`__\n",
-        "state": "ready",
-        "source-date-epoch": 1743477904,
-        "versions": [
-            "3.0.2",
-            "3.0.1",
-            "3.0.0",
-            "2.6.1",
-            "2.6.0",
-            "2.5.0",
-            "2.4.0",
-            "2.3.0",
-            "2.2.0",
-            "2.1.1",
-            "2.1.0",
-            "2.0.0",
-        ],
         "integrations": [
             {
                 "integration-name": "Teradata",
@@ -52,7 +36,27 @@ def get_provider_info():
                 ],
                 "logo": "/docs/integration-logos/Teradata.png",
                 "tags": ["software"],
-            }
+            },
+            {
+                "integration-name": "Bteq",
+                "external-doc-url": "https://www.teradata.com/",
+                "how-to-guide": ["/docs/apache-airflow-providers-teradata/operators/bteq.rst"],
+                "logo": "/docs/integration-logos/Teradata.png",
+                "tags": ["software"],
+            },
+            {
+                "integration-name": "Ttu",
+                "external-doc-url": "https://www.teradata.com/",
+                "logo": "/docs/integration-logos/Teradata.png",
+                "tags": ["software"],
+            },
+            {
+                "integration-name": "Tpt",
+                "external-doc-url": "https://www.teradata.com/",
+                "how-to-guide": ["/docs/apache-airflow-providers-teradata/operators/tpt.rst"],
+                "logo": "/docs/integration-logos/Teradata.png",
+                "tags": ["software"],
+            },
         ],
         "operators": [
             {
@@ -61,10 +65,15 @@ def get_provider_info():
                     "airflow.providers.teradata.operators.teradata",
                     "airflow.providers.teradata.operators.teradata_compute_cluster",
                 ],
-            }
+            },
+            {"integration-name": "Bteq", "python-modules": ["airflow.providers.teradata.operators.bteq"]},
+            {"integration-name": "Tpt", "python-modules": ["airflow.providers.teradata.operators.tpt"]},
         ],
         "hooks": [
-            {"integration-name": "Teradata", "python-modules": ["airflow.providers.teradata.hooks.teradata"]}
+            {"integration-name": "Teradata", "python-modules": ["airflow.providers.teradata.hooks.teradata"]},
+            {"integration-name": "Ttu", "python-modules": ["airflow.providers.teradata.hooks.ttu"]},
+            {"integration-name": "Bteq", "python-modules": ["airflow.providers.teradata.hooks.bteq"]},
+            {"integration-name": "Tpt", "python-modules": ["airflow.providers.teradata.hooks.tpt"]},
         ],
         "transfers": [
             {
@@ -86,10 +95,40 @@ def get_provider_info():
                 "how-to-guide": "/docs/apache-airflow-providers-teradata/operators/s3_to_teradata.rst",
             },
         ],
+        "asset-uris": [
+            {
+                "schemes": ["teradata"],
+                "handler": "airflow.providers.teradata.assets.teradata.sanitize_uri",
+                "factory": "airflow.providers.teradata.assets.teradata.create_asset",
+                "to_openlineage_converter": "airflow.providers.teradata.assets.teradata.convert_asset_to_openlineage",
+            }
+        ],
+        "dataset-uris": [
+            {
+                "schemes": ["teradata"],
+                "handler": "airflow.providers.teradata.assets.teradata.sanitize_uri",
+                "factory": "airflow.providers.teradata.assets.teradata.create_asset",
+                "to_openlineage_converter": "airflow.providers.teradata.assets.teradata.convert_asset_to_openlineage",
+            }
+        ],
         "connection-types": [
             {
                 "hook-class-name": "airflow.providers.teradata.hooks.teradata.TeradataHook",
+                "hook-name": "Teradata",
                 "connection-type": "teradata",
+                "ui-field-behaviour": {
+                    "hidden-fields": ["port"],
+                    "relabeling": {
+                        "host": "Database Server URL",
+                        "schema": "Database Name",
+                        "login": "Username",
+                    },
+                    "placeholders": {
+                        "extra": '{\n  "tmode": "TERA",\n  "sslmode": "verify-ca",\n  "sslca": "/tmp/server-ca.pem"\n}\n',
+                        "login": "dbc",
+                        "password": "dbc",
+                    },
+                },
             }
         ],
         "triggers": [
@@ -98,15 +137,4 @@ def get_provider_info():
                 "python-modules": ["airflow.providers.teradata.triggers.teradata_compute_cluster"],
             }
         ],
-        "dependencies": [
-            "apache-airflow>=2.9.0",
-            "apache-airflow-providers-common-sql>=1.20.0",
-            "teradatasqlalchemy>=17.20.0.0",
-            "teradatasql>=17.20.0.28",
-        ],
-        "optional-dependencies": {
-            "microsoft.azure": ["apache-airflow-providers-microsoft-azure"],
-            "amazon": ["apache-airflow-providers-amazon"],
-        },
-        "devel-dependencies": [],
     }

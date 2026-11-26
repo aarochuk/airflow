@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from google.api_core.exceptions import NotFound
 from google.api_core.gapic_v1.method import DEFAULT, _MethodDefault
@@ -37,7 +37,7 @@ from airflow.providers.google.cloud.operators.cloud_base import GoogleCloudBaseO
 if TYPE_CHECKING:
     from google.api_core.retry import Retry
 
-    from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class DeleteModelOperator(GoogleCloudBaseOperator):
@@ -64,7 +64,13 @@ class DeleteModelOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("region", "model_id", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = (
+        "region",
+        "model_id",
+        "project_id",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,
@@ -135,7 +141,13 @@ class GetModelOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("region", "model_id", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = (
+        "region",
+        "model_id",
+        "project_id",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
     operator_extra_links = (VertexAIModelLink(),)
 
     def __init__(
@@ -161,6 +173,13 @@ class GetModelOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "region": self.region,
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = ModelServiceHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -179,8 +198,8 @@ class GetModelOperator(GoogleCloudBaseOperator):
             )
             self.log.info("Model found. Model ID: %s", self.model_id)
 
-            self.xcom_push(context, key="model_id", value=self.model_id)
-            VertexAIModelLink.persist(context=context, task_instance=self, model_id=self.model_id)
+            context["ti"].xcom_push(key="model_id", value=self.model_id)
+            VertexAIModelLink.persist(context=context, model_id=self.model_id)
             return Model.to_dict(model)
         except NotFound:
             self.log.info("The Model ID %s does not exist.", self.model_id)
@@ -211,7 +230,13 @@ class ExportModelOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("region", "model_id", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = (
+        "region",
+        "model_id",
+        "project_id",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
     operator_extra_links = (VertexAIModelExportLink(),)
 
     def __init__(
@@ -257,7 +282,12 @@ class ExportModelOperator(GoogleCloudBaseOperator):
                 metadata=self.metadata,
             )
             hook.wait_for_operation(timeout=self.timeout, operation=operation)
-            VertexAIModelExportLink.persist(context=context, task_instance=self)
+            VertexAIModelExportLink.persist(
+                context=context,
+                output_config=self.output_config,
+                model_id=self.model_id,
+                project_id=self.project_id,
+            )
             self.log.info("Model was exported.")
         except NotFound:
             self.log.info("The Model ID %s does not exist.", self.model_id)
@@ -301,7 +331,7 @@ class ListModelsOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("region", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = ("region", "project_id", "impersonation_chain", "gcp_conn_id")
     operator_extra_links = (VertexAIModelListLink(),)
 
     def __init__(
@@ -335,6 +365,12 @@ class ListModelsOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = ModelServiceHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -352,7 +388,7 @@ class ListModelsOperator(GoogleCloudBaseOperator):
             timeout=self.timeout,
             metadata=self.metadata,
         )
-        VertexAIModelListLink.persist(context=context, task_instance=self)
+        VertexAIModelListLink.persist(context=context)
         return [Model.to_dict(result) for result in results]
 
 
@@ -379,7 +415,14 @@ class UploadModelOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("region", "project_id", "model", "parent_model", "impersonation_chain")
+    template_fields: Sequence[str] = (
+        "region",
+        "project_id",
+        "model",
+        "parent_model",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
     operator_extra_links = (VertexAIModelLink(),)
 
     def __init__(
@@ -407,6 +450,13 @@ class UploadModelOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "region": self.region,
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = ModelServiceHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -428,8 +478,8 @@ class UploadModelOperator(GoogleCloudBaseOperator):
         model_id = hook.extract_model_id(model_resp)
         self.log.info("Model was uploaded. Model ID: %s", model_id)
 
-        self.xcom_push(context, key="model_id", value=model_id)
-        VertexAIModelLink.persist(context=context, task_instance=self, model_id=model_id)
+        context["ti"].xcom_push(key="model_id", value=model_id)
+        VertexAIModelLink.persist(context=context, model_id=model_id)
         return model_resp
 
 
@@ -457,7 +507,13 @@ class ListModelVersionsOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("model_id", "region", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = (
+        "model_id",
+        "region",
+        "project_id",
+        "impersonation_chain",
+        "gcp_conn_id",
+    )
 
     def __init__(
         self,
@@ -527,7 +583,7 @@ class SetDefaultVersionOnModelOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("model_id", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = ("model_id", "project_id", "impersonation_chain", "gcp_conn_id")
     operator_extra_links = (VertexAIModelLink(),)
 
     def __init__(
@@ -553,6 +609,13 @@ class SetDefaultVersionOnModelOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "region": self.region,
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = ModelServiceHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -571,7 +634,7 @@ class SetDefaultVersionOnModelOperator(GoogleCloudBaseOperator):
             timeout=self.timeout,
             metadata=self.metadata,
         )
-        VertexAIModelLink.persist(context=context, task_instance=self, model_id=self.model_id)
+        VertexAIModelLink.persist(context=context, model_id=self.model_id)
         return Model.to_dict(updated_model)
 
 
@@ -599,7 +662,7 @@ class AddVersionAliasesOnModelOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("model_id", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = ("model_id", "project_id", "impersonation_chain", "gcp_conn_id")
     operator_extra_links = (VertexAIModelLink(),)
 
     def __init__(
@@ -627,6 +690,13 @@ class AddVersionAliasesOnModelOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "region": self.region,
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = ModelServiceHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -645,7 +715,7 @@ class AddVersionAliasesOnModelOperator(GoogleCloudBaseOperator):
             timeout=self.timeout,
             metadata=self.metadata,
         )
-        VertexAIModelLink.persist(context=context, task_instance=self, model_id=self.model_id)
+        VertexAIModelLink.persist(context=context, model_id=self.model_id)
         return Model.to_dict(updated_model)
 
 
@@ -673,7 +743,7 @@ class DeleteVersionAliasesOnModelOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("model_id", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = ("model_id", "project_id", "impersonation_chain", "gcp_conn_id")
     operator_extra_links = (VertexAIModelLink(),)
 
     def __init__(
@@ -701,6 +771,13 @@ class DeleteVersionAliasesOnModelOperator(GoogleCloudBaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
 
+    @property
+    def extra_links_params(self) -> dict[str, Any]:
+        return {
+            "region": self.region,
+            "project_id": self.project_id,
+        }
+
     def execute(self, context: Context):
         hook = ModelServiceHook(
             gcp_conn_id=self.gcp_conn_id,
@@ -721,7 +798,7 @@ class DeleteVersionAliasesOnModelOperator(GoogleCloudBaseOperator):
             timeout=self.timeout,
             metadata=self.metadata,
         )
-        VertexAIModelLink.persist(context=context, task_instance=self, model_id=self.model_id)
+        VertexAIModelLink.persist(context=context, model_id=self.model_id)
         return Model.to_dict(updated_model)
 
 
@@ -749,7 +826,7 @@ class DeleteModelVersionOperator(GoogleCloudBaseOperator):
         account from the list granting this role to the originating account (templated).
     """
 
-    template_fields = ("model_id", "project_id", "impersonation_chain")
+    template_fields: Sequence[str] = ("model_id", "project_id", "impersonation_chain", "gcp_conn_id")
 
     def __init__(
         self,

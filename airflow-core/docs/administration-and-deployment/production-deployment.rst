@@ -18,7 +18,7 @@
 Production Deployment
 ^^^^^^^^^^^^^^^^^^^^^
 
-It is time to deploy your DAG in production. To do this, first, you need to make sure that the Airflow
+It is time to deploy your Dag in production. To do this, first, you need to make sure that the Airflow
 is itself production-ready. Let's see what precautions you need to take.
 
 Database backend
@@ -57,14 +57,22 @@ Multi-Node Cluster
 ==================
 
 Airflow uses :class:`~airflow.executors.local_executor.LocalExecutor` by default. For a multi-node setup,
-you should use the :doc:`Kubernetes executor <apache-airflow-providers-cncf-kubernetes:kubernetes_executor>` or
-the :doc:`Celery executor <apache-airflow-providers-celery:celery_executor>`.
+choose a remote executor, or a multi-executor configuration, that matches where tasks should run.
+Common choices include the :doc:`Celery executor <apache-airflow-providers-celery:celery_executor>`,
+the :doc:`Kubernetes executor <apache-airflow-providers-cncf-kubernetes:kubernetes_executor>`,
+Amazon provider executors such as :doc:`Batch <apache-airflow-providers-amazon:executors/batch-executor>`
+or :doc:`ECS <apache-airflow-providers-amazon:executors/ecs-executor>`, and the
+:doc:`Edge executor <apache-airflow-providers-edge3:edge_executor>`. See the
+:ref:`executor comparison <executor-types-comparison>` for the current list and trade-offs.
 
 
 Once you have configured the executor, it is necessary to make sure that every node in the cluster contains
-the same configuration and dags. Airflow sends simple instructions such as "execute task X of DAG Y", but
-does not send any DAG files or configuration. You can use a simple cronjob or any other mechanism to sync
-dags and configs across your nodes, e.g., checkout dags from git repo every 5 minutes on all nodes.
+the Dags and configuration appropriate for its role. Airflow sends simple instructions such as
+"execute task X of Dag Y", but does not send any Dag files or configuration. For synchronization of Dags
+we recommend the Dag Bundle mechanism (including ``GitDagBundle``), which allows you to make use of
+DAG versioning. For security-sensitive deployments, restrict sensitive configuration (JWT signing keys,
+database credentials, Fernet keys) to only the components that need them rather than sharing all
+configuration across all nodes — see :doc:`/security/security_model` for guidance.
 
 
 Logging
@@ -90,7 +98,7 @@ e.g. metadata DB, password, etc. You can accomplish this using the format :envva
 .. code-block:: bash
 
  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=my_conn_id
- AIRFLOW__WEBSERVER__BASE_URL=http://host:port
+ AIRFLOW__API__BASE_URL=http://host:port
 
 Some configurations such as the Airflow Backend connection URI can be derived from bash commands as well:
 
@@ -149,21 +157,21 @@ Make sure to test such live upgrade procedure in a staging environment before yo
 to avoid any surprises and side-effects.
 
 When it comes to live-upgrading the ``Webserver``, ``Triggerer`` components, if you run them in separate
-environments and have more than one instances for each of them, you can rolling-restart them one by one,
+environments and have more than one instance for each of them, you can rolling-restart them one by one,
 without any downtime. This should usually be done as the first step in your upgrade procedure.
 
-When you are running a deployment with separate ``DAG processor``, in a
-:ref:`Separate DAG processing deployment <overview-separate-dag-processing-airflow-architecture>`
-the ``DAG processor`` is not horizontally scaled - even if you have more of them there is usually one
-``DAG processor`` running at a time per specific folder, so you can just stop it and start the new one -
-but since the ``DAG processor`` is not a critical component, it's ok for it to experience a short downtime.
+When you are running a deployment with separate ``Dag processor``, in a
+:ref:`Separate Dag processing deployment <overview-separate-dag-processing-airflow-architecture>`
+the ``Dag processor`` is not horizontally scaled - even if you have more of them there is usually one
+``Dag processor`` running at a time per specific folder, so you can just stop it and start the new one -
+but since the ``Dag processor`` is not a critical component, it's ok for it to experience a short downtime.
 
 When it comes to upgrading the schedulers and workers, you can use the live upgrade capabilities
 of the executor you use:
 
 * For the :doc:`Local executor <../core-concepts/executor/local>` your tasks are running as subprocesses of
   scheduler and you cannot upgrade the Scheduler without killing the tasks run by it. You can either
-  pause all your dags and wait for the running tasks to complete or just stop the scheduler and kill all
+  pause all your Dags and wait for the running tasks to complete or just stop the scheduler and kill all
   the tasks it runs - then you will need to clear and restart those tasks manually after the upgrade
   is completed (or rely on ``retry`` being set for stopped tasks).
 
@@ -174,16 +182,10 @@ of the executor you use:
   of running tasks going down to zero. Once the workers are upgraded, they will be automatically put in online
   mode and start picking up new tasks. You can then upgrade the ``Scheduler`` in a rolling restart mode.
 
-* For the :doc:`Kubernetes executor <apache-airflow-providers-cncf-kubernetes:kubernetes_executor>`, you can upgrade the scheduler
+* For the :doc:`Kubernetes executor <apache-airflow-providers-cncf-kubernetes:kubernetes_executor>`, you can upgrade the scheduler,
   triggerer, webserver in a rolling restart mode, and generally you should not worry about the workers, as they
   are managed by the Kubernetes cluster and will be automatically adopted by ``Schedulers`` when they are
   upgraded and restarted.
-
-* For the :doc:``CeleryKubernetesExecutor <apache-airflow-providers-celery:celery_kubernetes_executor>``, you follow the
-  same procedure as for the ``CeleryExecutor`` - you put the workers in offline mode, wait for the running
-  tasks to complete, upgrade the workers, and then upgrade the scheduler, triggerer and webserver in a
-  rolling restart mode - which should also adopt tasks run via the ``KubernetesExecutor`` part of the
-  executor.
 
 Most of the rolling-restart upgrade scenarios are implemented in the :doc:`helm-chart:index`, so you can
 use it to upgrade your Airflow deployment without any downtime - especially in case you do patch-level
@@ -246,14 +248,14 @@ If you are using Kubernetes Engine, you can use
 `Workload Identity <https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity>`__ to assign
 an identity to individual pods.
 
-For more information about service accounts in the Airflow, see :ref:`howto/connection:gcp`
+For more information about service accounts in the Airflow, see :ref:`howto/connection:google_cloud_platform`
 
 Impersonate Service Accounts
 ----------------------------
 
 If you need access to other service accounts, you can
-:ref:`impersonate other service accounts <howto/connection:gcp:impersonation>` to exchange the token with
-the default identity to another service account. Thus, the account keys are still managed by Google
+:ref:`impersonate other service accounts <howto/connection:google_cloud_platform:impersonation>` to exchange the token of
+the default identity for that of another service account. Thus, the account keys are still managed by Google
 and cannot be read by your workload.
 
 It is not recommended to generate service account keys and store them in the metadata database or the
@@ -268,7 +270,7 @@ of this instance and credentials to access it. To simplify this task, you can us
 :class:`~airflow.providers.google.cloud.hooks.compute.ComputeEngineHook`
 instead of :class:`~airflow.providers.ssh.hooks.ssh.SSHHook`
 
-The :class:`~airflow.providers.google.cloud.hooks.compute.ComputeEngineHook` support authorization with
+The :class:`~airflow.providers.google.cloud.hooks.compute.ComputeEngineHook` supports authorization with
 Google OS Login service. It is an extremely robust way to manage Linux access properly as it stores
 short-lived ssh keys in the metadata service, offers PAM modules for access and sudo privilege checking
 and offers the ``nsswitch`` user lookup into the metadata service as well.

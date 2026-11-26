@@ -16,14 +16,21 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Flex, Link } from "@chakra-ui/react";
-import { Link as RouterLink } from "react-router-dom";
+import { useState } from "react";
+
+import { Box, Flex, Button } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 
 import type { TaskInstanceResponse } from "openapi/requests/types.gen";
+
+import { RouterLink } from "src/system-components";
+
+import { TaskLogContent } from "src/pages/TaskInstance/Logs/TaskLogContent";
+
 import { ClearTaskInstanceButton } from "src/components/Clear";
 import { StateBadge } from "src/components/StateBadge";
 import Time from "src/components/Time";
-import { TaskLogContent } from "src/pages/TaskInstance/Logs/TaskLogContent";
+
 import { useLogs } from "src/queries/useLogs";
 import { getTaskInstanceLink } from "src/utils/links";
 
@@ -34,14 +41,23 @@ export const TaskLogPreview = ({
   readonly taskInstance: TaskInstanceResponse;
   readonly wrap: boolean;
 }) => {
-  const { data, error, isLoading } = useLogs(
+  const { t: translate } = useTranslation("dag");
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  const {
+    error,
+    isLoading,
+    parsedData: data,
+  } = useLogs(
     {
       dagId: taskInstance.dag_id,
+      limit: 100,
       logLevelFilters: ["error", "critical"],
       taskInstance,
       tryNumber: taskInstance.try_number,
     },
     {
+      enabled: isExpanded,
       refetchInterval: false,
       retry: false,
     },
@@ -49,28 +65,36 @@ export const TaskLogPreview = ({
 
   return (
     <Box borderRadius={4} borderStyle="solid" borderWidth={1} key={taskInstance.id} width="100%">
-      <Flex alignItems="center" justifyContent="space-between" px={2}>
+      <Flex alignItems="center" justifyContent="space-between" px={2} py={2}>
         <Box>
           <StateBadge mr={1} state={taskInstance.state} />
           {taskInstance.task_display_name}
           <Time datetime={taskInstance.run_after} ml={1} />
         </Box>
         <Flex gap={1}>
-          <ClearTaskInstanceButton taskInstance={taskInstance} withText={false} />
-          <Link asChild color="fg.info" fontSize="sm">
-            <RouterLink to={getTaskInstanceLink(taskInstance)}>View full logs</RouterLink>
-          </Link>
+          <Button fontSize="sm" onClick={() => setIsExpanded(!isExpanded)} variant="ghost">
+            {isExpanded
+              ? translate("overview.failedLogs.hideLogs")
+              : translate("overview.failedLogs.showLogs")}
+          </Button>
+          <ClearTaskInstanceButton taskInstance={taskInstance} />
+          <RouterLink fontSize="sm" to={getTaskInstanceLink(taskInstance, "logs")}>
+            {translate("overview.failedLogs.viewFullLogs")}
+          </RouterLink>
         </Flex>
       </Flex>
-      <Box maxHeight="100px" overflow="auto">
-        <TaskLogContent
-          error={error}
-          isLoading={isLoading}
-          logError={error}
-          parsedLogs={data.parsedLogs}
-          wrap={wrap}
-        />
-      </Box>
+      {isExpanded ? (
+        <Box borderTopStyle="solid" borderTopWidth={1} maxHeight="200px" overflow="auto">
+          <TaskLogContent
+            error={error}
+            expanded
+            isLoading={isLoading}
+            logError={error}
+            parsedLogs={data.parsedLogs ?? []}
+            wrap={wrap}
+          />
+        </Box>
+      ) : undefined}
     </Box>
   );
 };

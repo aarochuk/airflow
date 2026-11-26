@@ -35,7 +35,12 @@ from airflow.providers.google.cloud.operators.bigquery import (
     BigQueryInsertJobOperator,
     BigQueryValueCheckOperator,
 )
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
 
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT", "default")
@@ -50,7 +55,7 @@ SCHEMA = [
 DAG_ID = "bq_value_check_location"
 DATASET = f"ds_{DAG_ID}_{ENV_ID}"
 TABLE = "ds_table"
-INSERT_DATE = datetime.now().strftime("%Y-%m-%d")
+INSERT_DATE = "{{ ds }}"
 INSERT_ROWS_QUERY = (
     f"INSERT {DATASET}.{TABLE} VALUES "
     f"(42, 'monty python', '{INSERT_DATE}'), "
@@ -139,11 +144,11 @@ with DAG(
     # when "tearDown" task with trigger rule is part of the DAG
     list(dag.tasks) >> watcher()
 
-    # Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+    # Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
     test_run = get_test_run(dag)
 
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)

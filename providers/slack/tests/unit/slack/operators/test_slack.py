@@ -23,6 +23,7 @@ from unittest import mock
 import pytest
 
 from airflow.providers.slack.operators.slack import (
+    SlackAPIConversationsHistoryOperator,
     SlackAPIFileOperator,
     SlackAPIOperator,
     SlackAPIPostOperator,
@@ -35,7 +36,7 @@ DEFAULT_HOOKS_PARAMETERS = {"base_url": None, "timeout": None, "proxy": None, "r
 class TestSlackAPIOperator:
     @mock.patch("airflow.providers.slack.operators.slack.SlackHook")
     @pytest.mark.parametrize(
-        "slack_op_kwargs, hook_extra_kwargs",
+        ("slack_op_kwargs", "hook_extra_kwargs"),
         [
             pytest.param({}, DEFAULT_HOOKS_PARAMETERS, id="default-hook-parameters"),
             pytest.param(
@@ -168,11 +169,55 @@ class TestSlackAPIPostOperator:
             "Here is a cat video instead\n"
             "https://www.youtube.com/watch?v=J---aiyznGQ",
             "icon_url": "https://raw.githubusercontent.com/apache/"
-            "airflow/main/airflow/www/static/pin_100.png",
+            "airflow/main/airflow-core/src/airflow/ui/public/pin_100.png",
             "attachments": "[]",
             "blocks": "[]",
         }
         assert expected_api_params == slack_api_post_operator.api_params
+
+    @mock.patch("airflow.providers.slack.operators.slack.SlackHook")
+    def test_api_call_params_with_thread_ts(self, mock_hook):
+        """Test that thread_ts is passed to hook.call when provided."""
+        op = SlackAPIPostOperator(
+            task_id="slack",
+            username=self.test_username,
+            slack_conn_id=SLACK_API_TEST_CONNECTION_ID,
+            channel=self.test_channel,
+            text=self.test_text,
+            icon_url=self.test_icon_url,
+            thread_ts="1234567890.123456",
+        )
+        op.execute({})
+        mock_hook.return_value.call.assert_called_once_with(
+            "chat.postMessage",
+            json={
+                "channel": self.test_channel,
+                "username": self.test_username,
+                "text": self.test_text,
+                "icon_url": self.test_icon_url,
+                "attachments": "[]",
+                "blocks": "[]",
+                "thread_ts": "1234567890.123456",
+            },
+        )
+
+    @mock.patch("airflow.providers.slack.operators.slack.SlackHook")
+    def test_execute_returns_api_response(self, mock_hook):
+        """Test that execute returns Slack API response data for XCom."""
+        mock_response = mock.MagicMock()
+        mock_response.data = {"ok": True, "ts": "1234567890.123456", "channel": "C1234567890"}
+        mock_hook.return_value.call.return_value = mock_response
+
+        op = SlackAPIPostOperator(
+            task_id="slack",
+            slack_conn_id=SLACK_API_TEST_CONNECTION_ID,
+            channel=self.test_channel,
+            text=self.test_text,
+        )
+        result = op.execute({})
+
+        assert result == {"ok": True, "ts": "1234567890.123456", "channel": "C1234567890"}
+        assert result["ts"] == "1234567890.123456"
 
 
 class TestSlackAPIFileOperator:
@@ -181,7 +226,6 @@ class TestSlackAPIFileOperator:
         self.test_channel = "#test_slack_channel"
         self.test_initial_comment = "test text file test_filename.txt"
         self.filename = "test_filename.txt"
-        self.test_filetype = "text"
         self.test_content = "This is a test text file!"
         self.test_api_params = {"key": "value"}
         self.expected_method = "files.upload"
@@ -194,7 +238,6 @@ class TestSlackAPIFileOperator:
             channels=self.test_channel,
             initial_comment=self.test_initial_comment,
             filename=self.filename,
-            filetype=self.test_filetype,
             content=self.test_content,
             api_params=test_api_params,
             snippet_type=self.test_snippet_type,
@@ -210,23 +253,15 @@ class TestSlackAPIFileOperator:
         assert slack_api_post_operator.channels == self.test_channel
         assert slack_api_post_operator.api_params == self.test_api_params
         assert slack_api_post_operator.filename == self.filename
-        assert slack_api_post_operator.filetype == self.test_filetype
+        assert slack_api_post_operator.filetype is None
         assert slack_api_post_operator.content == self.test_content
         assert slack_api_post_operator.snippet_type == self.test_snippet_type
         assert not hasattr(slack_api_post_operator, "token")
 
     @pytest.mark.parametrize("initial_comment", [None, "foo-bar"])
     @pytest.mark.parametrize("title", [None, "Spam Egg"])
-    @pytest.mark.parametrize(
-        "method_version, method_name",
-        [
-            pytest.param("v2", "send_file_v1_to_v2", id="v2"),
-        ],
-    )
     @pytest.mark.parametrize("snippet_type", [None, "text"])
-    def test_api_call_params_with_content_args(
-        self, initial_comment, title, method_version, method_name, snippet_type
-    ):
+    def test_api_call_params_with_content_args(self, initial_comment, title, snippet_type):
         op = SlackAPIFileOperator(
             task_id="slack",
             slack_conn_id=SLACK_API_TEST_CONNECTION_ID,
@@ -234,33 +269,27 @@ class TestSlackAPIFileOperator:
             channels="#test-channel",
             initial_comment=initial_comment,
             title=title,
-            method_version=method_version,
             snippet_type=snippet_type,
         )
-        with mock.patch(f"airflow.providers.slack.operators.slack.SlackHook.{method_name}") as mock_send_file:
+        with mock.patch(
+            "airflow.providers.slack.operators.slack.SlackHook.send_file_v1_to_v2"
+        ) as mock_send_file:
             op.execute({})
             mock_send_file.assert_called_once_with(
                 channels="#test-channel",
                 content="test-content",
                 file=None,
-                filetype=None,
+                filename=None,
                 initial_comment=initial_comment,
                 title=title,
                 snippet_type=snippet_type,
+                thread_ts=None,
             )
 
     @pytest.mark.parametrize("initial_comment", [None, "foo-bar"])
     @pytest.mark.parametrize("title", [None, "Spam Egg"])
-    @pytest.mark.parametrize(
-        "method_version, method_name",
-        [
-            pytest.param("v2", "send_file_v1_to_v2", id="v2"),
-        ],
-    )
     @pytest.mark.parametrize("snippet_type", [None, "text"])
-    def test_api_call_params_with_file_args(
-        self, initial_comment, title, method_version, method_name, snippet_type
-    ):
+    def test_api_call_params_with_file_args(self, initial_comment, title, snippet_type):
         op = SlackAPIFileOperator(
             task_id="slack",
             slack_conn_id=SLACK_API_TEST_CONNECTION_ID,
@@ -268,17 +297,222 @@ class TestSlackAPIFileOperator:
             filename="/dev/null",
             initial_comment=initial_comment,
             title=title,
-            method_version=method_version,
             snippet_type=snippet_type,
         )
-        with mock.patch(f"airflow.providers.slack.operators.slack.SlackHook.{method_name}") as mock_send_file:
+        with mock.patch(
+            "airflow.providers.slack.operators.slack.SlackHook.send_file_v1_to_v2"
+        ) as mock_send_file:
             op.execute({})
             mock_send_file.assert_called_once_with(
                 channels="C1234567890",
                 content=None,
                 file="/dev/null",
-                filetype=None,
+                filename=None,
                 initial_comment=initial_comment,
                 title=title,
                 snippet_type=snippet_type,
+                thread_ts=None,
             )
+
+    def test_api_call_params_with_content_and_display_filename(self):
+        """Test that content upload uses display_filename as the displayed name."""
+        op = SlackAPIFileOperator(
+            task_id="slack",
+            slack_conn_id=SLACK_API_TEST_CONNECTION_ID,
+            channels="#test-channel",
+            content="test-content",
+            display_filename="test.txt",
+            initial_comment="test",
+        )
+        with mock.patch(
+            "airflow.providers.slack.operators.slack.SlackHook.send_file_v1_to_v2"
+        ) as mock_send_file:
+            op.execute({})
+            mock_send_file.assert_called_once_with(
+                channels="#test-channel",
+                content="test-content",
+                file=None,
+                filename="test.txt",
+                initial_comment="test",
+                title=None,
+                snippet_type=None,
+                thread_ts=None,
+            )
+
+    def test_api_call_params_with_file_and_display_filename(self):
+        """Test that file upload uses display_filename as the displayed name."""
+        op = SlackAPIFileOperator(
+            task_id="slack",
+            slack_conn_id=SLACK_API_TEST_CONNECTION_ID,
+            channels="#test-channel",
+            filename="/path/to/file.txt",
+            display_filename="custom_test.txt",
+            initial_comment="test",
+        )
+        with mock.patch(
+            "airflow.providers.slack.operators.slack.SlackHook.send_file_v1_to_v2"
+        ) as mock_send_file:
+            op.execute({})
+            mock_send_file.assert_called_once_with(
+                channels="#test-channel",
+                content=None,
+                file="/path/to/file.txt",
+                filename="custom_test.txt",
+                initial_comment="test",
+                title=None,
+                snippet_type=None,
+                thread_ts=None,
+            )
+
+    def test_api_call_params_with_thread_ts(self):
+        """Test that thread_ts is passed to send_file_v1_to_v2 when provided."""
+        op = SlackAPIFileOperator(
+            task_id="slack",
+            slack_conn_id=SLACK_API_TEST_CONNECTION_ID,
+            channels="#test-channel",
+            content="test-content",
+            thread_ts="1234567890.123456",
+        )
+        with mock.patch(
+            "airflow.providers.slack.operators.slack.SlackHook.send_file_v1_to_v2"
+        ) as mock_send_file:
+            op.execute({})
+            mock_send_file.assert_called_once_with(
+                channels="#test-channel",
+                content="test-content",
+                file=None,
+                filename=None,
+                initial_comment=None,
+                title=None,
+                snippet_type=None,
+                thread_ts="1234567890.123456",
+            )
+
+    def test_execute_returns_api_response(self):
+        """Test that execute returns Slack API response data for XCom."""
+        mock_response = [mock.MagicMock()]
+        mock_response[0].data = {
+            "ok": True,
+            "ts": "1234567890.123456",
+            "channel": "C1234567890",
+            "file": {"id": "F1234567890"},
+        }
+
+        op = SlackAPIFileOperator(
+            task_id="slack",
+            slack_conn_id=SLACK_API_TEST_CONNECTION_ID,
+            channels="#test-channel",
+            content="test-content",
+        )
+        with mock.patch(
+            "airflow.providers.slack.operators.slack.SlackHook.send_file_v1_to_v2",
+            return_value=mock_response,
+        ):
+            result = op.execute({})
+
+        expected = {
+            "ok": True,
+            "ts": "1234567890.123456",
+            "channel": "C1234567890",
+            "file": {"id": "F1234567890"},
+        }
+        assert result == [expected]
+        assert result[0]["ts"] == "1234567890.123456"
+        assert result[0]["file"]["id"] == "F1234567890"
+
+
+class TestSlackAPIConversationsHistoryOperator:
+    def test_init_with_valid_params(self):
+        op = SlackAPIConversationsHistoryOperator(
+            task_id="test_history",
+            slack_conn_id=SLACK_API_TEST_CONNECTION_ID,
+            channel="C1234567890",
+        )
+        assert op.method == "conversations.history"
+        assert op.channel == "C1234567890"
+        assert op.oldest is None
+        assert op.latest is None
+        assert op.inclusive is True
+        assert op.limit == 100
+        assert op.cursor is None
+        assert op.include_all_metadata is False
+
+        op_full = SlackAPIConversationsHistoryOperator(
+            task_id="test_history",
+            slack_conn_id=SLACK_API_TEST_CONNECTION_ID,
+            channel="C1234567890",
+            oldest="1234567890.000000",
+            latest="1234567891.000490",
+            inclusive=False,
+            limit=50,
+            cursor="dXNlcjpVMDYxTkZUVDI=",
+            include_all_metadata=True,
+        )
+        assert op_full.channel == "C1234567890"
+        assert op_full.oldest == "1234567890.000000"
+        assert op_full.latest == "1234567891.000490"
+        assert op_full.inclusive is False
+        assert op_full.limit == 50
+        assert op_full.cursor == "dXNlcjpVMDYxTkZUVDI="
+        assert op_full.include_all_metadata is True
+
+    @mock.patch("airflow.providers.slack.operators.slack.SlackHook")
+    def test_execute_with_defaults(self, mock_hook):
+        mock_response = mock.MagicMock()
+        mock_response.data = {
+            "ok": True,
+            "messages": [{"type": "message", "ts": "1234567890.000216", "text": "hello"}],
+            "has_more": False,
+        }
+        mock_hook.return_value.call.return_value = mock_response
+
+        op = SlackAPIConversationsHistoryOperator(
+            task_id="test_history",
+            slack_conn_id=SLACK_API_TEST_CONNECTION_ID,
+            channel="C1234567890",
+        )
+        result = op.execute({})
+
+        mock_hook.return_value.call.assert_called_once_with(
+            "conversations.history",
+            json={
+                "channel": "C1234567890",
+                "inclusive": True,
+                "limit": 100,
+                "include_all_metadata": False,
+            },
+        )
+        assert result == mock_response.data
+
+    @mock.patch("airflow.providers.slack.operators.slack.SlackHook")
+    def test_execute_with_all_params(self, mock_hook):
+        mock_response = mock.MagicMock()
+        mock_response.data = {"ok": True, "messages": [], "has_more": False}
+        mock_hook.return_value.call.return_value = mock_response
+
+        op = SlackAPIConversationsHistoryOperator(
+            task_id="test_history",
+            slack_conn_id=SLACK_API_TEST_CONNECTION_ID,
+            channel="C1234567890",
+            oldest="1234567890.000000",
+            latest="1234567891.000490",
+            inclusive=False,
+            limit=50,
+            cursor="dXNlcjpVMDYxTkZUVDI=",
+            include_all_metadata=True,
+        )
+        result = op.execute({})
+
+        mock_hook.return_value.call.assert_called_once_with(
+            "conversations.history",
+            json={
+                "channel": "C1234567890",
+                "oldest": "1234567890.000000",
+                "latest": "1234567891.000490",
+                "inclusive": False,
+                "limit": 50,
+                "cursor": "dXNlcjpVMDYxTkZUVDI=",
+                "include_all_metadata": True,
+            },
+        )
+        assert result == mock_response.data

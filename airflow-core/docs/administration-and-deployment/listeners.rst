@@ -24,7 +24,7 @@ You can write listeners to enable Airflow to notify you when events happen.
 .. warning::
 
     Listeners are an advanced feature of Airflow. They are not isolated from the Airflow components they run in, and
-    can slow down or in come cases take down your Airflow instance. As such, extra care should be taken when writing listeners.
+    can slow down or in some cases take down your Airflow instance. As such, extra care should be taken when writing listeners.
 
 Airflow supports notifications for the following events:
 
@@ -34,12 +34,14 @@ Lifecycle Events
 - ``on_starting``
 - ``before_stopping``
 
-Lifecycle events allow you to react to start and stop events for an Airflow ``Job``, like  ``SchedulerJob``.
+Lifecycle events allow you to react to start and stop events for an Airflow ``Job``, like ``SchedulerJob``.
 
 DagRun State Change Events
 --------------------------
 
 DagRun state change events occur when a :class:`~airflow.models.dagrun.DagRun` changes state.
+Beginning with Airflow 3, listeners are also notified whenever a state change is triggered through the API
+(for ``on_dag_run_success`` and ``on_dag_run_failed``) e.g., when a DagRun is marked as success from the Airflow UI.
 
 - ``on_dag_run_running``
 
@@ -66,8 +68,12 @@ DagRun state change events occur when a :class:`~airflow.models.dagrun.DagRun` c
 TaskInstance State Change Events
 --------------------------------
 
-TaskInstance state change events occur when a :class:`~airflow.models.taskinstance.TaskInstance` changes state.
+TaskInstance state change events occur when a :class:`~airflow.sdk.execution_time.task_runner.RuntimeTaskInstance` changes state.
 You can use these events to react to ``LocalTaskJob`` state changes.
+Starting with Airflow 3, listeners are also notified when a state change is triggered through the API
+(for ``on_task_instance_success`` and ``on_task_instance_failed``) e.g., when marking a task instance as success from the Airflow UI.
+In such cases, the listener will receive a :class:`~airflow.models.taskinstance.TaskInstance` instance instead
+of a :class:`~airflow.sdk.execution_time.task_runner.RuntimeTaskInstance` instance.
 
 - ``on_task_instance_running``
 
@@ -85,17 +91,27 @@ You can use these events to react to ``LocalTaskJob`` state changes.
 
 - ``on_task_instance_failed``
 
+This event also occurs for an attempt that will be retried. In that case ``task_instance.state`` is
+``UP_FOR_RETRY``; it is ``FAILED`` when the task instance will not be retried. A listener that should only
+react to final failures can check ``task_instance.state``.
+
 .. exampleinclude:: /../src/airflow/example_dags/plugins/event_listener.py
     :language: python
     :start-after: [START howto_listen_ti_failure_task]
     :end-before: [END howto_listen_ti_failure_task]
 
+- ``on_task_instance_skipped``
+
+.. exampleinclude:: /../src/airflow/example_dags/plugins/event_listener.py
+    :language: python
+    :start-after: [START howto_listen_ti_skipped_task]
+    :end-before: [END howto_listen_ti_skipped_task]
 
 Asset Events
 --------------
 
 - ``on_asset_created``
-- ``on_dataset_alias_created``
+- ``on_asset_alias_created``
 - ``on_asset_changed``
 
 Asset events occur when Asset management operations are run.
@@ -107,7 +123,20 @@ Dag Import Error Events
 - ``on_new_dag_import_error``
 - ``on_existing_dag_import_error``
 
-Dag import error events occur when dag processor finds import error in the Dag code and update the metadata database table.
+Dag import error events occur when Dag processor finds an import error in the Dag code and updates the metadata database table.
+
+``filename`` is the absolute path of the file on the Dag processor. When the Dag processor publishes its
+results through the Execution API, these events fire on the API server, which does not have the processor's
+bundles, so ``filename`` is the path relative to the bundle root instead. Both hooks also receive
+``bundle_name`` and ``relative_fileloc`` to identify the source consistently in either mode. Existing
+listeners that accept only ``filename`` and ``stacktrace`` continue to work; new listeners can accept
+the bundle identity arguments without relying on the form of ``filename``.
+
+``bundle_name`` and ``relative_fileloc`` were added in Airflow 3.5.0. Earlier versions raise
+``PluginValidationError`` while loading a listener whose hook accepts them, and then load no plugin
+listeners at all. Giving them default values does not help: pluggy never passes an argument that has
+a default, so the listener would never receive them. A listener that must also load on earlier versions
+should accept only ``filename`` and ``stacktrace``.
 
 
 |experimental|
@@ -121,11 +150,11 @@ To create a listener:
 - import ``airflow.listeners.hookimpl``
 - implement the ``hookimpls`` for events that you'd like to generate notifications
 
-Airflow defines the specification as `hookspec <https://github.com/apache/airflow/tree/main/airflow/listeners/spec>`__. Your implementation must accept the same named parameters as defined in hookspec. If you don't use the same parameters as hookspec, Pluggy throws an error when you try to use your plugin. But you don't need to implement every method. Many listeners only implement one method, or a subset of methods.
+Airflow defines the specification as `hookspec <https://github.com/apache/airflow/tree/main/airflow-core/src/airflow/listeners/spec>`__. Your implementation must accept the same named parameters as defined in hookspec. If you don't use the same parameters as hookspec, Pluggy throws an error when you try to use your plugin. But you don't need to implement every method. Many listeners only implement one method, or a subset of methods.
 
 To include the listener in your Airflow installation, include it as a part of an :doc:`Airflow Plugin </administration-and-deployment/plugins>`.
 
-Listener API is meant to be called across all dags and all operators. You can't listen to events generated by specific dags. For that behavior, try methods like ``on_success_callback`` and ``pre_execute``. These provide callbacks for particular DAG authors or operator creators. The logs and ``print()`` calls will be handled as part of the listeners.
+Listener API is meant to be called across all Dags and all operators. You can't listen to events generated by specific Dags. For that behavior, try methods like ``on_success_callback`` and ``pre_execute``. These provide callbacks for particular Dag authors or operator creators. The logs and ``print()`` calls will be handled as part of the listeners.
 
 
 Compatibility note
@@ -182,12 +211,16 @@ For example if you want to implement a listener that uses the ``error`` field in
 List of changes in the listener interfaces since 2.8.0 when they were introduced:
 
 
-+-----------------+--------------------------------------------+-------------------------------------------------------------------------+
-| Airflow Version | Affected method                            | Change                                                                  |
-+=================+============================================+=========================================================================+
-| 2.10.0          | ``on_task_instance_failed``                | An error field added to the interface                                   |
-+-----------------+--------------------------------------------+-------------------------------------------------------------------------+
-| 3.0.0           | ``on_task_instance_running``,              | ``session`` argument removed from task instance listeners,              |
-|                 | ``on_task_instance_success``,              | ``task_instance`` object is now an instance of ``RuntimeTaskInstance``  |
-|                 | ``on_task_instance_failed``                |                                                                         |
-+-----------------+--------------------------------------------+-------------------------------------------------------------------------+
++-----------------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------+
+| Airflow Version | Affected method                            | Change                                                                                                                        |
++=================+============================================+===============================================================================================================================+
+| 2.10.0          | ``on_task_instance_failed``                | An error field added to the interface                                                                                         |
++-----------------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------+
+| 3.0.0           | ``on_task_instance_running``               | ``session`` argument removed from task instance listeners,                                                                    |
+|                 |                                            | ``task_instance`` object is now an instance of ``RuntimeTaskInstance``                                                        |
++-----------------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------+
+| 3.0.0           | ``on_task_instance_failed``,               | ``session`` argument removed from task instance listeners,                                                                    |
+|                 | ``on_task_instance_success``               | ``task_instance`` object is now an instance of ``RuntimeTaskInstance`` when on worker and ``TaskInstance`` when on API server |
++-----------------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------+
+| 3.2.0           | ``on_task_instance_skipped``               | New listener method added to the interface                                                                                    |
++-----------------+--------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------+

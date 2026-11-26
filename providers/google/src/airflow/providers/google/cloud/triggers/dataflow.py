@@ -22,6 +22,8 @@ from collections.abc import Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
+from asgiref.sync import sync_to_async
+from google.api_core.exceptions import ServiceUnavailable
 from google.cloud.dataflow_v1beta3 import JobState
 from google.cloud.dataflow_v1beta3.types import (
     AutoscalingEvent,
@@ -32,7 +34,11 @@ from google.cloud.dataflow_v1beta3.types import (
     MetricUpdate,
 )
 
-from airflow.providers.google.cloud.hooks.dataflow import AsyncDataflowHook, DataflowJobStatus
+from airflow.providers.google.cloud.hooks.dataflow import (
+    AsyncDataflowHook,
+    DataflowHook,
+    DataflowJobStatus,
+)
 from airflow.triggers.base import BaseTrigger, TriggerEvent
 
 if TYPE_CHECKING:
@@ -61,6 +67,10 @@ class TemplateJobStartTrigger(BaseTrigger):
         account from the list granting this role to the originating account (templated).
     :param cancel_timeout: Optional. How long (in seconds) operator should wait for the pipeline to be
         successfully cancelled when task is being killed.
+    :param cancel_on_kill: If True (default), cancel the Dataflow job when the user acts on the
+        deferred task (mark-failed, clear or mark-succeeded).
+    :param drain_pipeline: Optional. Set to True if you want a streaming job to be stopped by
+        draining it instead of cancelling, matching the operator's behaviour before deferral.
     """
 
     def __init__(
@@ -72,6 +82,8 @@ class TemplateJobStartTrigger(BaseTrigger):
         poll_sleep: int = 10,
         impersonation_chain: str | Sequence[str] | None = None,
         cancel_timeout: int | None = 5 * 60,
+        cancel_on_kill: bool = True,
+        drain_pipeline: bool = False,
     ):
         super().__init__()
         self.project_id = project_id
@@ -81,6 +93,8 @@ class TemplateJobStartTrigger(BaseTrigger):
         self.poll_sleep = poll_sleep
         self.impersonation_chain = impersonation_chain
         self.cancel_timeout = cancel_timeout
+        self.cancel_on_kill = cancel_on_kill
+        self.drain_pipeline = drain_pipeline
 
     def serialize(self) -> tuple[str, dict[str, Any]]:
         """Serialize class arguments and classpath."""
@@ -94,7 +108,46 @@ class TemplateJobStartTrigger(BaseTrigger):
                 "poll_sleep": self.poll_sleep,
                 "impersonation_chain": self.impersonation_chain,
                 "cancel_timeout": self.cancel_timeout,
+                "cancel_on_kill": self.cancel_on_kill,
+                "drain_pipeline": self.drain_pipeline,
             },
+        )
+
+    async def on_kill(self) -> None:
+        """Stop the Dataflow job when the user acts on the deferred task."""
+        if not self.cancel_on_kill or not self.job_id:
+            return
+        self.log.info(
+            "Stopping Dataflow job. Project ID: %s, Location: %s, Job ID: %s, drain: %s",
+            self.project_id,
+            self.location,
+            self.job_id,
+            self.drain_pipeline,
+        )
+        try:
+            # Build the synchronous hook and cancel inside the worker thread: the hook resolves the
+            # connection eagerly during construction, which must not run in the triggerer's event loop.
+            await sync_to_async(self._stop_job)()
+            self.log.info("Cancellation or drain requested for Dataflow job %s.", self.job_id)
+        except Exception:
+            self.log.exception(
+                "Failed to stop Dataflow job %s. The job may still be running.",
+                self.job_id,
+            )
+
+    def _stop_job(self) -> None:
+        """Request cancellation or drain without waiting for the job to reach a terminal state."""
+        hook = DataflowHook(
+            gcp_conn_id=self.gcp_conn_id,
+            impersonation_chain=self.impersonation_chain,
+            drain_pipeline=self.drain_pipeline,
+            cancel_timeout=None,
+            poll_sleep=self.poll_sleep,
+        )
+        hook.cancel_job(
+            job_id=self.job_id,
+            project_id=self.project_id,
+            location=self.location,
         )
 
     async def run(self):
@@ -110,11 +163,17 @@ class TemplateJobStartTrigger(BaseTrigger):
         hook = self._get_async_hook()
         try:
             while True:
-                status = await hook.get_job_status(
-                    project_id=self.project_id,
-                    job_id=self.job_id,
-                    location=self.location,
-                )
+                try:
+                    status = await hook.get_job_status(
+                        project_id=self.project_id,
+                        job_id=self.job_id,
+                        location=self.location,
+                    )
+                except ServiceUnavailable as e:
+                    self.log.warning("Dataflow API is temporarily unavailable. Retrying... (%s)", e)
+                    await asyncio.sleep(self.poll_sleep)
+                    continue
+
                 if status == JobState.JOB_STATE_DONE:
                     yield TriggerEvent(
                         {
@@ -293,6 +352,10 @@ class DataflowStartYamlJobTrigger(BaseTrigger):
         If set as a sequence, the identities from the list must grant
         Service Account Token Creator IAM role to the directly preceding identity, with first
         account from the list granting this role to the originating account (templated).
+    :param cancel_on_kill: If True (default), cancel the Dataflow job when the user acts on the
+        deferred task (mark failed, clear, or mark success).
+    :param drain_pipeline: Optional. Set to True if you want a streaming job to be stopped by
+        draining it instead of cancelling when the task is killed.
     """
 
     def __init__(
@@ -305,6 +368,8 @@ class DataflowStartYamlJobTrigger(BaseTrigger):
         cancel_timeout: int | None = 5 * 60,
         expected_terminal_state: str | None = None,
         impersonation_chain: str | Sequence[str] | None = None,
+        cancel_on_kill: bool = True,
+        drain_pipeline: bool = False,
     ):
         super().__init__()
         self.project_id = project_id
@@ -315,6 +380,8 @@ class DataflowStartYamlJobTrigger(BaseTrigger):
         self.cancel_timeout = cancel_timeout
         self.expected_terminal_state = expected_terminal_state
         self.impersonation_chain = impersonation_chain
+        self.cancel_on_kill = cancel_on_kill
+        self.drain_pipeline = drain_pipeline
 
     def serialize(self) -> tuple[str, dict[str, Any]]:
         """Serialize class arguments and classpath."""
@@ -329,7 +396,46 @@ class DataflowStartYamlJobTrigger(BaseTrigger):
                 "expected_terminal_state": self.expected_terminal_state,
                 "impersonation_chain": self.impersonation_chain,
                 "cancel_timeout": self.cancel_timeout,
+                "cancel_on_kill": self.cancel_on_kill,
+                "drain_pipeline": self.drain_pipeline,
             },
+        )
+
+    async def on_kill(self) -> None:
+        """Stop the Dataflow job when the user acts on the deferred task."""
+        if not self.cancel_on_kill or not self.job_id:
+            return
+        self.log.info(
+            "Stopping Dataflow job. Project ID: %s, Location: %s, Job ID: %s, drain: %s",
+            self.project_id,
+            self.location,
+            self.job_id,
+            self.drain_pipeline,
+        )
+        try:
+            # Build the synchronous hook and cancel inside the worker thread: the hook resolves the
+            # connection eagerly during construction, which must not run in the triggerer's event loop.
+            await sync_to_async(self._stop_job)()
+            self.log.info("Cancellation or drain requested for Dataflow job %s.", self.job_id)
+        except Exception:
+            self.log.exception(
+                "Failed to stop Dataflow job %s. The job may still be running.",
+                self.job_id,
+            )
+
+    def _stop_job(self) -> None:
+        """Request cancellation or drain without waiting for the job to reach a terminal state."""
+        hook = DataflowHook(
+            gcp_conn_id=self.gcp_conn_id,
+            impersonation_chain=self.impersonation_chain,
+            drain_pipeline=self.drain_pipeline,
+            cancel_timeout=None,
+            poll_sleep=self.poll_sleep,
+        )
+        hook.cancel_job(
+            job_id=self.job_id,
+            project_id=self.project_id,
+            location=self.location,
         )
 
     async def run(self):
@@ -780,6 +886,128 @@ class DataflowJobMessagesTrigger(BaseTrigger):
     ) -> list[dict[str, str | dict]]:
         """Return a list of serialized JobMessage objects."""
         return [JobMessage.to_dict(message) for message in job_response.job_messages]
+
+    @cached_property
+    def async_hook(self) -> AsyncDataflowHook:
+        return AsyncDataflowHook(
+            gcp_conn_id=self.gcp_conn_id,
+            poll_sleep=self.poll_sleep,
+            impersonation_chain=self.impersonation_chain,
+        )
+
+
+class DataflowJobStateCompleteTrigger(BaseTrigger):
+    """
+    Trigger that monitors if a Dataflow job has reached any of successful terminal state meant for that job.
+
+    :param job_id: Required. ID of the job.
+    :param project_id: Required. The Google Cloud project ID in which the job was started.
+    :param location: Optional. The location where the job is executed. If set to None then
+        the value of DEFAULT_DATAFLOW_LOCATION will be used.
+    :param wait_until_finished: Optional. Dataflow option to block pipeline until completion.
+    :param gcp_conn_id: The connection ID to use for connecting to Google Cloud.
+    :param poll_sleep: Time (seconds) to wait between two consecutive calls to check the job.
+    :param impersonation_chain: Optional. Service account to impersonate using short-term
+        credentials, or chained list of accounts required to get the access_token
+        of the last account in the list, which will be impersonated in the request.
+        If set as a string, the account must grant the originating account
+        the Service Account Token Creator IAM role.
+        If set as a sequence, the identities from the list must grant
+        Service Account Token Creator IAM role to the directly preceding identity, with first
+        account from the list granting this role to the originating account (templated).
+    """
+
+    def __init__(
+        self,
+        job_id: str,
+        project_id: str | None,
+        location: str = DEFAULT_DATAFLOW_LOCATION,
+        wait_until_finished: bool | None = None,
+        gcp_conn_id: str = "google_cloud_default",
+        poll_sleep: int = 10,
+        impersonation_chain: str | Sequence[str] | None = None,
+    ):
+        super().__init__()
+        self.job_id = job_id
+        self.project_id = project_id
+        self.location = location
+        self.wait_until_finished = wait_until_finished
+        self.gcp_conn_id = gcp_conn_id
+        self.poll_sleep = poll_sleep
+        self.impersonation_chain = impersonation_chain
+
+    def serialize(self) -> tuple[str, dict[str, Any]]:
+        """Serialize class arguments and classpath."""
+        return (
+            "airflow.providers.google.cloud.triggers.dataflow.DataflowJobStateCompleteTrigger",
+            {
+                "job_id": self.job_id,
+                "project_id": self.project_id,
+                "location": self.location,
+                "wait_until_finished": self.wait_until_finished,
+                "gcp_conn_id": self.gcp_conn_id,
+                "poll_sleep": self.poll_sleep,
+                "impersonation_chain": self.impersonation_chain,
+            },
+        )
+
+    async def run(self):
+        """
+        Loop until the job reaches  successful final or error state.
+
+        Yields a TriggerEvent with success status, if the job reaches successful state for own type.
+
+        Yields a TriggerEvent with error status, if the client returns an unexpected terminal
+        job status or any exception is raised while looping.
+
+        In any other case the Trigger will wait for a specified amount of time
+        stored in self.poll_sleep variable.
+        """
+        try:
+            while True:
+                job = await self.async_hook.get_job(
+                    project_id=self.project_id,
+                    job_id=self.job_id,
+                    location=self.location,
+                )
+                job_state = job.current_state.name
+                job_type_name = job.type_.name
+
+                FAILED_STATES = DataflowJobStatus.FAILED_END_STATES | {DataflowJobStatus.JOB_STATE_DRAINED}
+                if job_state in FAILED_STATES:
+                    yield TriggerEvent(
+                        {
+                            "status": "error",
+                            "message": (
+                                f"Job with id '{self.job_id}' is in failed terminal state: {job_state}"
+                            ),
+                        }
+                    )
+                    return
+
+                if self.async_hook.job_reached_terminal_state(
+                    job={"id": self.job_id, "currentState": job_state, "type": job_type_name},
+                    wait_until_finished=self.wait_until_finished,
+                ):
+                    yield TriggerEvent(
+                        {
+                            "status": "success",
+                            "message": (
+                                f"Job with id '{self.job_id}' has reached successful final state: {job_state}"
+                            ),
+                        }
+                    )
+                    return
+                self.log.info("Sleeping for %s seconds.", self.poll_sleep)
+                await asyncio.sleep(self.poll_sleep)
+        except Exception as e:
+            self.log.error("Exception occurred while checking for job state!")
+            yield TriggerEvent(
+                {
+                    "status": "error",
+                    "message": str(e),
+                }
+            )
 
     @cached_property
     def async_hook(self) -> AsyncDataflowHook:

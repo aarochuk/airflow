@@ -17,19 +17,18 @@
 # under the License.
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
-from airflow.sensors.base import BaseSensorOperator, PokeReturnValue
-from airflow.utils.context import context_merge
-from airflow.utils.operator_helpers import determine_kwargs
+from airflow.providers.common.compat.sdk import (
+    BaseSensorOperator,
+    PokeReturnValue,
+    context_merge,
+    determine_kwargs,
+)
 
 if TYPE_CHECKING:
-    try:
-        from airflow.sdk.definitions.context import Context
-    except ImportError:
-        # TODO: Remove once provider drops support for Airflow 2
-        from airflow.utils.context import Context
+    from airflow.providers.common.compat.sdk import Context
 
 
 class PythonSensor(BaseSensorOperator):
@@ -81,5 +80,4 @@ class PythonSensor(BaseSensorOperator):
         return_value = self.python_callable(*self.op_args, **self.op_kwargs)
         if isinstance(return_value, PokeReturnValue):
             return return_value
-        else:
-            return PokeReturnValue(bool(return_value))
+        return PokeReturnValue(bool(return_value))

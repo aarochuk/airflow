@@ -16,72 +16,107 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { useDagServiceGetDags, useDagsServiceRecentDagRuns } from "openapi/queries";
-import type { DagRunState, DAGWithLatestDagRunsResponse } from "openapi/requests/types.gen";
+import { useDagServiceGetDagsUi } from "openapi/queries";
+import type { DagRunState, DagSchedulingState } from "openapi/requests/types.gen";
+
 import { isStatePending, useAutoRefresh } from "src/utils";
 
-export type DagWithLatest = {
-  last_run_start_date: string;
-} & DAGWithLatestDagRunsResponse;
-
-export const useDags = (
-  searchParams: {
-    dagDisplayNamePattern?: string;
-    dagIdPattern?: string;
-    lastDagRunState?: DagRunState;
-    limit?: number;
-    offset?: number;
-    onlyActive?: boolean;
-    orderBy?: string;
-    owners?: Array<string>;
-    paused?: boolean;
-    tags?: Array<string>;
-  } = {},
-) => {
-  const { data, error, isFetching, isLoading } = useDagServiceGetDags(searchParams);
-
+export const useDags = ({
+  advancedSearch = false,
+  bundleName,
+  dagDisplayNamePattern,
+  dagIdPattern,
+  dagRunsLimit,
+  dagRunState,
+  dagRunStateWithinHours,
+  excludeStale = true,
+  hasImportErrors,
+  isFavorite,
+  lastDagRunState,
+  limit,
+  offset,
+  orderBy,
+  owners,
+  paused,
+  pendingHitl,
+  relativeFilelocPrefix,
+  schedulingState,
+  tags,
+  tagsMatchMode,
+  teams,
+  timetableType,
+}: {
+  advancedSearch?: boolean;
+  bundleName?: string;
+  dagDisplayNamePattern?: string;
+  dagIdPattern?: string;
+  dagRunsLimit: number;
+  dagRunState?: DagRunState;
+  dagRunStateWithinHours?: number;
+  excludeStale?: boolean;
+  hasImportErrors?: boolean;
+  isFavorite?: boolean;
+  lastDagRunState?: DagRunState;
+  limit?: number;
+  offset?: number;
+  orderBy?: Array<string>;
+  owners?: Array<string>;
+  paused?: boolean;
+  pendingHitl?: boolean;
+  relativeFilelocPrefix?: string;
+  schedulingState?: DagSchedulingState;
+  tags?: Array<string>;
+  tagsMatchMode?: "all" | "any";
+  teams?: Array<string>;
+  timetableType?: Array<string>;
+}) => {
   const refetchInterval = useAutoRefresh({});
 
-  const { orderBy, ...runsParams } = searchParams;
-  const {
-    data: runsData,
-    error: runsError,
-    isFetching: isRunsFetching,
-    isLoading: isRunsLoading,
-  } = useDagsServiceRecentDagRuns(
+  const { data, error, isLoading } = useDagServiceGetDagsUi(
     {
-      ...runsParams,
-      dagRunsLimit: 14,
+      ...(advancedSearch
+        ? { dagDisplayNamePattern, dagIdPattern }
+        : { dagDisplayNamePrefixPattern: dagDisplayNamePattern, dagIdPrefixPattern: dagIdPattern }),
+      bundleName,
+      dagRunsLimit,
+      dagRunState,
+      dagRunStateWithinHours,
+      excludeStale,
+      hasImportErrors,
+      hasPendingActions: pendingHitl,
+      isFavorite,
+      lastDagRunState,
+      limit,
+      offset,
+      orderBy,
+      owners,
+      paused,
+      relativeFilelocPrefix,
+      schedulingState,
+      tags,
+      tagsMatchMode,
+      teams,
+      timetableType,
     },
     undefined,
     {
+      // Filter changes swap the query key, which would otherwise drop the list to skeletons
+      placeholderData: (prev) => prev,
       refetchInterval: (query) =>
-        query.state.data?.dags.some(
-          (dag) => !dag.is_paused && dag.latest_dag_runs.some((dr) => isStatePending(dr.state)),
+        refetchInterval !== false &&
+        (query.state.data?.dags.some(
+          (dag) =>
+            dag.scheduling_state === "draining" ||
+            (!dag.is_paused && dag.latest_dag_runs.some((dr) => isStatePending(dr.state))),
         )
           ? refetchInterval
-          : false,
+          : refetchInterval * 10),
     },
   );
 
-  const dags = (data?.dags ?? []).map((dag) => {
-    const dagWithRuns = runsData?.dags.find((runsDag) => runsDag.dag_id === dag.dag_id);
-
-    return {
-      // eslint-disable-next-line unicorn/no-null
-      asset_expression: null,
-      latest_dag_runs: [],
-      ...dagWithRuns,
-      ...dag,
-      // We need last_run_start_date to exist on the object in order for react-table sort to work correctly
-      last_run_start_date: "",
-    };
-  });
-
   return {
-    data: { dags, total_entries: data?.total_entries ?? 0 },
-    error: error ?? runsError,
-    isFetching: isFetching || isRunsFetching,
-    isLoading: isLoading || isRunsLoading,
+    data,
+    error,
+    isLoading,
   };
 };

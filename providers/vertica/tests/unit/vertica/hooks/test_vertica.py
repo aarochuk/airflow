@@ -21,8 +21,11 @@ import json
 from unittest import mock
 from unittest.mock import patch
 
+import pytest
+
 from airflow.models import Connection
-from airflow.providers.vertica.hooks.vertica import VerticaHook
+from airflow.providers.common.sql.hooks.handlers import fetch_all_handler, fetch_one_handler
+from airflow.providers.vertica.hooks.vertica import VerticaHook, vertica_fetch_all_handler
 
 
 class TestVerticaHookConn:
@@ -128,6 +131,8 @@ class TestVerticaHook:
     def setup_method(self):
         self.cur = mock.MagicMock(rowcount=0)
         self.cur.nextset.side_effect = [None]
+        # The hook drains the cursor with fetchone() until it returns None.
+        self.cur.fetchone.return_value = None
         self.conn = mock.MagicMock()
         self.conn.cursor.return_value = self.cur
         conn = self.conn
@@ -152,7 +157,7 @@ class TestVerticaHook:
     def test_get_first_record(self):
         statement = "SQL"
         result_sets = [("row1",), ("row2",)]
-        self.cur.fetchone.return_value = result_sets[0]
+        self.cur.fetchone.side_effect = [result_sets[0], None]
 
         assert result_sets[0] == self.db_hook.get_first(statement)
         self.conn.close.assert_called_once_with()
@@ -169,15 +174,221 @@ class TestVerticaHook:
         self.cur.close.assert_called_once_with()
         self.cur.execute.assert_called_once_with(statement)
 
-    def test_get_pandas_df(self):
+    def test_get_df_pandas(self):
         statement = "SQL"
         column = "col"
         result_sets = [("row1",), ("row2",)]
         self.cur.description = [(column,)]
         self.cur.fetchall.return_value = result_sets
-        df = self.db_hook.get_pandas_df(statement)
+        df = self.db_hook.get_df(statement, df_type="pandas")
 
         assert column == df.columns[0]
 
         assert result_sets[0][0] == df.values.tolist()[0][0]
         assert result_sets[1][0] == df.values.tolist()[1][0]
+
+    def test_get_df_polars(self):
+        statement = "SQL"
+        column = "col"
+        result_sets = [("row1",), ("row2",)]
+        mock_execute = mock.MagicMock()
+        mock_execute.description = [(column, None, None, None, None, None, None)]
+        mock_execute.fetchall.return_value = result_sets
+        self.cur.execute.return_value = mock_execute
+        df = self.db_hook.get_df(statement, df_type="polars")
+
+        self.cur.execute.assert_called_once_with(statement)
+        mock_execute.fetchall.assert_called_once_with()
+        assert column == df.columns[0]
+        assert result_sets[0][0] == df.row(0)[0]
+        assert result_sets[1][0] == df.row(1)[0]
+
+
+class TestVerticaHookLineage:
+    def setup_method(self):
+        self.cur = mock.MagicMock(rowcount=0)
+        self.cur.nextset.return_value = False
+        self.cur.fetchone.return_value = None
+        self.conn = mock.MagicMock()
+        self.conn.cursor.return_value = self.cur
+        conn = self.conn
+
+        class UnitTestVerticaHook(VerticaHook):
+            conn_name_attr = "vertica_conn_id"
+
+            def get_conn(self):
+                return conn
+
+        self.db_hook = UnitTestVerticaHook()
+        self.db_hook.get_connection = mock.Mock(
+            return_value=Connection(
+                login="login",
+                password="password",
+                host="host",
+                schema="vertica",
+            )
+        )
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    def test_run_hook_lineage(self, mock_send_lineage):
+        statement = "SELECT 1"
+        self.cur.fetchall.return_value = []
+
+        self.db_hook.run(statement)
+
+        mock_send_lineage.assert_called()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == statement
+        assert call_kw["sql_parameters"] is None
+        assert call_kw["cur"] is self.cur
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    def test_insert_rows_hook_lineage(self, mock_send_lineage):
+        table = "table"
+        rows = [("hello",), ("world",)]
+
+        self.db_hook.insert_rows(table, rows)
+
+        mock_send_lineage.assert_called()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == "INSERT INTO table  VALUES (%s)"
+        assert call_kw["row_count"] == 2
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    @mock.patch("airflow.providers.common.sql.hooks.sql.DbApiHook._get_pandas_df")
+    def test_get_df_hook_lineage(self, mock_get_pandas_df, mock_send_lineage):
+        sql = "SELECT 1"
+        parameters = ("x",)
+        self.db_hook.get_df(sql, parameters=parameters)
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] == parameters
+
+    @mock.patch("airflow.providers.common.sql.hooks.sql.send_sql_hook_lineage")
+    @mock.patch("airflow.providers.common.sql.hooks.sql.DbApiHook._get_pandas_df_by_chunks")
+    def test_get_df_by_chunks_hook_lineage(self, mock_get_pandas_df_by_chunks, mock_send_lineage):
+        sql = "SELECT 1"
+        parameters = ("x",)
+        self.db_hook.get_df_by_chunks(sql, parameters=parameters, chunksize=1)
+
+        mock_send_lineage.assert_called_once()
+        call_kw = mock_send_lineage.call_args.kwargs
+        assert call_kw["context"] is self.db_hook
+        assert call_kw["sql"] == sql
+        assert call_kw["sql_parameters"] == parameters
+
+
+class TestVerticaHookResultSetDrain:
+    """
+    vertica-python only raises the error of a non-first statement once the client reads up to it.
+
+    The mocks follow the driver: ``fetchone()`` returns rows of the current result set, then
+    ``None``, and raises if the server error arrives in the middle of the set; ``nextset()`` moves to
+    the next result set and raises if the next "set" is an error.
+    """
+
+    def setup_method(self):
+        self.cur = mock.MagicMock(rowcount=0, description=None)
+        self.cur.fetchone.return_value = None
+        self.conn = mock.MagicMock()
+        self.conn.cursor.return_value = self.cur
+        conn = self.conn
+
+        class UnitTestVerticaHook(VerticaHook):
+            conn_name_attr = "test_conn_id"
+
+            def get_conn(self):
+                return conn
+
+        self.db_hook = UnitTestVerticaHook()
+
+    @pytest.mark.parametrize(
+        "handler",
+        [None, fetch_all_handler, fetch_one_handler, lambda cur: "custom"],
+        ids=["no_handler", "fetch_all", "fetch_one", "custom"],
+    )
+    def test_error_in_later_statement_is_raised(self, handler):
+        self.cur.nextset.side_effect = [True, RuntimeError("Duplicate key values")]
+        with pytest.raises(RuntimeError, match="Duplicate key values"):
+            self.db_hook.run("INSERT INTO t VALUES (1); INSERT INTO t VALUES (1);", handler=handler)
+
+    @pytest.mark.parametrize(
+        "handler",
+        [None, fetch_all_handler, fetch_one_handler, lambda cur: "custom"],
+        ids=["no_handler", "fetch_all", "fetch_one", "custom"],
+    )
+    def test_error_after_rows_of_later_statement_is_raised(self, handler):
+        # SELECT 1; SELECT a/b FROM t; -- the second statement returns a row, then fails on the next
+        # one. nextset() would skip that error, only fetchone() raises it.
+        self.cur.fetchall.return_value = [(1,)]
+        self.cur.fetchone.side_effect = [None, (4,), RuntimeError("Division by zero")]
+        self.cur.nextset.side_effect = [True, False]
+        with pytest.raises(RuntimeError, match="Division by zero"):
+            self.db_hook.run("SELECT 1; SELECT a/b FROM t;", handler=handler)
+
+    def test_error_in_rest_of_consumed_result_set_is_raised(self):
+        # fetch_one_handler reads one row of the only statement; its next row fails.
+        self.cur.fetchone.side_effect = [(4,), RuntimeError("Division by zero")]
+        self.cur.nextset.return_value = False
+        with pytest.raises(RuntimeError, match="Division by zero"):
+            self.db_hook.run("SELECT a/b FROM t;", handler=fetch_one_handler)
+
+    def test_all_result_sets_are_consumed(self):
+        self.cur.nextset.side_effect = [True, True, False]
+        assert self.db_hook.run("CREATE TABLE t (a INT); INSERT INTO t VALUES (1); SELECT 1;") is None
+        assert self.cur.nextset.call_count == 3
+
+    def test_handler_result_is_returned_after_drain(self):
+        self.cur.nextset.side_effect = [True, False]
+        self.cur.description = [("?column?", None, None, None, None, None, None)]
+        self.cur.fetchone.side_effect = [(1,), None, (2,), None]
+        assert self.db_hook.run("SELECT 1; SELECT 2;", handler=fetch_one_handler) == (1,)
+        assert self.cur.nextset.call_count == 2
+
+    def test_each_split_statement_is_drained(self):
+        self.cur.nextset.side_effect = [False, False]
+        self.db_hook.run("SELECT 1; SELECT 2;", split_statements=True)
+        assert self.cur.execute.call_count == 2
+        assert self.cur.nextset.call_count == 2
+
+    def test_vertica_fetch_all_handler_drains(self):
+        self.cur.fetchall.return_value = [(1,)]
+        self.cur.nextset.side_effect = [True, RuntimeError("Division by zero")]
+        with pytest.raises(RuntimeError, match="Division by zero"):
+            vertica_fetch_all_handler(self.cur)
+
+    @pytest.mark.parametrize(
+        "handler",
+        [fetch_all_handler, fetch_one_handler, lambda cur: cur.fetchone()],
+        ids=["fetch_all", "fetch_one", "custom"],
+    )
+    def test_description_of_consumed_result_set_is_kept(self, handler):
+        first_description = [("a", None, None, None, None, None, None)]
+        last_description = [
+            ("b", None, None, None, None, None, None),
+            ("c", None, None, None, None, None, None),
+        ]
+        self.cur.description = first_description
+        self.cur.fetchone.side_effect = [(1,), None, (2, 3), None]
+        self.cur.fetchall.return_value = [(1,)]
+
+        def nextset():
+            if self.cur.description is first_description:
+                self.cur.description = last_description
+                return True
+            return False
+
+        self.cur.nextset.side_effect = nextset
+        self.db_hook.run("SELECT 1 AS a; SELECT 2 AS b, 3 AS c;", handler=handler)
+        assert self.db_hook.descriptions == [first_description]
+
+    def test_no_descriptions_without_handler(self):
+        self.cur.description = [("a", None, None, None, None, None, None)]
+        self.cur.nextset.side_effect = [False]
+        self.db_hook.run("SELECT 1 AS a;")
+        assert self.db_hook.descriptions == []

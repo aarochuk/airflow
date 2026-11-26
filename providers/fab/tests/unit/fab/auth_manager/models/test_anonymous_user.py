@@ -17,15 +17,14 @@
 # under the License.
 from __future__ import annotations
 
-from tests_common.test_utils.compat import ignore_provider_compatibility_error
+import pytest
 
-with ignore_provider_compatibility_error("2.9.0+", __file__):
-    from airflow.providers.fab.auth_manager.models.anonymous_user import AnonymousUser
+from airflow.providers.fab.auth_manager.models.anonymous_user import AnonymousUser
 
 
 class TestAnonymousUser:
     def test_roles(self):
-        roles = {"role1"}
+        roles = ["role1"]
         user = AnonymousUser()
         user.roles = roles
         assert user.roles == roles
@@ -35,3 +34,17 @@ class TestAnonymousUser:
         user = AnonymousUser()
         user._perms = perms
         assert user.perms == perms
+
+    @pytest.mark.db_test
+    def test_unknown_public_role_grants_nothing_in_an_app_context(self, minimal_app_for_auth_api):
+        """A Flask view resolving a public role that does not exist grants nothing instead of failing."""
+        app = minimal_app_for_auth_api
+        previous = app.config.get("AUTH_ROLE_PUBLIC")
+        app.config["AUTH_ROLE_PUBLIC"] = "DoesNotExist"
+        try:
+            with app.app_context():
+                user = AnonymousUser()
+                assert user.roles == []
+                assert user.perms == set()
+        finally:
+            app.config["AUTH_ROLE_PUBLIC"] = previous

@@ -29,11 +29,11 @@ import textwrap
 
 import pendulum
 
-# The DAG object; we'll need this to instantiate a DAG
-from airflow.models.dag import DAG
-
 # Operators; we need this to operate!
 from airflow.providers.standard.operators.python import PythonOperator
+
+# The DAG object; we'll need this to instantiate a DAG
+from airflow.sdk import DAG
 
 # [END import_module]
 
@@ -57,16 +57,14 @@ with DAG(
     # [END documentation]
 
     # [START extract_function]
-    def extract(**kwargs):
-        ti = kwargs["ti"]
+    def extract(ti=None):
         data_string = '{"1001": 301.27, "1002": 433.21, "1003": 502.22}'
         ti.xcom_push("order_data", data_string)
 
     # [END extract_function]
 
     # [START transform_function]
-    def transform(**kwargs):
-        ti = kwargs["ti"]
+    def transform(ti=None):
         extract_data_string = ti.xcom_pull(task_ids="extract", key="order_data")
         order_data = json.loads(extract_data_string)
 
@@ -81,8 +79,7 @@ with DAG(
     # [END transform_function]
 
     # [START load_function]
-    def load(**kwargs):
-        ti = kwargs["ti"]
+    def load(ti=None):
         total_value_string = ti.xcom_pull(task_ids="transform", key="total_order_value")
         total_order_value = json.loads(total_value_string)
 

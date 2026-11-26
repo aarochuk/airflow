@@ -16,6 +16,7 @@
 # under the License.
 from __future__ import annotations
 
+import sys
 from unittest import mock
 
 import pytest
@@ -28,11 +29,49 @@ from tests_common.test_utils.config import conf_vars
 
 pytestmark = pytest.mark.db_test
 
+PY313 = sys.version_info >= (3, 13)
+
 
 class TestKerberosCommand:
     @classmethod
     def setup_class(cls):
         cls.parser = cli_parser.get_parser()
+
+    @pytest.mark.parametrize("one_time", [False, True])
+    @conf_vars({("core", "executor"): "CeleryExecutor", ("database", "check_migrations"): "True"})
+    @mock.patch(
+        "airflow.utils.db.check_and_run_migrations",
+        autospec=True,
+        side_effect=RuntimeError("Metadata database unavailable"),
+    )
+    @mock.patch(
+        "airflow.utils.db.synchronize_log_template",
+        autospec=True,
+        side_effect=RuntimeError("Metadata database unavailable"),
+    )
+    @mock.patch("airflow.cli.commands.kerberos_command.krb.run", autospec=True)
+    def test_run_without_metadata_database(
+        self, mock_run, mock_synchronize_log_template, mock_check_migrations, one_time
+    ):
+        args = self.parser.parse_args(
+            [
+                "kerberos",
+                "PRINCIPAL",
+                "--keytab",
+                "/tmp/airflow.keytab",
+                *(["--one-time"] if one_time else []),
+            ]
+        )
+
+        kerberos_command.kerberos(args)
+
+        mock_check_migrations.assert_not_called()
+        mock_synchronize_log_template.assert_not_called()
+        mock_run.assert_called_once_with(
+            keytab="/tmp/airflow.keytab",
+            principal="PRINCIPAL",
+            mode=KerberosMode.ONE_TIME if one_time else KerberosMode.STANDARD,
+        )
 
     @mock.patch("airflow.cli.commands.kerberos_command.krb")
     @conf_vars({("core", "executor"): "CeleryExecutor"})
@@ -100,6 +139,8 @@ class TestKerberosCommand:
             log="/tmp/kerberos.log",
         )
 
+        python_3_13_close_calls = [mock.call().close()] if PY313 else []
+
         mock_pid_file.mock_calls[0] = mock.call(mock_setup_locations.return_value[0], -1)
         assert mock_open.mock_calls == [
             mock.call(mock_setup_locations.return_value[1], "a"),
@@ -109,18 +150,10 @@ class TestKerberosCommand:
             mock.call().truncate(0),
             mock.call().truncate(0),
             mock.call().__exit__(None, None, None),
+            *python_3_13_close_calls,
             mock.call().__exit__(None, None, None),
+            *python_3_13_close_calls,
         ]
-
-    @mock.patch("airflow.cli.commands.kerberos_command.krb")
-    @conf_vars({("core", "executor"): "CeleryExecutor"})
-    def test_run_command_with_mode_standard(self, mock_krb):
-        args = self.parser.parse_args(["kerberos", "PRINCIPAL", "--keytab", "/tmp/airflow.keytab"])
-
-        kerberos_command.kerberos(args)
-        mock_krb.run.assert_called_once_with(
-            keytab="/tmp/airflow.keytab", principal="PRINCIPAL", mode=KerberosMode.STANDARD
-        )
 
     @mock.patch("airflow.cli.commands.kerberos_command.krb")
     @conf_vars({("core", "executor"): "CeleryExecutor"})

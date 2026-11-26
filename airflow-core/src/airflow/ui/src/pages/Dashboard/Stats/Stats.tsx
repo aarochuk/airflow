@@ -16,33 +16,95 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { Box, Flex, Heading, HStack } from "@chakra-ui/react";
+import { Box, Flex, Heading } from "@chakra-ui/react";
+import { useTranslation } from "react-i18next";
 import { FiClipboard, FiZap } from "react-icons/fi";
 
-import { StateIcon } from "src/components/StateIcon";
+import { useDashboardServiceDagStats } from "openapi/queries";
 
-import { DAGImportErrors } from "./DAGImportErrors";
-import { DagFilterButton } from "./DagFilterButton";
+import { NeedsReviewButtonWithModal } from "src/components/NeedsReviewButton";
+import { StatsCard } from "src/components/StatsCard";
 
-export const Stats = () => (
-  <Box>
-    <Flex color="fg.muted" my={2}>
-      <FiClipboard />
-      <Heading ml={1} size="xs">
-        Links
-      </Heading>
-    </Flex>
-    <HStack>
-      <DagFilterButton colorPalette="failed" filter="failed" link="dags?last_dag_run_state=failed">
-        <StateIcon state="failed" />
-      </DagFilterButton>
-      <DAGImportErrors />
-      <DagFilterButton colorPalette="running" filter="running" link="dags?last_dag_run_state=running">
-        <StateIcon state="running" />
-      </DagFilterButton>
-      <DagFilterButton colorPalette="blue" filter="active" link="dags?paused=false">
-        <FiZap />
-      </DagFilterButton>
-    </HStack>
-  </Box>
-);
+import { useAutoRefresh } from "src/utils";
+
+import { DagImportErrors } from "./DagImportErrors";
+import { FailingTriggers } from "./FailingTriggers";
+import { PluginImportErrors } from "./PluginImportErrors";
+
+export const Stats = () => {
+  const refetchInterval = useAutoRefresh({ checkPendingRuns: true });
+  const { data: statsData, isLoading: isStatsLoading } = useDashboardServiceDagStats(undefined, {
+    refetchInterval,
+  });
+
+  const failedDagsCount = statsData?.failed_dag_count ?? 0;
+  const queuedDagsCount = statsData?.queued_dag_count ?? 0;
+  const runningDagsCount = statsData?.running_dag_count ?? 0;
+  const activeDagsCount = statsData?.active_dag_count ?? 0;
+  const { i18n, t: translate } = useTranslation("dashboard");
+
+  const isRTL = i18n.dir() === "rtl";
+
+  return (
+    <Box>
+      <Flex alignItems="center" color="fg.muted" my={2}>
+        <FiClipboard />
+        <Heading ml={1} size="xs">
+          {translate("stats.stats")}
+        </Heading>
+      </Flex>
+
+      <Flex flexWrap="wrap" gap={4}>
+        <NeedsReviewButtonWithModal />
+
+        <StatsCard
+          colorScheme="failed"
+          count={failedDagsCount}
+          isLoading={isStatsLoading}
+          isRTL={isRTL}
+          label={translate("stats.failedDags")}
+          link="/dags?last_dag_run_state=failed"
+          state="failed"
+        />
+
+        <FailingTriggers />
+
+        <DagImportErrors />
+
+        <PluginImportErrors />
+
+        {queuedDagsCount > 0 ? (
+          <StatsCard
+            colorScheme="queued"
+            count={queuedDagsCount}
+            isLoading={isStatsLoading}
+            isRTL={isRTL}
+            label={translate("stats.queuedDags")}
+            link="/dags?dag_run_state=queued"
+            state="queued"
+          />
+        ) : undefined}
+
+        <StatsCard
+          colorScheme="running"
+          count={runningDagsCount}
+          isLoading={isStatsLoading}
+          isRTL={isRTL}
+          label={translate("stats.runningDags")}
+          link="/dags?dag_run_state=running"
+          state="running"
+        />
+
+        <StatsCard
+          colorScheme="active"
+          count={activeDagsCount}
+          icon={<FiZap />}
+          isLoading={isStatsLoading}
+          isRTL={isRTL}
+          label={translate("stats.activeDags")}
+          link="/dags?scheduling_state=active"
+        />
+      </Flex>
+    </Box>
+  );
+};

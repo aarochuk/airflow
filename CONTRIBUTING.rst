@@ -1,4 +1,4 @@
-.. Licensed to the Apache Software Foundation (ASF) under one
+ .. Licensed to the Apache Software Foundation (ASF) under one
     or more contributor license agreements.  See the NOTICE file
     distributed with this work for additional information
     regarding copyright ownership.  The ASF licenses this file
@@ -18,7 +18,6 @@
 Contributing
 ============
 
-**The outline for this document in GitHub is available at top-right corner button (with 3-dots and 3 lines).**
 
 Contributions are welcome and are greatly appreciated! Every little bit helps, and credit will always be given.
 

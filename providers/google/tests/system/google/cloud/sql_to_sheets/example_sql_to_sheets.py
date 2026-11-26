@@ -27,13 +27,21 @@ This DAG relies on the following OS environment variables
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime
+from typing import Any, cast
 
-from airflow.decorators import task
-from airflow.models import Connection
+from tests_common.test_utils.version_compat import AIRFLOW_V_3_0_PLUS
+
+if AIRFLOW_V_3_0_PLUS:
+    from airflow.sdk import task
+else:
+    # Airflow 2 path
+    from airflow.decorators import task  # type: ignore[attr-defined,no-redef]
 from airflow.models.dag import DAG
+from airflow.models.xcom_arg import XComArg
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.providers.google.cloud.hooks.compute import ComputeEngineHook
 from airflow.providers.google.cloud.hooks.compute_ssh import ComputeEngineSSHHook
@@ -41,16 +49,25 @@ from airflow.providers.google.cloud.operators.compute import (
     ComputeEngineDeleteInstanceOperator,
     ComputeEngineInsertInstanceOperator,
 )
+from airflow.providers.google.common.utils.get_secret import get_secret
 from airflow.providers.google.suite.operators.sheets import GoogleSheetsCreateSpreadsheetOperator
 from airflow.providers.google.suite.transfers.sql_to_sheets import SQLToGoogleSheetsOperator
 from airflow.providers.ssh.operators.ssh import SSHOperator
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.settings import Session, json
-from airflow.utils.trigger_rule import TriggerRule
+
+try:
+    from airflow.sdk import TriggerRule
+except ImportError:
+    # Compatibility for Airflow < 3.1
+    from airflow.utils.trigger_rule import TriggerRule  # type: ignore[no-redef,attr-defined]
+
+from system.google.gcp_api_client_helpers import create_airflow_connection, delete_airflow_connection
 
 DAG_ID = "sql_to_sheets"
 ENV_ID = os.environ.get("SYSTEM_TESTS_ENV_ID", "default")
 PROJECT_ID = os.environ.get("SYSTEM_TESTS_GCP_PROJECT", "example-project")
+
+IS_COMPOSER = bool(os.environ.get("COMPOSER_ENVIRONMENT", ""))
 
 REGION = "europe-west2"
 ZONE = REGION + "-a"
@@ -88,6 +105,7 @@ GCE_INSTANCE_BODY = {
     "disks": [
         {
             "boot": True,
+            "auto_delete": True,
             "device_name": GCE_INSTANCE_NAME,
             "initialize_params": {
                 "disk_size_gb": "10",
@@ -131,23 +149,15 @@ if [ $(gcloud compute firewall-rules list --filter=name:{FIREWALL_RULE_NAME} --f
     gcloud compute firewall-rules delete {FIREWALL_RULE_NAME} --project={PROJECT_ID} --quiet; \
 fi;
 """
-DELETE_PERSISTENT_DISK_COMMAND = f"""
-if [ $AIRFLOW__API__GOOGLE_KEY_PATH ]; then \
- gcloud auth activate-service-account --key-file=$AIRFLOW__API__GOOGLE_KEY_PATH; \
-fi;
-
-gcloud compute disks delete {GCE_INSTANCE_NAME} --project={PROJECT_ID} --zone={ZONE} --quiet
-"""
 
 SHEETS_CONNECTION_ID = f"connection_{DAG_ID}_{ENV_ID}"
 SPREADSHEET = {
     "properties": {"title": "Test1"},
     "sheets": [{"properties": {"title": "Sheet1"}}],
 }
-
+GDRIVE_SECRET_ID = "gdrive_shared_folder_id"
 
 log = logging.getLogger(__name__)
-
 
 with DAG(
     dag_id=DAG_ID,
@@ -156,6 +166,13 @@ with DAG(
     catchup=False,
     tags=["example", "postgres", "gcs"],
 ) as dag:
+
+    @task
+    def get_shared_drive_id() -> str:
+        return get_secret(secret_id=GDRIVE_SECRET_ID).strip()
+
+    get_shared_drive_id_task = get_shared_drive_id()
+
     create_gce_instance = ComputeEngineInsertInstanceOperator(
         task_id="create_gce_instance",
         project_id=PROJECT_ID,
@@ -193,24 +210,20 @@ with DAG(
 
     @task
     def create_connection(connection_id: str, ip_address: str) -> None:
-        connection = Connection(
-            conn_id=connection_id,
-            description="Example connection",
-            conn_type=CONNECTION_TYPE,
-            schema=DB_NAME,
-            host=ip_address,
-            login=DB_USER_NAME,
-            password=DB_USER_PASSWORD,
-            port=DB_PORT,
+        connection: dict[str, Any] = {
+            "description": "Example connection",
+            "conn_type": CONNECTION_TYPE,
+            "schema": DB_NAME,
+            "host": ip_address,
+            "login": DB_USER_NAME,
+            "password": DB_USER_PASSWORD,
+            "port": DB_PORT,
+        }
+        create_airflow_connection(
+            connection_id=connection_id,
+            connection_conf=connection,
+            is_composer=IS_COMPOSER,
         )
-        session = Session()
-        log.info("Removing connection %s if it exists", connection_id)
-        query = session.query(Connection).filter(Connection.conn_id == connection_id)
-        query.delete()
-
-        session.add(connection)
-        session.commit()
-        log.info("Connection %s created", connection_id)
 
     create_connection_task = create_connection(connection_id=CONNECTION_ID, ip_address=get_public_ip_task)
 
@@ -229,26 +242,26 @@ with DAG(
 
     @task
     def setup_sheets_connection():
-        conn = Connection(
-            conn_id=SHEETS_CONNECTION_ID,
-            conn_type="google_cloud_platform",
-        )
         conn_extra = {
-            "scope": "https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/cloud-platform",
+            "scope": "https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/cloud-platform",
             "project": PROJECT_ID,
             "keyfile_dict": "",  # Override to match your needs
         }
         conn_extra_json = json.dumps(conn_extra)
-        conn.set_extra(conn_extra_json)
-
-        session = Session()
-        session.add(conn)
-        session.commit()
+        connection: dict[str, Any] = {"conn_type": "google_cloud_platform", "extra": conn_extra_json}
+        create_airflow_connection(
+            connection_id=SHEETS_CONNECTION_ID,
+            connection_conf=connection,
+            is_composer=IS_COMPOSER,
+        )
 
     setup_sheets_connection_task = setup_sheets_connection()
 
     create_spreadsheet = GoogleSheetsCreateSpreadsheetOperator(
-        task_id="create_spreadsheet", spreadsheet=SPREADSHEET, gcp_conn_id=SHEETS_CONNECTION_ID
+        task_id="create_spreadsheet",
+        spreadsheet=SPREADSHEET,
+        gcp_conn_id=SHEETS_CONNECTION_ID,
+        drive_id=get_shared_drive_id_task,
     )
 
     # [START upload_sql_to_sheets]
@@ -257,7 +270,7 @@ with DAG(
         sql=SQL_SELECT,
         sql_conn_id=CONNECTION_ID,
         database=DB_NAME,
-        spreadsheet_id="{{ task_instance.xcom_pull(task_ids='create_spreadsheet', key='spreadsheet_id') }}",
+        spreadsheet_id=cast("str", XComArg(create_spreadsheet, key="spreadsheet_id")),
         gcp_conn_id=SHEETS_CONNECTION_ID,
     )
     # [END upload_sql_to_sheets]
@@ -276,19 +289,9 @@ with DAG(
         trigger_rule=TriggerRule.ALL_DONE,
     )
 
-    delete_persistent_disk = BashOperator(
-        task_id="delete_persistent_disk",
-        bash_command=DELETE_PERSISTENT_DISK_COMMAND,
-        trigger_rule=TriggerRule.ALL_DONE,
-    )
-
     @task(task_id="delete_connection")
     def delete_connection(connection_id: str) -> None:
-        session = Session()
-        log.info("Removing connection %s", connection_id)
-        query = session.query(Connection).filter(Connection.conn_id == connection_id)
-        query.delete()
-        session.commit()
+        delete_airflow_connection(connection_id=connection_id, is_composer=IS_COMPOSER)
 
     delete_connection_task = delete_connection(connection_id=CONNECTION_ID)
     delete_connection_sheets_task = delete_connection(connection_id=SHEETS_CONNECTION_ID)
@@ -297,7 +300,7 @@ with DAG(
     create_gce_instance >> get_public_ip_task >> create_connection_task
     [create_gce_instance, create_firewall_rule] >> setup_postgres
     [setup_postgres, create_connection_task, create_firewall_rule] >> create_sql_table >> insert_sql_data
-    setup_sheets_connection_task >> create_spreadsheet
+    get_shared_drive_id_task >> setup_sheets_connection_task >> create_spreadsheet
 
     (
         [create_spreadsheet, insert_sql_data]
@@ -312,7 +315,6 @@ with DAG(
         delete_connection_task,
         delete_connection_sheets_task,
     ]
-    delete_gce_instance >> delete_persistent_disk
 
     from tests_common.test_utils.watcher import watcher
 
@@ -322,5 +324,5 @@ with DAG(
 
 from tests_common.test_utils.system_tests import get_test_run  # noqa: E402
 
-# Needed to run the example DAG with pytest (see: tests/system/README.md#run_via_pytest)
+# Needed to run the example DAG with pytest (see: contributing-docs/testing/system_tests.rst)
 test_run = get_test_run(dag)
